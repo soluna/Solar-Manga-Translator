@@ -26,7 +26,6 @@ python -m pip install --upgrade pip >/dev/null
 
 echo Installing project dependencies (This may take a while, especially PyTorch)...
 :: Add extra-index-url to ensure we fetch CUDA versions correctly during all dependency resolutions
-python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 python -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
 
 echo.

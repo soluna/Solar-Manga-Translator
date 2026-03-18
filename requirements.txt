@@ -9,8 +9,9 @@ opencv-python>=4.8.0
 numpy>=1.24.0,<2.0.0
 
 # Deep Learning / GPU
-torch>=2.0.0
-torchvision>=0.15.0
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
 
 # Manga OCR & Detection
 manga-ocr>=0.1.11

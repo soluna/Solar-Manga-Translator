@@ -25,9 +25,9 @@ echo Updating pip and setting resolver behavior...
 python -m pip install --upgrade pip >/dev/null
 
 echo Installing project dependencies (This may take a while, especially PyTorch)...
-:: Use legacy-resolver to bypass strict backtracking loops if versions are pinned anyway
+:: Removed legacy-resolver since we properly pinned the breaking dependency huggingface-hub
 python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-python -m pip install -r requirements.txt --use-deprecated=legacy-resolver
+python -m pip install -r requirements.txt
 
 echo.
 echo ===================================================

@@ -1,5 +1,5 @@
 # Web UI
-gradio==4.44.0
+gradio>=5.0.0
 Pillow>=10.0.0
 
 # Image Processing & CV
@@ -14,6 +14,7 @@ torchvision>=0.15.0
 manga-ocr>=0.1.11
 ultralytics==8.2.100
 transformers==4.40.0
+huggingface-hub==0.24.0
 
 # Inpainting (New: LaMa)
 simple-lama-inpainting==0.1.2

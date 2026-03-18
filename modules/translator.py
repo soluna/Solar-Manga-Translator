@@ -5,9 +5,6 @@ from openai import OpenAI
 
 class LLMTranslator:
     def __init__(self, api_key=None, model="gemini-1.5-pro", proxy_url=None, base_url=None):
-        """
-        初始化翻译器 (V2版：统一使用 OpenAI 兼容协议并显式代理)
-        """
         self.api_key = api_key
         self.model = model
         self.proxy_url = proxy_url
@@ -18,16 +15,15 @@ class LLMTranslator:
             self.client = None
             return
 
-        # V2 核心：配置 httpx Client，彻底解决国内 443 / 连通性问题
         http_client = None
         if self.proxy_url:
             print(f"🔗 正在通过代理连接 LLM: {self.proxy_url}")
             http_client = httpx.Client(proxy=self.proxy_url)
 
-        # Gemini 可以通过修改 base_url，完美使用 OpenAI 的 SDK 调用
         if "gemini" in self.model.lower():
-            # 使用 Google AI Studio 兼容的 OpenAI 路由
-            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            # Google API base URL compatible with OpenAI SDK endpoint
+            # Gemini models explicitly need v1beta in the path. Using v1main throws 404
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/"
             
         self.client = OpenAI(
             api_key=self.api_key,
@@ -88,7 +84,6 @@ class LLMTranslator:
         try:
             print(f"正在请求 {self.model} 翻译 {len(texts_to_translate)} 句台词...")
             
-            # 使用统一的 Chat Completions 接口
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -101,7 +96,6 @@ class LLMTranslator:
             result_text = response.choices[0].message.content
             print(f"LLM 原始返回: {result_text}")
             
-            # 清理可能的 markdown 标记
             result_text = result_text.strip()
             if result_text.startswith("```json"):
                 result_text = result_text[7:-3].strip()
@@ -126,7 +120,6 @@ class LLMTranslator:
             return bboxes
             
         except Exception as e:
-            # V2版：输出更详尽的网络/代理错误日志
             print(f"❌ LLM 翻译发生严重错误: {e}")
             if "Connection" in str(e) or "Timeout" in str(e):
                 print("⚠️ 这通常是因为网络不通或被屏蔽，请尝试在界面左侧配置 HTTP Proxy 代理地址。")

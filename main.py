@@ -81,7 +81,7 @@ def create_ui():
                     placeholder="sk-..."
                 )
                 model_choice = gr.Dropdown(
-                    choices=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "claude-3-5-sonnet-20240620", "deepseek-chat"],
+                    choices=["gpt-4o", "claude-3-5-sonnet-20240620", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
                     label="选择大语言模型",
                     value="gpt-4o"
                 )

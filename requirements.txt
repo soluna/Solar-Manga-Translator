@@ -12,8 +12,8 @@ torchvision>=0.15.0
 
 # Manga OCR & Detection
 manga-ocr>=0.1.11
-ultralytics>=8.0.0
-transformers>=4.30.0
+ultralytics==8.2.100
+transformers==4.40.0
 
 # Inpainting (New: LaMa)
 simple-lama-inpainting>=0.1.2

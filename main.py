@@ -1,22 +1,20 @@
 import gradio as gr
 import os
-import io
-from PIL import Image
 
-# 导入核心模块
 from modules.detector import TextDetector
 from modules.ocr import MangaOCR
 from modules.translator import LLMTranslator
 from modules.inpainter import ImageInpainter
 from modules.typesetter import Typesetter
 
-# 初始化全局模块实例 (避免每次请求都重新加载庞大的深度学习模型)
+# V2: 默认拉起基于 LaMa 的擦除模型
 detector = TextDetector()
 ocr = MangaOCR()
-inpainter = ImageInpainter(model_type="opencv")  # 默认使用轻量级 OpenCV 修补
+inpainter = ImageInpainter(model_type="lama") 
 typesetter = Typesetter()
 
-def process_image(image, api_key, model_choice):
+def process_single_image(image, api_key, model_choice, proxy_url):
+    """V2 处理单张图片流水线"""
     if image is None:
         return None, "错误：请上传一张漫画图片。"
         
@@ -26,85 +24,81 @@ def process_image(image, api_key, model_choice):
         log_messages.append(msg)
         
     try:
-        # 1. 文本检测 (Text Detection)
-        log("开始步骤 1: 文本框/气泡检测 (YOLO)")
+        # V2: 引入带显式代理支持的通用 LLM Translator
+        translator = LLMTranslator(api_key=api_key, model=model_choice, proxy_url=proxy_url)
+        log(f"开始处理单张图片 (代理模式: {proxy_url if proxy_url else '关闭'})...")
+        
+        # 1. 文本检测
+        log("1/5: 开始气泡检测...")
         bboxes = detector.detect_text_boxes(image)
-        log(f"检测到 {len(bboxes)} 个潜在文本区域。")
-        
-        # UI 调试图：生成半透明红色遮罩图以展示检测区域
+        if not bboxes:
+            log("未检测到气泡，跳过。")
+            return image, "\n".join(log_messages)
+            
         mask_image = detector.generate_mask(image, bboxes)
-        # debug_overlay = inpainter.draw_mask_on_image(image, mask_image)
         
-        # 2. 提取日文 (Manga OCR)
-        log("开始步骤 2: 裁剪区域并执行日文 OCR (manga-ocr)")
+        # 2. 提取日文
+        log("2/5: 开始提取日文 OCR...")
         bboxes = ocr.crop_and_recognize(image, bboxes)
-        for i, b in enumerate(bboxes):
-            jp_txt = b.get('original_text', '')
-            if jp_txt:
-                log(f"  框 {i+1}: {jp_txt}")
-                
-        # 3. LLM 翻译 (Translation)
-        log(f"开始步骤 3: 调用 {model_choice} 进行上下文翻译")
-        translator = LLMTranslator(api_key=api_key, model=model_choice)
+        
+        # 3. LLM 翻译
+        log(f"3/5: 开始 {model_choice} 上下文翻译 ({len(bboxes)} 句台词)...")
         bboxes = translator.translate_batch(bboxes)
-        for i, b in enumerate(bboxes):
-            zh_txt = b.get('translated_text', '')
-            if zh_txt:
-                log(f"  译文 {i+1}: {zh_txt}")
                 
-        # 4. 图像擦除 (Inpainting)
-        log("开始步骤 4: 擦除原始日文字符 (Inpainting)")
+        # 4. 图像擦除 (LaMa)
+        log("4/5: 开始 LaMa 神经网络无痕擦除...")
         clean_image = inpainter.inpaint(image, mask_image)
         
-        # 5. 中文排版 (Typesetting)
-        log("开始步骤 5: 在干净底图上进行中文自动折行排版与居中渲染")
+        # 5. 中文排版
+        log("5/5: 开始渲染中文排版...")
         final_image = typesetter.render(clean_image, bboxes)
         
-        log("🎉 处理完成！")
+        log("🎉 漫画单页处理成功！")
         return final_image, "\n".join(log_messages)
         
     except Exception as e:
-        error_msg = f"处理过程中发生异常: {str(e)}"
+        error_msg = f"处理异常: {str(e)}"
         log(error_msg)
         return image, "\n".join(log_messages)
 
 def create_ui():
-    with gr.Blocks(title="Manga Auto-Translator", theme=gr.themes.Soft()) as app:
-        gr.Markdown("# 漫画自动翻译工具 (Manga Auto-Translator)")
-        gr.Markdown("基于 LLM 与计算机视觉的自动化漫画汉化流水线。此版本集成了 `YOLO` 检测、`manga-ocr` 识别、OpenCV 修补以及 PIL 自动排版引擎。")
+    with gr.Blocks(title="Manga Auto-Translator V2", theme=gr.themes.Soft()) as app:
+        gr.Markdown("# 漫画自动翻译工具 (Manga Translator V2 专业版)")
+        gr.Markdown("🚀 **全新升级**: 引入 LaMa 生成式去文字算法 + LLM 直连代理防封锁。")
         
         with gr.Row():
             with gr.Column(scale=1):
+                gr.Markdown("### ⚙️ API 设置与网络代理")
                 api_key = gr.Textbox(
-                    label="LLM API Key (如不填将尝试从环境变量 OPENAI_API_KEY 读取)", 
+                    label="Google/OpenAI API Key", 
                     type="password",
-                    placeholder="sk-..."
+                    placeholder="例如: AIzaSy..."
+                )
+                proxy_url = gr.Textbox(
+                    label="HTTP 网络代理 (国内必填，解决翻译失败！)", 
+                    placeholder="例如: http://127.0.0.1:7890",
+                    info="如果您在电脑上开着 Clash / v2ray，请填入对应的本地代理地址（通常是 7890 端口）。留空则直连。"
                 )
                 model_choice = gr.Dropdown(
-                    choices=["gpt-4o", "claude-3-5-sonnet-20240620", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
-                    label="选择大语言模型",
-                    value="gpt-4o"
+                    choices=["gemini-1.5-pro", "gemini-1.5-flash", "gpt-4o", "claude-3-5-sonnet-20240620"],
+                    label="选择大模型",
+                    value="gemini-1.5-pro"
                 )
                 
-                input_image = gr.Image(type="pil", label="1. 上传需翻译的日文漫画页")
-                process_btn = gr.Button("🚀 提取并翻译", variant="primary", size="lg")
+                gr.Markdown("---")
+                input_image = gr.Image(type="pil", label="上传日文漫画原图")
+                process_btn = gr.Button("🎨 提取、擦除并翻译", variant="primary", size="lg")
                 
             with gr.Column(scale=1):
-                output_image = gr.Image(type="pil", label="2. 汉化成品预览", interactive=False)
-                output_log = gr.Textbox(label="处理日志 (Console Log)", lines=12, max_lines=20)
+                output_image = gr.Image(type="pil", label="LaMa 无痕汉化成品", interactive=False)
+                output_log = gr.Textbox(label="处理实时日志 (Console Log)", lines=15, max_lines=25)
                 
         process_btn.click(
-            fn=process_image,
-            inputs=[input_image, api_key, model_choice],
+            fn=process_single_image,
+            inputs=[input_image, api_key, model_choice, proxy_url],
             outputs=[output_image, output_log]
         )
-        
-        gr.Markdown("---")
-        gr.Markdown("### ⚠️ 首次运行注意事项")
-        gr.Markdown("1. **YOLO 权重**: 需要将名为 `comic-text-detector.pt` 的模型放入 `models/` 目录中。如果没有，系统将提示找不到模型。")
-        gr.Markdown("2. **manga-ocr 权重**: 首次执行 OCR 时，会自动从 HuggingFace 下载约 300MB 的 transformer 模型。")
-        gr.Markdown("3. **中文字体**: 排版模块默认需要一款粗体中文字体（如思源黑体），建议在 `fonts/` 目录下提供 `NotoSansSC-Bold.otf`。")
-        
+                
     return app
 
 if __name__ == "__main__":

@@ -1,0 +1,24 @@
+# Web UI
+gradio>=4.0.0
+Pillow>=10.0.0
+
+# Image Processing & CV
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Deep Learning / GPU
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Manga OCR & Detection
+manga-ocr>=0.1.11
+ultralytics>=8.0.0 # for YOLOv8 (comic text detection)
+transformers>=4.30.0
+
+# LLM API
+openai>=1.0.0
+requests>=2.31.0
+
+# Utilities
+tqdm>=4.65.0
+python-dotenv>=1.0.0

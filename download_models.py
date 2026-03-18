@@ -9,8 +9,16 @@ font_path = os.path.join(font_dir, "NotoSansSC-Bold.otf")
 if not os.path.exists(font_path):
     print("正在下载思源黑体 (Noto Sans SC Bold)... (约10MB)")
     try:
-        url = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Bold.otf"
-        urllib.request.urlretrieve(url, font_path)
+        # Changed to a more reliable CDN link for the font
+        url = "https://cdn.jsdelivr.net/gh/notofonts/notocjk/Sans/OTF/SimplifiedChinese/NotoSansSC-Bold.otf"
+        
+        # Add headers to avoid 403/404 on some CDNs
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        
+        with urllib.request.urlopen(req) as response, open(font_path, 'wb') as out_file:
+            data = response.read()
+            out_file.write(data)
+            
         print("字体下载成功！")
     except Exception as e:
         print(f"字体下载失败: {e}。请手动下载中文字体并放入 fonts/ 目录下。")

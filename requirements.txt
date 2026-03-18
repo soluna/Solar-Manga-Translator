@@ -1,10 +1,12 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+
 # Web UI
-gradio==4.44.0
+gradio>=4.44.0
 Pillow>=10.0.0
 
 # Image Processing & CV
 opencv-python>=4.8.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
 
 # Deep Learning / GPU
 torch>=2.0.0
@@ -12,12 +14,12 @@ torchvision>=0.15.0
 
 # Manga OCR & Detection
 manga-ocr>=0.1.11
-ultralytics==8.2.100
-transformers==4.40.0
+ultralytics>=8.2.100
+transformers>=4.40.0
 huggingface-hub<=0.26.0
 
 # Inpainting (New: LaMa)
-simple-lama-inpainting==0.1.2
+simple-lama-inpainting>=0.1.2
 
 # LLM API
 openai>=1.0.0

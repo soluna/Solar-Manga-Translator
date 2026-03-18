@@ -25,9 +25,9 @@ echo Updating pip and setting resolver behavior...
 python -m pip install --upgrade pip >/dev/null
 
 echo Installing project dependencies (This may take a while, especially PyTorch)...
-:: Removed legacy-resolver since we properly pinned the breaking dependency huggingface-hub
+:: Add extra-index-url to ensure we fetch CUDA versions correctly during all dependency resolutions
 python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
 
 echo.
 echo ===================================================

@@ -2,7 +2,7 @@ import math
 from PIL import Image, ImageDraw, ImageFont
 
 class Typesetter:
-    def __init__(self, font_path="fonts/NotoSansSC-Bold.otf", default_color=(0, 0, 0)):
+    def __init__(self, font_path="fonts/SourceHanSansSC-Bold.otf", default_color=(0, 0, 0)):
         """
         初始化漫画文字排版器
         默认使用黑色字体。

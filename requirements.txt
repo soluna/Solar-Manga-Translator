@@ -12,14 +12,17 @@ torchvision>=0.15.0
 
 # Manga OCR & Detection
 manga-ocr>=0.1.11
-ultralytics>=8.0.0 # for YOLOv8 (comic text detection)
+ultralytics>=8.0.0
 transformers>=4.30.0
+
+# Inpainting (New: LaMa)
+simple-lama-inpainting>=0.1.2
 
 # LLM API
 openai>=1.0.0
+httpx>=0.24.1
 requests>=2.31.0
 
 # Utilities
 tqdm>=4.65.0
 python-dotenv>=1.0.0
-google-generativeai>=0.4.0

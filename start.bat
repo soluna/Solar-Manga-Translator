@@ -2,6 +2,9 @@
 chcp 65001 >nul
 setlocal
 
+:: Get absolute path to the directory containing this script
+set "ROOT_DIR=%~dp0"
+
 echo ===================================================
 echo Manga Auto-Translator WebUI Start Script
 echo ===================================================
@@ -24,7 +27,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [1/3] Installing Backend Dependencies...
-cd backend
+cd /d "%ROOT_DIR%backend"
 if not exist venv (
     echo Creating Python venv...
     python -m venv venv
@@ -40,20 +43,20 @@ pip install git+https://github.com/zyddnys/manga-image-translator.git
 
 echo.
 echo [2/3] Installing Frontend Dependencies...
-cd ..\frontend
+cd /d "%ROOT_DIR%frontend"
 call npm install
 
 echo.
 echo [3/3] Starting Services...
 echo Starting Backend API...
-cd ..\backend
+cd /d "%ROOT_DIR%backend"
 start "Manga Translator API" cmd /c "call venv\Scripts\activate.bat && uvicorn main:app --host 0.0.0.0 --port 8000"
 
 echo Waiting for backend to start...
 timeout /t 3 >nul
 
 echo Starting Frontend WebUI...
-cd ..\frontend
+cd /d "%ROOT_DIR%frontend"
 start "Manga Translator WebUI" cmd /c "npm run dev -- --open"
 
 echo.

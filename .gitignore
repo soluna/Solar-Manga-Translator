@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+temp_uploads/
+temp_extracted/
+output_images/
+.superpowers/

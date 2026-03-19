@@ -1,7 +1,0 @@
-fastapi>=0.100.0
-uvicorn>=0.23.0
-websockets>=11.0.3
-python-multipart>=0.0.6
-aiofiles>=23.2.1
-pydantic>=2.1.1
-# 注意：PyTorch 和 manga-image-translator 需要额外单独安装

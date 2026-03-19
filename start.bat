@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 
 echo ===================================================
@@ -6,7 +7,7 @@ echo Manga Auto-Translator WebUI 启动脚本 (Windows + CUDA)
 echo ===================================================
 
 :: 检查 Python 环境
-python --version >/dev/null 2>&1
+python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [错误] 未找到 Python，请确保已安装 Python 并添加到 PATH 环境变量。
     pause
@@ -14,7 +15,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 检查 Node.js 环境
-node --version >/dev/null 2>&1
+node --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [错误] 未找到 Node.js，请确保已安装 Node.js (用于运行前端)。
     pause
@@ -49,7 +50,7 @@ cd ..\backend
 start "Manga Translator API" cmd /c "call venv\Scripts\activate.bat && uvicorn main:app --host 0.0.0.0 --port 8000"
 
 echo 等待后端启动...
-timeout /t 3 >/dev/null
+timeout /t 3 >nul
 
 echo 正在启动前端服务并打开浏览器...
 cd ..\frontend

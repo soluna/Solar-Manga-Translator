@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from utils.file_handler import extract_archive
 from engine.translator import TranslatorEngine
 import shutil
@@ -55,6 +56,17 @@ async def upload_comic(file: UploadFile = File(...)):
         "total_images": len(images),
         "source_images": images
     }
+
+@app.get("/api/download/{session_id}")
+async def download_result(session_id: str):
+    out_dir = f"output_images/{session_id}"
+    zip_path = f"temp_uploads/{session_id}_translated.zip"
+
+    if not os.path.exists(out_dir):
+        raise HTTPException(status_code=404, detail="Translation results not found")
+
+    shutil.make_archive(zip_path.replace('.zip', ''), 'zip', out_dir)
+    return FileResponse(zip_path, filename="translated_comic.zip")
 
 @app.websocket("/ws/translate/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):

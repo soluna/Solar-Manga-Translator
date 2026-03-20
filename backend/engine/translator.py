@@ -153,6 +153,17 @@ class TranslatorEngine:
         raw_config = raw_config or {}
         translator = str(raw_config.get("translator") or "sugoi").strip() or "sugoi"
         target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
+
+        # Bug fix: Some translators use different language codes for Chinese
+        # For example, sugoi might not support CHS, but only JPN/ENG
+        # If it's CHS/CHT, the backend needs to convert it appropriately based on the translator
+        # But looking at the logs: Language unsupported exception for SugoiTranslator: "CHS"
+        # Sugoi only supports Japanese to English translations!
+        if translator == "sugoi" and target_lang in ["CHS", "CHT"]:
+            # Fall back to youdao or baidu for Chinese if user selected Sugoi but wants Chinese
+            print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'youdao'")
+            translator = "youdao"
+
         use_gpu = bool(raw_config.get("use_gpu", True))
 
         return {

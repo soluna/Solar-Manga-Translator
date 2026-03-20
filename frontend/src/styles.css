@@ -110,6 +110,58 @@ h2 {
   margin-top: 28px;
 }
 
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.field,
+.toggle-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(116, 88, 62, 0.12);
+}
+
+.field span,
+.toggle-field span {
+  color: #6f5643;
+  font-size: 0.92rem;
+}
+
+.field select {
+  min-height: 42px;
+  border: 1px solid rgba(155, 95, 45, 0.24);
+  border-radius: 12px;
+  background: #fffdf9;
+  padding: 0 12px;
+  color: #2b2118;
+}
+
+.toggle-field {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+
+.toggle-field input {
+  width: 18px;
+  height: 18px;
+}
+
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
 .file-picker {
   position: relative;
   display: flex;
@@ -131,7 +183,11 @@ h2 {
 }
 
 .primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 168px;
+  min-height: 58px;
   border: 0;
   border-radius: 20px;
   background: linear-gradient(135deg, #d86c2a 0%, #b9472c 100%);
@@ -149,6 +205,50 @@ h2 {
 .primary-button:disabled {
   opacity: 0.65;
   cursor: wait;
+}
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 58px;
+  padding: 0 22px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(116, 88, 62, 0.16);
+  color: #553d2c;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.progress-panel {
+  margin-top: 20px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  color: #5f4734;
+}
+
+.progress-track {
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(116, 88, 62, 0.12);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f39a59 0%, #b9472c 100%);
+  transition: width 240ms ease;
 }
 
 .error-text {
@@ -228,7 +328,20 @@ h2 {
     grid-template-columns: 1fr;
   }
 
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .primary-button {
+    min-height: 56px;
+  }
+
+  .secondary-button {
     min-height: 56px;
   }
 

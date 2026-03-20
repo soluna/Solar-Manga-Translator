@@ -69,7 +69,7 @@ class TranslatorEngine:
         # Set GEMINI API Key from config if provided
         api_key = config.get("api_key")
         env = os.environ.copy()
-        if api_key and translator == "gemini":
+        if api_key and config.get("translator") == "gemini":
             env["GEMINI_API_KEY"] = api_key
 
         print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")

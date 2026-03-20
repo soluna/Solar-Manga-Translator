@@ -65,7 +65,7 @@ class TranslatorEngine:
         with log_path.open("wb") as log_file:
             process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=str(self.base_dir),
+                cwd=str(self.base_dir / "manga-image-translator"),
                 stdout=log_file,
                 stderr=log_file,
             )

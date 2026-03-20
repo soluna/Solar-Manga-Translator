@@ -4,4 +4,6 @@ websockets>=11.0.3
 python-multipart>=0.0.6
 aiofiles>=23.2.1
 pydantic>=2.1.1
+python-dotenv>=1.0.1
+colorama>=0.4.6
 # Note: PyTorch and manga-image-translator need to be installed separately

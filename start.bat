@@ -34,15 +34,18 @@ if not exist venv (
     python -m venv venv
 )
 call venv\Scripts\activate.bat
+set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
 
 echo Installing PyTorch (CUDA 11.8)...
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+"%VENV_PYTHON%" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+echo Installing critical runtime dependencies...
+"%VENV_PYTHON%" -m pip install python-dotenv colorama
 echo Installing manga-image-translator runtime requirements...
-pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
+"%VENV_PYTHON%" -m pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
 echo Installing FastAPI and requirements...
-pip install -r requirements.txt
+"%VENV_PYTHON%" -m pip install -r requirements.txt
 echo Installing manga-image-translator core engine...
-pip install git+https://github.com/zyddnys/manga-image-translator.git
+"%VENV_PYTHON%" -m pip install git+https://github.com/zyddnys/manga-image-translator.git
 
 echo.
 echo [2/3] Installing Frontend Dependencies...

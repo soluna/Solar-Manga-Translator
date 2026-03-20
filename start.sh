@@ -24,18 +24,22 @@ if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 source venv/bin/activate
+VENV_PYTHON="$(pwd)/venv/bin/python"
 
 echo "安装 PyTorch (如果是在 Windows 下请手动调整 CUDA 版本, 此脚本提供兼容支持)..."
-pip install torch torchvision torchaudio
+"$VENV_PYTHON" -m pip install torch torchvision torchaudio
+
+echo "安装关键运行时依赖..."
+"$VENV_PYTHON" -m pip install python-dotenv colorama
 
 echo "安装 manga-image-translator 运行时依赖..."
-pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
+"$VENV_PYTHON" -m pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
 
 echo "安装 FastAPI 等依赖..."
-pip install -r requirements.txt
+"$VENV_PYTHON" -m pip install -r requirements.txt
 
 echo "安装 manga-image-translator 核心引擎..."
-pip install git+https://github.com/zyddnys/manga-image-translator.git
+"$VENV_PYTHON" -m pip install git+https://github.com/zyddnys/manga-image-translator.git
 
 echo -e "\n[2/3] 正在检查并安装前端依赖..."
 if [ ! -f "../frontend/package.json" ]; then

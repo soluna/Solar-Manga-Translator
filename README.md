@@ -52,9 +52,9 @@ npm run build
 
 ```bat
 cd backend
-venv\Scripts\activate
-pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
-pip install git+https://github.com/zyddnys/manga-image-translator.git
+venv\Scripts\python -m pip install python-dotenv colorama
+venv\Scripts\python -m pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
+venv\Scripts\python -m pip install git+https://github.com/zyddnys/manga-image-translator.git
 ```
 
 如果希望最省事，也可以直接删除 `backend\venv` 后重新运行 `start.bat`。

@@ -28,6 +28,9 @@ source venv/bin/activate
 echo "安装 PyTorch (如果是在 Windows 下请手动调整 CUDA 版本, 此脚本提供兼容支持)..."
 pip install torch torchvision torchaudio
 
+echo "安装 manga-image-translator 运行时依赖..."
+pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
+
 echo "安装 FastAPI 等依赖..."
 pip install -r requirements.txt
 

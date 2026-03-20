@@ -47,6 +47,18 @@ npm run build
 4. 点击“开始翻译”
 5. 等待页面中的进度条逐张推进，完成后可直接下载结果压缩包
 
+### 如果之前已经创建过 `backend/venv`
+由于 `manga-image-translator` 自身的 `pyproject.toml` 没有完整声明运行依赖，旧环境里可能会缺少 `python-dotenv` 等模块。更新代码后，建议：
+
+```bat
+cd backend
+venv\Scripts\activate
+pip install -r https://raw.githubusercontent.com/zyddnys/manga-image-translator/main/requirements.txt
+pip install git+https://github.com/zyddnys/manga-image-translator.git
+```
+
+如果希望最省事，也可以直接删除 `backend\venv` 后重新运行 `start.bat`。
+
 ## 常见问题
 **1. 提示未找到 Python 或 Node.js**
 请前往 [Python 官网](https://www.python.org/) 安装 Python 3.10+ (勾选 Add Python to PATH)，前往 [Node.js官网](https://nodejs.org/) 安装 Node。

@@ -62,6 +62,13 @@ class TranslatorEngine:
         total = len(expected_outputs)
         await progress_callback({"event": "start", "total_pages": total})
 
+        # Append verbose flag to command to get more detailed output
+        command.append("--verbose")
+
+        print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
+        print(f"[DEBUG] Output directory: {output_dir}")
+        print(f"[DEBUG] Log file: {log_path}")
+
         with log_path.open("wb") as log_file:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -82,6 +89,16 @@ class TranslatorEngine:
                 await asyncio.sleep(1)
 
             await wait_task
+
+        print(f"[DEBUG] Engine finished with return code {process.returncode}")
+
+        # Read the log to console for debugging
+        try:
+            with log_path.open("r", encoding="utf-8", errors="ignore") as f:
+                log_content = f.read()
+                print(f"[DEBUG] ENGINE LOG OUTPUT:\n{log_content}\n[DEBUG] END LOG OUTPUT")
+        except Exception as e:
+            print(f"[DEBUG] Failed to read log file: {e}")
 
         await self._emit_completed_images(
             session_id,

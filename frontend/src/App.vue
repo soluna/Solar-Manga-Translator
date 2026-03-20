@@ -16,9 +16,10 @@ const downloadUrl = ref('')
 const progress = ref({ current: 0, total: 0 })
 
 const config = ref({
-  translator: 'sugoi',
+  translator: 'gemini',
   target_lang: 'CHS',
-  use_gpu: true
+  use_gpu: true,
+  api_key: ''
 })
 
 let socket = null
@@ -247,8 +248,11 @@ onBeforeUnmount(() => {
           <span>翻译器</span>
           <select v-model="config.translator">
             <option value="sugoi">sugoi</option>
+            <option value="gemini">gemini (推荐)</option>
+            <option value="chatgpt">chatgpt</option>
+            <option value="youdao">有道 (youdao)</option>
+            <option value="baidu">百度 (baidu)</option>
             <option value="offline">offline</option>
-            <option value="original">original</option>
             <option value="none">none</option>
           </select>
         </label>
@@ -262,6 +266,11 @@ onBeforeUnmount(() => {
             <option value="JPN">日语</option>
             <option value="KOR">韩语</option>
           </select>
+        </label>
+
+        <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt'" class="field" style="grid-column: span 2;">
+          <span>API Key (可选，留空则使用默认配置)</span>
+          <input v-model="config.api_key" type="password" placeholder="输入你的 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
         </label>
 
         <label class="toggle-field">

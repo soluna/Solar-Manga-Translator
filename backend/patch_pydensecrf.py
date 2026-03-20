@@ -29,6 +29,20 @@ def patch_mask_refinement():
         # Instead of regex, we just overwrite the whole file with our pre-patched version
         shutil.copy2(patched_file, target_file)
         print("Successfully replaced text_mask_utils.py with the patched Windows-compatible version!")
+
+        # We also need to patch translators/keys.py to default to Gemini 1.5 Pro
+        keys_file = backend_dir / "manga-image-translator" / "manga_translator" / "translators" / "keys.py"
+        if keys_file.exists():
+            with open(keys_file, 'r', encoding='utf-8') as f:
+                keys_content = f.read()
+
+            # Change the default model
+            if "'gemini-1.5-flash-002'" in keys_content:
+                keys_content = keys_content.replace("'gemini-1.5-flash-002'", "'gemini-1.5-pro-preview-0409'")
+                with open(keys_file, 'w', encoding='utf-8') as f:
+                    f.write(keys_content)
+                print("Successfully patched Gemini default model to gemini-1.5-pro-preview-0409!")
+
         return True
     except Exception as e:
         print(f"Failed to overwrite file: {e}")

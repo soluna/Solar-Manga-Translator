@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import sys
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -65,6 +66,12 @@ class TranslatorEngine:
         # Append verbose flag to command to get more detailed output
         command.append("--verbose")
 
+        # Set GEMINI API Key from config if provided
+        api_key = config.get("api_key")
+        env = os.environ.copy()
+        if api_key and translator == "gemini":
+            env["GEMINI_API_KEY"] = api_key
+
         print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
         print(f"[DEBUG] Output directory: {output_dir}")
         print(f"[DEBUG] Log file: {log_path}")
@@ -73,6 +80,7 @@ class TranslatorEngine:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(self.base_dir / "manga-image-translator"),
+                env=env,
                 stdout=log_file,
                 stderr=log_file,
             )
@@ -151,7 +159,7 @@ class TranslatorEngine:
 
     def _normalize_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         raw_config = raw_config or {}
-        translator = str(raw_config.get("translator") or "sugoi").strip() or "sugoi"
+        translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
         target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
 
         # Bug fix: Some translators use different language codes for Chinese
@@ -160,16 +168,18 @@ class TranslatorEngine:
         # But looking at the logs: Language unsupported exception for SugoiTranslator: "CHS"
         # Sugoi only supports Japanese to English translations!
         if translator == "sugoi" and target_lang in ["CHS", "CHT"]:
-            # Fall back to youdao or baidu for Chinese if user selected Sugoi but wants Chinese
-            print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'youdao'")
-            translator = "youdao"
+            # Fall back to gemini for Chinese if user selected Sugoi but wants Chinese
+            print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'gemini'")
+            translator = "gemini"
 
         use_gpu = bool(raw_config.get("use_gpu", True))
+        api_key = str(raw_config.get("api_key", "")).strip()
 
         return {
             "translator": translator,
             "target_lang": target_lang,
             "use_gpu": use_gpu,
+            "api_key": api_key,
         }
 
     def _write_config(self, session_id: str, config: dict[str, Any]) -> Path:

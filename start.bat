@@ -50,6 +50,9 @@ if not exist manga-image-translator (
     git clone https://github.com/zyddnys/manga-image-translator.git manga-image-translator
 )
 
+echo Patching manga-image-translator to bypass Windows C++ build errors...
+"%VENV_PYTHON%" patch_pydensecrf.py
+
 echo.
 echo [2/3] Installing Frontend Dependencies...
 cd /d "%ROOT_DIR%"

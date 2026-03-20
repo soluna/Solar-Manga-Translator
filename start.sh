@@ -35,6 +35,10 @@ echo "安装 manga-image-translator 核心引擎..."
 pip install git+https://github.com/zyddnys/manga-image-translator.git
 
 echo -e "\n[2/3] 正在检查并安装前端依赖..."
+if [ ! -f "../frontend/package.json" ]; then
+    echo "[错误] 缺少 frontend/package.json，前端项目未就绪。"
+    exit 1
+fi
 cd ../frontend
 npm install
 

@@ -45,6 +45,11 @@ pip install git+https://github.com/zyddnys/manga-image-translator.git
 echo.
 echo [2/3] Installing Frontend Dependencies...
 cd /d "%ROOT_DIR%"
+if not exist frontend\package.json (
+    echo [Error] Frontend project files are missing.
+    pause
+    exit /b
+)
 cd frontend
 call npm install
 

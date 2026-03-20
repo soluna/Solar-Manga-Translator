@@ -30,6 +30,16 @@ chmod +x start.sh
 ./start.sh
 ```
 
+### 手动验证前端
+如果你想先单独确认前端依赖是否正常，可运行：
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+修复后的仓库已经补齐 `frontend/package.json`、Vite 配置和基础 Vue 页面；之前 Windows 上执行到 `npm install` 报错的根因是仓库内没有 `frontend` 项目文件，导致启动脚本切换目录后无法找到可安装的前端依赖描述文件。
+
 ## 常见问题
 **1. 提示未找到 Python 或 Node.js**
 请前往 [Python 官网](https://www.python.org/) 安装 Python 3.10+ (勾选 Add Python to PATH)，前往 [Node.js官网](https://nodejs.org/) 安装 Node。

@@ -69,6 +69,10 @@ class TranslatorEngine:
         # Set GEMINI API Key from config if provided
         api_key = config.get("api_key")
         env = os.environ.copy()
+
+        # Override the gemini model name using environment variable
+        env["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
+
         if api_key and config.get("translator") == "gemini":
             env["GEMINI_API_KEY"] = api_key
 

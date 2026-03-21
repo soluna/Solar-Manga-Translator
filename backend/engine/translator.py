@@ -193,10 +193,29 @@ class TranslatorEngine:
                 "translator": config["translator"],
                 "target_lang": config["target_lang"],
             },
-            "mask_dilation_offset": 30,  # Expand the mask to clean up edges
-            "kernel_size": 5,            # Use a larger kernel to smooth out leftover text artifacts
+            # Fix text artifacts (not clean):
+            # The mask offset needs to be large enough to catch loose pixels.
+            "mask_dilation_offset": 20,
+            # Use larger convolution kernel to erase the text completely.
+            "kernel_size": 7,
             "render": {
-                "font_size_offset": -2,  # Slightly decrease font size to avoid text overflowing boxes
+                # Fix text overflow:
+                # Tell the renderer to use a much smaller minimum font size
+                "font_size_minimum": 8,
+                # Drastically shrink font to fit in tight vertical bubbles
+                "font_size_offset": -6,
+                # Enable auto text alignment for better fitting
+                "alignment": "center",
+                # Make text flow horizontally or vertically depending on best fit
+                "direction": "auto"
+            },
+            "detector": {
+                # Better bounding boxes logic:
+                "unclip_ratio": 2.5  # Expand detected text bounding boxes
+            },
+            "ocr": {
+                # Merge broken/split bboxes to form one solid bubble
+                "use_mocr_merge": True
             }
         }
         config_path.write_text(

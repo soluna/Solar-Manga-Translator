@@ -192,6 +192,11 @@ class TranslatorEngine:
             "translator": {
                 "translator": config["translator"],
                 "target_lang": config["target_lang"],
+            },
+            "mask_dilation_offset": 30,  # Expand the mask to clean up edges
+            "kernel_size": 5,            # Use a larger kernel to smooth out leftover text artifacts
+            "render": {
+                "font_size_offset": -2,  # Slightly decrease font size to avoid text overflowing boxes
             }
         }
         config_path.write_text(

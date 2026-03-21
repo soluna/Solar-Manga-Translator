@@ -8,4 +8,4 @@ __pycache__/
 temp_uploads/
 temp_extracted/
 output_images/
-.superpowers/
+.superpowers/.worktrees/

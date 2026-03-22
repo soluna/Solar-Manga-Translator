@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,9 @@ class GeminiImageCleanupClient:
             raise RuntimeError("缺少 google-genai 依赖，请先重新安装后端依赖。") from exc
 
         client = genai.Client(api_key=self.api_key)
+        config = types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+        )
         response = client.models.generate_content(
             model=self.model,
             contents=[
@@ -30,9 +34,7 @@ class GeminiImageCleanupClient:
                 Image.fromarray(source_rgb),
                 Image.fromarray(guide_rgb),
             ],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-            ),
+            config=config,
         )
 
         image = self._extract_image(response)
@@ -57,17 +59,20 @@ class GeminiImageCleanupClient:
         return None
 
     def _part_to_image(self, part: Any) -> np.ndarray | None:
+        if hasattr(part, "as_image"):
+            try:
+                pil_image = part.as_image()
+                if hasattr(pil_image, "convert"):
+                    return np.array(pil_image.convert("RGB"))
+            except Exception:
+                pass
+
         inline_data = getattr(part, "inline_data", None)
         if inline_data is None:
             return None
 
-        if hasattr(part, "as_image"):
-            return np.array(part.as_image().convert("RGB"))
-
         data = getattr(inline_data, "data", None)
         if data is None:
             return None
-
-        from io import BytesIO
 
         return np.array(Image.open(BytesIO(data)).convert("RGB"))

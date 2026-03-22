@@ -502,11 +502,12 @@ watch(
         <label v-if="config.image_cleanup_mode === 'gemini-image'" class="field">
           <span>AI 去字模型版本</span>
           <select v-model="config.image_cleanup_model">
-            <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (官方 GA / 速度优先)</option>
-            <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (质量优先 / 更慢)</option>
+            <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (Nano Banana / 官方稳定)</option>
+            <option value="gemini-3.1-flash-image-preview">gemini-3.1-flash-image-preview (更强编辑 / 预览版)</option>
+            <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (Nano Banana Pro / 最慢)</option>
           </select>
           <small class="field-hint">
-            先建议用 `gemini-2.5-flash-image` 跑通；如果速度可以接受，再切到 `gemini-3-pro-image-preview` 比效果。
+            Google 官方公开可用的是这些模型名；如果你说的 “Nano Banana 2” 是更强编辑版，这里更接近的是 `gemini-3.1-flash-image-preview`。
           </small>
         </label>
 

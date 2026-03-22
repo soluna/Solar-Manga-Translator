@@ -332,7 +332,14 @@ class TranslatorEngine:
 
     def _normalize_image_cleanup_model(self, raw_value: Any) -> str:
         value = str(raw_value or "gemini-2.5-flash-image").strip()
-        return value or "gemini-2.5-flash-image"
+        allowed_models = {
+            "gemini-2.5-flash-image",
+            "gemini-3-pro-image-preview",
+            "gemini-3.1-flash-image-preview",
+        }
+        if value in allowed_models:
+            return value
+        return "gemini-2.5-flash-image"
 
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
@@ -804,10 +811,13 @@ class TranslatorEngine:
         api_key = config.get("image_cleanup_api_key") or config.get("api_key")
         client = GeminiImageCleanupClient(api_key=api_key, model=config["image_cleanup_model"])
         prompt = (
-            "You are restoring a manga/comic crop. "
-            "Use the first image as the source artwork and the second image as a guide where red highlighted areas mark original text that must be removed. "
-            "Erase only the marked original text, reconstruct the hidden background, line art, tones, colors, and textures faithfully, and do not add any new text, symbols, blur, or redesigns. "
-            "Keep everything outside the marked areas unchanged and return only the cleaned image."
+            "You are restoring a manga/comic crop for professional text replacement. "
+            "Use the first image as the original artwork and the second image as a guide where red highlighted areas mark only the source text that must be removed. "
+            "Edit as little as possible: remove only the marked text and tiny furigana around it, then reconstruct the hidden background faithfully. "
+            "Preserve the original composition, brush strokes, halftone dots, hatch lines, outlines, anatomy, facial features, hair strands, clothing folds, patterns, sword details, lighting, shadows, and colors exactly. "
+            "Do not repaint the character, do not blur, do not smear, do not simplify textures, do not change pose or expression, do not crop or resize, and do not add any new text, symbols, strokes, or decorations. "
+            "If the marked area crosses character edges or costume patterns, continue those edges and patterns naturally so the result looks like the original page before lettering. "
+            "Return only the cleaned image."
         )
         print(
             "[DEBUG] AI cleanup request "

@@ -11,6 +11,8 @@ def patch_mask_refinement():
     patched_file = backend_dir / "patched_text_mask_utils.py"
     target_render_file = translator_dir / "manga_translator" / "rendering" / "__init__.py"
     patched_render_file = backend_dir / "patched_rendering_init.py"
+    patched_text_render_file = backend_dir / "patched_text_render.py"
+    target_text_render_file = translator_dir / "manga_translator" / "rendering" / "text_render.py"
 
     if not target_file.exists():
         print(f"Error: Could not find {target_file}")
@@ -29,6 +31,12 @@ def patch_mask_refinement():
         return False
 
     try:
+        if patched_text_render_file.exists():
+            shutil.copy2(patched_text_render_file, target_text_render_file)
+            print("Successfully replaced text_render.py with the patched semantic wrapper version!")
+        else:
+            print(f"Warning: Could not find patched_text_render.py at {patched_text_render_file}, skipping text_render patch.")
+
         shutil.copy2(patched_file, target_file)
         print("Successfully replaced text_mask_utils.py with the patched version!")
 

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from patch_pydensecrf import patch_mask_refinement
-from .image_cleanup import GeminiImageCleanupClient
+from .image_cleanup import DEFAULT_IMAGE_CLEANUP_PROMPT, create_image_cleanup_client
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -302,7 +302,10 @@ class TranslatorEngine:
         font_key = str(raw_config.get("font_key", "")).strip()
         font_path = self._resolve_font_path(font_key)
         image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
-        image_cleanup_model = self._normalize_image_cleanup_model(raw_config.get("image_cleanup_model"))
+        image_cleanup_model = self._normalize_image_cleanup_model(
+            image_cleanup_mode,
+            raw_config.get("image_cleanup_model"),
+        )
         image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
 
         return {
@@ -326,20 +329,29 @@ class TranslatorEngine:
 
     def _normalize_image_cleanup_mode(self, raw_value: Any) -> str:
         value = str(raw_value or "off").strip().lower()
-        if value not in {"off", "gemini-image"}:
+        if value not in {"off", "gemini-image", "seedream-image"}:
             return "off"
         return value
 
-    def _normalize_image_cleanup_model(self, raw_value: Any) -> str:
-        value = str(raw_value or "gemini-2.5-flash-image").strip()
+    def _normalize_image_cleanup_model(self, mode: str, raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
         allowed_models = {
-            "gemini-2.5-flash-image",
-            "gemini-3-pro-image-preview",
-            "gemini-3.1-flash-image-preview",
+            "gemini-image": {
+                "gemini-2.5-flash-image",
+                "gemini-3-pro-image-preview",
+                "gemini-3.1-flash-image-preview",
+            },
+            "seedream-image": {
+                "doubao-seedream-5-0-lite-260128",
+            },
         }
-        if value in allowed_models:
+        default_models = {
+            "gemini-image": "gemini-2.5-flash-image",
+            "seedream-image": "doubao-seedream-5-0-lite-260128",
+        }
+        if mode in allowed_models and value in allowed_models[mode]:
             return value
-        return "gemini-2.5-flash-image"
+        return default_models.get(mode, "gemini-2.5-flash-image")
 
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
@@ -491,9 +503,11 @@ class TranslatorEngine:
         return selected_images
 
     def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
-        return config.get("image_cleanup_mode") == "gemini-image"
+        return config.get("image_cleanup_mode") in {"gemini-image", "seedream-image"}
 
     def _has_image_cleanup_key(self, config: dict[str, Any]) -> bool:
+        if config.get("image_cleanup_mode") == "seedream-image":
+            return bool(config.get("image_cleanup_api_key"))
         return bool(config.get("image_cleanup_api_key") or config.get("api_key"))
 
     def _analyze_embedded_text_risk(self, image_path: Path) -> dict[str, Any]:
@@ -808,25 +822,26 @@ class TranslatorEngine:
         guide_crop = self._build_ai_cleanup_guide(source_crop, target_regions, x1, y1)
         prepared_source_crop, prepared_guide_crop = self._prepare_ai_cleanup_inputs(source_crop, guide_crop)
 
-        api_key = config.get("image_cleanup_api_key") or config.get("api_key")
-        client = GeminiImageCleanupClient(api_key=api_key, model=config["image_cleanup_model"])
-        prompt = (
-            "You are restoring a manga/comic crop for professional text replacement. "
-            "Use the first image as the original artwork and the second image as a guide where red highlighted areas mark only the source text that must be removed. "
-            "Edit as little as possible: remove only the marked text and tiny furigana around it, then reconstruct the hidden background faithfully. "
-            "Preserve the original composition, brush strokes, halftone dots, hatch lines, outlines, anatomy, facial features, hair strands, clothing folds, patterns, sword details, lighting, shadows, and colors exactly. "
-            "Do not repaint the character, do not blur, do not smear, do not simplify textures, do not change pose or expression, do not crop or resize, and do not add any new text, symbols, strokes, or decorations. "
-            "If the marked area crosses character edges or costume patterns, continue those edges and patterns naturally so the result looks like the original page before lettering. "
-            "Return only the cleaned image."
+        api_key = config.get("image_cleanup_api_key")
+        if config.get("image_cleanup_mode") != "seedream-image":
+            api_key = api_key or config.get("api_key")
+        client = create_image_cleanup_client(
+            mode=config["image_cleanup_mode"],
+            api_key=api_key,
+            model=config["image_cleanup_model"],
         )
         print(
             "[DEBUG] AI cleanup request "
-            f"file={source_path.name} model={config['image_cleanup_model']} "
+            f"file={source_path.name} mode={config['image_cleanup_mode']} model={config['image_cleanup_model']} "
             f"regions={len(target_regions)} crop={source_crop.shape[1]}x{source_crop.shape[0]} "
             f"request={prepared_source_crop.shape[1]}x{prepared_source_crop.shape[0]}"
         )
         edited_crop_rgb = await asyncio.wait_for(
-            client.remove_text(prepared_source_crop, prepared_guide_crop, prompt),
+            client.remove_text(
+                prepared_source_crop,
+                prepared_guide_crop,
+                DEFAULT_IMAGE_CLEANUP_PROMPT,
+            ),
             timeout=self.IMAGE_CLEANUP_TIMEOUT_SECONDS,
         )
         if edited_crop_rgb.shape[:2] != source_crop.shape[:2]:

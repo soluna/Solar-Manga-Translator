@@ -3,6 +3,28 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
+const imageCleanupDefaultModels = {
+  'gemini-image': 'gemini-2.5-flash-image',
+  'seedream-image': 'doubao-seedream-5-0-lite-260128'
+}
+const imageCleanupAllowedModels = {
+  'gemini-image': new Set([
+    'gemini-2.5-flash-image',
+    'gemini-3.1-flash-image-preview',
+    'gemini-3-pro-image-preview'
+  ]),
+  'seedream-image': new Set([
+    'doubao-seedream-5-0-lite-260128'
+  ])
+}
+
+function getDefaultImageCleanupModel(mode) {
+  return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
+}
+
+function isValidImageCleanupModel(mode, model) {
+  return Boolean(imageCleanupAllowedModels[mode]?.has(model))
+}
 
 function createDefaultConfig() {
   return {
@@ -24,6 +46,16 @@ function normalizeStoredConfig(rawValue) {
     return defaults
   }
 
+  const imageCleanupMode = typeof rawValue.image_cleanup_mode === 'string'
+    ? rawValue.image_cleanup_mode
+    : defaults.image_cleanup_mode
+  const storedImageCleanupModel = typeof rawValue.image_cleanup_model === 'string'
+    ? rawValue.image_cleanup_model
+    : defaults.image_cleanup_model
+  const imageCleanupModel = isValidImageCleanupModel(imageCleanupMode, storedImageCleanupModel)
+    ? storedImageCleanupModel
+    : getDefaultImageCleanupModel(imageCleanupMode)
+
   return {
     translator: typeof rawValue.translator === 'string' ? rawValue.translator : defaults.translator,
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
@@ -33,12 +65,8 @@ function normalizeStoredConfig(rawValue) {
     advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
       ? rawValue.advanced_text_repair
       : defaults.advanced_text_repair,
-    image_cleanup_mode: typeof rawValue.image_cleanup_mode === 'string'
-      ? rawValue.image_cleanup_mode
-      : defaults.image_cleanup_mode,
-    image_cleanup_model: typeof rawValue.image_cleanup_model === 'string'
-      ? rawValue.image_cleanup_model
-      : defaults.image_cleanup_model,
+    image_cleanup_mode: imageCleanupMode,
+    image_cleanup_model: imageCleanupModel,
     image_cleanup_api_key: typeof rawValue.image_cleanup_api_key === 'string'
       ? rawValue.image_cleanup_api_key
       : defaults.image_cleanup_api_key
@@ -383,6 +411,15 @@ watch(
   },
   { deep: true }
 )
+
+watch(
+  () => config.value.image_cleanup_mode,
+  (nextMode) => {
+    if (!isValidImageCleanupModel(nextMode, config.value.image_cleanup_model)) {
+      config.value.image_cleanup_model = getDefaultImageCleanupModel(nextMode)
+    }
+  }
+)
 </script>
 
 <template>
@@ -493,6 +530,7 @@ watch(
           <select v-model="config.image_cleanup_mode">
             <option value="off">关闭</option>
             <option value="gemini-image">Gemini 图像编辑</option>
+            <option value="seedream-image">Seedream 5.0 Lite</option>
           </select>
           <small class="field-hint">
             只会命中复杂嵌字页；普通页仍走稳定流程。单页等待过久时会自动超时并回退，不会卡住整本。
@@ -511,11 +549,32 @@ watch(
           </small>
         </label>
 
-        <label v-if="config.image_cleanup_mode === 'gemini-image'" class="field" style="grid-column: span 2;">
-          <span>AI 去字 API Key (可选，留空则复用上面的 Gemini Key)</span>
-          <input v-model="config.image_cleanup_api_key" type="password" placeholder="输入图像编辑 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
+        <label v-if="config.image_cleanup_mode === 'seedream-image'" class="field">
+          <span>AI 去字模型版本</span>
+          <select v-model="config.image_cleanup_model">
+            <option value="doubao-seedream-5-0-lite-260128">doubao-seedream-5-0-lite-260128 (Seedream 5.0 Lite)</option>
+          </select>
+          <small class="field-hint">
+            这条链路会把原图裁剪和红色引导图一起送到火山方舟图片生成接口，prompt 固定为“去除覆盖在图片上的文字”。
+          </small>
+        </label>
+
+        <label v-if="config.image_cleanup_mode !== 'off'" class="field" style="grid-column: span 2;">
+          <span>AI 去字 API Key</span>
+          <input
+            v-model="config.image_cleanup_api_key"
+            type="password"
+            :placeholder="config.image_cleanup_mode === 'seedream-image' ? '输入火山方舟 Ark API Key' : '输入图像编辑 API Key'"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
+          />
           <small class="field-hint field-hint-row">
-            <span>会保存在当前浏览器本地；如果留空，会优先复用当前页面里的 Gemini 翻译 Key。</span>
+            <span>
+              {{
+                config.image_cleanup_mode === 'seedream-image'
+                  ? '会保存在当前浏览器本地；Seedream 不会复用上面的 Gemini 翻译 Key。'
+                  : '会保存在当前浏览器本地；如果留空，会优先复用当前页面里的 Gemini 翻译 Key。'
+              }}
+            </span>
             <button
               v-if="config.image_cleanup_api_key"
               class="inline-button"

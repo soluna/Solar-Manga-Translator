@@ -52,6 +52,32 @@ def patch_gemini_translator(target_file: Path) -> bool:
 
     return changed
 
+def patch_local_mode(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "from ..utils import natural_sort, replace_prefix, get_color_name, rgb2hex, get_logger\n",
+        "from ..utils import natural_sort, replace_prefix, get_color_name, rgb2hex, get_logger\nfrom ..utils.rerender_cache import save_rerender_cache\n",
+        "local mode rerender cache import",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            ctx = await self.translate(img, config)\n            result = ctx.result\n",
+        "            ctx = await self.translate(img, config)\n            save_rerender_cache(path, ctx)\n            result = ctx.result\n",
+        "local mode rerender cache save hook",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
 def patch_mask_refinement():
     # Detect if we're running from start.bat and find the correct path dynamically
     backend_dir = Path(__file__).parent
@@ -63,6 +89,9 @@ def patch_mask_refinement():
     patched_text_render_file = backend_dir / "patched_text_render.py"
     target_text_render_file = translator_dir / "manga_translator" / "rendering" / "text_render.py"
     target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
+    target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
+    patched_rerender_cache_file = backend_dir / "patched_rerender_cache.py"
+    target_rerender_cache_file = translator_dir / "manga_translator" / "utils" / "rerender_cache.py"
 
     if not target_file.exists():
         print(f"Error: Could not find {target_file}")
@@ -84,6 +113,14 @@ def patch_mask_refinement():
         print(f"Error: Could not find {target_gemini_file}")
         return False
 
+    if not target_local_file.exists():
+        print(f"Error: Could not find {target_local_file}")
+        return False
+
+    if not patched_rerender_cache_file.exists():
+        print(f"Error: Could not find {patched_rerender_cache_file}")
+        return False
+
     try:
         if patched_text_render_file.exists():
             shutil.copy2(patched_text_render_file, target_text_render_file)
@@ -97,8 +134,14 @@ def patch_mask_refinement():
         shutil.copy2(patched_render_file, target_render_file)
         print("Successfully replaced rendering/__init__.py with the patched layout version!")
 
+        shutil.copy2(patched_rerender_cache_file, target_rerender_cache_file)
+        print("Successfully added rerender cache helper module!")
+
         patch_gemini_translator(target_gemini_file)
         print("Successfully patched Gemini translator for empty-response handling!")
+
+        patch_local_mode(target_local_file)
+        print("Successfully patched local mode for rerender cache generation!")
 
         # We also need to patch translators/keys.py to default to Gemini 3.1 Pro Preview
         keys_file = translator_dir / "manga_translator" / "translators" / "keys.py"

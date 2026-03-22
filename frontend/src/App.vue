@@ -67,6 +67,8 @@ const status = ref('正在检查后端状态...')
 const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
+const activeAction = ref('translate')
+const renderNonce = ref(Date.now())
 const sessionId = ref('')
 const originalImages = ref([])
 const translatedImages = ref([])
@@ -85,6 +87,7 @@ const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
 const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
+const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
 const progressPercent = computed(() => {
   if (!progress.value.total) {
     return 0
@@ -109,6 +112,15 @@ function toWebSocketUrl(path) {
   const url = new URL(toApiUrl(path))
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
+}
+
+function withCacheBust(url) {
+  if (!url) {
+    return ''
+  }
+
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}t=${renderNonce.value}`
 }
 
 function closeSocket() {
@@ -246,11 +258,13 @@ async function submitFile() {
   }
 }
 
-function startTranslation() {
+function startTranslation(action = 'translate') {
   if (!sessionId.value || translating.value) {
     return
   }
 
+  activeAction.value = action
+  renderNonce.value = Date.now()
   translatedImages.value = []
   downloadUrl.value = ''
   downloadPath.value = ''
@@ -258,13 +272,13 @@ function startTranslation() {
   errorMessage.value = ''
   translating.value = true
   progress.value = { current: 0, total: 0 }
-  status.value = '正在启动翻译任务...'
+  status.value = action === 'rerender' ? '正在启动重嵌字任务...' : '正在启动翻译任务...'
   closeSocket()
 
   socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
 
   socket.onopen = () => {
-    socket.send(JSON.stringify({ config: config.value }))
+    socket.send(JSON.stringify({ action, config: config.value }))
   }
 
   socket.onmessage = (event) => {
@@ -272,7 +286,9 @@ function startTranslation() {
 
     if (payload.event === 'start') {
       progress.value = { current: 0, total: payload.total_pages }
-      status.value = `翻译已开始，共 ${payload.total_pages} 张图片。`
+      status.value = activeAction.value === 'rerender'
+        ? `重嵌字已开始，共 ${payload.total_pages} 张图片。`
+        : `翻译已开始，共 ${payload.total_pages} 张图片。`
       return
     }
 
@@ -284,9 +300,11 @@ function startTranslation() {
       translatedImages.value.push({
         id: `${sessionId.value}-translated-${payload.current}`,
         name: payload.name || `第 ${payload.current} 张`,
-        url: toApiUrl(payload.image_url)
+        url: withCacheBust(toApiUrl(payload.image_url))
       })
-      status.value = `翻译进行中：${payload.current} / ${payload.total}`
+      status.value = activeAction.value === 'rerender'
+        ? `重嵌字进行中：${payload.current} / ${payload.total}`
+        : `翻译进行中：${payload.current} / ${payload.total}`
       return
     }
 
@@ -297,10 +315,12 @@ function startTranslation() {
 
     if (payload.event === 'completed') {
       translating.value = false
-      downloadUrl.value = toApiUrl(payload.download_url)
+      downloadUrl.value = withCacheBust(toApiUrl(payload.download_url))
       downloadPath.value = payload.download_path || ''
       translatedDirPath.value = payload.translated_dir || ''
-      status.value = `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      status.value = activeAction.value === 'rerender'
+        ? `重嵌字完成，共输出 ${translatedImages.value.length} 张图片。`
+        : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       closeSocket()
       return
     }
@@ -308,14 +328,14 @@ function startTranslation() {
     if (payload.event === 'error') {
       translating.value = false
       errorMessage.value = payload.message || '翻译失败'
-      status.value = '翻译失败。'
+      status.value = activeAction.value === 'rerender' ? '重嵌字失败。' : '翻译失败。'
       closeSocket()
     }
   }
 
   socket.onerror = () => {
     errorMessage.value = '翻译连接中断，请查看后端控制台日志。'
-    status.value = '翻译连接中断。'
+    status.value = activeAction.value === 'rerender' ? '重嵌字连接中断。' : '翻译连接中断。'
     translating.value = false
     closeSocket()
   }
@@ -323,7 +343,7 @@ function startTranslation() {
   socket.onclose = () => {
     if (translating.value) {
       errorMessage.value = '翻译任务意外断开，请查看后端日志。'
-      status.value = '翻译未完成。'
+      status.value = activeAction.value === 'rerender' ? '重嵌字未完成。' : '翻译未完成。'
       translating.value = false
     }
   }
@@ -460,9 +480,19 @@ watch(
         <button
           class="primary-button"
           :disabled="!canTranslate"
-          @click="startTranslation"
+          @click="startTranslation('translate')"
         >
           {{ translating ? '翻译进行中...' : '开始翻译' }}
+        </button>
+
+        <button
+          v-if="downloadUrl"
+          class="secondary-button"
+          :disabled="!canRerender"
+          type="button"
+          @click="startTranslation('rerender')"
+        >
+          仅重新嵌字
         </button>
 
         <a

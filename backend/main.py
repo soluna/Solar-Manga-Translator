@@ -178,17 +178,26 @@ async def translate_session(websocket: WebSocket, session_id: str):
 
     try:
         payload = await websocket.receive_json()
+        action = str(payload.get("action") or "translate").strip().lower()
         config = payload.get("config", {})
 
         async def send_event(event: dict[str, Any]) -> None:
             await websocket.send_json(event)
 
-        result = await translator_engine.translate_session(
-            session_id=session_id,
-            session=session,
-            raw_config=config,
-            progress_callback=send_event,
-        )
+        if action == "rerender":
+            result = await translator_engine.rerender_session(
+                session_id=session_id,
+                session=session,
+                raw_config=config,
+                progress_callback=send_event,
+            )
+        else:
+            result = await translator_engine.translate_session(
+                session_id=session_id,
+                session=session,
+                raw_config=config,
+                progress_callback=send_event,
+            )
         await websocket.send_json({"event": "completed", **result})
     except WebSocketDisconnect:
         return

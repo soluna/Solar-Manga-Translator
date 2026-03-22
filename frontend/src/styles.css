@@ -140,6 +140,14 @@ h2 {
   line-height: 1.5;
 }
 
+.field-hint-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .field select {
   min-height: 42px;
   border: 1px solid rgba(155, 95, 45, 0.24);
@@ -225,6 +233,20 @@ h2 {
   color: #553d2c;
   text-decoration: none;
   font-weight: 700;
+}
+
+.inline-button {
+  border: 0;
+  background: transparent;
+  color: #9b5f2d;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0;
+}
+
+.inline-button:hover {
+  color: #b9472c;
 }
 
 .progress-panel {

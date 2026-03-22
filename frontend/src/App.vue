@@ -1,7 +1,62 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const configStorageKey = 'manga-translator.ui-config'
+
+function createDefaultConfig() {
+  return {
+    translator: 'gemini',
+    target_lang: 'CHS',
+    use_gpu: true,
+    api_key: '',
+    font_key: ''
+  }
+}
+
+function normalizeStoredConfig(rawValue) {
+  const defaults = createDefaultConfig()
+  if (!rawValue || typeof rawValue !== 'object') {
+    return defaults
+  }
+
+  return {
+    translator: typeof rawValue.translator === 'string' ? rawValue.translator : defaults.translator,
+    target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
+    use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
+    api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
+    font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key
+  }
+}
+
+function loadStoredConfig() {
+  if (typeof window === 'undefined') {
+    return createDefaultConfig()
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(configStorageKey)
+    if (!rawValue) {
+      return createDefaultConfig()
+    }
+
+    return normalizeStoredConfig(JSON.parse(rawValue))
+  } catch (error) {
+    return createDefaultConfig()
+  }
+}
+
+function saveStoredConfig(value) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(configStorageKey, JSON.stringify(normalizeStoredConfig(value)))
+  } catch (error) {
+    console.warn('Failed to persist UI config locally.', error)
+  }
+}
 
 const selectedFile = ref(null)
 const status = ref('正在检查后端状态...')
@@ -16,13 +71,7 @@ const downloadUrl = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
 
-const config = ref({
-  translator: 'gemini',
-  target_lang: 'CHS',
-  use_gpu: true,
-  api_key: '',
-  font_key: ''
-})
+const config = ref(loadStoredConfig())
 
 let socket = null
 
@@ -61,6 +110,12 @@ function closeSocket() {
     socket.close()
     socket = null
   }
+}
+
+function clearStoredApiKey() {
+  config.value.api_key = ''
+  saveStoredConfig(config.value)
+  status.value = '已清除本机浏览器里保存的 API Key。'
 }
 
 async function checkBackendStatus() {
@@ -240,6 +295,14 @@ onMounted(() => {
 onBeforeUnmount(() => {
   closeSocket()
 })
+
+watch(
+  config,
+  (nextValue) => {
+    saveStoredConfig(nextValue)
+  },
+  { deep: true }
+)
 </script>
 
 <template>
@@ -303,6 +366,17 @@ onBeforeUnmount(() => {
         <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt'" class="field" style="grid-column: span 2;">
           <span>API Key (可选，留空则使用默认配置)</span>
           <input v-model="config.api_key" type="password" placeholder="输入你的 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
+          <small class="field-hint field-hint-row">
+            <span>会保存在当前浏览器本地，下次打开页面会自动带出。</span>
+            <button
+              v-if="config.api_key"
+              class="inline-button"
+              type="button"
+              @click="clearStoredApiKey"
+            >
+              清除已保存 Key
+            </button>
+          </small>
         </label>
 
         <label class="field" style="grid-column: span 2;">

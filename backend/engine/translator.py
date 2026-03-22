@@ -817,6 +817,14 @@ class TranslatorEngine:
         if not target_regions:
             return None
 
+        if config["image_cleanup_mode"] == "seedream-image":
+            return await self._build_seedream_full_page_base_image(
+                source_path=source_path,
+                source_rgb=source_rgb,
+                target_regions=target_regions,
+                config=config,
+            )
+
         x1, y1, x2, y2 = self._merge_region_bounds(target_regions, source_rgb.shape)
         source_crop = source_rgb[y1:y2, x1:x2].copy()
         guide_crop = self._build_ai_cleanup_guide(source_crop, target_regions, x1, y1)
@@ -865,6 +873,41 @@ class TranslatorEngine:
             255,
         ).astype(np.uint8)
         return base_rgb
+
+    async def _build_seedream_full_page_base_image(
+        self,
+        source_path: Path,
+        source_rgb: np.ndarray,
+        target_regions: list[Any],
+        config: dict[str, Any],
+    ) -> np.ndarray:
+        guide_rgb = self._build_ai_cleanup_guide(source_rgb.copy(), target_regions, 0, 0)
+        client = create_image_cleanup_client(
+            mode=config["image_cleanup_mode"],
+            api_key=config["image_cleanup_api_key"],
+            model=config["image_cleanup_model"],
+        )
+        print(
+            "[DEBUG] AI cleanup request "
+            f"file={source_path.name} mode={config['image_cleanup_mode']} model={config['image_cleanup_model']} "
+            f"regions={len(target_regions)} crop={source_rgb.shape[1]}x{source_rgb.shape[0]} "
+            f"request={source_rgb.shape[1]}x{source_rgb.shape[0]}"
+        )
+        edited_rgb = await asyncio.wait_for(
+            client.remove_text(
+                source_rgb,
+                guide_rgb,
+                DEFAULT_IMAGE_CLEANUP_PROMPT,
+            ),
+            timeout=self.IMAGE_CLEANUP_TIMEOUT_SECONDS,
+        )
+        if edited_rgb.shape[:2] != source_rgb.shape[:2]:
+            edited_rgb = cv2.resize(
+                edited_rgb,
+                (source_rgb.shape[1], source_rgb.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return edited_rgb
 
     def _prepare_ai_cleanup_inputs(
         self,

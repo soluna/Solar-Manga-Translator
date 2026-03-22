@@ -11,7 +11,10 @@ function createDefaultConfig() {
     use_gpu: true,
     api_key: '',
     font_key: '',
-    advanced_text_repair: 'auto'
+    advanced_text_repair: 'auto',
+    image_cleanup_mode: 'off',
+    image_cleanup_model: 'gemini-3-pro-image-preview',
+    image_cleanup_api_key: ''
   }
 }
 
@@ -29,7 +32,16 @@ function normalizeStoredConfig(rawValue) {
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
     advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
       ? rawValue.advanced_text_repair
-      : defaults.advanced_text_repair
+      : defaults.advanced_text_repair,
+    image_cleanup_mode: typeof rawValue.image_cleanup_mode === 'string'
+      ? rawValue.image_cleanup_mode
+      : defaults.image_cleanup_mode,
+    image_cleanup_model: typeof rawValue.image_cleanup_model === 'string'
+      ? rawValue.image_cleanup_model
+      : defaults.image_cleanup_model,
+    image_cleanup_api_key: typeof rawValue.image_cleanup_api_key === 'string'
+      ? rawValue.image_cleanup_api_key
+      : defaults.image_cleanup_api_key
   }
 }
 
@@ -134,6 +146,12 @@ function clearStoredApiKey() {
   config.value.api_key = ''
   saveStoredConfig(config.value)
   status.value = '已清除本机浏览器里保存的 API Key。'
+}
+
+function clearStoredImageApiKey() {
+  config.value.image_cleanup_api_key = ''
+  saveStoredConfig(config.value)
+  status.value = '已清除本机浏览器里保存的图像去字 API Key。'
 }
 
 async function copyText(text, successMessage) {
@@ -467,6 +485,44 @@ watch(
           </select>
           <small class="field-hint">
             只会对疑似框外嵌字或彩色复杂页尝试第二次修复；普通页面默认仍走当前稳定流程。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>AI 去字模型</span>
+          <select v-model="config.image_cleanup_mode">
+            <option value="off">关闭</option>
+            <option value="gemini-image">Gemini 图像编辑</option>
+          </select>
+          <small class="field-hint">
+            命中复杂嵌字页时，先让 AI 补全被文字遮挡的底图，再回填译文。
+          </small>
+        </label>
+
+        <label v-if="config.image_cleanup_mode === 'gemini-image'" class="field">
+          <span>AI 去字模型版本</span>
+          <select v-model="config.image_cleanup_model">
+            <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (质量优先 / Nano Banana 2)</option>
+            <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (速度优先)</option>
+          </select>
+          <small class="field-hint">
+            如果高质量模型额度不足，可以切到 `gemini-2.5-flash-image`。
+          </small>
+        </label>
+
+        <label v-if="config.image_cleanup_mode === 'gemini-image'" class="field" style="grid-column: span 2;">
+          <span>AI 去字 API Key (可选，留空则复用上面的 Gemini Key)</span>
+          <input v-model="config.image_cleanup_api_key" type="password" placeholder="输入图像编辑 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
+          <small class="field-hint field-hint-row">
+            <span>会保存在当前浏览器本地；如果留空，会优先复用当前页面里的 Gemini 翻译 Key。</span>
+            <button
+              v-if="config.image_cleanup_api_key"
+              class="inline-button"
+              type="button"
+              @click="clearStoredImageApiKey"
+            >
+              清除已保存 Key
+            </button>
           </small>
         </label>
 

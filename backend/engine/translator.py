@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from patch_pydensecrf import patch_mask_refinement
+from .image_cleanup import GeminiImageCleanupClient
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -76,13 +77,31 @@ class TranslatorEngine:
             raise RuntimeError(self._format_failure(log_path))
 
         if complex_images:
-            enhanced_count = await self._enhance_complex_pages(
-                session_id=session_id,
-                session=session,
-                config=config,
-                complex_images=complex_images,
-                progress_callback=progress_callback,
-            )
+            if self._wants_ai_image_cleanup(config):
+                if self._has_image_cleanup_key(config):
+                    enhanced_count = await self._ai_clean_complex_pages(
+                        session_id=session_id,
+                        session=session,
+                        config=config,
+                        complex_images=complex_images,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    enhanced_count = 0
+                    await progress_callback(
+                        {
+                            "event": "status",
+                            "message": "已启用 Gemini 图像去字，但没有可用 API Key，已保留稳定版输出。",
+                        }
+                    )
+            else:
+                enhanced_count = await self._enhance_complex_pages(
+                    session_id=session_id,
+                    session=session,
+                    config=config,
+                    complex_images=complex_images,
+                    progress_callback=progress_callback,
+                )
             if enhanced_count:
                 print(f"[DEBUG] Enhanced repair finished for {enhanced_count} complex page(s).")
             session["deferred_output_names"] = set()
@@ -279,6 +298,9 @@ class TranslatorEngine:
         api_key = str(raw_config.get("api_key", "")).strip()
         font_key = str(raw_config.get("font_key", "")).strip()
         font_path = self._resolve_font_path(font_key)
+        image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
+        image_cleanup_model = self._normalize_image_cleanup_model(raw_config.get("image_cleanup_model"))
+        image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
 
         return {
             "translator": translator,
@@ -288,6 +310,9 @@ class TranslatorEngine:
             "font_key": font_key,
             "font_path": font_path,
             "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
+            "image_cleanup_mode": image_cleanup_mode,
+            "image_cleanup_model": image_cleanup_model,
+            "image_cleanup_api_key": image_cleanup_api_key,
         }
 
     def _normalize_advanced_text_repair(self, raw_value: Any) -> str:
@@ -295,6 +320,16 @@ class TranslatorEngine:
         if value not in {"auto", "off", "force"}:
             return "auto"
         return value
+
+    def _normalize_image_cleanup_mode(self, raw_value: Any) -> str:
+        value = str(raw_value or "off").strip().lower()
+        if value not in {"off", "gemini-image"}:
+            return "off"
+        return value
+
+    def _normalize_image_cleanup_model(self, raw_value: Any) -> str:
+        value = str(raw_value or "gemini-3-pro-image-preview").strip()
+        return value or "gemini-3-pro-image-preview"
 
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
@@ -424,7 +459,7 @@ class TranslatorEngine:
         if repair_mode == "off":
             return []
 
-        if not config.get("use_gpu"):
+        if not config.get("use_gpu") and not self._wants_ai_image_cleanup(config):
             return []
 
         selected_images: list[dict[str, str]] = []
@@ -444,6 +479,12 @@ class TranslatorEngine:
                 selected_images.append(image)
 
         return selected_images
+
+    def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
+        return config.get("image_cleanup_mode") == "gemini-image"
+
+    def _has_image_cleanup_key(self, config: dict[str, Any]) -> bool:
+        return bool(config.get("image_cleanup_api_key") or config.get("api_key"))
 
     def _analyze_embedded_text_risk(self, image_path: Path) -> dict[str, Any]:
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -619,6 +660,213 @@ class TranslatorEngine:
         shutil.rmtree(enhanced_output_dir, ignore_errors=True)
         return enhanced_count
 
+    async def _ai_clean_complex_pages(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        config: dict[str, Any],
+        complex_images: list[dict[str, str]],
+        progress_callback: ProgressCallback,
+    ) -> int:
+        await progress_callback(
+            {
+                "event": "status",
+                "message": f"检测到 {len(complex_images)} 张复杂嵌字页，正在使用 {config['image_cleanup_model']} 做 AI 去字…",
+            }
+        )
+
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        enhanced_count = 0
+
+        for image in complex_images:
+            source_path = source_dir / image["stored_name"]
+            output_path = output_dir / image["stored_name"]
+            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+
+            if not self._has_rerenderable_page_cache(cache_page_dir):
+                print(f"[WARN] Missing rerender cache for AI cleanup page: {image['stored_name']}")
+                continue
+
+            try:
+                ai_base_rgb = await self._build_ai_clean_base_image(
+                    source_path=source_path,
+                    page_cache_dir=cache_page_dir,
+                    config=config,
+                )
+                if ai_base_rgb is None:
+                    continue
+
+                cv2.imwrite(
+                    str(cache_page_dir / "inpainted.png"),
+                    cv2.cvtColor(ai_base_rgb, cv2.COLOR_RGB2BGR),
+                )
+
+                await self._render_cached_page(
+                    source_path=source_path,
+                    output_path=output_path,
+                    page_cache_dir=cache_page_dir,
+                    config=config,
+                    base_image_rgb=ai_base_rgb,
+                )
+                enhanced_count += 1
+            except Exception as exc:
+                print(f"[WARN] AI cleanup failed for {image['stored_name']}: {exc}")
+
+        if enhanced_count:
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": f"AI 去字完成，共优化 {enhanced_count} 张复杂页。",
+                }
+            )
+        else:
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": "AI 去字没有成功产出可替换结果，已保留稳定版输出。",
+                }
+            )
+
+        return enhanced_count
+
+    async def _build_ai_clean_base_image(
+        self,
+        source_path: Path,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+    ) -> np.ndarray | None:
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图: {source_path}")
+
+        inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
+        if inpainted_bgr is None:
+            raise RuntimeError(f"无法读取缓存底图: {page_cache_dir / 'inpainted.png'}")
+
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        base_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
+        regions = self._load_cached_regions(page_cache_dir)
+        target_regions = self._select_ai_cleanup_regions(source_rgb, regions)
+        if not target_regions:
+            return None
+
+        x1, y1, x2, y2 = self._merge_region_bounds(target_regions, source_rgb.shape)
+        source_crop = source_rgb[y1:y2, x1:x2].copy()
+        guide_crop = self._build_ai_cleanup_guide(source_crop, target_regions, x1, y1)
+
+        api_key = config.get("image_cleanup_api_key") or config.get("api_key")
+        client = GeminiImageCleanupClient(api_key=api_key, model=config["image_cleanup_model"])
+        prompt = (
+            "You are restoring a manga/comic crop. "
+            "Use the first image as the source artwork and the second image as a guide where red highlighted areas mark original text that must be removed. "
+            "Erase only the marked original text, reconstruct the hidden background, line art, tones, colors, and textures faithfully, and do not add any new text, symbols, blur, or redesigns. "
+            "Keep everything outside the marked areas unchanged and return only the cleaned image."
+        )
+        edited_crop_rgb = await client.remove_text(source_crop, guide_crop, prompt)
+        if edited_crop_rgb.shape[:2] != source_crop.shape[:2]:
+            edited_crop_rgb = cv2.resize(
+                edited_crop_rgb,
+                (source_crop.shape[1], source_crop.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+        blend_mask = self._build_ai_blend_mask(target_regions, source_rgb.shape, x1, y1, x2, y2)
+        base_region = base_rgb[y1:y2, x1:x2].astype(np.float32)
+        edited_region = edited_crop_rgb.astype(np.float32)
+        alpha = blend_mask[:, :, None].astype(np.float32) / 255.0
+        base_rgb[y1:y2, x1:x2] = np.clip(
+            base_region * (1 - alpha) + edited_region * alpha,
+            0,
+            255,
+        ).astype(np.uint8)
+        return base_rgb
+
+    def _select_ai_cleanup_regions(self, image_rgb: np.ndarray, regions: list[Any]) -> list[Any]:
+        if not regions:
+            return []
+
+        hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
+        saturation = hsv[:, :, 1]
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        scored_regions: list[tuple[float, Any]] = []
+
+        for region in regions:
+            x1, y1, x2, y2 = map(int, getattr(region, "xyxy", [0, 0, 0, 0]))
+            pad = max(8, int(max(x2 - x1, y2 - y1) * 0.25))
+            x1 = max(0, x1 - pad)
+            y1 = max(0, y1 - pad)
+            x2 = min(image_rgb.shape[1], x2 + pad)
+            y2 = min(image_rgb.shape[0], y2 + pad)
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            region_gray = gray[y1:y2, x1:x2]
+            region_sat = saturation[y1:y2, x1:x2]
+            if region_gray.size == 0:
+                continue
+
+            nonwhite_ratio = float(np.mean(region_gray < 232))
+            sat_score = float(region_sat.mean()) / 255.0
+            dark_ratio = float(np.mean(region_gray < 210))
+            score = nonwhite_ratio * 0.7 + dark_ratio * 0.2 + sat_score * 0.4
+            scored_regions.append((score, region))
+
+        if not scored_regions:
+            return []
+
+        scored_regions.sort(key=lambda item: item[0], reverse=True)
+        thresholded = [region for score, region in scored_regions if score >= 0.22]
+        if thresholded:
+            return thresholded
+        return [region for _, region in scored_regions[: min(3, len(scored_regions))]]
+
+    def _merge_region_bounds(self, regions: list[Any], image_shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+        x1 = min(int(region.xyxy[0]) for region in regions)
+        y1 = min(int(region.xyxy[1]) for region in regions)
+        x2 = max(int(region.xyxy[2]) for region in regions)
+        y2 = max(int(region.xyxy[3]) for region in regions)
+        pad = max(24, int(max(x2 - x1, y2 - y1) * 0.2))
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(image_shape[1], x2 + pad)
+        y2 = min(image_shape[0], y2 + pad)
+        return x1, y1, x2, y2
+
+    def _build_ai_cleanup_guide(
+        self,
+        source_crop: np.ndarray,
+        regions: list[Any],
+        crop_x1: int,
+        crop_y1: int,
+    ) -> np.ndarray:
+        guide = source_crop.copy()
+        overlay = guide.copy()
+        for region in regions:
+            polygon = np.array(region.min_rect[0], dtype=np.int32)
+            polygon[:, 0] -= crop_x1
+            polygon[:, 1] -= crop_y1
+            cv2.fillConvexPoly(overlay, polygon, color=(255, 48, 48))
+            cv2.polylines(overlay, [polygon], True, color=(255, 255, 255), thickness=4)
+        return cv2.addWeighted(overlay, 0.48, guide, 0.52, 0)
+
+    def _build_ai_blend_mask(
+        self,
+        regions: list[Any],
+        image_shape: tuple[int, ...],
+        crop_x1: int,
+        crop_y1: int,
+        crop_x2: int,
+        crop_y2: int,
+    ) -> np.ndarray:
+        mask = np.zeros(image_shape[:2], dtype=np.uint8)
+        for region in regions:
+            polygon = np.array(region.min_rect[0], dtype=np.int32)
+            cv2.fillConvexPoly(mask, polygon, 255)
+        mask = cv2.dilate(mask, np.ones((21, 21), dtype=np.uint8), iterations=1)
+        mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=9, sigmaY=9)
+        return mask[crop_y1:crop_y2, crop_x1:crop_x2]
+
     def _rerender_cache_dir(self, session_id: str) -> Path:
         return self.rerender_cache_root / session_id
 
@@ -699,6 +947,7 @@ class TranslatorEngine:
         output_path: Path,
         page_cache_dir: Path,
         config: dict[str, Any],
+        base_image_rgb: np.ndarray | None = None,
     ) -> None:
         self._ensure_vendor_import_path()
         from PIL import Image
@@ -712,7 +961,11 @@ class TranslatorEngine:
 
         source_image = Image.open(source_path)
         _, alpha_ch = load_image(source_image)
-        inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
+        inpainted_rgb = (
+            base_image_rgb.copy()
+            if base_image_rgb is not None
+            else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
+        )
         regions = self._load_cached_regions(page_cache_dir)
 
         rendered_rgb = await dispatch_rendering(

@@ -13,7 +13,7 @@ function createDefaultConfig() {
     font_key: '',
     advanced_text_repair: 'auto',
     image_cleanup_mode: 'off',
-    image_cleanup_model: 'gemini-3-pro-image-preview',
+    image_cleanup_model: 'gemini-2.5-flash-image',
     image_cleanup_api_key: ''
   }
 }
@@ -495,18 +495,18 @@ watch(
             <option value="gemini-image">Gemini 图像编辑</option>
           </select>
           <small class="field-hint">
-            命中复杂嵌字页时，先让 AI 补全被文字遮挡的底图，再回填译文。
+            只会命中复杂嵌字页；普通页仍走稳定流程。单页等待过久时会自动超时并回退，不会卡住整本。
           </small>
         </label>
 
         <label v-if="config.image_cleanup_mode === 'gemini-image'" class="field">
           <span>AI 去字模型版本</span>
           <select v-model="config.image_cleanup_model">
-            <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (质量优先 / Nano Banana 2)</option>
-            <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (速度优先)</option>
+            <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (官方 GA / 速度优先)</option>
+            <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (质量优先 / 更慢)</option>
           </select>
           <small class="field-hint">
-            如果高质量模型额度不足，可以切到 `gemini-2.5-flash-image`。
+            先建议用 `gemini-2.5-flash-image` 跑通；如果速度可以接受，再切到 `gemini-3-pro-image-preview` 比效果。
           </small>
         </label>
 

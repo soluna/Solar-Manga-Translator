@@ -20,6 +20,9 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class TranslatorEngine:
+    IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
+    IMAGE_CLEANUP_MAX_EDGE = 1280
+
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
         self.temp_dir = self.base_dir / "temp_uploads"
@@ -328,8 +331,8 @@ class TranslatorEngine:
         return value
 
     def _normalize_image_cleanup_model(self, raw_value: Any) -> str:
-        value = str(raw_value or "gemini-3-pro-image-preview").strip()
-        return value or "gemini-3-pro-image-preview"
+        value = str(raw_value or "gemini-2.5-flash-image").strip()
+        return value or "gemini-2.5-flash-image"
 
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
@@ -679,13 +682,29 @@ class TranslatorEngine:
         output_dir = Path(session["translated_dir"])
         enhanced_count = 0
 
-        for image in complex_images:
+        for index, image in enumerate(complex_images, start=1):
             source_path = source_dir / image["stored_name"]
             output_path = output_dir / image["stored_name"]
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
 
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": (
+                        f"AI 去字第 {index}/{len(complex_images)} 张："
+                        f"{image['name']}，正在等待 {config['image_cleanup_model']} 返回结果…"
+                    ),
+                }
+            )
+
             if not self._has_rerenderable_page_cache(cache_page_dir):
                 print(f"[WARN] Missing rerender cache for AI cleanup page: {image['stored_name']}")
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "message": f"AI 去字跳过 {image['name']}：缺少可复用缓存，已保留稳定版输出。",
+                    }
+                )
                 continue
 
             try:
@@ -710,8 +729,34 @@ class TranslatorEngine:
                     base_image_rgb=ai_base_rgb,
                 )
                 enhanced_count += 1
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "message": f"AI 去字已完成 {image['name']}，正在继续后续页面…",
+                    }
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[WARN] AI cleanup timed out after {self.IMAGE_CLEANUP_TIMEOUT_SECONDS}s "
+                    f"for {image['stored_name']}"
+                )
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "message": (
+                            f"AI 去字在 {image['name']} 上等待超时，"
+                            "已自动回退到稳定版输出。"
+                        ),
+                    }
+                )
             except Exception as exc:
                 print(f"[WARN] AI cleanup failed for {image['stored_name']}: {exc}")
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "message": f"AI 去字在 {image['name']} 上失败，已回退到稳定版输出。",
+                    }
+                )
 
         if enhanced_count:
             await progress_callback(
@@ -754,6 +799,7 @@ class TranslatorEngine:
         x1, y1, x2, y2 = self._merge_region_bounds(target_regions, source_rgb.shape)
         source_crop = source_rgb[y1:y2, x1:x2].copy()
         guide_crop = self._build_ai_cleanup_guide(source_crop, target_regions, x1, y1)
+        prepared_source_crop, prepared_guide_crop = self._prepare_ai_cleanup_inputs(source_crop, guide_crop)
 
         api_key = config.get("image_cleanup_api_key") or config.get("api_key")
         client = GeminiImageCleanupClient(api_key=api_key, model=config["image_cleanup_model"])
@@ -763,7 +809,16 @@ class TranslatorEngine:
             "Erase only the marked original text, reconstruct the hidden background, line art, tones, colors, and textures faithfully, and do not add any new text, symbols, blur, or redesigns. "
             "Keep everything outside the marked areas unchanged and return only the cleaned image."
         )
-        edited_crop_rgb = await client.remove_text(source_crop, guide_crop, prompt)
+        print(
+            "[DEBUG] AI cleanup request "
+            f"file={source_path.name} model={config['image_cleanup_model']} "
+            f"regions={len(target_regions)} crop={source_crop.shape[1]}x{source_crop.shape[0]} "
+            f"request={prepared_source_crop.shape[1]}x{prepared_source_crop.shape[0]}"
+        )
+        edited_crop_rgb = await asyncio.wait_for(
+            client.remove_text(prepared_source_crop, prepared_guide_crop, prompt),
+            timeout=self.IMAGE_CLEANUP_TIMEOUT_SECONDS,
+        )
         if edited_crop_rgb.shape[:2] != source_crop.shape[:2]:
             edited_crop_rgb = cv2.resize(
                 edited_crop_rgb,
@@ -781,6 +836,25 @@ class TranslatorEngine:
             255,
         ).astype(np.uint8)
         return base_rgb
+
+    def _prepare_ai_cleanup_inputs(
+        self,
+        source_crop: np.ndarray,
+        guide_crop: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        height, width = source_crop.shape[:2]
+        longest_edge = max(height, width)
+        if longest_edge <= self.IMAGE_CLEANUP_MAX_EDGE:
+            return source_crop, guide_crop
+
+        scale = self.IMAGE_CLEANUP_MAX_EDGE / float(longest_edge)
+        resized_width = max(256, int(round(width * scale)))
+        resized_height = max(256, int(round(height * scale)))
+        resized_size = (resized_width, resized_height)
+        return (
+            cv2.resize(source_crop, resized_size, interpolation=cv2.INTER_AREA),
+            cv2.resize(guide_crop, resized_size, interpolation=cv2.INTER_LINEAR),
+        )
 
     def _select_ai_cleanup_regions(self, image_rgb: np.ndarray, regions: list[Any]) -> list[Any]:
         if not regions:

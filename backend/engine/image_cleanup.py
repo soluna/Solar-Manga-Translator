@@ -106,6 +106,7 @@ class SeedreamImageCleanupClient:
         return await asyncio.to_thread(self._remove_text_sync, source_rgb, guide_rgb, prompt)
 
     def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray, prompt: str) -> np.ndarray:
+        height, width = source_rgb.shape[:2]
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -113,7 +114,7 @@ class SeedreamImageCleanupClient:
                 self._image_to_data_uri(source_rgb),
                 self._image_to_data_uri(guide_rgb),
             ],
-            "size": "adaptive",
+            "size": f"{width}x{height}",
             "watermark": False,
         }
         request = urllib_request.Request(

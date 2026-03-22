@@ -301,6 +301,8 @@ class TranslatorEngine:
         api_key = str(raw_config.get("api_key", "")).strip()
         font_key = str(raw_config.get("font_key", "")).strip()
         font_path = self._resolve_font_path(font_key)
+        render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
+        render_letter_spacing = self._normalize_render_letter_spacing(raw_config.get("render_letter_spacing"))
         image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
         image_cleanup_model = self._normalize_image_cleanup_model(
             image_cleanup_mode,
@@ -315,6 +317,8 @@ class TranslatorEngine:
             "api_key": api_key,
             "font_key": font_key,
             "font_path": font_path,
+            "render_alignment": render_alignment,
+            "render_letter_spacing": render_letter_spacing,
             "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
             "image_cleanup_mode": image_cleanup_mode,
             "image_cleanup_model": image_cleanup_model,
@@ -332,6 +336,19 @@ class TranslatorEngine:
         if value not in {"off", "gemini-image", "seedream-image"}:
             return "off"
         return value
+
+    def _normalize_render_alignment(self, raw_value: Any) -> str:
+        value = str(raw_value or "left").strip().lower()
+        if value not in {"auto", "left", "center", "right"}:
+            return "left"
+        return value
+
+    def _normalize_render_letter_spacing(self, raw_value: Any) -> float:
+        try:
+            value = float(raw_value if raw_value is not None else 1.08)
+        except (TypeError, ValueError):
+            value = 1.08
+        return max(0.85, min(1.35, round(value, 2)))
 
     def _normalize_image_cleanup_model(self, mode: str, raw_value: Any) -> str:
         value = str(raw_value or "").strip()
@@ -406,7 +423,7 @@ class TranslatorEngine:
                 # detected orientation instead of forcing horizontal Chinese.
                 "font_size_minimum": 8,
                 "font_size_offset": -6,
-                "alignment": "center",
+                "alignment": config["render_alignment"],
                 "direction": "auto"
             },
             "detector": {
@@ -1117,6 +1134,9 @@ class TranslatorEngine:
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
         regions = self._load_cached_regions(page_cache_dir)
+        for region in regions:
+            region._alignment = config["render_alignment"]
+            region.letter_spacing = config["render_letter_spacing"]
 
         rendered_rgb = await dispatch_rendering(
             inpainted_rgb.copy(),

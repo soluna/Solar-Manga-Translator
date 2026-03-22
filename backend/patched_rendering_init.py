@@ -98,6 +98,7 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
             region.target_lang,
             hyphenate,
             line_spacing,
+            getattr(region, 'letter_spacing', 1.0),
         )
 
     return text_render.put_text_vertical(
@@ -108,6 +109,7 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
         fg,
         bg,
         line_spacing,
+        getattr(region, 'letter_spacing', 1.0),
     )
 
 
@@ -290,6 +292,7 @@ def render(
             region.target_lang,
             hyphenate,
             line_spacing,
+            getattr(region, 'letter_spacing', 1.0),
         )
     else:
         temp_box = text_render.put_text_vertical(
@@ -300,6 +303,7 @@ def render(
             fg,
             bg,
             line_spacing,
+            getattr(region, 'letter_spacing', 1.0),
         )
     h, w, _ = temp_box.shape
     r_temp = w / h

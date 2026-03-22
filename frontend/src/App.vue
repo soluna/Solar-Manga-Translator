@@ -33,6 +33,8 @@ function createDefaultConfig() {
     use_gpu: true,
     api_key: '',
     font_key: '',
+    render_alignment: 'left',
+    render_letter_spacing: 1.08,
     advanced_text_repair: 'auto',
     image_cleanup_mode: 'off',
     image_cleanup_model: 'gemini-2.5-flash-image',
@@ -62,6 +64,12 @@ function normalizeStoredConfig(rawValue) {
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
+    render_alignment: typeof rawValue.render_alignment === 'string'
+      ? rawValue.render_alignment
+      : defaults.render_alignment,
+    render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
+      ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
+      : defaults.render_letter_spacing,
     advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
       ? rawValue.advanced_text_repair
       : defaults.advanced_text_repair,
@@ -510,6 +518,34 @@ watch(
           </select>
           <small class="field-hint">
             想换自定义字体时，把 `.ttf` / `.ttc` / `.otf` 放到项目根目录 `fonts` 文件夹后重启即可。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>排版对齐</span>
+          <select v-model="config.render_alignment">
+            <option value="left">靠左 / 靠上</option>
+            <option value="center">居中</option>
+            <option value="right">靠右 / 靠下</option>
+            <option value="auto">自动</option>
+          </select>
+          <small class="field-hint">
+            现在默认会优先靠左 / 靠上。修改后可直接点“仅重新嵌字”快速比较版式。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>字间距倍率</span>
+          <input
+            v-model.number="config.render_letter_spacing"
+            type="number"
+            min="0.85"
+            max="1.35"
+            step="0.02"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
+          />
+          <small class="field-hint">
+            默认 `1.08`，会比之前稍微舒展一点。改完后也建议用“仅重新嵌字”比较效果。
           </small>
         </label>
 

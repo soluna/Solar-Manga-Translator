@@ -78,6 +78,88 @@ def patch_local_mode(target_file: Path) -> bool:
 
     return changed
 
+def patch_text_render(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int):",
+        "def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int, letter_spacing: float = 1.0):",
+        "text_render vertical signature",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    spacing_x = int(font_size * (line_spacing or 0.2))\n",
+        "    spacing_x = int(font_size * (line_spacing or 0.2))\n    letter_spacing = max(float(letter_spacing or 1.0), 0.85)\n",
+        "text_render vertical letter spacing init",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    canvas_y = font_size * num_char_y + (font_size + bg_size) * 2\n",
+        "    canvas_y = int(font_size * num_char_y * max(letter_spacing, 1.0)) + (font_size + bg_size) * 2\n",
+        "text_render vertical canvas height",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            pen_line[1] += offset_y\n",
+        "            pen_line[1] += max(1, int(round(offset_y * letter_spacing)))\n",
+        "text_render vertical glyph advance",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "def put_text_horizontal(font_size: int, text: str, width: int, height: int, alignment: str,\n                        reversed_direction: bool, fg: Tuple[int, int, int], bg: Tuple[int, int, int],\n                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0):",
+        "def put_text_horizontal(font_size: int, text: str, width: int, height: int, alignment: str,\n                        reversed_direction: bool, fg: Tuple[int, int, int], bg: Tuple[int, int, int],\n                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0, letter_spacing: float = 1.0):",
+        "text_render horizontal signature",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    spacing_y = int(font_size * (line_spacing or 0.01))\n",
+        "    spacing_y = int(font_size * (line_spacing or 0.01))\n    letter_spacing = max(float(letter_spacing or 1.0), 0.85)\n",
+        "text_render horizontal letter spacing init",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    canvas_w = max(line_width_list) + (font_size + bg_size) * 2\n",
+        "    canvas_w = int(max(line_width_list) * max(letter_spacing, 1.0)) + (font_size + bg_size) * 2\n",
+        "text_render horizontal canvas width",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "                offset_x = glyph.metrics.horiAdvance >> 6\n                pen_line[0] -= offset_x\n",
+        "                offset_x = glyph.metrics.horiAdvance >> 6\n                pen_line[0] -= max(1, int(round(offset_x * letter_spacing)))\n",
+        "text_render horizontal reverse advance",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "                pen_line[0] += offset_x\n",
+        "                pen_line[0] += max(1, int(round(offset_x * letter_spacing)))\n",
+        "text_render horizontal glyph advance",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
 def patch_mask_refinement():
     # Detect if we're running from start.bat and find the correct path dynamically
     backend_dir = Path(__file__).parent
@@ -126,7 +208,8 @@ def patch_mask_refinement():
             shutil.copy2(patched_text_render_file, target_text_render_file)
             print("Successfully replaced text_render.py with the patched semantic wrapper version!")
         else:
-            print(f"Warning: Could not find patched_text_render.py at {patched_text_render_file}, skipping text_render patch.")
+            patch_text_render(target_text_render_file)
+            print("Successfully patched text_render.py for configurable letter spacing!")
 
         shutil.copy2(patched_file, target_file)
         print("Successfully replaced text_mask_utils.py with the patched version!")

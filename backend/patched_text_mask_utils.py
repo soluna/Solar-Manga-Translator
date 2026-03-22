@@ -55,6 +55,49 @@ def extend_rect(x, y, w, h, max_x, max_y, extend_size):
     h1 = min(h + extend_size * 2, max_y - y1 - 1)
     return x1, y1, w1, h1
 
+def interval_overlap(a1, a2, b1, b2):
+    return max(0, min(a2, b2) - max(a1, b1))
+
+def interval_gap(a1, a2, b1, b2):
+    return max(0, max(a1, b1) - min(a2, b2))
+
+def is_small_adjacent_component(textline: Quadrilateral, cc_rect: Tuple[int, int, int, int], cc_area: int,
+                                poly_dist: float, overlap_ratio: float) -> bool:
+    x1, y1, w1, h1 = cc_rect
+    if cc_area <= 0 or w1 <= 0 or h1 <= 0:
+        return False
+
+    tx, ty, tw, th = textline.aabb.xywh
+    if tw <= 0 or th <= 0:
+        return False
+
+    font_size = max(float(textline.font_size), 1.0)
+    long_side = max(w1, h1)
+    short_side = min(w1, h1)
+
+    if cc_area > max(textline.area * 0.5, font_size * font_size):
+        return False
+    if long_side > font_size * 1.2 or short_side > font_size * 0.9:
+        return False
+    if poly_dist > max(2.0, font_size * 0.9) and overlap_ratio <= 0:
+        return False
+
+    x2 = x1 + w1
+    y2 = y1 + h1
+    tx2 = tx + tw
+    ty2 = ty + th
+
+    if textline.direction == 'h':
+        parallel_overlap = interval_overlap(x1, x2, tx, tx2)
+        perpendicular_gap = interval_gap(y1, y2, ty, ty2)
+        required_overlap = max(1.0, min(w1, tw) * 0.12)
+    else:
+        parallel_overlap = interval_overlap(y1, y2, ty, ty2)
+        perpendicular_gap = interval_gap(x1, x2, tx, tx2)
+        required_overlap = max(1.0, min(h1, th) * 0.12)
+
+    return parallel_overlap >= required_overlap and perpendicular_gap <= max(2.0, font_size * 0.75)
+
 def complete_mask_fill(text_lines: List[Tuple[int, int, int, int]]):
     for (x, y, w, h) in text_lines:
         final_mask = cv2.rectangle(final_mask, (x, y), (x + w, y + h), (255), -1)
@@ -108,19 +151,40 @@ def complete_mask(img: np.ndarray, mask: np.ndarray, textlines: List[Quadrilater
         for tl_idx in range(M):
             area2 = polys[tl_idx].area
             overlapping_area = polys[tl_idx].intersection(cc_poly).area
-            ratio_mat[label, tl_idx] = overlapping_area / min(area1, area2)
-            dist_mat[label, tl_idx] = polys[tl_idx].distance(cc_poly.centroid)
+            ratio_mat[label, tl_idx] = overlapping_area / max(min(area1, area2), 1e-6)
+            dist_mat[label, tl_idx] = polys[tl_idx].distance(cc_poly)
 
         avg = np.argmax(ratio_mat[label])
         area2 = polys[avg].area
+        ruby_candidates = [
+            tl_idx for tl_idx in range(M)
+            if is_small_adjacent_component(
+                textlines[tl_idx],
+                (x1, y1, w1, h1),
+                area1,
+                dist_mat[label, tl_idx],
+                ratio_mat[label, tl_idx],
+            )
+        ]
         if area1 >= area2:
-            continue
-        if ratio_mat[label, avg] <= keep_threshold:
-            avg = np.argmin(dist_mat[label])
-            area2 = polys[avg].area
-            unit = max(min([textlines[avg].font_size, w1, h1]), 10)
-            if dist_mat[label, avg] >= 0.5 * unit:
+            if avg not in ruby_candidates:
                 continue
+        if ratio_mat[label, avg] <= keep_threshold:
+            if ruby_candidates:
+                avg = min(ruby_candidates, key=lambda idx: dist_mat[label, idx])
+                area2 = polys[avg].area
+            else:
+                avg = np.argmin(dist_mat[label])
+                area2 = polys[avg].area
+                unit = max(min([textlines[avg].font_size, w1, h1]), 10)
+                if dist_mat[label, avg] >= 0.5 * unit:
+                    continue
+        elif ruby_candidates and avg not in ruby_candidates:
+            avg = min(ruby_candidates, key=lambda idx: dist_mat[label, idx])
+            area2 = polys[avg].area
+
+        if area1 >= area2 and avg not in ruby_candidates:
+            continue
 
         textline_ccs[avg][y1:y1+h1, x1:x1+w1][labels[y1:y1+h1, x1:x1+w1] == label] = 255
         textline_rects[avg, 0] = min(textline_rects[avg, 0], x1)

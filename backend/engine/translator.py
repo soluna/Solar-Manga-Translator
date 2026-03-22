@@ -9,6 +9,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from patch_pydensecrf import patch_mask_refinement
+
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -27,6 +29,7 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
+        self._ensure_runtime_patches()
         config = self._normalize_config(raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
@@ -134,6 +137,13 @@ class TranslatorEngine:
         return {
             "download_url": f"/api/download/{session_id}",
         }
+
+    def _ensure_runtime_patches(self) -> None:
+        try:
+            if not patch_mask_refinement():
+                print("[WARN] Runtime patch sync did not complete successfully.")
+        except Exception as exc:
+            print(f"[WARN] Failed to sync runtime patches: {exc}")
 
     async def _emit_completed_images(
         self,

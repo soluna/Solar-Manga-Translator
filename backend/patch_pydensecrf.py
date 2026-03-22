@@ -3,6 +3,55 @@ import sys
 import shutil
 from pathlib import Path
 
+def _replace_once(content: str, old: str, new: str, description: str) -> tuple[str, bool]:
+    if new in content:
+        return content, False
+    if old not in content:
+        raise RuntimeError(f"Could not patch {description}: expected snippet not found.")
+    return content.replace(old, new, 1), True
+
+def patch_gemini_translator(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "        RETRY_ATTEMPTS = self._RETRY_ATTEMPTS  \n",
+        "        RETRY_ATTEMPTS = self._RETRY_ATTEMPTS  \n        server_error_attempt = 0\n",
+        "Gemini server error retry counter",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            self.logger.debug(f'-- GPT Response --\\n' + response.text)\n\n            return response.text",
+        "            response_text = getattr(response, 'text', None)\n            if response_text is None:\n                self.logger.warning('Gemini returned an empty response text; retrying this batch.')\n                raise InvalidServerResponse('Gemini returned an empty response text.')\n\n            self.logger.debug('-- GPT Response --\\n' + response_text)\n\n            return response_text",
+        "Gemini plain-text response handling",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            self.logger.debug(  '-- GPT Response --\\n' + \n                                self.ppJSON(response.text) + \n                                '\\n------------\\n'\n                            )\n\n            return response.text",
+        "            response_text = getattr(response, 'text', None)\n            if response_text is None:\n                self.logger.warning('Gemini returned an empty JSON response text; retrying this batch.')\n                raise InvalidServerResponse('Gemini returned an empty JSON response text.')\n\n            self.logger.debug(  '-- GPT Response --\\n' + \n                                self.ppJSON(response_text) + \n                                '\\n------------\\n'\n                            )\n\n            return response_text",
+        "Gemini JSON response handling",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "                    if attempt == RETRY_ATTEMPTS - 1:  \n                        raise  \n",
+        "                    if attempt == RETRY_ATTEMPTS - 1:  \n                        self.logger.warning('Retry limit reached for the current Gemini batch; falling back to batch splitting.')\n                        break\n",
+        "Gemini retry-to-split fallback",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
 def patch_mask_refinement():
     # Detect if we're running from start.bat and find the correct path dynamically
     backend_dir = Path(__file__).parent
@@ -13,6 +62,7 @@ def patch_mask_refinement():
     patched_render_file = backend_dir / "patched_rendering_init.py"
     patched_text_render_file = backend_dir / "patched_text_render.py"
     target_text_render_file = translator_dir / "manga_translator" / "rendering" / "text_render.py"
+    target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
 
     if not target_file.exists():
         print(f"Error: Could not find {target_file}")
@@ -30,6 +80,10 @@ def patch_mask_refinement():
         print(f"Error: Could not find our patched rendering version at {patched_render_file}")
         return False
 
+    if not target_gemini_file.exists():
+        print(f"Error: Could not find {target_gemini_file}")
+        return False
+
     try:
         if patched_text_render_file.exists():
             shutil.copy2(patched_text_render_file, target_text_render_file)
@@ -42,6 +96,9 @@ def patch_mask_refinement():
 
         shutil.copy2(patched_render_file, target_render_file)
         print("Successfully replaced rendering/__init__.py with the patched layout version!")
+
+        patch_gemini_translator(target_gemini_file)
+        print("Successfully patched Gemini translator for empty-response handling!")
 
         # We also need to patch translators/keys.py to default to Gemini 3.1 Pro Preview
         keys_file = translator_dir / "manga_translator" / "translators" / "keys.py"

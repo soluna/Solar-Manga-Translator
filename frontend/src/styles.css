@@ -256,6 +256,54 @@ h2 {
   background: rgba(255, 255, 255, 0.72);
 }
 
+.artifact-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 20px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.artifact-copy {
+  display: flex;
+  flex: 1 1 420px;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.artifact-label {
+  color: #6f5643;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.artifact-path {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(116, 88, 62, 0.08);
+  color: #4b382a;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.83rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.artifact-button {
+  min-height: 48px;
+}
+
 .progress-meta {
   display: flex;
   align-items: center;
@@ -376,5 +424,9 @@ h2 {
   .section-head {
     align-items: start;
     flex-direction: column;
+  }
+
+  .artifact-button {
+    width: 100%;
   }
 }

@@ -68,6 +68,8 @@ const originalImages = ref([])
 const translatedImages = ref([])
 const errorMessage = ref('')
 const downloadUrl = ref('')
+const downloadPath = ref('')
+const translatedDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
 
@@ -116,6 +118,31 @@ function clearStoredApiKey() {
   config.value.api_key = ''
   saveStoredConfig(config.value)
   status.value = '已清除本机浏览器里保存的 API Key。'
+}
+
+async function copyText(text, successMessage) {
+  if (!text) {
+    return
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'absolute'
+      textarea.style.left = '-9999px'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+    status.value = successMessage
+  } catch (error) {
+    errorMessage.value = '复制失败，请手动复制下方路径。'
+  }
 }
 
 async function checkBackendStatus() {
@@ -181,6 +208,8 @@ async function submitFile() {
   translatedImages.value = []
   sessionId.value = ''
   downloadUrl.value = ''
+  downloadPath.value = ''
+  translatedDirPath.value = ''
   progress.value = { current: 0, total: 0 }
   closeSocket()
 
@@ -220,6 +249,8 @@ function startTranslation() {
 
   translatedImages.value = []
   downloadUrl.value = ''
+  downloadPath.value = ''
+  translatedDirPath.value = ''
   errorMessage.value = ''
   translating.value = true
   progress.value = { current: 0, total: 0 }
@@ -258,6 +289,8 @@ function startTranslation() {
     if (payload.event === 'completed') {
       translating.value = false
       downloadUrl.value = toApiUrl(payload.download_url)
+      downloadPath.value = payload.download_path || ''
+      translatedDirPath.value = payload.translated_dir || ''
       status.value = `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       closeSocket()
       return
@@ -418,6 +451,36 @@ watch(
         >
           下载翻译结果
         </a>
+      </div>
+
+      <div v-if="downloadPath || translatedDirPath" class="artifact-panel">
+        <div class="artifact-row" v-if="downloadPath">
+          <div class="artifact-copy">
+            <span class="artifact-label">压缩包路径</span>
+            <code class="artifact-path">{{ downloadPath }}</code>
+          </div>
+          <button
+            class="secondary-button artifact-button"
+            type="button"
+            @click="copyText(downloadPath, '已复制压缩包路径。')"
+          >
+            复制压缩包路径
+          </button>
+        </div>
+
+        <div class="artifact-row" v-if="translatedDirPath">
+          <div class="artifact-copy">
+            <span class="artifact-label">输出目录</span>
+            <code class="artifact-path">{{ translatedDirPath }}</code>
+          </div>
+          <button
+            class="secondary-button artifact-button"
+            type="button"
+            @click="copyText(translatedDirPath, '已复制输出目录路径。')"
+          >
+            复制输出目录
+          </button>
+        </div>
       </div>
 
       <div v-if="progress.total" class="progress-panel">

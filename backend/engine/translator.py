@@ -140,6 +140,8 @@ class TranslatorEngine:
 
         return {
             "download_url": f"/api/download/{session_id}",
+            "download_path": str(Path(archive_path).resolve()),
+            "translated_dir": str(output_dir.resolve()),
         }
 
     def _ensure_runtime_patches(self) -> None:

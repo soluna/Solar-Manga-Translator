@@ -14,12 +14,14 @@ const translatedImages = ref([])
 const errorMessage = ref('')
 const downloadUrl = ref('')
 const progress = ref({ current: 0, total: 0 })
+const availableFonts = ref([])
 
 const config = ref({
   translator: 'gemini',
   target_lang: 'CHS',
   use_gpu: true,
-  api_key: ''
+  api_key: '',
+  font_key: ''
 })
 
 let socket = null
@@ -74,6 +76,35 @@ async function checkBackendStatus() {
   } catch (error) {
     backendOnline.value = false
     status.value = '无法连接后端，请先启动 FastAPI 服务。'
+  }
+}
+
+function pickRecommendedFont(fonts, targetLang) {
+  const preferredNames = targetLang === 'JPN'
+    ? ['msgothic.ttc', 'NotoSansMonoCJK-VF.ttf.ttc']
+    : ['msyh.ttc', 'Arial-Unicode-Regular.ttf', 'NotoSansMonoCJK-VF.ttf.ttc']
+
+  return fonts.find((font) => preferredNames.includes(font.name)) || fonts[0] || null
+}
+
+async function loadFonts() {
+  try {
+    const response = await fetch(toApiUrl('/api/fonts'))
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const payload = await response.json()
+    availableFonts.value = payload.fonts || []
+
+    if (!config.value.font_key) {
+      const recommended = pickRecommendedFont(availableFonts.value, config.value.target_lang)
+      if (recommended) {
+        config.value.font_key = recommended.id
+      }
+    }
+  } catch (error) {
+    availableFonts.value = []
   }
 }
 
@@ -203,6 +234,7 @@ function startTranslation() {
 
 onMounted(() => {
   checkBackendStatus()
+  loadFonts()
 })
 
 onBeforeUnmount(() => {
@@ -271,6 +303,23 @@ onBeforeUnmount(() => {
         <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt'" class="field" style="grid-column: span 2;">
           <span>API Key (可选，留空则使用默认配置)</span>
           <input v-model="config.api_key" type="password" placeholder="输入你的 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
+        </label>
+
+        <label class="field" style="grid-column: span 2;">
+          <span>翻译字体</span>
+          <select v-model="config.font_key">
+            <option value="">默认字体</option>
+            <option
+              v-for="font in availableFonts"
+              :key="font.id"
+              :value="font.id"
+            >
+              {{ font.label }}
+            </option>
+          </select>
+          <small class="field-hint">
+            想换自定义字体时，把 `.ttf` / `.ttc` / `.otf` 放到项目根目录 `fonts` 文件夹后重启即可。
+          </small>
         </label>
 
         <label class="toggle-field">

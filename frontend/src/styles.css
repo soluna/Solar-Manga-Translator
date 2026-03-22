@@ -134,6 +134,12 @@ h2 {
   font-size: 0.92rem;
 }
 
+.field-hint {
+  color: #876854;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 .field select {
   min-height: 42px;
   border: 1px solid rgba(155, 95, 45, 0.24);

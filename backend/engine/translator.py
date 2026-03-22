@@ -20,6 +20,8 @@ class TranslatorEngine:
         self.base_dir = Path(base_dir)
         self.temp_dir = self.base_dir / "temp_uploads"
         self.model_dir = self.base_dir / "models"
+        self.project_font_dir = self.base_dir.parent / "fonts"
+        self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.model_dir.mkdir(exist_ok=True)
 
     async def translate_session(
@@ -59,6 +61,8 @@ class TranslatorEngine:
             "--config-file",
             str(config_path),
         ]
+        if config["font_path"]:
+            command.extend(["--font-path", config["font_path"]])
         if config["use_gpu"]:
             command.insert(3, "--use-gpu")
 
@@ -188,13 +192,46 @@ class TranslatorEngine:
 
         use_gpu = bool(raw_config.get("use_gpu", True))
         api_key = str(raw_config.get("api_key", "")).strip()
+        font_key = str(raw_config.get("font_key", "")).strip()
+        font_path = self._resolve_font_path(font_key)
 
         return {
             "translator": translator,
             "target_lang": target_lang,
             "use_gpu": use_gpu,
             "api_key": api_key,
+            "font_key": font_key,
+            "font_path": font_path,
         }
+
+    def _resolve_font_path(self, font_key: str) -> str:
+        if not font_key:
+            return ""
+
+        candidate = Path(font_key)
+        if candidate.exists():
+            return str(candidate.resolve())
+
+        font_dirs = {
+            "project": self.project_font_dir,
+            "builtin": self.builtin_font_dir,
+        }
+
+        if ":" in font_key:
+            source, font_name = font_key.split(":", 1)
+            font_dir = font_dirs.get(source)
+            if font_dir:
+                resolved = font_dir / font_name
+                if resolved.exists():
+                    return str(resolved.resolve())
+
+        for font_dir in font_dirs.values():
+            resolved = font_dir / font_key
+            if resolved.exists():
+                return str(resolved.resolve())
+
+        print(f"[WARN] Requested font not found: {font_key}")
+        return ""
 
     def _write_config(self, session_id: str, config: dict[str, Any]) -> Path:
         config_path = self.temp_dir / f"{session_id}_config.json"
@@ -209,14 +246,11 @@ class TranslatorEngine:
             # Use larger convolution kernel to erase the text completely.
             "kernel_size": 7,
             "render": {
-                # Fix text overflow:
-                # Tell the renderer to use a much smaller minimum font size
+                # Keep text fitting conservative, but preserve the original
+                # detected orientation instead of forcing horizontal Chinese.
                 "font_size_minimum": 8,
-                # Drastically shrink font to fit in tight vertical bubbles
                 "font_size_offset": -6,
-                # Enable auto text alignment for better fitting
                 "alignment": "center",
-                # Make text flow horizontally or vertically depending on best fit
                 "direction": "auto"
             },
             "detector": {

@@ -68,9 +68,6 @@ def _get_candidate_directions(region: TextBlock) -> List[str]:
     if forced_direction != 'auto':
         return [forced_direction]
 
-    if getattr(region, 'target_lang', '') in ('CHS', 'CHT'):
-        return ['h', 'v']
-
     inferred_direction = _normalize_direction(region.direction)
     if inferred_direction != 'auto':
         return [inferred_direction]
@@ -128,8 +125,6 @@ def _layout_metrics(candidate_box: np.ndarray, box_width: int, box_height: int):
 
 
 def _direction_priority(region: TextBlock, direction: str) -> int:
-    if getattr(region, 'target_lang', '') in ('CHS', 'CHT'):
-        return 1 if direction.startswith('h') else 0
     return 1 if direction.startswith('h') == region.horizontal else 0
 
 

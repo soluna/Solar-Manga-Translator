@@ -18,6 +18,11 @@ OUTPUT_DIR = BASE_DIR / "output_images"
 TEMP_UPLOADS_DIR = BASE_DIR / "temp_uploads"
 TEMP_EXTRACTED_DIR = BASE_DIR / "temp_extracted"
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
+FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
+FONT_DIRECTORIES = {
+    "project": BASE_DIR.parent / "fonts",
+    "builtin": BASE_DIR / "manga-image-translator" / "fonts",
+}
 SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR)
 
@@ -59,9 +64,49 @@ def prepare_session_images(session_id: str, image_paths: list[str]) -> tuple[Pat
     return source_dir, prepared_images
 
 
+def list_available_fonts() -> list[dict[str, str]]:
+    fonts: list[dict[str, str]] = []
+    preferred_order = {
+        "msyh.ttc": 0,
+        "msgothic.ttc": 1,
+        "Arial-Unicode-Regular.ttf": 2,
+        "NotoSansMonoCJK-VF.ttf.ttc": 3,
+    }
+
+    for source, font_dir in FONT_DIRECTORIES.items():
+        if not font_dir.exists():
+            continue
+
+        font_paths = sorted(
+            (
+                path for path in font_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
+            ),
+            key=lambda path: (preferred_order.get(path.name, 99), path.name.lower()),
+        )
+
+        for path in font_paths:
+            source_label = "自定义" if source == "project" else "内置"
+            fonts.append(
+                {
+                    "id": f"{source}:{path.name}",
+                    "name": path.name,
+                    "label": f"{path.stem} ({source_label})",
+                    "source": source,
+                }
+            )
+
+    return fonts
+
+
 @app.get("/api/status")
 async def get_status():
     return {"status": "running"}
+
+
+@app.get("/api/fonts")
+async def get_fonts():
+    return {"fonts": list_available_fonts()}
 
 
 @app.post("/api/upload")

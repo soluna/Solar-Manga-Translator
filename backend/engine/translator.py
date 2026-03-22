@@ -820,7 +820,11 @@ class TranslatorEngine:
         x1, y1, x2, y2 = self._merge_region_bounds(target_regions, source_rgb.shape)
         source_crop = source_rgb[y1:y2, x1:x2].copy()
         guide_crop = self._build_ai_cleanup_guide(source_crop, target_regions, x1, y1)
-        prepared_source_crop, prepared_guide_crop = self._prepare_ai_cleanup_inputs(source_crop, guide_crop)
+        prepared_source_crop, prepared_guide_crop = self._prepare_ai_cleanup_inputs(
+            source_crop,
+            guide_crop,
+            config["image_cleanup_mode"],
+        )
 
         api_key = config.get("image_cleanup_api_key")
         if config.get("image_cleanup_mode") != "seedream-image":
@@ -866,7 +870,11 @@ class TranslatorEngine:
         self,
         source_crop: np.ndarray,
         guide_crop: np.ndarray,
+        mode: str,
     ) -> tuple[np.ndarray, np.ndarray]:
+        if mode == "seedream-image":
+            return source_crop, guide_crop
+
         height, width = source_crop.shape[:2]
         longest_edge = max(height, width)
         if longest_edge <= self.IMAGE_CLEANUP_MAX_EDGE:

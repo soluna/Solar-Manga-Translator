@@ -92,6 +92,8 @@ class GeminiImageCleanupClient:
 
 class SeedreamImageCleanupClient:
     API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+    MIN_PIXELS = 2560 * 1440
+    MAX_PIXELS = int(3072 * 3072 * 1.1025)
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -106,7 +108,7 @@ class SeedreamImageCleanupClient:
         return await asyncio.to_thread(self._remove_text_sync, source_rgb, guide_rgb, prompt)
 
     def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray, prompt: str) -> np.ndarray:
-        height, width = source_rgb.shape[:2]
+        source_rgb, guide_rgb, size_value = self._prepare_request_images(source_rgb, guide_rgb)
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -114,7 +116,9 @@ class SeedreamImageCleanupClient:
                 self._image_to_data_uri(source_rgb),
                 self._image_to_data_uri(guide_rgb),
             ],
-            "size": f"{width}x{height}",
+            "size": size_value,
+            "response_format": "b64_json",
+            "output_format": "png",
             "watermark": False,
         }
         request = urllib_request.Request(
@@ -165,6 +169,33 @@ class SeedreamImageCleanupClient:
         image.save(buffer, format="PNG")
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
         return f"data:image/png;base64,{encoded}"
+
+    def _prepare_request_images(
+        self,
+        source_rgb: np.ndarray,
+        guide_rgb: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        height, width = source_rgb.shape[:2]
+        current_pixels = height * width
+        target_pixels = min(max(current_pixels, self.MIN_PIXELS), self.MAX_PIXELS)
+
+        if current_pixels == 0:
+            raise RuntimeError("Seedream 图像编辑输入为空。")
+
+        scale = max(1.0, (target_pixels / float(current_pixels)) ** 0.5)
+        target_width = max(width, int(round(width * scale)))
+        target_height = max(height, int(round(height * scale)))
+
+        if target_width != width or target_height != height:
+            target_size = (target_width, target_height)
+            source_rgb = np.array(
+                Image.fromarray(source_rgb).resize(target_size, resample=Image.Resampling.LANCZOS)
+            )
+            guide_rgb = np.array(
+                Image.fromarray(guide_rgb).resize(target_size, resample=Image.Resampling.BILINEAR)
+            )
+
+        return source_rgb, guide_rgb, f"{target_width}x{target_height}"
 
     def _decode_base64_image(self, encoded: str) -> np.ndarray:
         return np.array(Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB"))

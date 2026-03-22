@@ -9,6 +9,9 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import cv2
+import numpy as np
+
 from patch_pydensecrf import patch_mask_refinement
 
 
@@ -45,90 +48,47 @@ class TranslatorEngine:
             output_dir / Path(image["stored_name"])
             for image in session["source_images"]
         ]
+        complex_images = self._select_complex_repair_images(session, source_dir, config)
+        session["deferred_output_names"] = {image["stored_name"] for image in complex_images}
 
-        command = [
-            sys.executable,
-            "-m",
-            "manga_translator",
-            "--model-dir",
-            str(self.model_dir),
-            "local",
-            "-i",
-            str(source_dir),
-            "-o",
-            str(output_dir),
-            "--overwrite",
-            "--config-file",
-            str(config_path),
-        ]
-        if config["font_path"]:
-            command.extend(["--font-path", config["font_path"]])
-        if config["use_gpu"]:
-            command.insert(3, "--use-gpu")
+        command = self._build_command(source_dir, output_dir, config_path, config)
 
         reported: set[Path] = set()
         total = len(expected_outputs)
         await progress_callback({"event": "start", "total_pages": total})
 
-        # Append verbose flag to command to get more detailed output
-        command.append("--verbose")
-
-        # Set GEMINI API Key from config if provided
-        api_key = config.get("api_key")
-        env = os.environ.copy()
-
-        # Override the gemini model name using environment variable
-        env["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
-
-        if api_key and config.get("translator") == "gemini":
-            env["GEMINI_API_KEY"] = api_key
-
-        print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
-        print(f"[DEBUG] Output directory: {output_dir}")
-        print(f"[DEBUG] Log file: {log_path}")
-
-        with log_path.open("wb") as log_file:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(self.base_dir / "manga-image-translator"),
-                env=env,
-                stdout=log_file,
-                stderr=log_file,
-            )
-            wait_task = asyncio.create_task(process.wait())
-
-            while not wait_task.done():
-                await self._emit_completed_images(
-                    session_id,
-                    session,
-                    expected_outputs,
-                    reported,
-                    progress_callback,
-                )
-                await asyncio.sleep(1)
-
-            await wait_task
-
-        print(f"[DEBUG] Engine finished with return code {process.returncode}")
-
-        # Read the log to console for debugging
-        try:
-            with log_path.open("r", encoding="utf-8", errors="ignore") as f:
-                log_content = f.read()
-                print(f"[DEBUG] ENGINE LOG OUTPUT:\n{log_content}\n[DEBUG] END LOG OUTPUT")
-        except Exception as e:
-            print(f"[DEBUG] Failed to read log file: {e}")
-
-        await self._emit_completed_images(
-            session_id,
-            session,
-            expected_outputs,
-            reported,
-            progress_callback,
+        process_returncode = await self._run_translation_command(
+            command=command,
+            log_path=log_path,
+            config=config,
+            session_id=session_id,
+            session=session,
+            expected_outputs=expected_outputs,
+            reported=reported,
+            progress_callback=progress_callback,
         )
 
-        if process.returncode != 0:
+        if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
+
+        if complex_images:
+            enhanced_count = await self._enhance_complex_pages(
+                session_id=session_id,
+                session=session,
+                config=config,
+                complex_images=complex_images,
+                progress_callback=progress_callback,
+            )
+            if enhanced_count:
+                print(f"[DEBUG] Enhanced repair finished for {enhanced_count} complex page(s).")
+            session["deferred_output_names"] = set()
+            await self._emit_completed_images(
+                session_id,
+                session,
+                expected_outputs,
+                reported,
+                progress_callback,
+            )
 
         archive_base = self.temp_dir / f"{session_id}_translated"
         archive_path = shutil.make_archive(
@@ -151,6 +111,59 @@ class TranslatorEngine:
         except Exception as exc:
             print(f"[WARN] Failed to sync runtime patches: {exc}")
 
+    async def _run_translation_command(
+        self,
+        command: list[str],
+        log_path: Path,
+        config: dict[str, Any],
+        session_id: str,
+        session: dict[str, Any],
+        expected_outputs: list[Path] | None,
+        reported: set[Path] | None,
+        progress_callback: ProgressCallback | None,
+    ) -> int:
+        env = self._build_env(config)
+
+        print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
+        print(f"[DEBUG] Log file: {log_path}")
+
+        with log_path.open("wb") as log_file:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(self.base_dir / "manga-image-translator"),
+                env=env,
+                stdout=log_file,
+                stderr=log_file,
+            )
+            wait_task = asyncio.create_task(process.wait())
+
+            while not wait_task.done():
+                if expected_outputs is not None and reported is not None and progress_callback is not None:
+                    await self._emit_completed_images(
+                        session_id,
+                        session,
+                        expected_outputs,
+                        reported,
+                        progress_callback,
+                    )
+                await asyncio.sleep(1)
+
+            await wait_task
+
+        print(f"[DEBUG] Engine finished with return code {process.returncode}")
+        self._dump_log_output(log_path)
+
+        if expected_outputs is not None and reported is not None and progress_callback is not None:
+            await self._emit_completed_images(
+                session_id,
+                session,
+                expected_outputs,
+                reported,
+                progress_callback,
+            )
+
+        return process.returncode
+
     async def _emit_completed_images(
         self,
         session_id: str,
@@ -160,9 +173,13 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
     ) -> None:
         total = len(expected_outputs)
+        deferred_output_names = session.get("deferred_output_names", set())
 
         for index, output_path in enumerate(expected_outputs, start=1):
             if output_path in reported or not output_path.exists():
+                continue
+
+            if output_path.name in deferred_output_names:
                 continue
 
             reported.add(output_path)
@@ -204,7 +221,14 @@ class TranslatorEngine:
             "api_key": api_key,
             "font_key": font_key,
             "font_path": font_path,
+            "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
         }
+
+    def _normalize_advanced_text_repair(self, raw_value: Any) -> str:
+        value = str(raw_value or "auto").strip().lower()
+        if value not in {"auto", "off", "force"}:
+            return "auto"
+        return value
 
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
@@ -235,8 +259,9 @@ class TranslatorEngine:
         print(f"[WARN] Requested font not found: {font_key}")
         return ""
 
-    def _write_config(self, session_id: str, config: dict[str, Any]) -> Path:
-        config_path = self.temp_dir / f"{session_id}_config.json"
+    def _write_config(self, session_id: str, config: dict[str, Any], profile: str = "default") -> Path:
+        config_path = self.temp_dir / f"{session_id}_{profile}_config.json"
+        is_complex_profile = profile == "complex"
         payload = {
             "translator": {
                 "translator": config["translator"],
@@ -244,9 +269,15 @@ class TranslatorEngine:
             },
             # Fix text artifacts (not clean):
             # The mask offset needs to be large enough to catch loose pixels.
-            "mask_dilation_offset": 20,
+            "mask_dilation_offset": 28 if is_complex_profile else 20,
             # Use larger convolution kernel to erase the text completely.
-            "kernel_size": 7,
+            "kernel_size": 9 if is_complex_profile else 7,
+            "inpainter": {
+                "inpainter": "sd" if is_complex_profile else "lama_large",
+                # Keep the experimental path conservative enough to avoid
+                # turning normal chapters into an OOM-prone workflow.
+                "inpainting_size": 2048,
+            },
             "render": {
                 # Keep text fitting conservative, but preserve the original
                 # detected orientation instead of forcing horizontal Chinese.
@@ -257,7 +288,7 @@ class TranslatorEngine:
             },
             "detector": {
                 # Better bounding boxes logic:
-                "unclip_ratio": 2.5  # Expand detected text bounding boxes
+                "unclip_ratio": 3.0 if is_complex_profile else 2.5  # Expand detected text bounding boxes
             },
             "ocr": {
                 # Merge broken/split bboxes to form one solid bubble
@@ -269,6 +300,256 @@ class TranslatorEngine:
             encoding="utf-8",
         )
         return config_path
+
+    def _build_command(
+        self,
+        source_dir: Path,
+        output_dir: Path,
+        config_path: Path,
+        config: dict[str, Any],
+    ) -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "manga_translator",
+            "--model-dir",
+            str(self.model_dir),
+            "local",
+            "-i",
+            str(source_dir),
+            "-o",
+            str(output_dir),
+            "--overwrite",
+            "--config-file",
+            str(config_path),
+            "--verbose",
+        ]
+        if config["font_path"]:
+            command.extend(["--font-path", config["font_path"]])
+        if config["use_gpu"]:
+            command.insert(3, "--use-gpu")
+        return command
+
+    def _build_env(self, config: dict[str, Any]) -> dict[str, str]:
+        env = os.environ.copy()
+        env["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
+        api_key = config.get("api_key")
+        if api_key and config.get("translator") == "gemini":
+            env["GEMINI_API_KEY"] = api_key
+        return env
+
+    def _dump_log_output(self, log_path: Path) -> None:
+        try:
+            with log_path.open("r", encoding="utf-8", errors="ignore") as file:
+                log_content = file.read()
+                print(f"[DEBUG] ENGINE LOG OUTPUT:\n{log_content}\n[DEBUG] END LOG OUTPUT")
+        except Exception as exc:
+            print(f"[DEBUG] Failed to read log file: {exc}")
+
+    def _select_complex_repair_images(
+        self,
+        session: dict[str, Any],
+        source_dir: Path,
+        config: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        repair_mode = config.get("advanced_text_repair", "auto")
+        if repair_mode == "off":
+            return []
+
+        if not config.get("use_gpu"):
+            return []
+
+        selected_images: list[dict[str, str]] = []
+        for image in session["source_images"]:
+            if repair_mode == "force":
+                selected_images.append(image)
+                continue
+
+            image_path = source_dir / image["stored_name"]
+            analysis = self._analyze_embedded_text_risk(image_path)
+            if analysis["should_enhance"]:
+                print(
+                    "[DEBUG] Complex page detected:",
+                    image["stored_name"],
+                    analysis,
+                )
+                selected_images.append(image)
+
+        return selected_images
+
+    def _analyze_embedded_text_risk(self, image_path: Path) -> dict[str, Any]:
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            return {"should_enhance": False, "reason": "unreadable"}
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        mean_saturation = float(saturation.mean())
+        colorful_ratio = float(np.mean(saturation > 32))
+        dark_ratio = float(np.mean(gray < 180))
+        is_colorful = mean_saturation >= 18 and colorful_ratio >= 0.08
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        _, stroke_mask = cv2.threshold(
+            blackhat,
+            0,
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        stroke_mask = cv2.morphologyEx(
+            stroke_mask,
+            cv2.MORPH_OPEN,
+            np.ones((2, 2), dtype=np.uint8),
+        )
+        stroke_mask = cv2.dilate(stroke_mask, np.ones((2, 2), dtype=np.uint8), iterations=1)
+
+        component_total = 0
+        risky_components = 0
+        image_area = image.shape[0] * image.shape[1]
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(stroke_mask, 8, cv2.CV_32S)
+        for index in range(1, num_labels):
+            x, y, w, h, area = stats[index]
+            if area < 10 or area > max(4000, int(image_area * 0.02)):
+                continue
+
+            aspect_ratio = w / max(h, 1)
+            if aspect_ratio < 0.08 or aspect_ratio > 20:
+                continue
+
+            component_total += 1
+            pad = max(4, int(max(w, h) * 0.2))
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(image.shape[1], x + w + pad)
+            y2 = min(image.shape[0], y + h + pad)
+            region_gray = gray[y1:y2, x1:x2]
+            region_saturation = saturation[y1:y2, x1:x2]
+            if region_gray.size == 0:
+                continue
+
+            region_nonwhite_ratio = float(np.mean(region_gray < 232))
+            if (
+                float(region_saturation.mean()) > 24
+                or region_nonwhite_ratio > 0.28
+                or (
+                    region_nonwhite_ratio > 0.18
+                    and float(region_gray.mean()) < 208
+                )
+            ):
+                risky_components += 1
+
+        risky_ratio = risky_components / component_total if component_total else 0.0
+        should_enhance = False
+        if is_colorful and component_total >= 8 and risky_components >= 4 and risky_ratio >= 0.45:
+            should_enhance = True
+        elif component_total >= 18 and risky_components >= 10 and risky_ratio >= 0.72 and dark_ratio >= 0.24:
+            should_enhance = True
+        elif component_total >= 26 and risky_components >= 18 and risky_ratio >= 0.78:
+            should_enhance = True
+
+        return {
+            "should_enhance": should_enhance,
+            "is_colorful": is_colorful,
+            "mean_saturation": round(mean_saturation, 2),
+            "colorful_ratio": round(colorful_ratio, 3),
+            "dark_ratio": round(dark_ratio, 3),
+            "component_total": component_total,
+            "risky_components": risky_components,
+            "risky_ratio": round(risky_ratio, 3),
+        }
+
+    async def _enhance_complex_pages(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        config: dict[str, Any],
+        complex_images: list[dict[str, str]],
+        progress_callback: ProgressCallback,
+    ) -> int:
+        await progress_callback(
+            {
+                "event": "status",
+                "message": f"检测到 {len(complex_images)} 张复杂嵌字页，正在进行增强修复…",
+            }
+        )
+
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        enhanced_source_dir = self.temp_dir / f"{session_id}_complex_source"
+        enhanced_output_dir = self.temp_dir / f"{session_id}_complex_output"
+        shutil.rmtree(enhanced_source_dir, ignore_errors=True)
+        shutil.rmtree(enhanced_output_dir, ignore_errors=True)
+        enhanced_source_dir.mkdir(parents=True, exist_ok=True)
+        enhanced_output_dir.mkdir(parents=True, exist_ok=True)
+
+        for image in complex_images:
+            shutil.copy2(source_dir / image["stored_name"], enhanced_source_dir / image["stored_name"])
+
+        complex_config_path = self._write_config(session_id, config, profile="complex")
+        complex_log_path = self.temp_dir / f"{session_id}_complex_translation.log"
+        complex_command = self._build_command(
+            enhanced_source_dir,
+            enhanced_output_dir,
+            complex_config_path,
+            config,
+        )
+
+        try:
+            returncode = await self._run_translation_command(
+                command=complex_command,
+                log_path=complex_log_path,
+                config=config,
+                session_id=session_id,
+                session=session,
+                expected_outputs=None,
+                reported=None,
+                progress_callback=None,
+            )
+        except Exception as exc:
+            print(f"[WARN] Complex page enhancement failed before completion: {exc}")
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": "复杂页增强修复失败，已保留稳定版输出。",
+                }
+            )
+            shutil.rmtree(enhanced_source_dir, ignore_errors=True)
+            shutil.rmtree(enhanced_output_dir, ignore_errors=True)
+            return 0
+
+        if returncode != 0:
+            print(f"[WARN] Complex page enhancement exited with {returncode}. Keeping stable outputs.")
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": "复杂页增强修复失败，已保留稳定版输出。",
+                }
+            )
+            shutil.rmtree(enhanced_source_dir, ignore_errors=True)
+            shutil.rmtree(enhanced_output_dir, ignore_errors=True)
+            return 0
+
+        enhanced_count = 0
+        for image in complex_images:
+            enhanced_file = enhanced_output_dir / image["stored_name"]
+            final_file = output_dir / image["stored_name"]
+            if not enhanced_file.exists():
+                continue
+            shutil.copy2(enhanced_file, final_file)
+            enhanced_count += 1
+
+        await progress_callback(
+            {
+                "event": "status",
+                "message": f"复杂页增强修复完成，共 {enhanced_count} 张。",
+            }
+        )
+        shutil.rmtree(enhanced_source_dir, ignore_errors=True)
+        shutil.rmtree(enhanced_output_dir, ignore_errors=True)
+        return enhanced_count
 
     def _clear_directory(self, directory: Path) -> None:
         for child in directory.iterdir():

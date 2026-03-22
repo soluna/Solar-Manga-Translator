@@ -10,7 +10,8 @@ function createDefaultConfig() {
     target_lang: 'CHS',
     use_gpu: true,
     api_key: '',
-    font_key: ''
+    font_key: '',
+    advanced_text_repair: 'auto'
   }
 }
 
@@ -25,7 +26,10 @@ function normalizeStoredConfig(rawValue) {
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
-    font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key
+    font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
+    advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
+      ? rawValue.advanced_text_repair
+      : defaults.advanced_text_repair
   }
 }
 
@@ -286,6 +290,11 @@ function startTranslation() {
       return
     }
 
+    if (payload.event === 'status') {
+      status.value = payload.message || '正在进行复杂页增强修复...'
+      return
+    }
+
     if (payload.event === 'completed') {
       translating.value = false
       downloadUrl.value = toApiUrl(payload.download_url)
@@ -426,6 +435,18 @@ watch(
           </select>
           <small class="field-hint">
             想换自定义字体时，把 `.ttf` / `.ttc` / `.otf` 放到项目根目录 `fonts` 文件夹后重启即可。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>复杂嵌字增强</span>
+          <select v-model="config.advanced_text_repair">
+            <option value="auto">自动识别后增强</option>
+            <option value="off">关闭，始终走稳定流程</option>
+            <option value="force">强制开启实验增强</option>
+          </select>
+          <small class="field-hint">
+            只会对疑似框外嵌字或彩色复杂页尝试第二次修复；普通页面默认仍走当前稳定流程。
           </small>
         </label>
 

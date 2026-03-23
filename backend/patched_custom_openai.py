@@ -285,14 +285,21 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return f"{base_url}/responses"
 
     def _responses_prompt_input(self, to_lang: str, prompt: str):
-        # The official Ark Responses examples use structured input arrays rather
-        # than a top-level string. Translation-enhanced models reject string
-        # input, so we send a single user message containing the flattened
-        # instruction + samples + OCR payload.
+        # The Ark SDK type definitions expect an EasyInputMessage item with
+        # `type="message"`. Translation-enhanced models are also stricter
+        # about message content, so we provide a content block list with a
+        # single `input_text` item.
+        prompt_text = self._format_prompt_log(to_lang, prompt)
         return [
             {
+                "type": "message",
                 "role": "user",
-                "content": self._format_prompt_log(to_lang, prompt),
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt_text,
+                    }
+                ],
             }
         ]
 

@@ -2,6 +2,8 @@ from typing import Tuple, List
 import numpy as np
 import cv2
 import math
+import os
+from pathlib import Path
 
 from tqdm import tqdm
 from shapely.geometry import Polygon
@@ -9,12 +11,40 @@ from shapely.geometry import Polygon
 from ..utils import Quadrilateral, image_resize
 
 COLOR_RANGE_SIGMA = 1.5 # how many stddev away is considered the same color
+MASK_DEBUG_COUNTER = 0
 
 def save_rgb(fn, img):
     if len(img.shape) == 3 and img.shape[2] == 3:
         cv2.imwrite(fn, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     else:
         cv2.imwrite(fn, img)
+
+def _save_mask_debug_images(
+    img: np.ndarray,
+    input_mask: np.ndarray,
+    core_mask: np.ndarray,
+    box_cleanup_mask: np.ndarray,
+    residual_mask: np.ndarray,
+    final_mask: np.ndarray,
+):
+    debug_dir = os.getenv("MT_MASK_DEBUG_DIR", "").strip()
+    if not debug_dir:
+        return
+
+    try:
+        Path(debug_dir).mkdir(parents=True, exist_ok=True)
+        global MASK_DEBUG_COUNTER
+        MASK_DEBUG_COUNTER += 1
+        prefix = f"{MASK_DEBUG_COUNTER:04d}"
+
+        save_rgb(str(Path(debug_dir) / f"{prefix}_image.png"), img)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_input_mask.png"), input_mask)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_core_mask.png"), core_mask)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_box_cleanup_mask.png"), box_cleanup_mask)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_edge_residual_mask.png"), residual_mask)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_final_mask.png"), final_mask)
+    except Exception:
+        pass
 
 def area_overlap(x1, y1, w1, h1, x2, y2, w2, h2):  # returns None if rectangles don't intersect
     x_overlap = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
@@ -165,11 +195,13 @@ def _detect_box_cleanup_mask(img: np.ndarray, textline: Quadrilateral):
 
 def _apply_box_cleanup(img: np.ndarray, final_mask: np.ndarray, textlines: List[Quadrilateral]):
     enhanced_mask = final_mask.copy()
+    added_mask = np.zeros_like(final_mask)
     for textline in textlines:
         box_mask = _detect_box_cleanup_mask(img, textline)
         if box_mask is not None:
             enhanced_mask = cv2.bitwise_or(enhanced_mask, box_mask)
-    return enhanced_mask
+            added_mask = cv2.bitwise_or(added_mask, box_mask)
+    return enhanced_mask, added_mask
 
 def _cleanup_edge_residuals(img: np.ndarray, final_mask: np.ndarray):
     if img.ndim == 3 and img.shape[2] == 3:
@@ -198,7 +230,7 @@ def _cleanup_edge_residuals(img: np.ndarray, final_mask: np.ndarray):
             continue
         kept[labels == label] = 255
 
-    return cv2.bitwise_or(final_mask, kept)
+    return cv2.bitwise_or(final_mask, kept), kept
 
 def is_small_adjacent_component(textline: Quadrilateral, cc_rect: Tuple[int, int, int, int], cc_area: int,
                                 poly_dist: float, overlap_ratio: float) -> bool:
@@ -261,6 +293,7 @@ def refine_mask(rgbimg, rawmask):
 # --------------------------------------------------------------------------------
 
 def complete_mask(img: np.ndarray, mask: np.ndarray, textlines: List[Quadrilateral], keep_threshold = 1e-2, dilation_offset = 0,kernel_size=3):
+    input_mask = mask.copy()
     bboxes = [txtln.aabb.xywh for txtln in textlines]
     polys = [Polygon(txtln.pts) for txtln in textlines]
     for (x, y, w, h) in bboxes:
@@ -357,10 +390,13 @@ def complete_mask(img: np.ndarray, mask: np.ndarray, textlines: List[Quadrilater
         x2, y2, w2, h2 = extend_rect(x1, y1, w1, h1, img.shape[1], img.shape[0], -(-dilate_size // 2))
         cc[y2:y2+h2, x2:x2+w2] = cv2.dilate(cc[y2:y2+h2, x2:x2+w2], kern)
         final_mask[y2:y2+h2, x2:x2+w2] = cv2.bitwise_or(final_mask[y2:y2+h2, x2:x2+w2], cc[y2:y2+h2, x2:x2+w2])
-    final_mask = _apply_box_cleanup(img, final_mask, textlines)
-    final_mask = _cleanup_edge_residuals(img, final_mask)
+    core_mask = final_mask.copy()
+    final_mask, box_cleanup_mask = _apply_box_cleanup(img, final_mask, textlines)
+    final_mask, residual_mask = _cleanup_edge_residuals(img, final_mask)
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    return cv2.dilate(final_mask, kern)
+    final_mask = cv2.dilate(final_mask, kern)
+    _save_mask_debug_images(img, input_mask, core_mask, box_cleanup_mask, residual_mask, final_mask)
+    return final_mask
 
 def unsharp(image):
     gaussian_3 = cv2.GaussianBlur(image, (3, 3), 2.0)

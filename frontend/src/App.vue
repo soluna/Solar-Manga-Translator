@@ -47,6 +47,10 @@ function isValidImageCleanupModel(mode, model) {
   return Boolean(imageCleanupAllowedModels[mode]?.has(model))
 }
 
+function isValidMaskCleanupStrength(value) {
+  return ['standard', 'clean', 'aggressive'].includes(value)
+}
+
 function createDefaultConfig() {
   return {
     translator: 'gemini',
@@ -57,6 +61,8 @@ function createDefaultConfig() {
     font_key: '',
     render_alignment: 'left',
     render_letter_spacing: 1.08,
+    mask_cleanup_strength: 'standard',
+    export_mask_debug: false,
     advanced_text_repair: 'auto',
     image_cleanup_mode: 'off',
     image_cleanup_model: 'gemini-2.5-flash-image',
@@ -88,6 +94,9 @@ function normalizeStoredConfig(rawValue) {
   const imageCleanupModel = isValidImageCleanupModel(imageCleanupMode, storedImageCleanupModel)
     ? storedImageCleanupModel
     : getDefaultImageCleanupModel(imageCleanupMode)
+  const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
+    ? rawValue.mask_cleanup_strength
+    : defaults.mask_cleanup_strength
 
   return {
     translator,
@@ -102,6 +111,10 @@ function normalizeStoredConfig(rawValue) {
     render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
       : defaults.render_letter_spacing,
+    mask_cleanup_strength: maskCleanupStrength,
+    export_mask_debug: typeof rawValue.export_mask_debug === 'boolean'
+      ? rawValue.export_mask_debug
+      : defaults.export_mask_debug,
     advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
       ? rawValue.advanced_text_repair
       : defaults.advanced_text_repair,
@@ -156,6 +169,7 @@ const errorMessage = ref('')
 const downloadUrl = ref('')
 const downloadPath = ref('')
 const translatedDirPath = ref('')
+const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
 
@@ -312,6 +326,7 @@ async function submitFile() {
   downloadUrl.value = ''
   downloadPath.value = ''
   translatedDirPath.value = ''
+  maskDebugDirPath.value = ''
   progress.value = { current: 0, total: 0 }
   closeSocket()
 
@@ -355,6 +370,7 @@ function startTranslation(action = 'translate') {
   downloadUrl.value = ''
   downloadPath.value = ''
   translatedDirPath.value = ''
+  maskDebugDirPath.value = ''
   errorMessage.value = ''
   translating.value = true
   progress.value = { current: 0, total: 0 }
@@ -404,6 +420,7 @@ function startTranslation(action = 'translate') {
       downloadUrl.value = withCacheBust(toApiUrl(payload.download_url))
       downloadPath.value = payload.download_path || ''
       translatedDirPath.value = payload.translated_dir || ''
+      maskDebugDirPath.value = payload.mask_debug_dir || ''
       status.value = activeAction.value === 'rerender'
         ? `重嵌字完成，共输出 ${translatedImages.value.length} 张图片。`
         : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
@@ -614,6 +631,23 @@ watch(
         </label>
 
         <label class="field">
+          <span>擦字强度</span>
+          <select v-model="config.mask_cleanup_strength">
+            <option value="standard">标准</option>
+            <option value="clean">更干净</option>
+            <option value="aggressive">激进</option>
+          </select>
+          <small class="field-hint">
+            只影响擦字和修复阶段；“更干净 / 激进”会更积极地抹掉文字边缘，但也更可能吃掉靠得很近的细节。
+          </small>
+        </label>
+
+        <label class="toggle-field">
+          <input v-model="config.export_mask_debug" type="checkbox" />
+          <span>导出擦字调试图</span>
+        </label>
+
+        <label class="field">
           <span>复杂嵌字增强</span>
           <select v-model="config.advanced_text_repair">
             <option value="auto">自动识别后增强</option>
@@ -720,7 +754,7 @@ watch(
         </a>
       </div>
 
-      <div v-if="downloadPath || translatedDirPath" class="artifact-panel">
+      <div v-if="downloadPath || translatedDirPath || maskDebugDirPath" class="artifact-panel">
         <div class="artifact-row" v-if="downloadPath">
           <div class="artifact-copy">
             <span class="artifact-label">压缩包路径</span>
@@ -746,6 +780,20 @@ watch(
             @click="copyText(translatedDirPath, '已复制输出目录路径。')"
           >
             复制输出目录
+          </button>
+        </div>
+
+        <div class="artifact-row" v-if="maskDebugDirPath">
+          <div class="artifact-copy">
+            <span class="artifact-label">擦字调试目录</span>
+            <code class="artifact-path">{{ maskDebugDirPath }}</code>
+          </div>
+          <button
+            class="secondary-button artifact-button"
+            type="button"
+            @click="copyText(maskDebugDirPath, '已复制擦字调试目录路径。')"
+          >
+            复制调试目录
           </button>
         </div>
       </div>

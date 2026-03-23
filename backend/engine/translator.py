@@ -52,6 +52,8 @@ class TranslatorEngine:
         output_dir = Path(session["translated_dir"])
         cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
         session["rerender_cache_dir"] = str(cache_dir)
+        mask_debug_dir = self._prepare_mask_debug_dir(session_id, reset=True) if config["export_mask_debug"] else None
+        session["mask_debug_dir"] = str(mask_debug_dir) if mask_debug_dir is not None else None
         output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(output_dir)
 
@@ -135,6 +137,7 @@ class TranslatorEngine:
             "download_url": f"/api/download/{session_id}",
             "download_path": str(Path(archive_path).resolve()),
             "translated_dir": str(output_dir.resolve()),
+            "mask_debug_dir": str(mask_debug_dir.resolve()) if mask_debug_dir is not None else "",
         }
 
     async def rerender_session(
@@ -196,6 +199,7 @@ class TranslatorEngine:
             "download_url": f"/api/download/{session_id}",
             "download_path": str(Path(archive_path).resolve()),
             "translated_dir": str(output_dir.resolve()),
+            "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
         }
 
     def _ensure_runtime_patches(self) -> None:
@@ -322,6 +326,8 @@ class TranslatorEngine:
             raw_config.get("image_cleanup_model"),
         )
         image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
+        mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
+        export_mask_debug = bool(raw_config.get("export_mask_debug", False))
 
         return {
             "translator": translator,
@@ -334,6 +340,8 @@ class TranslatorEngine:
             "font_path": font_path,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
+            "mask_cleanup_strength": mask_cleanup_strength,
+            "export_mask_debug": export_mask_debug,
             "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
             "image_cleanup_mode": image_cleanup_mode,
             "image_cleanup_model": image_cleanup_model,
@@ -372,6 +380,12 @@ class TranslatorEngine:
         except (TypeError, ValueError):
             value = 1.08
         return max(0.85, min(1.35, round(value, 2)))
+
+    def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
+        value = str(raw_value or "standard").strip().lower()
+        if value not in {"standard", "clean", "aggressive"}:
+            return "standard"
+        return value
 
     def _normalize_image_cleanup_model(self, mode: str, raw_value: Any) -> str:
         value = str(raw_value or "").strip()
@@ -425,6 +439,16 @@ class TranslatorEngine:
     def _write_config(self, session_id: str, config: dict[str, Any], profile: str = "default") -> Path:
         config_path = self.temp_dir / f"{session_id}_{profile}_config.json"
         is_complex_profile = profile == "complex"
+        strength = config.get("mask_cleanup_strength", "standard")
+        strength_overrides = {
+            "standard": {"dilation": 0, "kernel": 0, "unclip": 0.0},
+            "clean": {"dilation": 4, "kernel": 2, "unclip": 0.15},
+            "aggressive": {"dilation": 8, "kernel": 4, "unclip": 0.3},
+        }
+        strength_boost = strength_overrides.get(strength, strength_overrides["standard"])
+        base_dilation = 28 if is_complex_profile else 20
+        base_kernel = 9 if is_complex_profile else 7
+        base_unclip = 3.0 if is_complex_profile else 2.5
         payload = {
             "translator": {
                 "translator": config["translator"],
@@ -432,9 +456,9 @@ class TranslatorEngine:
             },
             # Fix text artifacts (not clean):
             # The mask offset needs to be large enough to catch loose pixels.
-            "mask_dilation_offset": 28 if is_complex_profile else 20,
+            "mask_dilation_offset": base_dilation + strength_boost["dilation"],
             # Use larger convolution kernel to erase the text completely.
-            "kernel_size": 9 if is_complex_profile else 7,
+            "kernel_size": base_kernel + strength_boost["kernel"],
             "inpainter": {
                 "inpainter": "sd" if is_complex_profile else "lama_large",
                 # Keep the experimental path conservative enough to avoid
@@ -451,7 +475,7 @@ class TranslatorEngine:
             },
             "detector": {
                 # Better bounding boxes logic:
-                "unclip_ratio": 3.0 if is_complex_profile else 2.5  # Expand detected text bounding boxes
+                "unclip_ratio": round(base_unclip + strength_boost["unclip"], 2)  # Expand detected text bounding boxes
             },
             "ocr": {
                 # Merge broken/split bboxes to form one solid bubble
@@ -507,6 +531,8 @@ class TranslatorEngine:
             env["CUSTOM_OPENAI_USE_RESPONSES"] = "1" if str(model_name).startswith("doubao-seed-translation") else "0"
             if api_key:
                 env["CUSTOM_OPENAI_API_KEY"] = api_key
+        if session_id and config.get("export_mask_debug"):
+            env["MT_MASK_DEBUG_DIR"] = str(self._prepare_mask_debug_dir(session_id, reset=False))
         if session_id:
             env["MT_RERENDER_CACHE_DIR"] = str(self._prepare_rerender_cache_dir(session_id, reset=False))
         return env
@@ -1068,12 +1094,22 @@ class TranslatorEngine:
     def _rerender_cache_dir(self, session_id: str) -> Path:
         return self.rerender_cache_root / session_id
 
+    def _mask_debug_dir(self, session_id: str) -> Path:
+        return self.temp_dir / f"{session_id}_mask_debug"
+
     def _prepare_rerender_cache_dir(self, session_id: str, reset: bool) -> Path:
         cache_dir = self._rerender_cache_dir(session_id)
         if reset:
             shutil.rmtree(cache_dir, ignore_errors=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir
+
+    def _prepare_mask_debug_dir(self, session_id: str, reset: bool) -> Path:
+        debug_dir = self._mask_debug_dir(session_id)
+        if reset:
+            shutil.rmtree(debug_dir, ignore_errors=True)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        return debug_dir
 
     def _count_rerenderable_pages(self, session_id: str, session: dict[str, Any]) -> int:
         cache_dir = Path(session.get("rerender_cache_dir") or self._rerender_cache_dir(session_id))

@@ -421,6 +421,7 @@ class TranslatorEngine:
             "dialogue": str(raw_config.get("style_font_dialogue_key", "")).strip(),
             "caption": str(raw_config.get("style_font_caption_key", "")).strip(),
             "emphasis": str(raw_config.get("style_font_emphasis_key", "")).strip(),
+            "whisper": str(raw_config.get("style_font_whisper_key", "")).strip(),
         }
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
@@ -1268,6 +1269,8 @@ class TranslatorEngine:
             return "caption"
         if self._looks_like_emphasis(region, median_font_size):
             return "emphasis"
+        if self._looks_like_whisper(region, median_font_size):
+            return "whisper"
         return "dialogue"
 
     def _looks_like_emphasis(self, region: Any, median_font_size: float) -> bool:
@@ -1282,6 +1285,30 @@ class TranslatorEngine:
         if char_count <= 2 and font_size >= median_font_size * 0.95:
             return True
         if char_count <= 4 and (font_size >= median_font_size * 1.12 or short_side <= median_font_size * 2.4):
+            return True
+        return False
+
+    def _looks_like_whisper(self, region: Any, median_font_size: float) -> bool:
+        region_text = str(getattr(region, "text", "") or getattr(region, "translation", "") or "").strip()
+        char_count = len(re.sub(r"\s+", "", region_text))
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
+        try:
+            box_w, box_h = getattr(region, "unrotated_size")
+        except Exception:
+            box_w, box_h = (font_size * 2, font_size * 2)
+        short_side = max(min(float(box_w), float(box_h)), 1.0)
+        long_side = max(float(box_w), float(box_h), 1.0)
+        aspect_ratio = long_side / short_side
+
+        if char_count == 0:
+            return False
+        if font_size <= median_font_size * 0.84 and char_count <= 10:
+            return True
+        if font_size <= median_font_size * 0.78:
+            return True
+        if char_count <= 6 and short_side <= median_font_size * 1.8:
+            return True
+        if char_count <= 8 and aspect_ratio >= 3.8 and font_size <= median_font_size * 0.9:
             return True
         return False
 

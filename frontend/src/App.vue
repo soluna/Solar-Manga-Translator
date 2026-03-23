@@ -67,6 +67,7 @@ function createDefaultConfig() {
     style_font_dialogue_key: '',
     style_font_caption_key: '',
     style_font_emphasis_key: '',
+    style_font_whisper_key: '',
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     mask_cleanup_strength: 'standard',
@@ -126,6 +127,9 @@ function normalizeStoredConfig(rawValue) {
     style_font_emphasis_key: typeof rawValue.style_font_emphasis_key === 'string'
       ? rawValue.style_font_emphasis_key
       : defaults.style_font_emphasis_key,
+    style_font_whisper_key: typeof rawValue.style_font_whisper_key === 'string'
+      ? rawValue.style_font_whisper_key
+      : defaults.style_font_whisper_key,
     render_alignment: typeof rawValue.render_alignment === 'string'
       ? rawValue.render_alignment
       : defaults.render_alignment,
@@ -677,6 +681,23 @@ watch(
             </select>
             <small class="field-hint">
               适合把对白映射到常规字体，把说明框映射到更规整的书刊风，再给强调字配更重或更有表现力的字体。
+            </small>
+          </label>
+
+          <label class="field">
+            <span>小声字字体</span>
+            <select v-model="config.style_font_whisper_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`whisper-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+            <small class="field-hint">
+              适合映射到更轻、更柔和、字面更“细声”的字体，比如圆体或较细的书刊字体。
             </small>
           </label>
         </template>

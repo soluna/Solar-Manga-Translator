@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 import os
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -65,7 +66,17 @@ class TranslatorEngine:
             for image in session["source_images"]
         ]
         complex_images = self._select_complex_repair_images(session, source_dir, config)
-        session["deferred_output_names"] = {image["stored_name"] for image in complex_images}
+        deferred_output_names = {image["stored_name"] for image in complex_images}
+        should_apply_font_style_map = self._has_style_font_overrides(config)
+        if should_apply_font_style_map:
+            deferred_output_names = {image["stored_name"] for image in session["source_images"]}
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": "已启用字体风格映射，翻译完成后会自动按对白 / 说明框 / 强调字重新嵌字。",
+                }
+            )
+        session["deferred_output_names"] = deferred_output_names
 
         command = self._build_command(source_dir, output_dir, config_path, config)
 
@@ -86,6 +97,14 @@ class TranslatorEngine:
 
         if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
+
+        if should_apply_font_style_map:
+            await self._apply_font_style_rerender(
+                session_id=session_id,
+                session=session,
+                config=config,
+                progress_callback=progress_callback,
+            )
 
         if complex_images:
             if self._wants_ai_image_cleanup(config):
@@ -115,6 +134,7 @@ class TranslatorEngine:
                 )
             if enhanced_count:
                 print(f"[DEBUG] Enhanced repair finished for {enhanced_count} complex page(s).")
+        if session.get("deferred_output_names"):
             session["deferred_output_names"] = set()
             await self._emit_completed_images(
                 session_id,
@@ -320,6 +340,7 @@ class TranslatorEngine:
         font_path = self._resolve_font_path(font_key)
         render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
         render_letter_spacing = self._normalize_render_letter_spacing(raw_config.get("render_letter_spacing"))
+        font_style_mode = self._normalize_font_style_mode(raw_config.get("font_style_mode"))
         image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
         image_cleanup_model = self._normalize_image_cleanup_model(
             image_cleanup_mode,
@@ -328,6 +349,11 @@ class TranslatorEngine:
         image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
         mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
+        style_font_keys = self._normalize_style_font_keys(raw_config)
+        style_font_paths = {
+            style: self._resolve_font_path(font_key)
+            for style, font_key in style_font_keys.items()
+        }
 
         return {
             "translator": translator,
@@ -338,6 +364,9 @@ class TranslatorEngine:
             "api_key": api_key,
             "font_key": font_key,
             "font_path": font_path,
+            "font_style_mode": font_style_mode,
+            "style_font_keys": style_font_keys,
+            "style_font_paths": style_font_paths,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
             "mask_cleanup_strength": mask_cleanup_strength,
@@ -374,12 +403,25 @@ class TranslatorEngine:
             return "left"
         return value
 
+    def _normalize_font_style_mode(self, raw_value: Any) -> str:
+        value = str(raw_value or "single").strip().lower()
+        if value not in {"single", "auto-map"}:
+            return "single"
+        return value
+
     def _normalize_render_letter_spacing(self, raw_value: Any) -> float:
         try:
             value = float(raw_value if raw_value is not None else 1.08)
         except (TypeError, ValueError):
             value = 1.08
         return max(0.85, min(1.35, round(value, 2)))
+
+    def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
+        return {
+            "dialogue": str(raw_config.get("style_font_dialogue_key", "")).strip(),
+            "caption": str(raw_config.get("style_font_caption_key", "")).strip(),
+            "emphasis": str(raw_config.get("style_font_emphasis_key", "")).strip(),
+        }
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
         value = str(raw_value or "standard").strip().lower()
@@ -435,6 +477,15 @@ class TranslatorEngine:
 
         print(f"[WARN] Requested font not found: {font_key}")
         return ""
+
+    def _has_style_font_overrides(self, config: dict[str, Any]) -> bool:
+        if config.get("font_style_mode") != "auto-map":
+            return False
+        default_font = str(config.get("font_path") or "")
+        for path in (config.get("style_font_paths") or {}).values():
+            if path and path != default_font:
+                return True
+        return False
 
     def _write_config(self, session_id: str, config: dict[str, Any], profile: str = "default") -> Path:
         config_path = self.temp_dir / f"{session_id}_{profile}_config.json"
@@ -575,6 +626,36 @@ class TranslatorEngine:
                 selected_images.append(image)
 
         return selected_images
+
+    async def _apply_font_style_rerender(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        config: dict[str, Any],
+        progress_callback: ProgressCallback,
+    ) -> None:
+        await progress_callback(
+            {
+                "event": "status",
+                "message": "正在根据文本区域风格切换中文字体并重新嵌字…",
+            }
+        )
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        for image in session["source_images"]:
+            source_path = source_dir / image["stored_name"]
+            output_path = output_dir / image["stored_name"]
+            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            if not self._has_rerenderable_page_cache(cache_page_dir):
+                continue
+            await self._render_cached_page(source_path, output_path, cache_page_dir, config)
+
+        await progress_callback(
+            {
+                "event": "status",
+                "message": "字体风格映射已应用完成。",
+            }
+        )
 
     def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
         return config.get("image_cleanup_mode") in {"gemini-image", "seedream-image"}
@@ -1173,7 +1254,110 @@ class TranslatorEngine:
         )
         if "adjust_bg_color" in payload:
             region.adjust_bg_color = bool(payload["adjust_bg_color"])
+        if "font_style" in payload:
+            region.font_style = payload["font_style"]
         return region
+
+    def _classify_region_font_style(
+        self,
+        source_rgb: np.ndarray,
+        region: Any,
+        median_font_size: float,
+    ) -> str:
+        if self._looks_like_caption_box(source_rgb, region):
+            return "caption"
+        if self._looks_like_emphasis(region, median_font_size):
+            return "emphasis"
+        return "dialogue"
+
+    def _looks_like_emphasis(self, region: Any, median_font_size: float) -> bool:
+        region_text = str(getattr(region, "text", "") or getattr(region, "translation", "") or "").strip()
+        char_count = len(re.sub(r"\s+", "", region_text))
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
+        try:
+            box_w, box_h = getattr(region, "unrotated_size")
+        except Exception:
+            box_w, box_h = (font_size * 2, font_size * 2)
+        short_side = max(min(float(box_w), float(box_h)), 1.0)
+        if char_count <= 2 and font_size >= median_font_size * 0.95:
+            return True
+        if char_count <= 4 and (font_size >= median_font_size * 1.12 or short_side <= median_font_size * 2.4):
+            return True
+        return False
+
+    def _looks_like_caption_box(self, source_rgb: np.ndarray, region: Any) -> bool:
+        gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+        x1, y1, x2, y2 = map(int, getattr(region, "xyxy"))
+        w = max(x2 - x1, 1)
+        h = max(y2 - y1, 1)
+        pad_x = max(int(w * 0.45), 8)
+        pad_y = max(int(h * 0.35), 8)
+        roi_x1 = max(0, x1 - pad_x)
+        roi_y1 = max(0, y1 - pad_y)
+        roi_x2 = min(gray.shape[1], x2 + pad_x)
+        roi_y2 = min(gray.shape[0], y2 + pad_y)
+        roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+        if roi.size == 0:
+            return False
+
+        bright = cv2.inRange(roi, 220, 255)
+        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
+        bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
+        local_x1 = x1 - roi_x1
+        local_y1 = y1 - roi_y1
+        local_w = w
+        local_h = h
+        center_x = local_x1 + local_w // 2
+        center_y = local_y1 + local_h // 2
+        bbox_area = max(local_w * local_h, 1)
+        roi_area = roi.shape[0] * roi.shape[1]
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bright, 8, cv2.CV_32S)
+        for label in range(1, num_labels):
+            cx = int(stats[label, cv2.CC_STAT_LEFT])
+            cy = int(stats[label, cv2.CC_STAT_TOP])
+            cw = int(stats[label, cv2.CC_STAT_WIDTH])
+            ch = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < int(bbox_area * 1.1) or area > int(roi_area * 0.85):
+                continue
+            if area / max(cw * ch, 1) < 0.72:
+                continue
+            if not (0 <= center_x < roi.shape[1] and 0 <= center_y < roi.shape[0] and labels[center_y, center_x] == label):
+                overlap = max(0, min(cx + cw, local_x1 + local_w) - max(cx, local_x1)) * max(
+                    0,
+                    min(cy + ch, local_y1 + local_h) - max(cy, local_y1),
+                )
+                if overlap <= 0:
+                    continue
+
+            component_pixels = roi[labels == label]
+            if component_pixels.size == 0:
+                continue
+            if float(component_pixels.mean()) < 229 or float(component_pixels.std()) > 24:
+                continue
+            return True
+        return False
+
+    def _apply_region_font_styles(self, source_rgb: np.ndarray, regions: list[Any], config: dict[str, Any]) -> None:
+        if not regions:
+            return
+
+        default_font_path = config.get("font_path", "")
+        style_paths = config.get("style_font_paths") or {}
+        if config.get("font_style_mode") != "auto-map":
+            for region in regions:
+                region.font_family = default_font_path
+                region.font_style = "single"
+            return
+
+        font_sizes = [max(float(getattr(region, "font_size", 0) or 0), 1.0) for region in regions]
+        median_font_size = float(np.median(font_sizes)) if font_sizes else 12.0
+
+        for region in regions:
+            style = self._classify_region_font_style(source_rgb, region, median_font_size)
+            region.font_style = style
+            region.font_family = style_paths.get(style) or default_font_path
 
     async def _render_cached_page(
         self,
@@ -1189,6 +1373,10 @@ class TranslatorEngine:
         from manga_translator.save import save_result
         from manga_translator.utils import Context, dump_image, load_image
 
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图: {source_path}")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
         inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
         if inpainted_bgr is None:
             raise RuntimeError(f"重嵌字缓存损坏，无法读取底图: {page_cache_dir / 'inpainted.png'}")
@@ -1201,6 +1389,7 @@ class TranslatorEngine:
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
         regions = self._load_cached_regions(page_cache_dir)
+        self._apply_region_font_styles(source_rgb, regions, config)
         for region in regions:
             region._alignment = config["render_alignment"]
             region.letter_spacing = config["render_letter_spacing"]

@@ -51,6 +51,10 @@ function isValidMaskCleanupStrength(value) {
   return ['standard', 'clean', 'aggressive'].includes(value)
 }
 
+function isValidFontStyleMode(value) {
+  return ['single', 'auto-map'].includes(value)
+}
+
 function createDefaultConfig() {
   return {
     translator: 'gemini',
@@ -59,6 +63,10 @@ function createDefaultConfig() {
     use_gpu: true,
     api_key: '',
     font_key: '',
+    font_style_mode: 'single',
+    style_font_dialogue_key: '',
+    style_font_caption_key: '',
+    style_font_emphasis_key: '',
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     mask_cleanup_strength: 'standard',
@@ -97,6 +105,9 @@ function normalizeStoredConfig(rawValue) {
   const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
     ? rawValue.mask_cleanup_strength
     : defaults.mask_cleanup_strength
+  const fontStyleMode = typeof rawValue.font_style_mode === 'string' && isValidFontStyleMode(rawValue.font_style_mode)
+    ? rawValue.font_style_mode
+    : defaults.font_style_mode
 
   return {
     translator,
@@ -105,6 +116,16 @@ function normalizeStoredConfig(rawValue) {
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
+    font_style_mode: fontStyleMode,
+    style_font_dialogue_key: typeof rawValue.style_font_dialogue_key === 'string'
+      ? rawValue.style_font_dialogue_key
+      : defaults.style_font_dialogue_key,
+    style_font_caption_key: typeof rawValue.style_font_caption_key === 'string'
+      ? rawValue.style_font_caption_key
+      : defaults.style_font_caption_key,
+    style_font_emphasis_key: typeof rawValue.style_font_emphasis_key === 'string'
+      ? rawValue.style_font_emphasis_key
+      : defaults.style_font_emphasis_key,
     render_alignment: typeof rawValue.render_alignment === 'string'
       ? rawValue.render_alignment
       : defaults.render_alignment,
@@ -601,6 +622,64 @@ watch(
             想换自定义字体时，把 `.ttf` / `.ttc` / `.otf` 放到项目根目录 `fonts` 文件夹后重启即可。
           </small>
         </label>
+
+        <label class="field">
+          <span>字体风格模式</span>
+          <select v-model="config.font_style_mode">
+            <option value="single">单字体</option>
+            <option value="auto-map">自动风格映射</option>
+          </select>
+          <small class="field-hint">
+            当前版本先按 `对白 / 说明框 / 强调字` 三类自动识别，不是精确识别日文字体名。改完后建议直接点“仅重新嵌字”快速比对效果。
+          </small>
+        </label>
+
+        <template v-if="config.font_style_mode === 'auto-map'">
+          <label class="field">
+            <span>对白字体</span>
+            <select v-model="config.style_font_dialogue_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`dialogue-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>说明框字体</span>
+            <select v-model="config.style_font_caption_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`caption-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>强调字字体</span>
+            <select v-model="config.style_font_emphasis_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`emphasis-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+            <small class="field-hint">
+              适合把对白映射到常规字体，把说明框映射到更规整的书刊风，再给强调字配更重或更有表现力的字体。
+            </small>
+          </label>
+        </template>
 
         <label class="field">
           <span>排版对齐</span>

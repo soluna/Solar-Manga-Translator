@@ -16,6 +16,7 @@ from ..utils import (
 )
 
 logger = get_logger('render')
+_ACTIVE_FONT_KEY = None
 
 
 def parse_font_paths(path: str, default: List[str] = None) -> List[str]:
@@ -54,6 +55,45 @@ def _normalize_direction(direction: str) -> str:
     return 'auto'
 
 
+def _normalize_font_key(font_path: str) -> str:
+    if not font_path:
+        return ''
+    return os.path.normcase(os.path.abspath(font_path))
+
+
+def _clear_font_sensitive_caches() -> None:
+    get_char_glyph = getattr(text_render, 'get_char_glyph', None)
+    if hasattr(get_char_glyph, 'cache_clear'):
+        get_char_glyph.cache_clear()
+
+    get_char_offset_x = getattr(text_render, 'get_char_offset_x', None)
+    if hasattr(get_char_offset_x, 'cache_clear'):
+        get_char_offset_x.cache_clear()
+
+
+def _activate_font_path(font_path: str) -> str:
+    global _ACTIVE_FONT_KEY
+
+    selected_font = font_path if font_path and os.path.isfile(font_path) else ''
+    font_key = _normalize_font_key(selected_font)
+    if _ACTIVE_FONT_KEY != font_key:
+        text_render.set_font(selected_font)
+        _clear_font_sensitive_caches()
+        _ACTIVE_FONT_KEY = font_key
+    return selected_font
+
+
+def _resolve_region_font_path(region: TextBlock, default_font_path: str) -> str:
+    region_font_path = str(getattr(region, 'font_family', '') or '').strip()
+    if region_font_path and os.path.isfile(region_font_path):
+        return region_font_path
+    return default_font_path if default_font_path and os.path.isfile(default_font_path) else ''
+
+
+def _activate_region_font(region: TextBlock, default_font_path: str) -> str:
+    return _activate_font_path(_resolve_region_font_path(region, default_font_path))
+
+
 def _get_candidate_text(region: TextBlock, direction: str) -> str:
     original_direction = getattr(region, '_direction', 'auto')
     try:
@@ -75,10 +115,12 @@ def _get_candidate_directions(region: TextBlock) -> List[str]:
 
 
 def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box_width: int, box_height: int,
-                          hyphenate: bool, line_spacing: int):
+                          hyphenate: bool, line_spacing: int, default_font_path: str):
     text = _get_candidate_text(region, direction)
     if not text:
         return None
+
+    _activate_region_font(region, default_font_path)
 
     fg = (0, 0, 0)
     # Always reserve border room during layout measurement so the final render
@@ -131,7 +173,8 @@ def _direction_priority(region: TextBlock, direction: str) -> int:
 
 
 def _select_region_layout(region: TextBlock, target_font_size: int, font_size_minimum: int, font_size_fixed: int,
-                          box_width: int, box_height: int, hyphenate: bool, line_spacing: int):
+                          box_width: int, box_height: int, hyphenate: bool, line_spacing: int,
+                          default_font_path: str):
     candidate_directions = _get_candidate_directions(region)
     search_sizes = [target_font_size] if font_size_fixed is not None else list(range(target_font_size, font_size_minimum - 1, -1))
 
@@ -140,7 +183,16 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
 
     for direction in candidate_directions:
         for font_size in search_sizes:
-            candidate_box = _render_candidate_box(region, direction, font_size, box_width, box_height, hyphenate, line_spacing)
+            candidate_box = _render_candidate_box(
+                region,
+                direction,
+                font_size,
+                box_width,
+                box_height,
+                hyphenate,
+                line_spacing,
+                default_font_path,
+            )
             fits, overflow, fill = _layout_metrics(candidate_box, box_width, box_height)
             direction_priority = _direction_priority(region, direction)
 
@@ -169,7 +221,8 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
 
 
 def resize_regions_to_font_size(img: np.ndarray, text_regions: List['TextBlock'], font_size_fixed: int, font_size_offset: int,
-                                font_size_minimum: int, hyphenate: bool = True, line_spacing: int = None):
+                                font_size_minimum: int, hyphenate: bool = True, line_spacing: int = None,
+                                default_font_path: str = ''):
     """
     Find a render direction and font size that keep translated text inside the
     original detected region.
@@ -212,6 +265,7 @@ def resize_regions_to_font_size(img: np.ndarray, text_regions: List['TextBlock']
             box_height,
             hyphenate,
             line_spacing,
+            default_font_path,
         )
 
         region._direction = selected_direction
@@ -234,7 +288,7 @@ async def dispatch(
     disable_font_border: bool = False
     ) -> np.ndarray:
 
-    text_render.set_font(font_path)
+    _activate_font_path(font_path)
     text_regions = list(filter(lambda region: region.translation, text_regions))
 
     dst_points_list = resize_regions_to_font_size(
@@ -245,12 +299,13 @@ async def dispatch(
         font_size_minimum,
         hyphenate,
         line_spacing,
+        font_path,
     )
 
     for region, dst_points in tqdm(zip(text_regions, dst_points_list), '[render]', total=len(text_regions)):
         if render_mask is not None:
             cv2.fillConvexPoly(render_mask, dst_points.astype(np.int32), 1)
-        img = render(img, region, dst_points, hyphenate, line_spacing, disable_font_border)
+        img = render(img, region, dst_points, hyphenate, line_spacing, disable_font_border, font_path)
     return img
 
 
@@ -260,8 +315,10 @@ def render(
     dst_points,
     hyphenate,
     line_spacing,
-    disable_font_border
+    disable_font_border,
+    default_font_path
 ):
+    _activate_region_font(region, default_font_path)
     fg, bg = region.get_font_colors()
     fg, bg = fg_bg_compare(fg, bg)
 
@@ -357,7 +414,7 @@ async def dispatch_eng_render(img_canvas: np.ndarray, original_img: np.ndarray, 
 
     if not font_path:
         font_path = os.path.join(BASE_PATH, 'fonts/comic shanns 2.ttf')
-    text_render.set_font(font_path)
+    _activate_font_path(font_path)
 
     return render_textblock_list_eng(img_canvas, text_regions, line_spacing=line_spacing, size_tol=1.2, original_img=original_img, downscale_constraint=0.8, disable_font_border=disable_font_border)
 
@@ -368,6 +425,6 @@ async def dispatch_eng_render_pillow(img_canvas: np.ndarray, original_img: np.nd
 
     if not font_path:
         font_path = os.path.join(BASE_PATH, 'fonts/NotoSansMonoCJK-VF.ttf.ttc')
-    text_render.set_font(font_path)
+    _activate_font_path(font_path)
 
     return render_textblock_list_eng_pillow(font_path, img_canvas, text_regions, original_img=original_img, downscale_constraint=0.95)

@@ -78,6 +78,12 @@ def patch_local_mode(target_file: Path) -> bool:
 
     return changed
 
+def patch_custom_openai_translator(target_file: Path, patched_file: Path) -> bool:
+    if not patched_file.exists():
+        raise RuntimeError(f"Could not find patched custom openai translator at {patched_file}")
+    shutil.copy2(patched_file, target_file)
+    return True
+
 def patch_text_render(target_file: Path) -> bool:
     content = target_file.read_text(encoding='utf-8')
     updated = content
@@ -171,9 +177,11 @@ def patch_mask_refinement():
     patched_text_render_file = backend_dir / "patched_text_render.py"
     target_text_render_file = translator_dir / "manga_translator" / "rendering" / "text_render.py"
     target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
+    target_custom_openai_file = translator_dir / "manga_translator" / "translators" / "custom_openai.py"
     target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
     patched_rerender_cache_file = backend_dir / "patched_rerender_cache.py"
     target_rerender_cache_file = translator_dir / "manga_translator" / "utils" / "rerender_cache.py"
+    patched_custom_openai_file = backend_dir / "patched_custom_openai.py"
 
     if not target_file.exists():
         print(f"Error: Could not find {target_file}")
@@ -203,6 +211,14 @@ def patch_mask_refinement():
         print(f"Error: Could not find {patched_rerender_cache_file}")
         return False
 
+    if not target_custom_openai_file.exists():
+        print(f"Error: Could not find {target_custom_openai_file}")
+        return False
+
+    if not patched_custom_openai_file.exists():
+        print(f"Error: Could not find {patched_custom_openai_file}")
+        return False
+
     try:
         if patched_text_render_file.exists():
             shutil.copy2(patched_text_render_file, target_text_render_file)
@@ -225,6 +241,9 @@ def patch_mask_refinement():
 
         patch_local_mode(target_local_file)
         print("Successfully patched local mode for rerender cache generation!")
+
+        patch_custom_openai_translator(target_custom_openai_file, patched_custom_openai_file)
+        print("Successfully replaced custom_openai.py with the patched Responses-compatible version!")
 
         # We also need to patch translators/keys.py to default to Gemini 3.1 Pro Preview
         keys_file = translator_dir / "manga_translator" / "translators" / "keys.py"

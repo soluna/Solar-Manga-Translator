@@ -503,6 +503,7 @@ class TranslatorEngine:
             env["CUSTOM_OPENAI_API_BASE"] = self.DOUBAO_ARK_BASE_URL
             env["CUSTOM_OPENAI_MODEL"] = config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL
             env["CUSTOM_OPENAI_MODEL_CONF"] = ""
+            env["CUSTOM_OPENAI_USE_RESPONSES"] = "1"
             if api_key:
                 env["CUSTOM_OPENAI_API_KEY"] = api_key
         if session_id:

@@ -73,7 +73,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
-                    "message": "已启用字体风格映射，翻译完成后会自动按对白 / 说明框 / 强调字重新嵌字。",
+                    "message": "已启用字体样式映射，翻译完成后会自动按黑体 / 宋体 / 圆体 / 卡通 / 手写 / 拟声重新嵌字。",
                 }
             )
         session["deferred_output_names"] = deferred_output_names
@@ -418,10 +418,12 @@ class TranslatorEngine:
 
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
         return {
-            "dialogue": str(raw_config.get("style_font_dialogue_key", "")).strip(),
-            "caption": str(raw_config.get("style_font_caption_key", "")).strip(),
-            "emphasis": str(raw_config.get("style_font_emphasis_key", "")).strip(),
-            "whisper": str(raw_config.get("style_font_whisper_key", "")).strip(),
+            "gothic": str(raw_config.get("style_font_gothic_key", "")).strip(),
+            "mincho": str(raw_config.get("style_font_mincho_key", "")).strip(),
+            "rounded": str(raw_config.get("style_font_rounded_key", "")).strip(),
+            "cartoon": str(raw_config.get("style_font_cartoon_key", "")).strip(),
+            "handwritten": str(raw_config.get("style_font_handwritten_key", "")).strip(),
+            "sfx": str(raw_config.get("style_font_sfx_key", "")).strip(),
         }
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
@@ -638,7 +640,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
-                "message": "正在根据文本区域风格切换中文字体并重新嵌字…",
+                "message": "正在根据文本框的字体样式切换中文字体并重新嵌字…",
             }
         )
         source_dir = Path(session["source_dir"])
@@ -1265,50 +1267,211 @@ class TranslatorEngine:
         region: Any,
         median_font_size: float,
     ) -> str:
-        if self._looks_like_caption_box(source_rgb, region):
-            return "caption"
-        if self._looks_like_emphasis(region, median_font_size):
-            return "emphasis"
-        if self._looks_like_whisper(region, median_font_size):
-            return "whisper"
-        return "dialogue"
+        features = self._extract_region_style_features(source_rgb, region, median_font_size)
+        if self._looks_like_sfx(region, median_font_size, features):
+            return "sfx"
+        if self._looks_like_handwritten(region, median_font_size, features):
+            return "handwritten"
+        if self._looks_like_cartoon(region, median_font_size, features):
+            return "cartoon"
+        if self._looks_like_rounded(region, median_font_size, features):
+            return "rounded"
+        if self._looks_like_mincho(region, median_font_size, features):
+            return "mincho"
+        return "gothic"
 
-    def _looks_like_emphasis(self, region: Any, median_font_size: float) -> bool:
-        region_text = str(getattr(region, "text", "") or getattr(region, "translation", "") or "").strip()
-        char_count = len(re.sub(r"\s+", "", region_text))
-        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
+    def _extract_region_style_features(
+        self,
+        source_rgb: np.ndarray,
+        region: Any,
+        median_font_size: float,
+    ) -> dict[str, float]:
+        x1, y1, x2, y2 = map(int, getattr(region, "xyxy", [0, 0, 0, 0]))
+        w = max(x2 - x1, 1)
+        h = max(y2 - y1, 1)
+        pad = max(4, int(max(w, h) * 0.12))
+        roi_x1 = max(0, x1 - pad)
+        roi_y1 = max(0, y1 - pad)
+        roi_x2 = min(source_rgb.shape[1], x2 + pad)
+        roi_y2 = min(source_rgb.shape[0], y2 + pad)
+        roi = source_rgb[roi_y1:roi_y2, roi_x1:roi_x2]
+        if roi.size == 0:
+            return {
+                "char_count": 0.0,
+                "font_ratio": 1.0,
+                "aspect_ratio": 1.0,
+                "fill_ratio": 0.0,
+                "component_count": 0.0,
+                "mean_circularity": 0.0,
+                "corner_density": 0.0,
+                "stroke_width_mean": 0.0,
+                "stroke_width_var": 0.0,
+                "ink_darkness": 0.0,
+                "boxed": 0.0,
+            }
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+        polygon_mask = np.zeros(gray.shape, dtype=np.uint8)
         try:
-            box_w, box_h = getattr(region, "unrotated_size")
+            polygon = np.array(region.min_rect[0], dtype=np.int32)
+            polygon[:, 0] -= roi_x1
+            polygon[:, 1] -= roi_y1
+            cv2.fillConvexPoly(polygon_mask, polygon, 255)
         except Exception:
-            box_w, box_h = (font_size * 2, font_size * 2)
-        short_side = max(min(float(box_w), float(box_h)), 1.0)
-        if char_count <= 2 and font_size >= median_font_size * 0.95:
+            polygon_mask[:, :] = 255
+
+        fg_color = tuple(getattr(region, "fg_colors", getattr(region, "fg_color", (0, 0, 0))) or (0, 0, 0))
+        bg_color = tuple(getattr(region, "bg_colors", getattr(region, "bg_color", (255, 255, 255))) or (255, 255, 255))
+        fg_brightness = float(np.mean(fg_color))
+        bg_brightness = float(np.mean(bg_color))
+
+        _, otsu_dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, otsu_light = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text_mask = otsu_dark if fg_brightness <= bg_brightness else otsu_light
+        text_mask = cv2.bitwise_and(text_mask, polygon_mask)
+
+        if cv2.countNonZero(text_mask) < max(8, int(w * h * 0.01)):
+            kernel_size = max(3, int(round(max(w, h) / max(median_font_size, 1.0))))
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+            response = cv2.max(
+                cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel),
+                cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel),
+            )
+            _, text_mask = cv2.threshold(response, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            text_mask = cv2.bitwise_and(text_mask, polygon_mask)
+
+        text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+        text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
+
+        ink_pixels = text_mask > 0
+        ink_count = int(np.count_nonzero(ink_pixels))
+        bbox_area = max(w * h, 1)
+        fill_ratio = ink_count / float(bbox_area)
+
+        contours, _ = cv2.findContours(text_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        component_count = 0
+        circularities: list[float] = []
+        corner_count = 0
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 4:
+                continue
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 0:
+                continue
+            component_count += 1
+            circularities.append(float((4.0 * np.pi * area) / (perimeter * perimeter)))
+            approximation = cv2.approxPolyDP(contour, 0.06 * perimeter, True)
+            corner_count += max(len(approximation) - 2, 0)
+
+        mean_circularity = float(np.clip(np.mean(circularities), 0.0, 1.0)) if circularities else 0.0
+        corner_density = corner_count / float(max(ink_count, 1))
+
+        distance = cv2.distanceTransform((text_mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
+        stroke_values = distance[ink_pixels]
+        if stroke_values.size:
+            stroke_width_mean = float(np.mean(stroke_values) * 2.0)
+            stroke_width_var = float(np.std(stroke_values) / max(np.mean(stroke_values), 1e-6))
+        else:
+            stroke_width_mean = 0.0
+            stroke_width_var = 0.0
+
+        char_count = len(re.sub(r"\s+", "", str(getattr(region, "text", "") or getattr(region, "translation", "") or "")))
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
+        long_side = max(float(w), float(h), 1.0)
+        short_side = max(min(float(w), float(h)), 1.0)
+        aspect_ratio = long_side / short_side
+        ink_darkness = float(255.0 - np.mean(gray[ink_pixels])) / 255.0 if ink_count else 0.0
+
+        return {
+            "char_count": float(char_count),
+            "font_ratio": font_size / max(median_font_size, 1.0),
+            "aspect_ratio": aspect_ratio,
+            "fill_ratio": fill_ratio,
+            "component_count": float(component_count),
+            "mean_circularity": mean_circularity,
+            "corner_density": corner_density,
+            "stroke_width_mean": stroke_width_mean,
+            "stroke_width_var": stroke_width_var,
+            "ink_darkness": ink_darkness,
+            "boxed": 1.0 if self._looks_like_caption_box(source_rgb, region) else 0.0,
+        }
+
+    def _looks_like_sfx(self, region: Any, median_font_size: float, features: dict[str, float]) -> bool:
+        char_count = features["char_count"]
+        font_ratio = features["font_ratio"]
+        fill_ratio = features["fill_ratio"]
+        stroke_width_mean = features["stroke_width_mean"]
+        aspect_ratio = features["aspect_ratio"]
+        boxed = features["boxed"] > 0.5
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
+        if boxed:
+            return False
+        if char_count <= 6 and (font_ratio >= 1.18 or font_size >= median_font_size * 1.2):
             return True
-        if char_count <= 4 and (font_size >= median_font_size * 1.12 or short_side <= median_font_size * 2.4):
+        if char_count <= 8 and fill_ratio >= 0.24 and stroke_width_mean >= max(2.2, median_font_size * 0.1):
+            return True
+        if char_count <= 5 and aspect_ratio >= 4.2 and font_ratio >= 1.05:
             return True
         return False
 
-    def _looks_like_whisper(self, region: Any, median_font_size: float) -> bool:
-        region_text = str(getattr(region, "text", "") or getattr(region, "translation", "") or "").strip()
-        char_count = len(re.sub(r"\s+", "", region_text))
-        font_size = max(float(getattr(region, "font_size", 0) or 0), 1.0)
-        try:
-            box_w, box_h = getattr(region, "unrotated_size")
-        except Exception:
-            box_w, box_h = (font_size * 2, font_size * 2)
-        short_side = max(min(float(box_w), float(box_h)), 1.0)
-        long_side = max(float(box_w), float(box_h), 1.0)
-        aspect_ratio = long_side / short_side
+    def _looks_like_handwritten(self, region: Any, median_font_size: float, features: dict[str, float]) -> bool:
+        char_count = features["char_count"]
+        font_ratio = features["font_ratio"]
+        component_count = features["component_count"]
+        stroke_width_var = features["stroke_width_var"]
+        fill_ratio = features["fill_ratio"]
+        mean_circularity = features["mean_circularity"]
+        boxed = features["boxed"] > 0.5
+        if boxed:
+            return False
+        if font_ratio <= 0.84 and char_count <= 12:
+            return True
+        if stroke_width_var >= 0.52 and component_count >= max(char_count, 2.0):
+            return True
+        if fill_ratio <= 0.12 and mean_circularity <= 0.22 and char_count <= 10:
+            return True
+        return False
 
+    def _looks_like_cartoon(self, region: Any, median_font_size: float, features: dict[str, float]) -> bool:
+        char_count = features["char_count"]
+        font_ratio = features["font_ratio"]
+        mean_circularity = features["mean_circularity"]
+        stroke_width_mean = features["stroke_width_mean"]
+        fill_ratio = features["fill_ratio"]
         if char_count == 0:
             return False
-        if font_size <= median_font_size * 0.84 and char_count <= 10:
+        if font_ratio >= 1.08 and mean_circularity >= 0.34 and stroke_width_mean >= max(2.0, median_font_size * 0.085):
             return True
-        if font_size <= median_font_size * 0.78:
+        if fill_ratio >= 0.22 and mean_circularity >= 0.38:
             return True
-        if char_count <= 6 and short_side <= median_font_size * 1.8:
+        if char_count <= 4 and mean_circularity >= 0.42:
             return True
-        if char_count <= 8 and aspect_ratio >= 3.8 and font_size <= median_font_size * 0.9:
+        return False
+
+    def _looks_like_rounded(self, region: Any, median_font_size: float, features: dict[str, float]) -> bool:
+        mean_circularity = features["mean_circularity"]
+        corner_density = features["corner_density"]
+        stroke_width_var = features["stroke_width_var"]
+        fill_ratio = features["fill_ratio"]
+        if mean_circularity >= 0.4 and corner_density <= 0.03:
+            return True
+        if mean_circularity >= 0.34 and stroke_width_var <= 0.3 and fill_ratio >= 0.1:
+            return True
+        return False
+
+    def _looks_like_mincho(self, region: Any, median_font_size: float, features: dict[str, float]) -> bool:
+        stroke_width_var = features["stroke_width_var"]
+        corner_density = features["corner_density"]
+        mean_circularity = features["mean_circularity"]
+        stroke_width_mean = features["stroke_width_mean"]
+        if stroke_width_var >= 0.46 and corner_density >= 0.028:
+            return True
+        if stroke_width_var >= 0.38 and corner_density >= 0.022 and mean_circularity <= 0.32:
+            return True
+        if stroke_width_mean <= max(1.8, median_font_size * 0.06) and corner_density >= 0.03:
             return True
         return False
 

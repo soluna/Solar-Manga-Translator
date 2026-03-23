@@ -64,10 +64,12 @@ function createDefaultConfig() {
     api_key: '',
     font_key: '',
     font_style_mode: 'single',
-    style_font_dialogue_key: '',
-    style_font_caption_key: '',
-    style_font_emphasis_key: '',
-    style_font_whisper_key: '',
+    style_font_gothic_key: '',
+    style_font_mincho_key: '',
+    style_font_rounded_key: '',
+    style_font_cartoon_key: '',
+    style_font_handwritten_key: '',
+    style_font_sfx_key: '',
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     mask_cleanup_strength: 'standard',
@@ -118,18 +120,24 @@ function normalizeStoredConfig(rawValue) {
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
     font_style_mode: fontStyleMode,
-    style_font_dialogue_key: typeof rawValue.style_font_dialogue_key === 'string'
-      ? rawValue.style_font_dialogue_key
-      : defaults.style_font_dialogue_key,
-    style_font_caption_key: typeof rawValue.style_font_caption_key === 'string'
-      ? rawValue.style_font_caption_key
-      : defaults.style_font_caption_key,
-    style_font_emphasis_key: typeof rawValue.style_font_emphasis_key === 'string'
-      ? rawValue.style_font_emphasis_key
-      : defaults.style_font_emphasis_key,
-    style_font_whisper_key: typeof rawValue.style_font_whisper_key === 'string'
-      ? rawValue.style_font_whisper_key
-      : defaults.style_font_whisper_key,
+    style_font_gothic_key: typeof rawValue.style_font_gothic_key === 'string'
+      ? rawValue.style_font_gothic_key
+      : defaults.style_font_gothic_key,
+    style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
+      ? rawValue.style_font_mincho_key
+      : defaults.style_font_mincho_key,
+    style_font_rounded_key: typeof rawValue.style_font_rounded_key === 'string'
+      ? rawValue.style_font_rounded_key
+      : defaults.style_font_rounded_key,
+    style_font_cartoon_key: typeof rawValue.style_font_cartoon_key === 'string'
+      ? rawValue.style_font_cartoon_key
+      : defaults.style_font_cartoon_key,
+    style_font_handwritten_key: typeof rawValue.style_font_handwritten_key === 'string'
+      ? rawValue.style_font_handwritten_key
+      : defaults.style_font_handwritten_key,
+    style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
+      ? rawValue.style_font_sfx_key
+      : defaults.style_font_sfx_key,
     render_alignment: typeof rawValue.render_alignment === 'string'
       ? rawValue.render_alignment
       : defaults.render_alignment,
@@ -634,18 +642,18 @@ watch(
             <option value="auto-map">自动风格映射</option>
           </select>
           <small class="field-hint">
-            当前版本先按 `对白 / 说明框 / 强调字` 三类自动识别，不是精确识别日文字体名。改完后建议直接点“仅重新嵌字”快速比对效果。
+            当前版本按字体样式来做启发式识别，不再按对白或说明框场景分类。建议改完后直接点“仅重新嵌字”快速比对效果。
           </small>
         </label>
 
         <template v-if="config.font_style_mode === 'auto-map'">
           <label class="field">
-            <span>对白字体</span>
-            <select v-model="config.style_font_dialogue_key">
+            <span>黑体映射</span>
+            <select v-model="config.style_font_gothic_key">
               <option value="">跟随翻译字体</option>
               <option
                 v-for="font in availableFonts"
-                :key="`dialogue-${font.id}`"
+                :key="`gothic-${font.id}`"
                 :value="font.id"
               >
                 {{ font.label }}
@@ -654,12 +662,12 @@ watch(
           </label>
 
           <label class="field">
-            <span>说明框字体</span>
-            <select v-model="config.style_font_caption_key">
+            <span>宋体 / 明体映射</span>
+            <select v-model="config.style_font_mincho_key">
               <option value="">跟随翻译字体</option>
               <option
                 v-for="font in availableFonts"
-                :key="`caption-${font.id}`"
+                :key="`mincho-${font.id}`"
                 :value="font.id"
               >
                 {{ font.label }}
@@ -668,36 +676,67 @@ watch(
           </label>
 
           <label class="field">
-            <span>强调字字体</span>
-            <select v-model="config.style_font_emphasis_key">
+            <span>圆体映射</span>
+            <select v-model="config.style_font_rounded_key">
               <option value="">跟随翻译字体</option>
               <option
                 v-for="font in availableFonts"
-                :key="`emphasis-${font.id}`"
+                :key="`rounded-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>卡通映射</span>
+            <select v-model="config.style_font_cartoon_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`cartoon-${font.id}`"
                 :value="font.id"
               >
                 {{ font.label }}
               </option>
             </select>
             <small class="field-hint">
-              适合把对白映射到常规字体，把说明框映射到更规整的书刊风，再给强调字配更重或更有表现力的字体。
+              可以把更粗、更圆、更夸张的中文字体放在这里，适合显眼的强调字。
             </small>
           </label>
 
           <label class="field">
-            <span>小声字字体</span>
-            <select v-model="config.style_font_whisper_key">
+            <span>手写映射</span>
+            <select v-model="config.style_font_handwritten_key">
               <option value="">跟随翻译字体</option>
               <option
                 v-for="font in availableFonts"
-                :key="`whisper-${font.id}`"
+                :key="`handwritten-${font.id}`"
                 :value="font.id"
               >
                 {{ font.label }}
               </option>
             </select>
             <small class="field-hint">
-              适合映射到更轻、更柔和、字面更“细声”的字体，比如圆体或较细的书刊字体。
+              适合映射到更轻、更松、更像手写笔触的字体。
+            </small>
+          </label>
+
+          <label class="field">
+            <span>拟声映射</span>
+            <select v-model="config.style_font_sfx_key">
+              <option value="">跟随翻译字体</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`sfx-${font.id}`"
+                :value="font.id"
+              >
+                {{ font.label }}
+              </option>
+            </select>
+            <small class="field-hint">
+              适合放最有表现力、最夸张、最重的字体，用来处理拟声和大字效果。
             </small>
           </label>
         </template>

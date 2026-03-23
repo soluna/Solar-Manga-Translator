@@ -284,12 +284,19 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             return base_url
         return f"{base_url}/responses"
 
-    def _responses_prompt_input(self, to_lang: str, prompt: str) -> str:
-        # Use the same flattened prompt text we already log. This matches the
-        # official Ark Responses examples more closely than a chat-style array.
-        return self._format_prompt_log(to_lang, prompt)
+    def _responses_prompt_input(self, to_lang: str, prompt: str):
+        # The official Ark Responses examples use structured input arrays rather
+        # than a top-level string. Translation-enhanced models reject string
+        # input, so we send a single user message containing the flattened
+        # instruction + samples + OCR payload.
+        return [
+            {
+                "role": "user",
+                "content": self._format_prompt_log(to_lang, prompt),
+            }
+        ]
 
-    def _request_responses_via_http_sync(self, model_name: str, prompt_input: str):
+    def _request_responses_via_http_sync(self, model_name: str, prompt_input):
         payload = {
             "model": model_name,
             "input": prompt_input,

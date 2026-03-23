@@ -15,6 +15,11 @@ try:
 except ImportError:
     openai = None
 
+try:
+    from volcenginesdkarkruntime import Ark
+except ImportError:
+    Ark = None
+
 from .common import CommonTranslator, VALID_LANGUAGES
 from .keys import CUSTOM_OPENAI_API_KEY, CUSTOM_OPENAI_API_BASE, CUSTOM_OPENAI_MODEL, CUSTOM_OPENAI_MODEL_CONF
 
@@ -48,6 +53,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         self.api_key = api_key or CUSTOM_OPENAI_API_KEY or "ollama"
         self.client = openai.AsyncOpenAI(api_key=self.api_key)
         self.client.base_url = api_base or CUSTOM_OPENAI_API_BASE
+        self.ark_client = None
         self.token_count = 0
         self.token_count_last = 0
         self.use_responses_api = os.getenv("CUSTOM_OPENAI_USE_RESPONSES", "").strip().lower() in {
@@ -59,6 +65,11 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         configured_model = (self.model or CUSTOM_OPENAI_MODEL or "").strip().lower()
         if configured_model.startswith("doubao-seed-translation"):
             self.use_responses_api = True
+        if Ark is not None and configured_model.startswith("doubao-seed"):
+            self.ark_client = Ark(
+                base_url=str(self.client.base_url).rstrip("/"),
+                api_key=self.api_key,
+            )
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
@@ -273,13 +284,15 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             return base_url
         return f"{base_url}/responses"
 
-    def _request_responses_via_http_sync(self, model_name: str, messages, max_output_tokens: int):
+    def _responses_prompt_input(self, to_lang: str, prompt: str) -> str:
+        # Use the same flattened prompt text we already log. This matches the
+        # official Ark Responses examples more closely than a chat-style array.
+        return self._format_prompt_log(to_lang, prompt)
+
+    def _request_responses_via_http_sync(self, model_name: str, prompt_input: str):
         payload = {
             "model": model_name,
-            "input": messages,
-            "max_output_tokens": max_output_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
+            "input": prompt_input,
         }
         request = urllib_request.Request(
             self._responses_endpoint_url(),
@@ -308,22 +321,25 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
-            max_output_tokens = self._MAX_TOKENS // 2
-            if hasattr(self.client, "responses"):
+            prompt_input = self._responses_prompt_input(to_lang, prompt)
+            if self.ark_client is not None and str(model_name or "").strip().lower().startswith("doubao-seed"):
+                self.logger.debug("Using official Ark SDK for Responses API.")
+                response = await asyncio.to_thread(
+                    self.ark_client.responses.create,
+                    model=model_name,
+                    input=prompt_input,
+                )
+            elif hasattr(self.client, "responses"):
                 response = await self.client.responses.create(
                     model=model_name,
-                    input=messages,
-                    max_output_tokens=max_output_tokens,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
+                    input=prompt_input,
                 )
             else:
                 self.logger.debug("OpenAI SDK does not expose responses API; falling back to direct HTTP request.")
                 response = await asyncio.to_thread(
                     self._request_responses_via_http_sync,
                     model_name,
-                    messages,
-                    max_output_tokens,
+                    prompt_input,
                 )
             response_text = self._extract_responses_text(response)
             self.logger.debug("\n-- GPT Response (raw) --")

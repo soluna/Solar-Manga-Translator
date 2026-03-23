@@ -1,8 +1,11 @@
 import asyncio
+import json
 import os
 import re
 import time
 from typing import List
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from ..config import TranslatorConfig
 from .config_gpt import ConfigGPT
@@ -14,6 +17,13 @@ except ImportError:
 
 from .common import CommonTranslator, VALID_LANGUAGES
 from .keys import CUSTOM_OPENAI_API_KEY, CUSTOM_OPENAI_API_BASE, CUSTOM_OPENAI_MODEL, CUSTOM_OPENAI_MODEL_CONF
+
+
+class ResponsesHTTPError(Exception):
+    def __init__(self, status_code: int, body: str):
+        super().__init__(f"Responses API request failed: HTTP {status_code} {body}")
+        self.status_code = status_code
+        self.body = body
 
 
 class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
@@ -35,7 +45,8 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         ConfigGPT.__init__(self, config_key=config_key)
         self.model = model
         CommonTranslator.__init__(self)
-        self.client = openai.AsyncOpenAI(api_key=api_key or CUSTOM_OPENAI_API_KEY or "ollama")
+        self.api_key = api_key or CUSTOM_OPENAI_API_KEY or "ollama"
+        self.client = openai.AsyncOpenAI(api_key=self.api_key)
         self.client.base_url = api_base or CUSTOM_OPENAI_API_BASE
         self.token_count = 0
         self.token_count_last = 0
@@ -199,6 +210,24 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return messages
 
     def _extract_responses_text(self, response) -> str:
+        if isinstance(response, dict):
+            output_text = response.get("output_text")
+            if isinstance(output_text, str) and output_text.strip():
+                return output_text
+
+            pieces: list[str] = []
+            for item in response.get("output", []) or []:
+                for content in item.get("content", []) or []:
+                    text = content.get("text")
+                    if isinstance(text, str) and text.strip():
+                        pieces.append(text)
+
+            merged = "\n".join(piece.strip() for piece in pieces if piece and piece.strip()).strip()
+            if merged:
+                return merged
+
+            raise RuntimeError("Responses API did not return any text output.")
+
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text.strip():
             return output_text
@@ -217,6 +246,16 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         raise RuntimeError("Responses API did not return any text output.")
 
     def _extract_total_tokens(self, usage) -> int:
+        if isinstance(usage, dict):
+            total_tokens = usage.get("total_tokens")
+            if isinstance(total_tokens, int):
+                return total_tokens
+            input_tokens = usage.get("input_tokens", 0) or 0
+            output_tokens = usage.get("output_tokens", 0) or 0
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                return input_tokens + output_tokens
+            return 0
+
         total_tokens = getattr(usage, "total_tokens", None)
         if isinstance(total_tokens, int):
             return total_tokens
@@ -228,6 +267,40 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         return 0
 
+    def _responses_endpoint_url(self) -> str:
+        base_url = str(self.client.base_url).rstrip("/")
+        if base_url.endswith("/responses"):
+            return base_url
+        return f"{base_url}/responses"
+
+    def _request_responses_via_http_sync(self, model_name: str, messages, max_output_tokens: int):
+        payload = {
+            "model": model_name,
+            "input": messages,
+            "max_output_tokens": max_output_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+        }
+        request = urllib_request.Request(
+            self._responses_endpoint_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._TIMEOUT) as response:
+                body = response.read().decode("utf-8")
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            raise ResponsesHTTPError(exc.code, body) from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"Responses API request failed: {exc}") from exc
+
+        return json.loads(body)
+
     async def _request_translation(self, to_lang: str, prompt: str) -> str:
         messages = self._build_messages(to_lang, prompt)
         model_name = self.model or CUSTOM_OPENAI_MODEL
@@ -235,19 +308,31 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
-            response = await self.client.responses.create(
-                model=model_name,
-                input=messages,
-                max_output_tokens=self._MAX_TOKENS // 2,
-                temperature=self.temperature,
-                top_p=self.top_p,
-            )
+            max_output_tokens = self._MAX_TOKENS // 2
+            if hasattr(self.client, "responses"):
+                response = await self.client.responses.create(
+                    model=model_name,
+                    input=messages,
+                    max_output_tokens=max_output_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                )
+            else:
+                self.logger.debug("OpenAI SDK does not expose responses API; falling back to direct HTTP request.")
+                response = await asyncio.to_thread(
+                    self._request_responses_via_http_sync,
+                    model_name,
+                    messages,
+                    max_output_tokens,
+                )
             response_text = self._extract_responses_text(response)
             self.logger.debug("\n-- GPT Response (raw) --")
             self.logger.debug(response_text)
             self.logger.debug("------------------------\n")
 
-            usage_total = self._extract_total_tokens(getattr(response, "usage", None))
+            usage_total = self._extract_total_tokens(
+                response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+            )
             self.token_count += usage_total
             self.token_count_last = usage_total
             return response_text

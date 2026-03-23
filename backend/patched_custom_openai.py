@@ -38,6 +38,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     _RETRY_ATTEMPTS = 3
     _TIMEOUT_RETRY_ATTEMPTS = 3
     _RATELIMIT_RETRY_ATTEMPTS = 3
+    _MAX_SPLIT_ATTEMPTS = 5
     _MAX_TOKENS = 4096
     _RETURN_PROMPT = False
     _INCLUDE_TEMPLATE = False
@@ -130,33 +131,64 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             ]
         )
 
-    async def _translate(self, from_lang: str, to_lang: str, queries: List[str]) -> List[str]:
-        translations = []
-        self.logger.debug(f"Temperature: {self.temperature}, TopP: {self.top_p}")
+    def _normalize_response_markers(self, text: str) -> str:
+        return re.sub(r"<\|?(\d+)\|?>", lambda match: f"<|{match.group(1)}|>", text or "")
 
-        for prompt, query_size in self._assemble_prompts(from_lang, to_lang, queries):
-            self.logger.debug("-- GPT Prompt --\n" + self._format_prompt_log(to_lang, prompt))
+    def _clean_translation_chunk(self, text: str) -> str:
+        text = self._normalize_response_markers(text)
+        text = re.sub(r"^\s*<\|\d+\|>\s*", "", text)
+        return text.strip()
 
-            ratelimit_attempt = 0
-            server_error_attempt = 0
-            timeout_attempt = 0
-            while True:
-                request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                started = time.time()
-                while not request_task.done():
-                    await asyncio.sleep(0.1)
-                    if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
-                        if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
-                            raise Exception("translator server did not respond quickly enough.")
-                        timeout_attempt += 1
-                        self.logger.warning(f"Restarting request due to timeout. Attempt: {timeout_attempt}")
-                        request_task.cancel()
-                        request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                        started = time.time()
-                try:
-                    response = await request_task
-                    break
-                except openai.RateLimitError:
+    def _parse_translation_response(self, response: str, query_size: int):
+        captured = self.extract_capture_groups(response, rf"{self.rgx_capture}")
+        response = captured if isinstance(captured, str) and captured.strip() else response
+        response = self._normalize_response_markers(response).strip()
+        if not response:
+            return None
+
+        if query_size == 1:
+            single = self._clean_translation_chunk(response)
+            return [single] if single else None
+
+        matches = list(re.finditer(r"(?s)<\|(\d+)\|>(.*?)(?=<\|\d+\|>|$)", response))
+        if matches:
+            mapped: dict[int, str] = {}
+            for match in matches:
+                idx = int(match.group(1))
+                text = self._clean_translation_chunk(match.group(2))
+                if 1 <= idx <= query_size and text and idx not in mapped:
+                    mapped[idx] = text
+            if len(mapped) == query_size:
+                return [mapped[i] for i in range(1, query_size + 1)]
+
+        line_candidates = [self._clean_translation_chunk(line) for line in response.splitlines()]
+        line_candidates = [line for line in line_candidates if line]
+        if len(line_candidates) == query_size:
+            return line_candidates
+
+        return None
+
+    async def _request_with_retries(self, to_lang: str, prompt: str) -> str:
+        ratelimit_attempt = 0
+        server_error_attempt = 0
+        timeout_attempt = 0
+        while True:
+            request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+            started = time.time()
+            while not request_task.done():
+                await asyncio.sleep(0.1)
+                if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
+                    if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
+                        raise Exception("translator server did not respond quickly enough.")
+                    timeout_attempt += 1
+                    self.logger.warning(f"Restarting request due to timeout. Attempt: {timeout_attempt}")
+                    request_task.cancel()
+                    request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+                    started = time.time()
+            try:
+                return await request_task
+            except Exception as exc:
+                if openai is not None and isinstance(exc, openai.RateLimitError):
                     ratelimit_attempt += 1
                     if ratelimit_attempt >= self._RATELIMIT_RETRY_ATTEMPTS:
                         raise
@@ -164,7 +196,8 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
                         f"Restarting request due to rate limiting by the upstream model service. Attempt: {ratelimit_attempt}"
                     )
                     await asyncio.sleep(2)
-                except openai.APIError:
+                    continue
+                if openai is not None and isinstance(exc, openai.APIError):
                     server_error_attempt += 1
                     if server_error_attempt >= self._RETRY_ATTEMPTS:
                         self.logger.error(
@@ -173,34 +206,81 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
                         raise
                     self.logger.warning(f"Restarting request due to a server error. Attempt: {server_error_attempt}")
                     await asyncio.sleep(1)
+                    continue
+                raise
 
-            response = self.extract_capture_groups(response, rf"{self.rgx_capture}")
+    async def _translate(self, from_lang: str, to_lang: str, queries: List[str]) -> List[str]:
+        translations = [""] * len(queries)
+        self.logger.debug(f"Temperature: {self.temperature}, TopP: {self.top_p}")
 
-            def add_pipe(match):
-                number = match.group(1)
-                return f"<|{number}|>"
+        async def translate_batch(batch_queries: List[str], batch_indices: List[int], split_level: int = 0) -> bool:
+            assembled = list(self._assemble_prompts(from_lang, to_lang, batch_queries))
+            if len(assembled) != 1:
+                self.logger.warning(
+                    f"Unexpected multi-prompt batch assembly for {len(batch_queries)} queries; splitting before request."
+                )
+                if len(batch_queries) <= 1:
+                    return False
+                mid = max(1, len(batch_queries) // 2)
+                results = await asyncio.gather(
+                    translate_batch(batch_queries[:mid], batch_indices[:mid], split_level + 1),
+                    translate_batch(batch_queries[mid:], batch_indices[mid:], split_level + 1),
+                )
+                return all(results)
 
-            response = re.sub(r"<\|?(\d+)\|?>", add_pipe, response)
+            prompt, query_size = assembled[0]
+            split_prefix = " (split)" if split_level > 0 else ""
+            self.logger.debug(f"-- GPT Prompt{split_prefix} --\n" + self._format_prompt_log(to_lang, prompt))
 
-            new_translations = re.split(r"<\|\d+\|>", "pre_1\n" + response)[1:]
+            last_response = ""
+            for attempt in range(self._RETRY_ATTEMPTS):
+                last_response = await self._request_with_retries(to_lang, prompt)
+                parsed = self._parse_translation_response(last_response, query_size)
+                if parsed and len(parsed) == query_size and all(text.strip() for text in parsed):
+                    for idx, text in zip(batch_indices, parsed):
+                        translations[idx] = text.strip()
+                    self.logger.info(f"Batch translated: {len([t for t in translations if t])}/{len(queries)} completed.")
+                    self.logger.debug(f"Completed translations: {[t if t else queries[i] for i, t in enumerate(translations)]}")
+                    return True
 
-            if not new_translations:
-                new_translations = [response]
+                remaining_attempts = self._RETRY_ATTEMPTS - attempt - 1
+                if remaining_attempts > 0:
+                    self.logger.warning(
+                        f"Could not map response back to {query_size} text regions. Retrying {remaining_attempts} more time(s) before splitting."
+                    )
 
-            new_translations = [t.strip() for t in new_translations]
+            if query_size == 1:
+                fallback_text = self._clean_translation_chunk(last_response)
+                if fallback_text:
+                    translations[batch_indices[0]] = fallback_text
+                    self.logger.info(f"Batch translated: {len([t for t in translations if t])}/{len(queries)} completed.")
+                    return True
 
-            if not new_translations[0].strip():
-                new_translations = new_translations[1:]
+            if split_level < self._MAX_SPLIT_ATTEMPTS and len(batch_queries) > 1:
+                self.logger.warning(
+                    f"Response segmentation mismatch for {len(batch_queries)} queries. Splitting the batch to protect text-region mapping."
+                )
+                mid = max(1, len(batch_queries) // 2)
+                results = await asyncio.gather(
+                    translate_batch(batch_queries[:mid], batch_indices[:mid], split_level + 1),
+                    translate_batch(batch_queries[mid:], batch_indices[mid:], split_level + 1),
+                )
+                return all(results)
 
-            if len(new_translations) <= 1 and query_size > 1:
-                new_translations = re.split(r"\n", response)
+            self.logger.error("Unable to map translated segments back to text regions for the current batch.")
+            if last_response:
+                self.logger.error(f"Last raw response for failed batch:\n{last_response}")
+            for idx in batch_indices:
+                if not translations[idx]:
+                    translations[idx] = queries[idx]
+            return False
 
-            if len(new_translations) > query_size:
-                new_translations = new_translations[:query_size]
-            elif len(new_translations) < query_size:
-                new_translations = new_translations + [""] * (query_size - len(new_translations))
-
-            translations.extend([t.strip() for t in new_translations])
+        idx_offset = 0
+        for _, batch_size in self._assemble_prompts(from_lang, to_lang, queries):
+            batch_queries = queries[idx_offset : idx_offset + batch_size]
+            batch_indices = list(range(idx_offset, idx_offset + batch_size))
+            await translate_batch(batch_queries, batch_indices)
+            idx_offset += batch_size
 
         for t in translations:
             if "I'm sorry, but I can't assist with that request" in t:
@@ -285,22 +365,13 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return f"{base_url}/responses"
 
     def _responses_prompt_input(self, to_lang: str, prompt: str):
-        # The Ark SDK type definitions expect an EasyInputMessage item with
-        # `type="message"`. Translation-enhanced models are also stricter
-        # about message content, so we provide a content block list with a
-        # single `input_text` item.
-        prompt_text = self._format_prompt_log(to_lang, prompt)
         return [
             {
                 "type": "message",
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt_text,
-                    }
-                ],
+                "role": message["role"],
+                "content": message["content"],
             }
+            for message in self._build_messages(to_lang, prompt)
         ]
 
     def _request_responses_via_http_sync(self, model_name: str, prompt_input):

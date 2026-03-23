@@ -45,6 +45,9 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             "yes",
             "on",
         }
+        configured_model = (self.model or CUSTOM_OPENAI_MODEL or "").strip().lower()
+        if configured_model.startswith("doubao-seed-translation"):
+            self.use_responses_api = True
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
@@ -228,8 +231,10 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     async def _request_translation(self, to_lang: str, prompt: str) -> str:
         messages = self._build_messages(to_lang, prompt)
         model_name = self.model or CUSTOM_OPENAI_MODEL
+        force_responses_api = str(model_name or "").strip().lower().startswith("doubao-seed-translation")
 
-        if self.use_responses_api:
+        if self.use_responses_api or force_responses_api:
+            self.logger.debug(f"Using Responses API for model: {model_name}")
             response = await self.client.responses.create(
                 model=model_name,
                 input=messages,

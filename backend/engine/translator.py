@@ -22,6 +22,12 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 class TranslatorEngine:
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
+    DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+    DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
+    DOUBAO_ALLOWED_MODELS = {
+        "doubao-seed-translation-250915",
+        "doubao-seed-2-0-mini-260215",
+    }
 
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
@@ -284,8 +290,13 @@ class TranslatorEngine:
 
     def _normalize_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         raw_config = raw_config or {}
-        translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
+        selected_translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
+        translator = selected_translator
         target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
+        translator_model = self._normalize_translator_model(
+            selected_translator,
+            raw_config.get("translator_model"),
+        )
 
         # Bug fix: Some translators use different language codes for Chinese
         # For example, sugoi might not support CHS, but only JPN/ENG
@@ -296,6 +307,8 @@ class TranslatorEngine:
             # Fall back to gemini for Chinese if user selected Sugoi but wants Chinese
             print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'gemini'")
             translator = "gemini"
+        elif selected_translator == "doubao-ark":
+            translator = "custom_openai"
 
         use_gpu = bool(raw_config.get("use_gpu", True))
         api_key = str(raw_config.get("api_key", "")).strip()
@@ -312,6 +325,8 @@ class TranslatorEngine:
 
         return {
             "translator": translator,
+            "selected_translator": selected_translator,
+            "translator_model": translator_model,
             "target_lang": target_lang,
             "use_gpu": use_gpu,
             "api_key": api_key,
@@ -330,6 +345,14 @@ class TranslatorEngine:
         if value not in {"auto", "off", "force"}:
             return "auto"
         return value
+
+    def _normalize_translator_model(self, translator: str, raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        if translator == "doubao-ark" and value in self.DOUBAO_ALLOWED_MODELS:
+            return value
+        if translator == "doubao-ark":
+            return self.DOUBAO_DEFAULT_MODEL
+        return ""
 
     def _normalize_image_cleanup_mode(self, raw_value: Any) -> str:
         value = str(raw_value or "off").strip().lower()
@@ -476,6 +499,12 @@ class TranslatorEngine:
         api_key = config.get("api_key")
         if api_key and config.get("translator") == "gemini":
             env["GEMINI_API_KEY"] = api_key
+        if config.get("selected_translator") == "doubao-ark":
+            env["CUSTOM_OPENAI_API_BASE"] = self.DOUBAO_ARK_BASE_URL
+            env["CUSTOM_OPENAI_MODEL"] = config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL
+            env["CUSTOM_OPENAI_MODEL_CONF"] = ""
+            if api_key:
+                env["CUSTOM_OPENAI_API_KEY"] = api_key
         if session_id:
             env["MT_RERENDER_CACHE_DIR"] = str(self._prepare_rerender_cache_dir(session_id, reset=False))
         return env

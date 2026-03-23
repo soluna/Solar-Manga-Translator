@@ -3,6 +3,15 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
+const translatorDefaultModels = {
+  'doubao-ark': 'doubao-seed-translation-250915'
+}
+const translatorAllowedModels = {
+  'doubao-ark': new Set([
+    'doubao-seed-translation-250915',
+    'doubao-seed-2-0-mini-260215'
+  ])
+}
 const imageCleanupDefaultModels = {
   'gemini-image': 'gemini-2.5-flash-image',
   'seedream-image': 'doubao-seedream-5-0-lite-260128'
@@ -22,6 +31,18 @@ function getDefaultImageCleanupModel(mode) {
   return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
 }
 
+function getDefaultTranslatorModel(translator) {
+  return translatorDefaultModels[translator] || ''
+}
+
+function isValidTranslatorModel(translator, model) {
+  if (!translatorAllowedModels[translator]) {
+    return model === '' || model == null
+  }
+
+  return Boolean(translatorAllowedModels[translator]?.has(model))
+}
+
 function isValidImageCleanupModel(mode, model) {
   return Boolean(imageCleanupAllowedModels[mode]?.has(model))
 }
@@ -29,6 +50,7 @@ function isValidImageCleanupModel(mode, model) {
 function createDefaultConfig() {
   return {
     translator: 'gemini',
+    translator_model: '',
     target_lang: 'CHS',
     use_gpu: true,
     api_key: '',
@@ -48,6 +70,15 @@ function normalizeStoredConfig(rawValue) {
     return defaults
   }
 
+  const translator = typeof rawValue.translator === 'string'
+    ? rawValue.translator
+    : defaults.translator
+  const storedTranslatorModel = typeof rawValue.translator_model === 'string'
+    ? rawValue.translator_model
+    : defaults.translator_model
+  const translatorModel = isValidTranslatorModel(translator, storedTranslatorModel)
+    ? storedTranslatorModel
+    : getDefaultTranslatorModel(translator)
   const imageCleanupMode = typeof rawValue.image_cleanup_mode === 'string'
     ? rawValue.image_cleanup_mode
     : defaults.image_cleanup_mode
@@ -59,7 +90,8 @@ function normalizeStoredConfig(rawValue) {
     : getDefaultImageCleanupModel(imageCleanupMode)
 
   return {
-    translator: typeof rawValue.translator === 'string' ? rawValue.translator : defaults.translator,
+    translator,
+    translator_model: translatorModel,
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
@@ -421,6 +453,15 @@ watch(
 )
 
 watch(
+  () => config.value.translator,
+  (nextTranslator) => {
+    if (!isValidTranslatorModel(nextTranslator, config.value.translator_model)) {
+      config.value.translator_model = getDefaultTranslatorModel(nextTranslator)
+    }
+  }
+)
+
+watch(
   () => config.value.image_cleanup_mode,
   (nextMode) => {
     if (!isValidImageCleanupModel(nextMode, config.value.image_cleanup_model)) {
@@ -469,12 +510,24 @@ watch(
           <select v-model="config.translator">
             <option value="sugoi">sugoi</option>
             <option value="gemini">gemini (推荐)</option>
+            <option value="doubao-ark">Doubao (Ark / 火山方舟)</option>
             <option value="chatgpt">chatgpt</option>
             <option value="youdao">有道 (youdao)</option>
             <option value="baidu">百度 (baidu)</option>
             <option value="offline">offline</option>
             <option value="none">none</option>
           </select>
+        </label>
+
+        <label v-if="config.translator === 'doubao-ark'" class="field">
+          <span>Doubao 模型</span>
+          <select v-model="config.translator_model">
+            <option value="doubao-seed-translation-250915">doubao-seed-translation-250915 (翻译增强 / 推荐)</option>
+            <option value="doubao-seed-2-0-mini-260215">doubao-seed-2-0-mini-260215 (通用文本 / 多模态)</option>
+          </select>
+          <small class="field-hint">
+            按火山方舟官方模型列表接入；当前只开放你指定的这两个模型。
+          </small>
         </label>
 
         <label class="field">
@@ -488,11 +541,22 @@ watch(
           </select>
         </label>
 
-        <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt'" class="field" style="grid-column: span 2;">
-          <span>API Key (可选，留空则使用默认配置)</span>
-          <input v-model="config.api_key" type="password" placeholder="输入你的 API Key" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);" />
+        <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt' || config.translator === 'doubao-ark'" class="field" style="grid-column: span 2;">
+          <span>{{ config.translator === 'doubao-ark' ? 'Ark API Key (可选，留空则使用默认配置)' : 'API Key (可选，留空则使用默认配置)' }}</span>
+          <input
+            v-model="config.api_key"
+            type="password"
+            :placeholder="config.translator === 'doubao-ark' ? '输入火山方舟 Ark API Key' : '输入你的 API Key'"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
+          />
           <small class="field-hint field-hint-row">
-            <span>会保存在当前浏览器本地，下次打开页面会自动带出。</span>
+            <span>
+              {{
+                config.translator === 'doubao-ark'
+                  ? '会保存在当前浏览器本地，并按火山方舟兼容 OpenAI SDK 的方式调用 Chat API。'
+                  : '会保存在当前浏览器本地，下次打开页面会自动带出。'
+              }}
+            </span>
             <button
               v-if="config.api_key"
               class="inline-button"

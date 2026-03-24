@@ -35,6 +35,14 @@ const styleBucketOptions = [
   { value: 'sfx', label: '拟声' }
 ]
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
+const defaultStyleFontNameMap = {
+  gothic: ['華康儷中黑.ttf', '華康儷中黑'],
+  rounded: ['華康儷粗圓.ttf', '華康儷粗圓'],
+  mincho: ['華康儷粗宋.ttf', '華康儷粗宋'],
+  cartoon: ['華康布丁體.ttf', '華康布丁體'],
+  handwritten: ['華康竹風體.ttf', '華康竹風體'],
+  sfx: ['方正剪紙GBK.ttf', '方正剪紙GBK']
+}
 
 function getDefaultImageCleanupModel(mode) {
   return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
@@ -467,6 +475,48 @@ function pickRecommendedFont(fonts, targetLang) {
   return fonts.find((font) => preferredNames.includes(font.name)) || fonts[0] || null
 }
 
+function normalizeFontLookupValue(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.(ttf|ttc|otf)$/i, '')
+    .replace(/\s+/g, '')
+}
+
+function pickMappedStyleFont(fonts, preferredNames) {
+  const normalizedPreferred = preferredNames.map((name) => normalizeFontLookupValue(name))
+  return (
+    fonts.find((font) => {
+      const candidates = [
+        font.name,
+        font.label,
+        font.id
+      ].map((item) => normalizeFontLookupValue(item))
+      return normalizedPreferred.some((preferred) => candidates.some((candidate) => candidate.includes(preferred)))
+    })
+    || null
+  )
+}
+
+function applyDefaultStyleFontMappings(fonts) {
+  let changed = false
+  for (const [styleKey, preferredNames] of Object.entries(defaultStyleFontNameMap)) {
+    const configKey = `style_font_${styleKey}_key`
+    if (config.value[configKey]) {
+      continue
+    }
+
+    const matchedFont = pickMappedStyleFont(fonts, preferredNames)
+    if (!matchedFont) {
+      continue
+    }
+
+    config.value[configKey] = matchedFont.id
+    changed = true
+  }
+  return changed
+}
+
 async function loadFonts() {
   try {
     const response = await fetch(toApiUrl('/api/fonts'))
@@ -482,6 +532,11 @@ async function loadFonts() {
       if (recommended) {
         config.value.font_key = recommended.id
       }
+    }
+
+    if (applyDefaultStyleFontMappings(availableFonts.value)) {
+      saveStoredConfig(config.value)
+      status.value = '已按你预设的字体样式映射自动带出默认字体。'
     }
   } catch (error) {
     availableFonts.value = []

@@ -381,6 +381,157 @@ h2 {
   text-align: center;
 }
 
+.style-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.style-toolbar {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.style-summary {
+  justify-content: center;
+}
+
+.style-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.style-preview,
+.style-region-list {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(116, 88, 62, 0.12);
+  border-radius: 22px;
+  padding: 16px;
+}
+
+.style-preview-canvas {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  background: #efe1d2;
+}
+
+.style-preview-canvas img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.style-box {
+  position: absolute;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0;
+  border: 2px solid rgba(217, 108, 42, 0.78);
+  background: rgba(255, 209, 186, 0.12);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.style-box:hover {
+  background: rgba(255, 209, 186, 0.2);
+}
+
+.style-box.active {
+  border-color: #b9472c;
+  box-shadow: 0 0 0 3px rgba(185, 71, 44, 0.16);
+  background: rgba(250, 180, 133, 0.18);
+}
+
+.style-box span {
+  display: inline-block;
+  margin: 4px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(43, 33, 24, 0.82);
+  color: #fffaf4;
+  font-size: 0.7rem;
+  line-height: 1.2;
+}
+
+.style-region-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 920px;
+  overflow: auto;
+}
+
+.style-region-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 248, 241, 0.86);
+  border: 1px solid rgba(116, 88, 62, 0.12);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.style-region-card.active {
+  border-color: rgba(185, 71, 44, 0.36);
+  box-shadow: 0 16px 30px rgba(82, 52, 27, 0.08);
+  transform: translateY(-1px);
+}
+
+.style-region-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.style-region-head strong {
+  color: #50382a;
+}
+
+.style-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.style-badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(116, 88, 62, 0.1);
+  color: #6b5442;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.style-badge-strong {
+  background: rgba(216, 108, 42, 0.12);
+  color: #b9472c;
+}
+
+.style-preview-text {
+  color: #35281f;
+  font-size: 0.96rem;
+  line-height: 1.65;
+}
+
+.style-source-text {
+  color: #7a614d;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.style-override-field {
+  padding: 12px 14px;
+}
+
 @media (max-width: 768px) {
   .page-shell {
     width: min(100vw - 20px, 1120px);
@@ -405,6 +556,11 @@ h2 {
   }
 
   .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .style-toolbar,
+  .style-workbench {
     grid-template-columns: 1fr;
   }
 

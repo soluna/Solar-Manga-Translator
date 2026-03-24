@@ -25,6 +25,7 @@ class TranslatorEngine:
     IMAGE_CLEANUP_MAX_EDGE = 1280
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
+    STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
     DOUBAO_ALLOWED_MODELS = {
         "doubao-seed-translation-250915",
         "doubao-seed-2-0-mini-260215",
@@ -354,6 +355,7 @@ class TranslatorEngine:
             style: self._resolve_font_path(font_key)
             for style, font_key in style_font_keys.items()
         }
+        style_region_overrides = self._normalize_style_region_overrides(raw_config.get("style_region_overrides"))
 
         return {
             "translator": translator,
@@ -367,6 +369,7 @@ class TranslatorEngine:
             "font_style_mode": font_style_mode,
             "style_font_keys": style_font_keys,
             "style_font_paths": style_font_paths,
+            "style_region_overrides": style_region_overrides,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
             "mask_cleanup_strength": mask_cleanup_strength,
@@ -416,6 +419,12 @@ class TranslatorEngine:
             value = 1.08
         return max(0.85, min(1.35, round(value, 2)))
 
+    def _normalize_style_bucket(self, raw_value: Any) -> str:
+        value = str(raw_value or "").strip().lower()
+        if value in self.STYLE_BUCKETS:
+            return value
+        return ""
+
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
         return {
             "gothic": str(raw_config.get("style_font_gothic_key", "")).strip(),
@@ -425,6 +434,19 @@ class TranslatorEngine:
             "handwritten": str(raw_config.get("style_font_handwritten_key", "")).strip(),
             "sfx": str(raw_config.get("style_font_sfx_key", "")).strip(),
         }
+
+    def _normalize_style_region_overrides(self, raw_value: Any) -> dict[str, str]:
+        if not isinstance(raw_value, dict):
+            return {}
+
+        normalized: dict[str, str] = {}
+        for key, value in raw_value.items():
+            if not isinstance(key, str):
+                continue
+            style = self._normalize_style_bucket(value)
+            if style:
+                normalized[key] = style
+        return normalized
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
         value = str(raw_value or "standard").strip().lower()
@@ -659,6 +681,72 @@ class TranslatorEngine:
                 "message": "字体风格映射已应用完成。",
             }
         )
+
+    async def inspect_style_regions(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        pages: list[dict[str, Any]] = []
+
+        for image in session["source_images"]:
+            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            if not self._has_rerenderable_page_cache(cache_page_dir):
+                continue
+
+            source_path = source_dir / image["stored_name"]
+            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+            if source_bgr is None:
+                continue
+            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+
+            regions = self._load_cached_regions(cache_page_dir)
+            self._apply_region_font_styles(source_rgb, regions, config, image["stored_name"])
+
+            preview_path = output_dir / image["stored_name"]
+            preview_url = (
+                f"/output/{session_id}/translated/{image['stored_name']}"
+                if preview_path.exists()
+                else f"/output/{session_id}/source/{image['stored_name']}"
+            )
+
+            region_payloads: list[dict[str, Any]] = []
+            for index, region in enumerate(regions):
+                x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
+                region_payloads.append(
+                    {
+                        "id": getattr(region, "style_region_key", self._make_style_region_key(image["stored_name"], index)),
+                        "index": index,
+                        "bbox": [x1, y1, x2, y2],
+                        "auto_style": getattr(region, "auto_font_style", ""),
+                        "override_style": getattr(region, "override_font_style", ""),
+                        "resolved_style": getattr(region, "font_style", ""),
+                        "font_family": str(getattr(region, "font_family", "") or ""),
+                        "source_text": self._region_source_text(region),
+                        "translation": str(getattr(region, "translation", "") or ""),
+                        "preview_text": self._region_preview_text(region),
+                    }
+                )
+
+            pages.append(
+                {
+                    "stored_name": image["stored_name"],
+                    "name": image["name"],
+                    "image_url": preview_url,
+                    "image_width": int(source_rgb.shape[1]),
+                    "image_height": int(source_rgb.shape[0]),
+                    "regions": region_payloads,
+                }
+            )
+
+        return {
+            "styles": list(self.STYLE_BUCKETS),
+            "pages": pages,
+        }
 
     def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
         return config.get("image_cleanup_mode") in {"gemini-image", "seedream-image"}
@@ -1220,6 +1308,26 @@ class TranslatorEngine:
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
         return [self._deserialize_text_region(payload) for payload in region_payloads]
 
+    def _make_style_region_key(self, stored_name: str, index: int) -> str:
+        return f"{stored_name}::{index}"
+
+    def _region_source_text(self, region: Any) -> str:
+        text_value = str(getattr(region, "text", "") or "").strip()
+        if text_value:
+            return text_value
+        texts = getattr(region, "texts", None)
+        if isinstance(texts, list):
+            joined = "".join(str(item or "") for item in texts).strip()
+            if joined:
+                return joined
+        return ""
+
+    def _region_preview_text(self, region: Any) -> str:
+        preview = str(getattr(region, "translation", "") or "").strip()
+        if preview:
+            return preview
+        return self._region_source_text(region)
+
     def _deserialize_text_region(self, payload: dict[str, Any]) -> Any:
         self._ensure_vendor_import_path()
         from manga_translator.utils.textblock import TextBlock
@@ -1529,25 +1637,41 @@ class TranslatorEngine:
             return True
         return False
 
-    def _apply_region_font_styles(self, source_rgb: np.ndarray, regions: list[Any], config: dict[str, Any]) -> None:
+    def _apply_region_font_styles(
+        self,
+        source_rgb: np.ndarray,
+        regions: list[Any],
+        config: dict[str, Any],
+        stored_name: str = "",
+    ) -> None:
         if not regions:
             return
 
         default_font_path = config.get("font_path", "")
         style_paths = config.get("style_font_paths") or {}
+        style_overrides = config.get("style_region_overrides") or {}
         if config.get("font_style_mode") != "auto-map":
-            for region in regions:
+            for index, region in enumerate(regions):
                 region.font_family = default_font_path
                 region.font_style = "single"
+                region.auto_font_style = "gothic"
+                region.override_font_style = ""
+                region.style_region_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
             return
 
         font_sizes = [max(float(getattr(region, "font_size", 0) or 0), 1.0) for region in regions]
         median_font_size = float(np.median(font_sizes)) if font_sizes else 12.0
 
-        for region in regions:
-            style = self._classify_region_font_style(source_rgb, region, median_font_size)
-            region.font_style = style
-            region.font_family = style_paths.get(style) or default_font_path
+        for index, region in enumerate(regions):
+            style_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
+            auto_style = self._classify_region_font_style(source_rgb, region, median_font_size)
+            override_style = self._normalize_style_bucket(style_overrides.get(style_key, ""))
+            resolved_style = override_style or auto_style
+            region.style_region_key = style_key
+            region.auto_font_style = auto_style
+            region.override_font_style = override_style
+            region.font_style = resolved_style
+            region.font_family = style_paths.get(resolved_style) or default_font_path
 
     async def _render_cached_page(
         self,
@@ -1579,7 +1703,7 @@ class TranslatorEngine:
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
         regions = self._load_cached_regions(page_cache_dir)
-        self._apply_region_font_styles(source_rgb, regions, config)
+        self._apply_region_font_styles(source_rgb, regions, config, source_path.name)
         for region in regions:
             region._alignment = config["render_alignment"]
             region.letter_spacing = config["render_letter_spacing"]

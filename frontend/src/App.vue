@@ -26,6 +26,15 @@ const imageCleanupAllowedModels = {
     'doubao-seedream-5-0-lite-260128'
   ])
 }
+const styleBucketOptions = [
+  { value: 'gothic', label: '黑体' },
+  { value: 'mincho', label: '宋体 / 明体' },
+  { value: 'rounded', label: '圆体' },
+  { value: 'cartoon', label: '卡通' },
+  { value: 'handwritten', label: '手写' },
+  { value: 'sfx', label: '拟声' }
+]
+const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 
 function getDefaultImageCleanupModel(mode) {
   return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
@@ -205,6 +214,11 @@ const translatedDirPath = ref('')
 const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
+const styleInspectionPages = ref([])
+const styleInspectionLoading = ref(false)
+const selectedStylePageKey = ref('')
+const selectedStyleRegionKey = ref('')
+const styleRegionOverrides = ref({})
 
 const config = ref(loadStoredConfig())
 
@@ -215,6 +229,19 @@ const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
 const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
+const canInspectStyles = computed(() => Boolean(sessionId.value) && config.value.font_style_mode === 'auto-map')
+const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
+const selectedStylePage = computed(() => {
+  if (!styleInspectionPages.value.length) {
+    return null
+  }
+
+  return (
+    styleInspectionPages.value.find((page) => page.stored_name === selectedStylePageKey.value)
+    || styleInspectionPages.value[0]
+    || null
+  )
+})
 const progressPercent = computed(() => {
   if (!progress.value.total) {
     return 0
@@ -255,6 +282,128 @@ function closeSocket() {
     socket.close()
     socket = null
   }
+}
+
+function resetStyleInspector() {
+  styleInspectionPages.value = []
+  styleInspectionLoading.value = false
+  selectedStylePageKey.value = ''
+  selectedStyleRegionKey.value = ''
+  styleRegionOverrides.value = {}
+}
+
+function buildRuntimeConfig() {
+  return {
+    ...config.value,
+    style_region_overrides: { ...styleRegionOverrides.value }
+  }
+}
+
+function getStyleLabel(style) {
+  return styleBucketLabelMap[style] || '未分类'
+}
+
+function getRegionOverrideValue(region) {
+  return styleRegionOverrides.value[region.id] || ''
+}
+
+function getStyleRegionBoxStyle(region, page) {
+  const [x1, y1, x2, y2] = region?.bbox || [0, 0, 0, 0]
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  const left = Math.max(0, (x1 / width) * 100)
+  const top = Math.max(0, (y1 / height) * 100)
+  const boxWidth = Math.max(0.6, ((x2 - x1) / width) * 100)
+  const boxHeight = Math.max(1, ((y2 - y1) / height) * 100)
+  return {
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${boxWidth}%`,
+    height: `${boxHeight}%`
+  }
+}
+
+function applyStyleInspectionPayload(payload) {
+  styleInspectionPages.value = payload.pages || []
+
+  if (!styleInspectionPages.value.length) {
+    selectedStylePageKey.value = ''
+    selectedStyleRegionKey.value = ''
+    return
+  }
+
+  if (!styleInspectionPages.value.some((page) => page.stored_name === selectedStylePageKey.value)) {
+    selectedStylePageKey.value = styleInspectionPages.value[0].stored_name
+  }
+
+  const currentPage = styleInspectionPages.value.find((page) => page.stored_name === selectedStylePageKey.value)
+  if (!currentPage) {
+    selectedStyleRegionKey.value = ''
+    return
+  }
+
+  if (!currentPage.regions.some((region) => region.id === selectedStyleRegionKey.value)) {
+    selectedStyleRegionKey.value = currentPage.regions[0]?.id || ''
+  }
+}
+
+async function loadStyleInspection() {
+  if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
+    styleInspectionPages.value = []
+    selectedStylePageKey.value = ''
+    selectedStyleRegionKey.value = ''
+    return
+  }
+
+  styleInspectionLoading.value = true
+  try {
+    const response = await fetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ config: buildRuntimeConfig() })
+    })
+
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取字体样式识别结果失败')
+    }
+
+    applyStyleInspectionPayload(payload)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取字体样式识别结果失败'
+  } finally {
+    styleInspectionLoading.value = false
+  }
+}
+
+function updateStyleOverride(region, nextStyle) {
+  const normalizedStyle = styleBucketOptions.some((option) => option.value === nextStyle) ? nextStyle : ''
+  const nextOverrides = { ...styleRegionOverrides.value }
+  if (!normalizedStyle || normalizedStyle === region.auto_style) {
+    delete nextOverrides[region.id]
+    region.override_style = ''
+    region.resolved_style = region.auto_style
+  } else {
+    nextOverrides[region.id] = normalizedStyle
+    region.override_style = normalizedStyle
+    region.resolved_style = normalizedStyle
+  }
+  styleRegionOverrides.value = nextOverrides
+  selectedStyleRegionKey.value = region.id
+  status.value = '已更新当前文本框的样式覆盖。点“仅重新嵌字”即可查看新效果。'
+}
+
+function clearStyleOverrides() {
+  styleRegionOverrides.value = {}
+  for (const page of styleInspectionPages.value) {
+    for (const region of page.regions || []) {
+      region.override_style = ''
+      region.resolved_style = region.auto_style
+    }
+  }
+  status.value = '已清空当前会话里的手动样式覆盖。'
 }
 
 function clearStoredApiKey() {
@@ -361,6 +510,7 @@ async function submitFile() {
   translatedDirPath.value = ''
   maskDebugDirPath.value = ''
   progress.value = { current: 0, total: 0 }
+  resetStyleInspector()
   closeSocket()
 
   try {
@@ -413,7 +563,7 @@ function startTranslation(action = 'translate') {
   socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
 
   socket.onopen = () => {
-    socket.send(JSON.stringify({ action, config: config.value }))
+    socket.send(JSON.stringify({ action, config: buildRuntimeConfig() }))
   }
 
   socket.onmessage = (event) => {
@@ -457,6 +607,9 @@ function startTranslation(action = 'translate') {
       status.value = activeAction.value === 'rerender'
         ? `重嵌字完成，共输出 ${translatedImages.value.length} 张图片。`
         : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      if (config.value.font_style_mode === 'auto-map') {
+        void loadStyleInspection()
+      }
       closeSocket()
       return
     }
@@ -517,6 +670,18 @@ watch(
     if (!isValidImageCleanupModel(nextMode, config.value.image_cleanup_model)) {
       config.value.image_cleanup_model = getDefaultImageCleanupModel(nextMode)
     }
+  }
+)
+
+watch(
+  () => config.value.font_style_mode,
+  (nextMode) => {
+    if (nextMode === 'auto-map' && sessionId.value && (downloadUrl.value || translatedImages.value.length)) {
+      void loadStyleInspection()
+      return
+    }
+    selectedStylePageKey.value = ''
+    selectedStyleRegionKey.value = ''
   }
 )
 </script>
@@ -1006,6 +1171,128 @@ watch(
 
       <div v-else class="empty-state">
         点击“开始翻译”后，这里会随着后端处理逐张显示翻译后的页面。
+      </div>
+    </section>
+
+    <section v-if="canInspectStyles" class="gallery-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Style Inspector</p>
+          <h2>字体样式检查</h2>
+        </div>
+        <div class="action-row">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="styleInspectionLoading"
+            @click="loadStyleInspection"
+          >
+            {{ styleInspectionLoading ? '正在读取...' : '刷新识别结果' }}
+          </button>
+
+          <button
+            v-if="hasStyleOverrides"
+            class="secondary-button"
+            type="button"
+            @click="clearStyleOverrides"
+          >
+            清空手动覆盖
+          </button>
+        </div>
+      </div>
+
+      <div v-if="styleInspectionLoading" class="empty-state">
+        正在读取当前会话的字体样式识别结果…
+      </div>
+
+      <div v-else-if="selectedStylePage" class="style-inspector">
+        <div class="style-toolbar">
+          <label class="field">
+            <span>检查页面</span>
+            <select v-model="selectedStylePageKey">
+              <option
+                v-for="page in styleInspectionPages"
+                :key="page.stored_name"
+                :value="page.stored_name"
+              >
+                {{ page.name }}（{{ page.regions.length }} 个文本框）
+              </option>
+            </select>
+          </label>
+
+          <div class="field style-summary">
+            <span>使用说明</span>
+            <small class="field-hint">
+              这里显示的是当前文本框被识别成的字体样式。你可以逐框手动改分类，改完后点“仅重新嵌字”查看最终效果。
+            </small>
+          </div>
+        </div>
+
+        <div class="style-workbench">
+          <div class="style-preview">
+            <div class="style-preview-canvas">
+              <img
+                :alt="selectedStylePage.name"
+                :src="withCacheBust(toApiUrl(selectedStylePage.image_url))"
+              />
+
+              <button
+                v-for="region in selectedStylePage.regions"
+                :key="region.id"
+                type="button"
+                :class="['style-box', selectedStyleRegionKey === region.id ? 'active' : '']"
+                :style="getStyleRegionBoxStyle(region, selectedStylePage)"
+                @click="selectedStyleRegionKey = region.id"
+              >
+                <span>{{ region.index + 1 }} · {{ getStyleLabel(region.resolved_style) }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="style-region-list">
+            <article
+              v-for="region in selectedStylePage.regions"
+              :key="`card-${region.id}`"
+              :class="['style-region-card', selectedStyleRegionKey === region.id ? 'active' : '']"
+              @click="selectedStyleRegionKey = region.id"
+            >
+              <div class="style-region-head">
+                <strong>文本框 #{{ region.index + 1 }}</strong>
+                <div class="style-badges">
+                  <span class="style-badge">自动：{{ getStyleLabel(region.auto_style) }}</span>
+                  <span class="style-badge style-badge-strong">当前：{{ getStyleLabel(region.resolved_style) }}</span>
+                </div>
+              </div>
+
+              <p class="style-preview-text">{{ region.preview_text || '（这个框当前没有可显示文字）' }}</p>
+
+              <p v-if="region.source_text && region.source_text !== region.preview_text" class="style-source-text">
+                原文：{{ region.source_text }}
+              </p>
+
+              <label class="field style-override-field">
+                <span>手动覆盖分类</span>
+                <select
+                  :value="getRegionOverrideValue(region)"
+                  @change="updateStyleOverride(region, $event.target.value)"
+                >
+                  <option value="">跟随自动识别（{{ getStyleLabel(region.auto_style) }}）</option>
+                  <option
+                    v-for="option in styleBucketOptions"
+                    :key="`${region.id}-${option.value}`"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="empty-state">
+        当前会话还没有可检查的文本框缓存。先完整翻译一次，再回来做样式映射会更稳。
       </div>
     </section>
   </main>

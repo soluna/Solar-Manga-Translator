@@ -196,6 +196,8 @@ class TranslatorEngine:
         if style_debug_enabled:
             self._prepare_style_rerender_debug_dir(session_id, reset=True)
 
+        rerender_variant = self._next_rerender_variant(session)
+
         archive_files: list[Path] = []
         for index, image in enumerate(session["source_images"], start=1):
             source_path = source_dir / image["stored_name"]
@@ -203,6 +205,7 @@ class TranslatorEngine:
                 output_dir,
                 image["stored_name"],
                 config["rerender_output_format"],
+                rerender_variant,
             )
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
 
@@ -238,7 +241,7 @@ class TranslatorEngine:
             elif not output_path.exists():
                 self._copy_source_to_output(source_path, output_path)
 
-            self._prune_translated_output_variants(output_dir, image["stored_name"], keep=output_path)
+            self._update_translated_output_map(session, image["stored_name"], output_path)
             archive_files.append(output_path)
 
             await progress_callback(
@@ -247,6 +250,7 @@ class TranslatorEngine:
                     "current": index,
                     "total": total,
                     "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "stored_name": image["stored_name"],
                     "name": image["name"],
                 }
             )
@@ -343,12 +347,14 @@ class TranslatorEngine:
 
             reported.add(output_path)
             source_meta = session["source_images"][index - 1]
+            self._update_translated_output_map(session, source_meta["stored_name"], output_path)
             await progress_callback(
                 {
                     "event": "progress",
                     "current": len(reported),
                     "total": total,
                     "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "stored_name": source_meta["stored_name"],
                     "name": source_meta["name"],
                 }
             )
@@ -568,11 +574,48 @@ class TranslatorEngine:
         print(f"[WARN] Requested font not found: {font_key}")
         return ""
 
-    def _translated_output_path(self, output_dir: Path, stored_name: str, rerender_output_format: str) -> Path:
+    def _translated_output_path(
+        self,
+        output_dir: Path,
+        stored_name: str,
+        rerender_output_format: str,
+        output_variant: str = "",
+    ) -> Path:
         source_name = Path(stored_name)
+        variant_suffix = f"__{output_variant}" if output_variant else ""
         if rerender_output_format == "png":
-            return output_dir / f"{source_name.stem}.png"
-        return output_dir / stored_name
+            return output_dir / f"{source_name.stem}{variant_suffix}.png"
+        return output_dir / f"{source_name.stem}{variant_suffix}{source_name.suffix}"
+
+    def _next_rerender_variant(self, session: dict[str, Any]) -> str:
+        next_generation = int(session.get("rerender_generation") or 0) + 1
+        session["rerender_generation"] = next_generation
+        return f"rerender-{next_generation}"
+
+    def _update_translated_output_map(
+        self,
+        session: dict[str, Any],
+        stored_name: str,
+        output_path: Path,
+    ) -> None:
+        translated_output_map = session.setdefault("translated_output_map", {})
+        translated_output_map[stored_name] = output_path.name
+
+    def _current_translated_output(
+        self,
+        session: dict[str, Any],
+        output_dir: Path,
+        stored_name: str,
+        preferred_format: str = "source",
+    ) -> Path | None:
+        translated_output_map = session.get("translated_output_map") or {}
+        mapped_name = translated_output_map.get(stored_name)
+        if mapped_name:
+            mapped_path = output_dir / mapped_name
+            if mapped_path.exists():
+                return mapped_path
+
+        return self._find_existing_translated_output(output_dir, stored_name, preferred_format)
 
     def _find_existing_translated_output(
         self,
@@ -894,7 +937,8 @@ class TranslatorEngine:
                 image["stored_name"],
             )
 
-            preview_path = self._find_existing_translated_output(
+            preview_path = self._current_translated_output(
+                session,
                 output_dir,
                 image["stored_name"],
                 preferred_output_format,
@@ -973,7 +1017,8 @@ class TranslatorEngine:
                 image["stored_name"],
             )
 
-            preview_path = self._find_existing_translated_output(
+            preview_path = self._current_translated_output(
+                session,
                 output_dir,
                 image["stored_name"],
                 preferred_output_format,

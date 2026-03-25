@@ -464,6 +464,22 @@ function applyStyleInspectionPayload(payload) {
   styleInspectionPages.value = payload.pages || []
 }
 
+function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
+  let changed = false
+  const nextPages = pages.map((page) => {
+    if (page.stored_name !== storedName) {
+      return page
+    }
+    changed = true
+    return {
+      ...page,
+      image_url: nextImageUrl,
+      translated_image_url: nextImageUrl
+    }
+  })
+  return changed ? nextPages : pages
+}
+
 async function loadReviewInspection() {
   if (!sessionId.value) {
     reviewInspectionPages.value = []
@@ -806,11 +822,24 @@ function startTranslation(action = 'translate') {
         current: payload.current,
         total: payload.total
       }
+      const nextImageUrl = withCacheBust(toApiUrl(payload.image_url))
       translatedImages.value.push({
         id: `${sessionId.value}-translated-${payload.current}`,
         name: payload.name || `第 ${payload.current} 张`,
-        url: withCacheBust(toApiUrl(payload.image_url))
+        url: nextImageUrl
       })
+      if (payload.stored_name) {
+        reviewInspectionPages.value = updatePagePreviewUrl(
+          reviewInspectionPages.value,
+          payload.stored_name,
+          payload.image_url,
+        )
+        styleInspectionPages.value = updatePagePreviewUrl(
+          styleInspectionPages.value,
+          payload.stored_name,
+          payload.image_url,
+        )
+      }
       status.value = activeAction.value === 'rerender'
         ? `重嵌字进行中：${payload.current} / ${payload.total}`
         : `翻译进行中：${payload.current} / ${payload.total}`

@@ -166,6 +166,8 @@ async def upload_comic(file: UploadFile = File(...)):
         "translated_dir": str(translated_dir),
         "source_images": staged_images,
         "download_path": None,
+        "translated_output_map": {},
+        "rerender_generation": 0,
     }
 
     return {

@@ -38,10 +38,15 @@ def save_rerender_cache(source_path: str, ctx: Any) -> None:
                 continue
             serialized_regions.append(_to_json_compatible(region.to_dict()))
 
+        gimp_mask = getattr(ctx, "gimp_mask", None)
+        img_inpainted = getattr(ctx, "img_inpainted", None)
+        has_gimp_mask = isinstance(gimp_mask, np.ndarray) and gimp_mask.ndim == 3 and gimp_mask.shape[2] >= 3
+
         meta = {
             "page_name": page_name,
             "region_count": len(serialized_regions),
-            "has_inpainted": bool(getattr(ctx, "img_inpainted", None) is not None),
+            "has_inpainted": bool(img_inpainted is not None),
+            "has_gimp_mask": has_gimp_mask,
         }
 
         (page_dir / "meta.json").write_text(
@@ -53,8 +58,12 @@ def save_rerender_cache(source_path: str, ctx: Any) -> None:
             encoding="utf-8",
         )
 
-        img_inpainted = getattr(ctx, "img_inpainted", None)
-        if img_inpainted is not None:
+        if has_gimp_mask:
+            cv2.imwrite(
+                str(page_dir / "inpainted.png"),
+                np.ascontiguousarray(gimp_mask[:, :, :3]),
+            )
+        elif img_inpainted is not None:
             cv2.imwrite(
                 str(page_dir / "inpainted.png"),
                 cv2.cvtColor(img_inpainted, cv2.COLOR_RGB2BGR),

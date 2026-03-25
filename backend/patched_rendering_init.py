@@ -449,7 +449,7 @@ def render(
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 
     M, _ = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
-    rgba_region = cv2.warpPerspective(box, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    rgba_region = cv2.warpPerspective(box, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     x, y, w, h = cv2.boundingRect(dst_points.astype(np.int32))
     canvas_region = rgba_region[y:y+h, x:x+w, :3]
     mask_region = rgba_region[y:y+h, x:x+w, 3:4].astype(np.float32) / 255.0

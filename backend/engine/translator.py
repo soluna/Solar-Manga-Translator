@@ -6,6 +6,7 @@ import shutil
 import sys
 import os
 import re
+import tempfile
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1820,7 +1821,42 @@ class TranslatorEngine:
         result_image = dump_image(source_image, rendered_rgb, alpha_ch)
 
         save_ctx = Context(save_quality=100, text_regions=regions, result=result_image)
-        save_result(result_image, str(output_path), save_ctx)
+        self._save_result_atomic(result_image, output_path, save_ctx)
+
+    def _save_result_atomic(self, result_image: Any, output_path: Path, save_ctx: Any) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        suffix = output_path.suffix.lower()
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=str(output_path.parent),
+            suffix=suffix or ".tmp",
+        ) as tmp_file:
+            temp_path = Path(tmp_file.name)
+
+        try:
+            if suffix in {".jpg", ".jpeg"}:
+                rgb_image = result_image.convert("RGB")
+                rgb_image.save(
+                    temp_path,
+                    quality=getattr(save_ctx, "save_quality", 100),
+                    format="JPEG",
+                    subsampling=0,
+                )
+            elif suffix == ".png":
+                result_image.save(temp_path, format="PNG")
+            elif suffix == ".webp":
+                result_image.save(temp_path, format="WEBP", quality=100, lossless=True)
+            else:
+                save_result(result_image, str(temp_path), save_ctx)
+
+            os.replace(temp_path, output_path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
     def _clear_directory(self, directory: Path) -> None:
         for child in directory.iterdir():

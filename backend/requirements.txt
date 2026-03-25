@@ -8,4 +8,5 @@ python-dotenv>=1.0.1
 colorama>=0.4.6
 google-genai>=1.0.0
 volcengine-python-sdk[ark]>=4.0.6
+opencc-python-reimplemented>=0.1.7
 # Note: PyTorch and manga-image-translator need to be installed separately

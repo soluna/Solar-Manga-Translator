@@ -4,6 +4,11 @@ import numpy as np
 from typing import List
 from tqdm import tqdm
 
+try:
+    from opencc import OpenCC
+except ImportError:  # pragma: no cover - optional runtime dependency
+    OpenCC = None
+
 # from .ballon_extractor import extract_ballon_region
 from . import text_render
 from .text_render_eng import render_textblock_list_eng
@@ -17,6 +22,7 @@ from ..utils import (
 
 logger = get_logger('render')
 _ACTIVE_FONT_KEY = None
+_TRADITIONAL_TEXT_CONVERTER = None
 
 
 def parse_font_paths(path: str, default: List[str] = None) -> List[str]:
@@ -53,6 +59,34 @@ def _normalize_direction(direction: str) -> str:
     if direction in ('vertical', 'v', 'vr'):
         return 'vr' if direction.endswith('r') else 'v'
     return 'auto'
+
+
+def _get_traditional_text_converter():
+    global _TRADITIONAL_TEXT_CONVERTER
+    if _TRADITIONAL_TEXT_CONVERTER is None:
+        if OpenCC is None:
+            _TRADITIONAL_TEXT_CONVERTER = False
+        else:
+            _TRADITIONAL_TEXT_CONVERTER = OpenCC('s2t')
+    return _TRADITIONAL_TEXT_CONVERTER
+
+
+def _convert_text_for_rendering(region: TextBlock, text: str) -> str:
+    if not text:
+        return text
+
+    target_lang = str(getattr(region, 'target_lang', '') or '').upper()
+    if target_lang not in {'CHS', 'CHT'}:
+        return text
+
+    converter = _get_traditional_text_converter()
+    if not converter:
+        return text
+
+    try:
+        return converter.convert(text)
+    except Exception:
+        return text
 
 
 def _normalize_font_key(font_path: str) -> str:
@@ -98,7 +132,7 @@ def _get_candidate_text(region: TextBlock, direction: str) -> str:
     original_direction = getattr(region, '_direction', 'auto')
     try:
         region._direction = direction
-        return region.get_translation_for_rendering()
+        return _convert_text_for_rendering(region, region.get_translation_for_rendering())
     finally:
         region._direction = original_direction
 
@@ -335,11 +369,12 @@ def render(
     )
     render_horizontally = render_direction.startswith('h') if render_direction != 'auto' else region.horizontal
     reversed_direction = render_direction.endswith('r')
+    render_text = _convert_text_for_rendering(region, region.get_translation_for_rendering())
 
     if render_horizontally:
         temp_box = text_render.put_text_horizontal(
             region.font_size,
-            region.get_translation_for_rendering(),
+            render_text,
             round(norm_h[0]),
             round(norm_v[0]),
             region.alignment,
@@ -354,7 +389,7 @@ def render(
     else:
         temp_box = text_render.put_text_vertical(
             region.font_size,
-            region.get_translation_for_rendering(),
+            render_text,
             round(norm_v[0]),
             region.alignment,
             fg,

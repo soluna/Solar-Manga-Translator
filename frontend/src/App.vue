@@ -76,7 +76,7 @@ function createDefaultConfig() {
   return {
     translator: 'gemini',
     translator_model: '',
-    target_lang: 'CHS',
+    target_lang: 'CHT',
     use_gpu: true,
     api_key: '',
     font_key: '',

@@ -23,6 +23,9 @@ from ..utils import (
 logger = get_logger('render')
 _ACTIVE_FONT_KEY = None
 _TRADITIONAL_TEXT_CONVERTER = None
+_TERMINAL_PERIOD_CHARS = {"。", "．", "."}
+_TERMINAL_PUNCTUATION_CHARS = _TERMINAL_PERIOD_CHARS | {"！", "!", "？", "?", "…", "‥", "～", "~"}
+_TRAILING_CLOSERS = "』」】》〉）)]}>'\"”’"
 
 
 def parse_font_paths(path: str, default: List[str] = None) -> List[str]:
@@ -71,6 +74,44 @@ def _get_traditional_text_converter():
     return _TRADITIONAL_TEXT_CONVERTER
 
 
+def _split_trailing_closers(text: str) -> tuple[str, str]:
+    if not text:
+        return "", ""
+
+    core = text
+    closers = []
+    while core and core[-1] in _TRAILING_CLOSERS:
+        closers.append(core[-1])
+        core = core[:-1]
+    return core, "".join(reversed(closers))
+
+
+def _has_terminal_punctuation(text: str) -> bool:
+    core, _ = _split_trailing_closers(str(text or "").rstrip())
+    return bool(core and core[-1] in _TERMINAL_PUNCTUATION_CHARS)
+
+
+def _strip_unwanted_terminal_period(region: TextBlock, text: str) -> str:
+    normalized_text = str(text or "").rstrip()
+    if not normalized_text:
+        return normalized_text
+
+    source_text = str(getattr(region, "text", "") or "").strip()
+    if not source_text:
+        texts = getattr(region, "texts", None)
+        if isinstance(texts, list):
+            source_text = "".join(str(item or "") for item in texts).strip()
+
+    if not source_text or _has_terminal_punctuation(source_text):
+        return normalized_text
+
+    core, closers = _split_trailing_closers(normalized_text)
+    if not core or core[-1] not in _TERMINAL_PERIOD_CHARS:
+        return normalized_text
+
+    return (core[:-1] + closers).rstrip()
+
+
 def _convert_text_for_rendering(region: TextBlock, text: str) -> str:
     if not text:
         return text
@@ -81,12 +122,13 @@ def _convert_text_for_rendering(region: TextBlock, text: str) -> str:
 
     converter = _get_traditional_text_converter()
     if not converter:
-        return text
+        return _strip_unwanted_terminal_period(region, text)
 
     try:
-        return converter.convert(text)
+        converted_text = converter.convert(text)
     except Exception:
-        return text
+        converted_text = text
+    return _strip_unwanted_terminal_period(region, converted_text)
 
 
 def _normalize_font_key(font_path: str) -> str:

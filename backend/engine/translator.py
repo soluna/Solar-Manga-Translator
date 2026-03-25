@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import sys
@@ -8,6 +9,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 import zipfile
 from difflib import SequenceMatcher
 from collections import deque
@@ -232,6 +234,7 @@ class TranslatorEngine:
                             cache_page_dir,
                             config,
                             image["stored_name"],
+                            session=session,
                         )
                 await self._render_cached_page(
                     source_path,
@@ -240,6 +243,7 @@ class TranslatorEngine:
                     config,
                     prepared_regions=prepared_regions,
                     debug_output_dir=self._prepare_style_rerender_debug_dir(session_id, reset=False) / Path(image["stored_name"]).stem if style_debug_enabled else None,
+                    session=session,
                 )
                 if style_debug_enabled and debug_info is not None:
                     self._write_style_rerender_debug_report(
@@ -903,6 +907,7 @@ class TranslatorEngine:
                     cache_page_dir,
                     config,
                     image["stored_name"],
+                    session=session,
                 )
             await self._render_cached_page(
                 source_path,
@@ -911,6 +916,7 @@ class TranslatorEngine:
                 config,
                 prepared_regions=prepared_regions,
                 debug_output_dir=self._prepare_style_rerender_debug_dir(session_id, reset=False) / Path(image["stored_name"]).stem,
+                session=session,
             )
             if debug_info is not None:
                 self._write_style_rerender_debug_report(
@@ -967,6 +973,7 @@ class TranslatorEngine:
                 cache_page_dir,
                 config,
                 image["stored_name"],
+                session=session,
             )
 
             preview_path = self._current_translated_output(
@@ -989,6 +996,7 @@ class TranslatorEngine:
                         "id": getattr(region, "style_region_key", self._make_style_region_key(image["stored_name"], index)),
                         "index": index,
                         "bbox": [x1, y1, x2, y2],
+                        "manual": bool(getattr(region, "manual_region", False)),
                         "auto_style": getattr(region, "auto_font_style", ""),
                         "override_style": getattr(region, "override_font_style", ""),
                         "resolved_style": getattr(region, "font_style", ""),
@@ -1047,6 +1055,7 @@ class TranslatorEngine:
                 cache_page_dir,
                 config,
                 image["stored_name"],
+                session=session,
             )
 
             preview_path = self._current_translated_output(
@@ -1069,6 +1078,7 @@ class TranslatorEngine:
                         "id": getattr(region, "translation_region_key", self._make_style_region_key(image["stored_name"], index)),
                         "index": index,
                         "bbox": [x1, y1, x2, y2],
+                        "manual": bool(getattr(region, "manual_region", False)),
                         "source_text": self._region_source_text(region),
                         "machine_translation": str(getattr(region, "machine_translation", "") or ""),
                         "override_translation": str(getattr(region, "translation_override", "") or ""),
@@ -1338,6 +1348,7 @@ class TranslatorEngine:
                     page_cache_dir=cache_page_dir,
                     config=config,
                     base_image_rgb=ai_base_rgb,
+                    session=session,
                 )
                 enhanced_count += 1
                 await progress_callback(
@@ -1662,14 +1673,314 @@ class TranslatorEngine:
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
         return [self._deserialize_text_region(payload) for payload in region_payloads]
 
+    def _ensure_manual_regions_store(self, session: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        manual_regions = session.get("manual_regions")
+        if not isinstance(manual_regions, dict):
+            manual_regions = {}
+            session["manual_regions"] = manual_regions
+        return manual_regions
+
+    def _manual_regions_for_page(self, session: dict[str, Any] | None, stored_name: str) -> list[dict[str, Any]]:
+        if not session:
+            return []
+        manual_regions = self._ensure_manual_regions_store(session)
+        page_regions = manual_regions.get(stored_name)
+        if not isinstance(page_regions, list):
+            return []
+        return [payload for payload in page_regions if isinstance(payload, dict)]
+
+    def _normalize_manual_bbox(self, bbox: Any, image_width: int, image_height: int) -> list[int]:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError("补漏框坐标无效。")
+        try:
+            x1, y1, x2, y2 = [int(round(float(value))) for value in bbox]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("补漏框坐标无效。") from exc
+
+        left = max(0, min(x1, x2))
+        top = max(0, min(y1, y2))
+        right = min(image_width, max(x1, x2))
+        bottom = min(image_height, max(y1, y2))
+        if right - left < 8 or bottom - top < 8:
+            raise ValueError("补漏框太小了，至少需要大于 8 像素。")
+        return [left, top, right, bottom]
+
+    def _direction_from_bbox(self, bbox: list[int]) -> str:
+        x1, y1, x2, y2 = bbox
+        width = max(x2 - x1, 1)
+        height = max(y2 - y1, 1)
+        return "v" if height > width * 1.15 else "h"
+
+    def _manual_region_lines(self, bbox: list[int]) -> list[list[list[int]]]:
+        x1, y1, x2, y2 = bbox
+        return [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]]
+
+    def _build_manual_region_payload(
+        self,
+        stored_name: str,
+        bbox: list[int],
+        source_text: str,
+        translation: str,
+        target_lang: str,
+        direction: str | None = None,
+        font_size: float | None = None,
+        fg_color: tuple[int, int, int] | list[int] | None = None,
+        bg_color: tuple[int, int, int] | list[int] | None = None,
+    ) -> dict[str, Any]:
+        x1, y1, x2, y2 = bbox
+        width = max(x2 - x1, 1)
+        height = max(y2 - y1, 1)
+        resolved_direction = direction or self._direction_from_bbox(bbox)
+        resolved_font_size = int(round(font_size if font_size is not None else max(min(width, height), 14)))
+        return {
+            "id": f"manual::{stored_name}::{uuid.uuid4().hex}",
+            "stored_name": stored_name,
+            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+            "lines": self._manual_region_lines(bbox),
+            "source_text": str(source_text or "").strip(),
+            "machine_translation": str(translation or "").strip(),
+            "translation": str(translation or "").strip(),
+            "direction": resolved_direction,
+            "alignment": "auto",
+            "font_size": max(resolved_font_size, 8),
+            "fg_color": [int(v) for v in (fg_color or (0, 0, 0))],
+            "bg_color": [int(v) for v in (bg_color or (255, 255, 255))],
+            "target_lang": target_lang,
+            "manual": True,
+            "created_at": time.time(),
+        }
+
+    def _manual_region_to_text_region(self, payload: dict[str, Any]) -> Any:
+        self._ensure_vendor_import_path()
+        from manga_translator.utils.textblock import TextBlock
+
+        bbox = payload.get("bbox") or [0, 0, 0, 0]
+        direction = str(payload.get("direction") or self._direction_from_bbox(bbox))
+        translation = str(payload.get("translation") or payload.get("machine_translation") or "").strip()
+        source_text = str(payload.get("source_text") or "").strip()
+        region = TextBlock(
+            lines=payload.get("lines") or self._manual_region_lines(bbox),
+            texts=[source_text],
+            language=payload.get("source_lang", "unknown"),
+            font_size=payload.get("font_size", max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14)),
+            angle=payload.get("angle", 0),
+            translation=translation,
+            fg_color=tuple(payload.get("fg_color") or (0, 0, 0)),
+            bg_color=tuple(payload.get("bg_color") or (255, 255, 255)),
+            line_spacing=payload.get("line_spacing", 1.0),
+            letter_spacing=payload.get("letter_spacing", 1.0),
+            font_family=payload.get("font_family", ""),
+            bold=payload.get("bold", False),
+            underline=payload.get("underline", False),
+            italic=payload.get("italic", False),
+            direction=direction,
+            alignment=payload.get("alignment", "auto"),
+            source_lang=payload.get("source_lang", ""),
+            target_lang=payload.get("target_lang", ""),
+            prob=payload.get("prob", 1.0),
+        )
+        region.manual_region = True
+        region.manual_region_id = str(payload.get("id") or "")
+        region.style_region_key = region.manual_region_id
+        region.translation_region_key = region.manual_region_id
+        region.machine_translation = str(payload.get("machine_translation") or translation or "")
+        region.translation_override = ""
+        return region
+
+    def _merge_manual_regions(
+        self,
+        session: dict[str, Any] | None,
+        stored_name: str,
+        regions: list[Any],
+    ) -> list[Any]:
+        manual_payloads = self._manual_regions_for_page(session, stored_name)
+        if not manual_payloads:
+            return regions
+        merged_regions = list(regions)
+        for payload in manual_payloads:
+            try:
+                merged_regions.append(self._manual_region_to_text_region(payload))
+            except Exception as exc:
+                print(f"[WARN] Failed to restore manual region {payload.get('id')}: {exc}")
+        return merged_regions
+
+    @contextlib.contextmanager
+    def _temporary_environment(self, updates: dict[str, str]):
+        sentinel = object()
+        previous: dict[str, Any] = {}
+        try:
+            for key, value in updates.items():
+                previous[key] = os.environ.get(key, sentinel)
+                if value is None or value == "":
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is sentinel:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+
+    async def _ocr_manual_region(
+        self,
+        source_rgb: np.ndarray,
+        bbox: list[int],
+        use_gpu: bool,
+    ) -> dict[str, Any]:
+        self._ensure_vendor_import_path()
+        from manga_translator.config import Ocr, OcrConfig
+        from manga_translator.ocr import dispatch as dispatch_ocr
+        from manga_translator.utils import Quadrilateral
+
+        pts = np.array(
+            [[bbox[0], bbox[1]], [bbox[2], bbox[1]], [bbox[2], bbox[3]], [bbox[0], bbox[3]]],
+            dtype=np.int32,
+        )
+        quad = Quadrilateral(pts, "", 1.0)
+        recognized = await dispatch_ocr(
+            Ocr.ocr48px,
+            source_rgb,
+            [quad],
+            OcrConfig(use_mocr_merge=True, ocr=Ocr.ocr48px),
+            "cuda" if use_gpu else "cpu",
+            False,
+        )
+        if not recognized:
+            return {
+                "source_text": "",
+                "direction": self._direction_from_bbox(bbox),
+                "font_size": max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14),
+                "fg_color": (0, 0, 0),
+                "bg_color": (255, 255, 255),
+            }
+
+        region = recognized[0]
+        return {
+            "source_text": str(getattr(region, "text", "") or "").strip(),
+            "direction": str(getattr(region, "direction", "") or self._direction_from_bbox(bbox)),
+            "font_size": float(getattr(region, "font_size", 0) or max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14)),
+            "fg_color": tuple(int(v) for v in getattr(region, "fg_colors", (0, 0, 0))),
+            "bg_color": tuple(int(v) for v in getattr(region, "bg_colors", (255, 255, 255))),
+        }
+
+    async def _translate_manual_text(
+        self,
+        text: str,
+        config: dict[str, Any],
+        session_id: str,
+    ) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+
+        self._ensure_vendor_import_path()
+        from manga_translator.config import Translator, TranslatorConfig
+        from manga_translator.translators import dispatch as dispatch_translation, unload as unload_translator
+
+        translator_key = Translator[config["translator"]]
+        translator_config = TranslatorConfig(
+            translator=translator_key,
+            target_lang=config["target_lang"],
+        )
+        env_updates = self._build_env(config, session_id)
+
+        with self._temporary_environment(env_updates):
+            try:
+                await unload_translator(translator_key)
+            except Exception:
+                pass
+            try:
+                translated = await dispatch_translation(
+                    translator_config.translator_gen,
+                    [cleaned],
+                    translator_config=translator_config,
+                    use_mtpe=False,
+                    args=None,
+                    device="cuda" if config.get("use_gpu") else "cpu",
+                )
+            finally:
+                try:
+                    await unload_translator(translator_key)
+                except Exception:
+                    pass
+
+        if not translated:
+            return ""
+        return str(translated[0] or "").strip()
+
+    async def create_manual_region(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        stored_name: str,
+        bbox: Any,
+    ) -> dict[str, Any]:
+        self._ensure_runtime_patches()
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        source_path = source_dir / stored_name
+        if not source_path.exists():
+            raise RuntimeError("目标页面不存在，请刷新后重试。")
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError("无法读取当前页面原图。")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        normalized_bbox = self._normalize_manual_bbox(bbox, source_rgb.shape[1], source_rgb.shape[0])
+
+        ocr_result = await self._ocr_manual_region(source_rgb, normalized_bbox, config.get("use_gpu", True))
+        translation = ""
+        try:
+            translation = await self._translate_manual_text(ocr_result.get("source_text", ""), config, session_id)
+        except Exception as exc:
+            print(f"[WARN] Manual region translation failed for {stored_name}: {exc}")
+
+        payload = self._build_manual_region_payload(
+            stored_name=stored_name,
+            bbox=normalized_bbox,
+            source_text=ocr_result.get("source_text", ""),
+            translation=translation,
+            target_lang=config["target_lang"],
+            direction=ocr_result.get("direction"),
+            font_size=ocr_result.get("font_size"),
+            fg_color=ocr_result.get("fg_color"),
+            bg_color=ocr_result.get("bg_color"),
+        )
+        manual_regions = self._ensure_manual_regions_store(session)
+        manual_regions.setdefault(stored_name, []).append(payload)
+        return payload
+
+    def delete_manual_region(self, session: dict[str, Any], region_id: str) -> bool:
+        manual_regions = self._ensure_manual_regions_store(session)
+        removed = False
+        for stored_name, page_regions in list(manual_regions.items()):
+            if not isinstance(page_regions, list):
+                continue
+            next_page_regions = [
+                payload for payload in page_regions
+                if str(payload.get("id") or "") != region_id
+            ]
+            if len(next_page_regions) != len(page_regions):
+                removed = True
+                if next_page_regions:
+                    manual_regions[stored_name] = next_page_regions
+                else:
+                    manual_regions.pop(stored_name, None)
+        return removed
+
     def _prepare_cached_regions_for_edit(
         self,
         source_rgb: np.ndarray,
         page_cache_dir: Path,
         config: dict[str, Any],
         stored_name: str,
+        session: dict[str, Any] | None = None,
     ) -> list[Any]:
         regions = self._load_cached_regions(page_cache_dir)
+        regions = self._merge_manual_regions(session, stored_name, regions)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
         return self._dedupe_overlapping_regions(regions)
@@ -1680,8 +1991,10 @@ class TranslatorEngine:
         page_cache_dir: Path,
         config: dict[str, Any],
         stored_name: str,
+        session: dict[str, Any] | None = None,
     ) -> tuple[list[Any], dict[str, Any]]:
         regions = self._load_cached_regions(page_cache_dir)
+        regions = self._merge_manual_regions(session, stored_name, regions)
         raw_count = len(regions)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
@@ -1746,6 +2059,8 @@ class TranslatorEngine:
         text_value = self._region_display_text(region)
         font_size = float(getattr(region, "font_size", 0) or 0)
         return (
+            (2500.0 if bool(getattr(region, "manual_region", False)) else 0.0)
+            +
             (1000.0 if translation_override else 0.0)
             + len(text_value) * 12.0
             + self._region_area(region) / 1200.0
@@ -1917,6 +2232,7 @@ class TranslatorEngine:
             "override_font_style": str(getattr(region, "override_font_style", "") or ""),
             "font_family": os.path.basename(str(getattr(region, "font_family", "") or "")),
             "translation": self._region_display_text(region),
+            "manual": bool(getattr(region, "manual_region", False)),
         }
 
     def _write_style_rerender_debug_report(
@@ -2310,14 +2626,20 @@ class TranslatorEngine:
                 region.font_style = "single"
                 region.auto_font_style = "gothic"
                 region.override_font_style = ""
-                region.style_region_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
+                region.style_region_key = str(
+                    getattr(region, "style_region_key", "")
+                    or (self._make_style_region_key(stored_name, index) if stored_name else str(index))
+                )
             return
 
         font_sizes = [max(float(getattr(region, "font_size", 0) or 0), 1.0) for region in regions]
         median_font_size = float(np.median(font_sizes)) if font_sizes else 12.0
 
         for index, region in enumerate(regions):
-            style_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
+            style_key = str(
+                getattr(region, "style_region_key", "")
+                or (self._make_style_region_key(stored_name, index) if stored_name else str(index))
+            )
             auto_style = self._classify_region_font_style(source_rgb, region, median_font_size)
             override_style = self._normalize_style_bucket(style_overrides.get(style_key, ""))
             resolved_style = override_style or auto_style
@@ -2335,7 +2657,10 @@ class TranslatorEngine:
     ) -> None:
         overrides = config.get("translation_region_overrides") or {}
         for index, region in enumerate(regions):
-            region_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
+            region_key = str(
+                getattr(region, "translation_region_key", "")
+                or (self._make_style_region_key(stored_name, index) if stored_name else str(index))
+            )
             machine_translation = str(getattr(region, "translation", "") or "")
             override_translation = str(overrides.get(region_key, "") or "").strip()
             region.translation_region_key = region_key
@@ -2353,6 +2678,7 @@ class TranslatorEngine:
         base_image_rgb: np.ndarray | None = None,
         prepared_regions: list[Any] | None = None,
         debug_output_dir: Path | None = None,
+        session: dict[str, Any] | None = None,
     ) -> None:
         self._ensure_vendor_import_path()
         from PIL import Image
@@ -2387,6 +2713,7 @@ class TranslatorEngine:
                 page_cache_dir,
                 config,
                 source_path.name,
+                session=session,
             )
         )
         for region in regions:

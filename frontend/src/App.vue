@@ -237,6 +237,9 @@ const translationRegionOverrides = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
+const creatingManualRegion = ref(false)
+const manualDrawMode = ref(false)
+const manualDrawDraft = ref(null)
 const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
 
@@ -250,6 +253,7 @@ const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
 const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
+const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
 const hasTranslationOverrides = computed(() => Object.keys(translationRegionOverrides.value).length > 0)
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
@@ -384,6 +388,7 @@ function resetTranslationReview() {
 function resetEditInspectorSelection() {
   selectedEditPageKey.value = ''
   selectedEditRegionKey.value = ''
+  manualDrawDraft.value = null
 }
 
 function buildRuntimeConfig() {
@@ -444,6 +449,171 @@ function getStyleRegionBoxStyle(region, page) {
     top: `${top}%`,
     width: `${boxWidth}%`,
     height: `${boxHeight}%`
+  }
+}
+
+function isManualRegion(region) {
+  return Boolean(region?.manual)
+}
+
+function getCanvasPoint(event, page) {
+  const canvas = event.currentTarget
+  const rect = canvas.getBoundingClientRect()
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const x = Math.min(imageWidth, Math.max(0, ((event.clientX - rect.left) / rect.width) * imageWidth))
+  const y = Math.min(imageHeight, Math.max(0, ((event.clientY - rect.top) / rect.height) * imageHeight))
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  }
+}
+
+function getManualDraftBBox(page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return null
+  }
+
+  const x1 = Math.min(draft.startX, draft.currentX)
+  const y1 = Math.min(draft.startY, draft.currentY)
+  const x2 = Math.max(draft.startX, draft.currentX)
+  const y2 = Math.max(draft.startY, draft.currentY)
+  if (x2 - x1 < 2 || y2 - y1 < 2) {
+    return null
+  }
+  return [x1, y1, x2, y2]
+}
+
+function getManualDraftStyle(page) {
+  const bbox = getManualDraftBBox(page)
+  if (!bbox) {
+    return {}
+  }
+  return getStyleRegionBoxStyle({ bbox }, page)
+}
+
+function clearManualDraft(options = {}) {
+  manualDrawDraft.value = null
+  if (!options.keepMode) {
+    manualDrawMode.value = false
+  }
+}
+
+function startManualDraw(event, page) {
+  if (!manualDrawMode.value || !canCreateManualRegion.value || !page) {
+    return
+  }
+  if (event.button !== 0) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  manualDrawDraft.value = {
+    stored_name: page.stored_name,
+    startX: point.x,
+    startY: point.y,
+    currentX: point.x,
+    currentY: point.y,
+    pointerId: event.pointerId
+  }
+  selectedEditPageKey.value = page.stored_name
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+
+function updateManualDraw(event, page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+}
+
+async function finishManualDraw(event, page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  event.currentTarget.releasePointerCapture?.(draft.pointerId)
+  const bbox = getManualDraftBBox(page)
+  if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
+    clearManualDraft({ keepMode: true })
+    status.value = '补漏框太小了，拖大一点会更稳。'
+    return
+  }
+
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'create',
+        stored_name: page.stored_name,
+        bbox,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '新增补漏框失败')
+    }
+    await loadEditInspection()
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
+    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '新增补漏框失败'
+  } finally {
+    creatingManualRegion.value = false
+    clearManualDraft({ keepMode: true })
+  }
+}
+
+async function deleteManualRegion(region) {
+  if (!sessionId.value || !region?.id || !isManualRegion(region)) {
+    return
+  }
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'delete',
+        region_id: region.id
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '删除补漏框失败')
+    }
+
+    const nextTranslationOverrides = { ...translationRegionOverrides.value }
+    delete nextTranslationOverrides[region.id]
+    translationRegionOverrides.value = nextTranslationOverrides
+
+    const nextStyleOverrides = { ...styleRegionOverrides.value }
+    delete nextStyleOverrides[region.id]
+    styleRegionOverrides.value = nextStyleOverrides
+
+    await loadEditInspection()
+    status.value = '已删除这个手动补漏框。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除补漏框失败'
+  } finally {
+    creatingManualRegion.value = false
   }
 }
 
@@ -788,6 +958,7 @@ function startTranslation(action = 'translate') {
   }
 
   activeAction.value = action
+  manualDrawDraft.value = null
   renderNonce.value = Date.now()
   translatedImages.value = []
   downloadUrl.value = ''
@@ -1452,6 +1623,15 @@ watch(
           </button>
 
           <button
+            class="secondary-button"
+            type="button"
+            :disabled="!canCreateManualRegion"
+            @click="manualDrawMode = !manualDrawMode; manualDrawDraft = null"
+          >
+            {{ manualDrawMode ? '结束补漏框绘制' : '手动补漏框' }}
+          </button>
+
+          <button
             v-if="hasTranslationOverrides"
             class="secondary-button"
             type="button"
@@ -1512,22 +1692,40 @@ watch(
             <div class="style-preview-grid">
               <div class="style-preview-panel">
                 <div class="style-preview-label">原图</div>
-                <div class="style-preview-canvas">
+                <div
+                  :class="['style-preview-canvas', manualDrawMode ? 'draw-mode' : '']"
+                  @pointerdown="startManualDraw($event, selectedEditPage)"
+                  @pointermove="updateManualDraw($event, selectedEditPage)"
+                  @pointerup="finishManualDraw($event, selectedEditPage)"
+                  @pointercancel="clearManualDraft({ keepMode: true })"
+                >
                   <img
                     :alt="`${selectedEditPage.name} 原图`"
                     :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
                   />
 
+                  <div v-if="manualDrawMode" class="style-preview-tip">
+                    在原图上拖拽框出漏掉的文字区域
+                  </div>
+
                   <button
                     v-for="region in selectedEditPage.regions"
                     :key="`source-${region.id}`"
                     type="button"
-                    :class="['style-box', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :class="['style-box', isManualRegion(region) ? 'manual' : '', selectedEditRegionKey === region.id ? 'active' : '']"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="selectedEditRegionKey = region.id"
                   >
                     <span>{{ region.index + 1 }}</span>
                   </button>
+
+                  <div
+                    v-if="manualDrawDraft && manualDrawDraft.stored_name === selectedEditPage.stored_name"
+                    class="style-box style-box-draft active manual"
+                    :style="getManualDraftStyle(selectedEditPage)"
+                  >
+                    <span>新框</span>
+                  </div>
                 </div>
               </div>
 
@@ -1543,7 +1741,7 @@ watch(
                     v-for="region in selectedEditPage.regions"
                     :key="`translated-${region.id}`"
                     type="button"
-                    :class="['style-box', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :class="['style-box', isManualRegion(region) ? 'manual' : '', selectedEditRegionKey === region.id ? 'active' : '']"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="selectedEditRegionKey = region.id"
                   >
@@ -1564,6 +1762,7 @@ watch(
               <div class="style-region-head">
                 <strong>文本框 #{{ region.index + 1 }}</strong>
                 <div class="style-badges">
+                  <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
                   <span
                     v-if="config.font_style_mode === 'auto-map'"
                     class="style-badge"
@@ -1571,6 +1770,14 @@ watch(
                     自动：{{ getStyleLabel(region.auto_style) }}
                   </span>
                   <span v-if="translationRegionOverrides[region.id]" class="style-badge style-badge-strong">已改译文</span>
+                  <button
+                    v-if="isManualRegion(region)"
+                    class="inline-button inline-button-danger"
+                    type="button"
+                    @click.stop="deleteManualRegion(region)"
+                  >
+                    删除
+                  </button>
                 </div>
               </div>
 

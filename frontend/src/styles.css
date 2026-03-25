@@ -439,10 +439,28 @@ h2 {
   background: #efe1d2;
 }
 
+.style-preview-canvas.draw-mode {
+  cursor: crosshair;
+}
+
 .style-preview-canvas img {
   display: block;
   width: 100%;
   height: auto;
+}
+
+.style-preview-tip {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(43, 33, 24, 0.84);
+  color: #fffaf4;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  pointer-events: none;
 }
 
 .style-box {
@@ -465,6 +483,22 @@ h2 {
   border-color: #b9472c;
   box-shadow: 0 0 0 3px rgba(185, 71, 44, 0.16);
   background: rgba(250, 180, 133, 0.18);
+}
+
+.style-box.manual {
+  border-style: dashed;
+  border-color: rgba(32, 95, 195, 0.82);
+  background: rgba(140, 181, 255, 0.12);
+}
+
+.style-box.manual.active {
+  border-color: #205fc3;
+  box-shadow: 0 0 0 3px rgba(32, 95, 195, 0.18);
+  background: rgba(140, 181, 255, 0.18);
+}
+
+.style-box-draft {
+  pointer-events: none;
 }
 
 .style-box span {
@@ -536,6 +570,11 @@ h2 {
   color: #b9472c;
 }
 
+.style-badge-manual {
+  background: rgba(32, 95, 195, 0.12);
+  color: #205fc3;
+}
+
 .style-source-text {
   color: #7a614d;
   margin: 0;
@@ -586,6 +625,10 @@ h2 {
 .translation-review-input:focus {
   outline: 2px solid rgba(216, 108, 42, 0.2);
   border-color: rgba(185, 71, 44, 0.34);
+}
+
+.inline-button-danger {
+  color: #b9472c;
 }
 
 @media (max-width: 768px) {

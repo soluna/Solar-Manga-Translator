@@ -135,6 +135,45 @@ async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None
     )
 
 
+@app.post("/api/manual-regions/{session_id}")
+async def update_manual_regions(session_id: str, payload: dict[str, Any] | None = None):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在，请重新上传文件。")
+
+    payload = payload or {}
+    action = str(payload.get("action") or "create").strip().lower()
+
+    try:
+        if action == "delete":
+            region_id = str(payload.get("region_id") or "").strip()
+            if not region_id:
+                raise HTTPException(status_code=400, detail="缺少需要删除的补漏框 ID。")
+            removed = translator_engine.delete_manual_region(session, region_id)
+            if not removed:
+                raise HTTPException(status_code=404, detail="没有找到对应的补漏框。")
+            return {"ok": True, "action": "delete", "region_id": region_id}
+
+        stored_name = str(payload.get("stored_name") or "").strip()
+        if not stored_name:
+            raise HTTPException(status_code=400, detail="缺少目标页面信息。")
+
+        region = await translator_engine.create_manual_region(
+            session_id=session_id,
+            session=session,
+            raw_config=payload.get("config", {}),
+            stored_name=stored_name,
+            bbox=payload.get("bbox"),
+        )
+        return {"ok": True, "action": "create", "region": region}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/upload")
 async def upload_comic(file: UploadFile = File(...)):
     filename = Path(file.filename or "upload").name
@@ -168,6 +207,7 @@ async def upload_comic(file: UploadFile = File(...)):
         "download_path": None,
         "translated_output_map": {},
         "rerender_generation": 0,
+        "manual_regions": {},
     }
 
     return {

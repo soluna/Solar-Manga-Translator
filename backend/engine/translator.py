@@ -7,6 +7,7 @@ import sys
 import os
 import re
 import tempfile
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1827,12 +1828,12 @@ class TranslatorEngine:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         suffix = output_path.suffix.lower()
 
-        with tempfile.NamedTemporaryFile(
-            delete=False,
+        fd, temp_name = tempfile.mkstemp(
             dir=str(output_path.parent),
             suffix=suffix or ".tmp",
-        ) as tmp_file:
-            temp_path = Path(tmp_file.name)
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
 
         try:
             if suffix in {".jpg", ".jpeg"}:
@@ -1850,13 +1851,36 @@ class TranslatorEngine:
             else:
                 save_result(result_image, str(temp_path), save_ctx)
 
-            os.replace(temp_path, output_path)
+            self._replace_file_with_retry(temp_path, output_path)
         finally:
             if temp_path.exists():
                 try:
                     temp_path.unlink()
                 except OSError:
                     pass
+
+    def _replace_file_with_retry(self, source_path: Path, target_path: Path) -> None:
+        retry_delays = (0.08, 0.12, 0.2, 0.35, 0.5, 0.8, 1.2)
+        last_error: Exception | None = None
+
+        for delay in (*retry_delays, None):
+            try:
+                os.replace(source_path, target_path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                if delay is None:
+                    break
+                time.sleep(delay)
+            except OSError as exc:
+                last_error = exc
+                if delay is None:
+                    break
+                time.sleep(delay)
+
+        raise RuntimeError(
+            f"无法替换输出文件，目标文件可能仍被占用：{target_path}"
+        ) from last_error
 
     def _clear_directory(self, directory: Path) -> None:
         for child in directory.iterdir():

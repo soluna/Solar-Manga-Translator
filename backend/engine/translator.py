@@ -928,6 +928,8 @@ class TranslatorEngine:
                     "stored_name": image["stored_name"],
                     "name": image["name"],
                     "image_url": preview_url,
+                    "source_image_url": f"/output/{session_id}/source/{image['stored_name']}",
+                    "translated_image_url": preview_url,
                     "image_width": int(source_rgb.shape[1]),
                     "image_height": int(source_rgb.shape[0]),
                     "regions": region_payloads,
@@ -1003,6 +1005,8 @@ class TranslatorEngine:
                     "stored_name": image["stored_name"],
                     "name": image["name"],
                     "image_url": preview_url,
+                    "source_image_url": f"/output/{session_id}/source/{image['stored_name']}",
+                    "translated_image_url": preview_url,
                     "image_width": int(source_rgb.shape[1]),
                     "image_height": int(source_rgb.shape[0]),
                     "regions": region_payloads,
@@ -2108,11 +2112,11 @@ class TranslatorEngine:
         boxed = features["boxed"] > 0.5
         if boxed:
             return False
-        if font_ratio <= 0.84 and char_count <= 12:
+        if font_ratio <= 0.72 and char_count <= 8:
             return True
-        if stroke_width_var >= 0.52 and component_count >= max(char_count, 2.0):
+        if stroke_width_var >= 0.68 and component_count >= max(char_count * 1.2, 3.0) and char_count <= 8:
             return True
-        if fill_ratio <= 0.12 and mean_circularity <= 0.22 and char_count <= 10:
+        if fill_ratio <= 0.1 and mean_circularity <= 0.18 and char_count <= 6 and font_ratio <= 0.92:
             return True
         return False
 
@@ -2124,11 +2128,11 @@ class TranslatorEngine:
         fill_ratio = features["fill_ratio"]
         if char_count == 0:
             return False
-        if font_ratio >= 1.08 and mean_circularity >= 0.34 and stroke_width_mean >= max(2.0, median_font_size * 0.085):
+        if font_ratio >= 1.14 and mean_circularity >= 0.4 and stroke_width_mean >= max(2.25, median_font_size * 0.095):
             return True
-        if fill_ratio >= 0.22 and mean_circularity >= 0.38:
+        if fill_ratio >= 0.26 and mean_circularity >= 0.44 and char_count <= 6:
             return True
-        if char_count <= 4 and mean_circularity >= 0.42:
+        if char_count <= 3 and mean_circularity >= 0.48:
             return True
         return False
 
@@ -2137,9 +2141,9 @@ class TranslatorEngine:
         corner_density = features["corner_density"]
         stroke_width_var = features["stroke_width_var"]
         fill_ratio = features["fill_ratio"]
-        if mean_circularity >= 0.4 and corner_density <= 0.03:
+        if mean_circularity >= 0.46 and corner_density <= 0.022:
             return True
-        if mean_circularity >= 0.34 and stroke_width_var <= 0.3 and fill_ratio >= 0.1:
+        if mean_circularity >= 0.4 and stroke_width_var <= 0.22 and fill_ratio >= 0.14:
             return True
         return False
 
@@ -2148,11 +2152,11 @@ class TranslatorEngine:
         corner_density = features["corner_density"]
         mean_circularity = features["mean_circularity"]
         stroke_width_mean = features["stroke_width_mean"]
-        if stroke_width_var >= 0.46 and corner_density >= 0.028:
+        if stroke_width_var >= 0.56 and corner_density >= 0.034:
             return True
-        if stroke_width_var >= 0.38 and corner_density >= 0.022 and mean_circularity <= 0.32:
+        if stroke_width_var >= 0.46 and corner_density >= 0.028 and mean_circularity <= 0.28:
             return True
-        if stroke_width_mean <= max(1.8, median_font_size * 0.06) and corner_density >= 0.03:
+        if stroke_width_mean <= max(1.55, median_font_size * 0.055) and corner_density >= 0.035:
             return True
         return False
 

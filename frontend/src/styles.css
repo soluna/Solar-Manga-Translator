@@ -409,13 +409,33 @@ h2 {
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(116, 88, 62, 0.12);
   border-radius: 22px;
-  padding: 16px;
+  padding: 14px;
+}
+
+.style-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.style-preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.style-preview-label {
+  color: #735c49;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
 .style-preview-canvas {
   position: relative;
   overflow: hidden;
-  border-radius: 18px;
+  border-radius: 16px;
   background: #efe1d2;
 }
 
@@ -461,7 +481,7 @@ h2 {
 .style-region-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   max-height: 920px;
   overflow: auto;
 }
@@ -469,9 +489,9 @@ h2 {
 .style-region-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  border-radius: 18px;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 16px;
   background: rgba(255, 248, 241, 0.86);
   border: 1px solid rgba(116, 88, 62, 0.12);
   cursor: pointer;
@@ -518,17 +538,18 @@ h2 {
 
 .style-source-text {
   color: #7a614d;
-  font-size: 0.74rem;
-  line-height: 1.45;
+  margin: 0;
+  font-size: 0.69rem;
+  line-height: 1.28;
 }
 
 .style-override-field {
-  padding: 10px 12px;
+  padding: 7px 9px;
 }
 
 .region-card-controls {
   display: grid;
-  grid-template-columns: minmax(168px, 220px) minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 230px) minmax(0, 1fr);
   gap: 8px;
   align-items: start;
 }
@@ -538,36 +559,33 @@ h2 {
 }
 
 .compact-field {
-  gap: 6px;
-}
-
-.compact-field span {
-  font-size: 0.82rem;
+  gap: 4px;
 }
 
 .compact-field-grow {
   min-width: 0;
 }
 
-.translation-review-textarea {
+.compact-select-field select,
+.translation-review-input {
   width: 100%;
-  min-height: 74px;
-  resize: vertical;
   border: 1px solid rgba(155, 95, 45, 0.24);
   border-radius: 12px;
   background: #fffdf9;
-  padding: 9px 11px;
+  min-height: 38px;
+  padding: 8px 10px;
   color: #2b2118;
-  line-height: 1.45;
+  line-height: 1.2;
 }
 
-.translation-review-textarea:focus {
+.compact-select-field select {
+  appearance: none;
+}
+
+.compact-select-field select:focus,
+.translation-review-input:focus {
   outline: 2px solid rgba(216, 108, 42, 0.2);
   border-color: rgba(185, 71, 44, 0.34);
-}
-
-.compact-textarea {
-  min-height: 64px;
 }
 
 @media (max-width: 768px) {
@@ -599,6 +617,10 @@ h2 {
 
   .style-toolbar,
   .style-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .style-preview-grid {
     grid-template-columns: 1fr;
   }
 

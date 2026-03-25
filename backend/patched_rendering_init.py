@@ -291,7 +291,15 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
                           box_width: int, box_height: int, hyphenate: bool, line_spacing: int,
                           default_font_path: str):
     candidate_directions = _get_candidate_directions(region)
-    search_sizes = [target_font_size] if font_size_fixed is not None else list(range(target_font_size, font_size_minimum - 1, -1))
+    if font_size_fixed is not None:
+        search_sizes = [target_font_size]
+    else:
+        growth_allowance = max(4, int(round(target_font_size * 0.3)))
+        upper_font_size = max(
+            target_font_size,
+            min(max(box_width, box_height), target_font_size + growth_allowance),
+        )
+        search_sizes = list(range(upper_font_size, font_size_minimum - 1, -1))
 
     best_fit = None
     best_fallback = None

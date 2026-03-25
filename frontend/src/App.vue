@@ -268,6 +268,8 @@ const mergedInspectionPages = computed(() => {
         stored_name: page.stored_name,
         name: page.name,
         image_url: page.image_url,
+        source_image_url: page.source_image_url || '',
+        translated_image_url: page.translated_image_url || page.image_url,
         image_width: page.image_width,
         image_height: page.image_height,
         regions: new Map()
@@ -290,6 +292,12 @@ const mergedInspectionPages = computed(() => {
     const mergedPage = ensurePage(page)
     if (!mergedPage.image_url) {
       mergedPage.image_url = page.image_url
+    }
+    if (!mergedPage.source_image_url && page.source_image_url) {
+      mergedPage.source_image_url = page.source_image_url
+    }
+    if (!mergedPage.translated_image_url && page.translated_image_url) {
+      mergedPage.translated_image_url = page.translated_image_url
     }
     for (const region of page.regions || []) {
       const existing = mergedPage.regions.get(region.id) || { id: region.id, index: region.index, bbox: region.bbox }
@@ -547,7 +555,6 @@ function updateStyleOverride(region, nextStyle) {
   }
   styleRegionOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
-  status.value = '已更新当前文本框的样式覆盖。点“仅重新嵌字”即可查看新效果。'
 }
 
 function updateTranslationOverride(region, nextTranslation) {
@@ -563,7 +570,6 @@ function updateTranslationOverride(region, nextTranslation) {
 
   translationRegionOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
-  status.value = '已更新当前文本框的译文。点“仅重新嵌字”即可查看新效果。'
 }
 
 function clearTranslationOverrides() {
@@ -1474,22 +1480,48 @@ watch(
 
         <div class="style-workbench">
           <div class="style-preview">
-            <div class="style-preview-canvas">
-              <img
-                :alt="selectedEditPage.name"
-                :src="withCacheBust(toApiUrl(selectedEditPage.image_url))"
-              />
+            <div class="style-preview-grid">
+              <div class="style-preview-panel">
+                <div class="style-preview-label">原图</div>
+                <div class="style-preview-canvas">
+                  <img
+                    :alt="`${selectedEditPage.name} 原图`"
+                    :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
+                  />
 
-              <button
-                v-for="region in selectedEditPage.regions"
-                :key="region.id"
-                type="button"
-                :class="['style-box', selectedEditRegionKey === region.id ? 'active' : '']"
-                :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                @click="selectedEditRegionKey = region.id"
-              >
-                <span>{{ region.index + 1 }}</span>
-              </button>
+                  <button
+                    v-for="region in selectedEditPage.regions"
+                    :key="`source-${region.id}`"
+                    type="button"
+                    :class="['style-box', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :style="getStyleRegionBoxStyle(region, selectedEditPage)"
+                    @click="selectedEditRegionKey = region.id"
+                  >
+                    <span>{{ region.index + 1 }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="style-preview-panel">
+                <div class="style-preview-label">当前译图</div>
+                <div class="style-preview-canvas">
+                  <img
+                    :alt="`${selectedEditPage.name} 译图`"
+                    :src="withCacheBust(toApiUrl(selectedEditPage.translated_image_url || selectedEditPage.image_url))"
+                  />
+
+                  <button
+                    v-for="region in selectedEditPage.regions"
+                    :key="`translated-${region.id}`"
+                    type="button"
+                    :class="['style-box', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :style="getStyleRegionBoxStyle(region, selectedEditPage)"
+                    @click="selectedEditRegionKey = region.id"
+                  >
+                    <span>{{ region.index + 1 }}</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1509,12 +1541,6 @@ watch(
                   >
                     自动：{{ getStyleLabel(region.auto_style) }}
                   </span>
-                  <span
-                    v-if="config.font_style_mode === 'auto-map'"
-                    class="style-badge style-badge-strong"
-                  >
-                    当前：{{ getStyleLabel(getResolvedStyle(region)) }}
-                  </span>
                   <span v-if="translationRegionOverrides[region.id]" class="style-badge style-badge-strong">已改译文</span>
                 </div>
               </div>
@@ -1522,13 +1548,19 @@ watch(
               <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
 
               <div class="region-card-controls" :class="{ compact: config.font_style_mode !== 'auto-map' }">
-                <label v-if="config.font_style_mode === 'auto-map'" class="field style-override-field compact-field">
-                  <span>字体样式</span>
+                <label
+                  v-if="config.font_style_mode === 'auto-map'"
+                  class="field style-override-field compact-field compact-select-field"
+                  @click.stop
+                  @mousedown.stop
+                >
                   <select
                     :value="getRegionOverrideValue(region)"
+                    @click.stop
+                    @mousedown.stop
                     @change="updateStyleOverride(region, $event.target.value)"
                   >
-                    <option value="">跟随自动识别（{{ getStyleLabel(region.auto_style) }}）</option>
+                    <option value="">当前：{{ getStyleLabel(getResolvedStyle(region)) }}（跟随自动）</option>
                     <option
                       v-for="option in styleBucketOptions"
                       :key="`${region.id}-${option.value}`"
@@ -1539,14 +1571,19 @@ watch(
                   </select>
                 </label>
 
-                <label class="field style-override-field compact-field compact-field-grow">
-                  <span>译文</span>
-                  <textarea
-                    class="translation-review-textarea compact-textarea"
+                <label
+                  class="field style-override-field compact-field compact-field-grow"
+                  @click.stop
+                  @mousedown.stop
+                >
+                  <input
+                    class="translation-review-input"
                     :value="getEditRegionText(region)"
-                    rows="2"
+                    type="text"
+                    @click.stop
+                    @mousedown.stop
                     @input="updateTranslationOverride(region, $event.target.value)"
-                  ></textarea>
+                  />
                 </label>
               </div>
             </article>

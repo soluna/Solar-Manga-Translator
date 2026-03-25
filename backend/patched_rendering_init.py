@@ -206,6 +206,45 @@ def _direction_priority(region: TextBlock, direction: str) -> int:
     return 1 if direction.startswith('h') == region.horizontal else 0
 
 
+def _alignment_offset(alignment: str, available_space: int) -> int:
+    if available_space <= 0:
+        return 0
+    if alignment == 'center':
+        return available_space // 2
+    if alignment == 'right':
+        return available_space
+    return 0
+
+
+def _compose_render_canvas(
+    temp_box: np.ndarray,
+    target_width: int,
+    target_height: int,
+    alignment: str,
+    render_horizontally: bool,
+) -> np.ndarray:
+    canvas = np.zeros((target_height, target_width, 4), dtype=np.uint8)
+    if temp_box is None or temp_box.size == 0:
+        return canvas
+
+    box_height, box_width = temp_box.shape[:2]
+    clipped_width = min(box_width, target_width)
+    clipped_height = min(box_height, target_height)
+    clipped_box = temp_box[:clipped_height, :clipped_width]
+
+    if render_horizontally:
+        offset_x = _alignment_offset(alignment, target_width - clipped_width)
+        offset_y = 0
+    else:
+        # Keep vertical text columns anchored to the reading-side edge while
+        # letting alignment control the top/center/bottom placement.
+        offset_x = max(target_width - clipped_width, 0)
+        offset_y = _alignment_offset(alignment, target_height - clipped_height)
+
+    canvas[offset_y:offset_y + clipped_height, offset_x:offset_x + clipped_width] = clipped_box
+    return canvas
+
+
 def _select_region_layout(region: TextBlock, target_font_size: int, font_size_minimum: int, font_size_fixed: int,
                           box_width: int, box_height: int, hyphenate: bool, line_spacing: int,
                           default_font_path: str):
@@ -397,40 +436,15 @@ def render(
             line_spacing,
             getattr(region, 'letter_spacing', 1.0),
         )
-    h, w, _ = temp_box.shape
-    r_temp = w / h
-
-    box = None
-    if region.horizontal:
-        if r_temp > r_orig:
-            h_ext = int((w / r_orig - h) // 2) if r_orig > 0 else 0
-            if h_ext >= 0:
-                box = np.zeros((h + h_ext * 2, w, 4), dtype=np.uint8)
-                box[h_ext:h_ext+h, 0:w] = temp_box
-            else:
-                box = temp_box.copy()
-        else:
-            w_ext = int((h * r_orig - w) // 2)
-            if w_ext >= 0:
-                box = np.zeros((h, w + w_ext * 2, 4), dtype=np.uint8)
-                box[0:h, 0:w] = temp_box
-            else:
-                box = temp_box.copy()
-    else:
-        if r_temp > r_orig:
-            h_ext = int(w / (2 * r_orig) - h / 2) if r_orig > 0 else 0
-            if h_ext >= 0:
-                box = np.zeros((h + h_ext * 2, w, 4), dtype=np.uint8)
-                box[0:h, 0:w] = temp_box
-            else:
-                box = temp_box.copy()
-        else:
-            w_ext = int((h * r_orig - w) / 2)
-            if w_ext >= 0:
-                box = np.zeros((h, w + w_ext * 2, 4), dtype=np.uint8)
-                box[0:h, w_ext:w_ext+w] = temp_box
-            else:
-                box = temp_box.copy()
+    target_width = max(int(round(norm_h[0])), 1)
+    target_height = max(int(round(norm_v[0])), 1)
+    box = _compose_render_canvas(
+        temp_box,
+        target_width,
+        target_height,
+        region.alignment,
+        render_horizontally,
+    )
 
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 

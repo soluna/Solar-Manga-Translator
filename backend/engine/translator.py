@@ -151,10 +151,21 @@ class TranslatorEngine:
             )
 
         archive_base = self.temp_dir / f"{session_id}_translated"
-        archive_path = shutil.make_archive(
-            str(archive_base),
-            "zip",
-            root_dir=str(output_dir),
+        archive_files: list[Path] = []
+        for image in session["source_images"]:
+            current_output = self._current_translated_output(
+                session,
+                output_dir,
+                image["stored_name"],
+                config["rerender_output_format"],
+            )
+            if current_output is not None:
+                archive_files.append(current_output)
+
+        archive_path = self._make_selected_archive(
+            Path(f"{archive_base}.zip"),
+            archive_files,
+            output_dir,
         )
         session["download_path"] = archive_path
         session["last_config"] = config
@@ -335,18 +346,24 @@ class TranslatorEngine:
         reported: set[Path],
         progress_callback: ProgressCallback,
     ) -> None:
-        total = len(expected_outputs)
+        output_dir = Path(session["translated_dir"])
+        total = len(session["source_images"])
         deferred_output_names = session.get("deferred_output_names", set())
 
-        for index, output_path in enumerate(expected_outputs, start=1):
-            if output_path in reported or not output_path.exists():
+        for index, source_meta in enumerate(session["source_images"], start=1):
+            output_path = self._current_translated_output(
+                session,
+                output_dir,
+                source_meta["stored_name"],
+                "source",
+            )
+            if output_path is None or output_path in reported or not output_path.exists():
                 continue
 
-            if output_path.name in deferred_output_names:
+            if source_meta["stored_name"] in deferred_output_names:
                 continue
 
             reported.add(output_path)
-            source_meta = session["source_images"][index - 1]
             self._update_translated_output_map(session, source_meta["stored_name"], output_path)
             await progress_callback(
                 {
@@ -853,13 +870,24 @@ class TranslatorEngine:
         temp_output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(temp_output_dir)
         self._prepare_style_rerender_debug_dir(session_id, reset=True)
+        rerender_variant = self._next_rerender_variant(session)
 
         for image in session["source_images"]:
             source_path = source_dir / image["stored_name"]
-            output_path = temp_output_dir / image["stored_name"]
+            output_path = self._translated_output_path(
+                temp_output_dir,
+                image["stored_name"],
+                config["rerender_output_format"],
+                rerender_variant,
+            )
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
             if not self._has_rerenderable_page_cache(cache_page_dir):
-                existing_output = self._find_existing_translated_output(output_dir, image["stored_name"], "source")
+                existing_output = self._current_translated_output(
+                    session,
+                    output_dir,
+                    image["stored_name"],
+                    "source",
+                )
                 if existing_output is not None:
                     shutil.copy2(existing_output, output_path)
                 else:
@@ -893,9 +921,13 @@ class TranslatorEngine:
                     regions=prepared_regions or [],
                 )
 
-        self._clear_directory(output_dir)
         for generated_file in temp_output_dir.iterdir():
-            shutil.move(str(generated_file), str(output_dir / generated_file.name))
+            final_output = output_dir / generated_file.name
+            shutil.move(str(generated_file), str(final_output))
+            for image in session["source_images"]:
+                if Path(image["stored_name"]).stem == generated_file.stem.split("__", 1)[0]:
+                    self._update_translated_output_map(session, image["stored_name"], final_output)
+                    break
         shutil.rmtree(temp_output_dir, ignore_errors=True)
 
         await progress_callback(

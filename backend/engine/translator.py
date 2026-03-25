@@ -192,6 +192,10 @@ class TranslatorEngine:
             }
         )
 
+        style_debug_enabled = config.get("font_style_mode") == "auto-map"
+        if style_debug_enabled:
+            self._prepare_style_rerender_debug_dir(session_id, reset=True)
+
         archive_files: list[Path] = []
         for index, image in enumerate(session["source_images"], start=1):
             source_path = source_dir / image["stored_name"]
@@ -203,7 +207,33 @@ class TranslatorEngine:
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
 
             if self._has_rerenderable_page_cache(cache_page_dir):
-                await self._render_cached_page(source_path, output_path, cache_page_dir, config)
+                prepared_regions = None
+                debug_info = None
+                if style_debug_enabled:
+                    source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+                    if source_bgr is not None:
+                        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+                        prepared_regions, debug_info = self._prepare_cached_regions_for_edit_with_debug(
+                            source_rgb,
+                            cache_page_dir,
+                            config,
+                            image["stored_name"],
+                        )
+                await self._render_cached_page(
+                    source_path,
+                    output_path,
+                    cache_page_dir,
+                    config,
+                    prepared_regions=prepared_regions,
+                )
+                if style_debug_enabled and debug_info is not None:
+                    self._write_style_rerender_debug_report(
+                        session_id=session_id,
+                        stored_name=image["stored_name"],
+                        output_path=output_path,
+                        debug_info=debug_info,
+                        regions=prepared_regions or [],
+                    )
             elif not output_path.exists():
                 self._copy_source_to_output(source_path, output_path)
 
@@ -778,6 +808,7 @@ class TranslatorEngine:
         temp_output_dir = self.temp_dir / f"{session_id}_style_rerender"
         temp_output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(temp_output_dir)
+        self._prepare_style_rerender_debug_dir(session_id, reset=True)
 
         for image in session["source_images"]:
             source_path = source_dir / image["stored_name"]
@@ -790,7 +821,32 @@ class TranslatorEngine:
                 else:
                     self._copy_source_to_output(source_path, output_path)
                 continue
-            await self._render_cached_page(source_path, output_path, cache_page_dir, config)
+            prepared_regions = None
+            debug_info = None
+            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+            if source_bgr is not None:
+                source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+                prepared_regions, debug_info = self._prepare_cached_regions_for_edit_with_debug(
+                    source_rgb,
+                    cache_page_dir,
+                    config,
+                    image["stored_name"],
+                )
+            await self._render_cached_page(
+                source_path,
+                output_path,
+                cache_page_dir,
+                config,
+                prepared_regions=prepared_regions,
+            )
+            if debug_info is not None:
+                self._write_style_rerender_debug_report(
+                    session_id=session_id,
+                    stored_name=image["stored_name"],
+                    output_path=output_path,
+                    debug_info=debug_info,
+                    regions=prepared_regions or [],
+                )
 
         self._clear_directory(output_dir)
         for generated_file in temp_output_dir.iterdir():
@@ -1488,6 +1544,16 @@ class TranslatorEngine:
         debug_dir.mkdir(parents=True, exist_ok=True)
         return debug_dir
 
+    def _style_rerender_debug_dir(self, session_id: str) -> Path:
+        return self.temp_dir / f"{session_id}_style_rerender_debug"
+
+    def _prepare_style_rerender_debug_dir(self, session_id: str, reset: bool) -> Path:
+        debug_dir = self._style_rerender_debug_dir(session_id)
+        if reset:
+            shutil.rmtree(debug_dir, ignore_errors=True)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        return debug_dir
+
     def _count_rerenderable_pages(self, session_id: str, session: dict[str, Any]) -> int:
         cache_dir = Path(session.get("rerender_cache_dir") or self._rerender_cache_dir(session_id))
         return sum(
@@ -1524,6 +1590,26 @@ class TranslatorEngine:
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
         return self._dedupe_overlapping_regions(regions)
+
+    def _prepare_cached_regions_for_edit_with_debug(
+        self,
+        source_rgb: np.ndarray,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+        stored_name: str,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        regions = self._load_cached_regions(page_cache_dir)
+        raw_count = len(regions)
+        self._apply_region_translation_overrides(regions, config, stored_name)
+        self._apply_region_font_styles(source_rgb, regions, config, stored_name)
+        deduped_regions, suppressed = self._dedupe_overlapping_regions(regions, capture_debug=True)
+        surviving_suspects = self._find_remaining_overlap_suspects(deduped_regions)
+        return deduped_regions, {
+            "raw_count": raw_count,
+            "deduped_count": len(deduped_regions),
+            "suppressed": suppressed,
+            "surviving_suspects": surviving_suspects,
+        }
 
     def _make_style_region_key(self, stored_name: str, index: int) -> str:
         return f"{stored_name}::{index}"
@@ -1583,9 +1669,13 @@ class TranslatorEngine:
             + font_size
         )
 
-    def _dedupe_overlapping_regions(self, regions: list[Any]) -> list[Any]:
+    def _dedupe_overlapping_regions(
+        self,
+        regions: list[Any],
+        capture_debug: bool = False,
+    ) -> list[Any] | tuple[list[Any], list[dict[str, Any]]]:
         if len(regions) < 2:
-            return regions
+            return (regions, []) if capture_debug else regions
 
         indexed_regions = list(enumerate(regions))
         indexed_regions.sort(
@@ -1593,6 +1683,7 @@ class TranslatorEngine:
             reverse=True,
         )
         suppressed: set[int] = set()
+        suppressed_debug: list[dict[str, Any]] = []
 
         for position, (index, region) in enumerate(indexed_regions):
             if index in suppressed:
@@ -1608,21 +1699,188 @@ class TranslatorEngine:
 
                 if text_similarity >= 0.72 and center_ratio <= 0.36:
                     suppressed.add(other_index)
+                    if capture_debug:
+                        suppressed_debug.append(
+                            self._build_overlap_debug_entry(
+                                kept_index=index,
+                                kept_region=region,
+                                other_index=other_index,
+                                other_region=other_region,
+                                smaller_cover=smaller_cover,
+                                iou=iou,
+                                center_ratio=center_ratio,
+                                text_similarity=text_similarity,
+                                reason="high_similarity_center_overlap",
+                            )
+                        )
                     continue
 
                 if text_similarity >= 0.55 and smaller_cover >= 0.78:
                     suppressed.add(other_index)
+                    if capture_debug:
+                        suppressed_debug.append(
+                            self._build_overlap_debug_entry(
+                                kept_index=index,
+                                kept_region=region,
+                                other_index=other_index,
+                                other_region=other_region,
+                                smaller_cover=smaller_cover,
+                                iou=iou,
+                                center_ratio=center_ratio,
+                                text_similarity=text_similarity,
+                                reason="high_similarity_large_cover",
+                            )
+                        )
                     continue
 
                 if text_similarity < 0.38 and smaller_cover < 0.9:
                     continue
 
                 suppressed.add(other_index)
+                if capture_debug:
+                    suppressed_debug.append(
+                        self._build_overlap_debug_entry(
+                            kept_index=index,
+                            kept_region=region,
+                            other_index=other_index,
+                            other_region=other_region,
+                            smaller_cover=smaller_cover,
+                            iou=iou,
+                            center_ratio=center_ratio,
+                            text_similarity=text_similarity,
+                            reason="fallback_overlap_suppression",
+                        )
+                    )
 
         if not suppressed:
-            return regions
+            return (regions, suppressed_debug) if capture_debug else regions
 
-        return [region for index, region in enumerate(regions) if index not in suppressed]
+        deduped_regions = [region for index, region in enumerate(regions) if index not in suppressed]
+        if capture_debug:
+            return deduped_regions, suppressed_debug
+        return deduped_regions
+
+    def _build_overlap_debug_entry(
+        self,
+        kept_index: int,
+        kept_region: Any,
+        other_index: int,
+        other_region: Any,
+        smaller_cover: float,
+        iou: float,
+        center_ratio: float,
+        text_similarity: float,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "reason": reason,
+            "kept_index": kept_index,
+            "other_index": other_index,
+            "smaller_cover": round(smaller_cover, 4),
+            "iou": round(iou, 4),
+            "center_ratio": round(center_ratio, 4),
+            "text_similarity": round(text_similarity, 4),
+            "kept_bbox": list(self._region_bbox(kept_region)),
+            "other_bbox": list(self._region_bbox(other_region)),
+            "kept_text": self._region_display_text(kept_region),
+            "other_text": self._region_display_text(other_region),
+            "kept_style": str(getattr(kept_region, "font_style", "") or ""),
+            "other_style": str(getattr(other_region, "font_style", "") or ""),
+            "kept_font": os.path.basename(str(getattr(kept_region, "font_family", "") or "")),
+            "other_font": os.path.basename(str(getattr(other_region, "font_family", "") or "")),
+        }
+
+    def _find_remaining_overlap_suspects(self, regions: list[Any]) -> list[dict[str, Any]]:
+        suspects: list[dict[str, Any]] = []
+        for left_index, left_region in enumerate(regions):
+            for right_index in range(left_index + 1, len(regions)):
+                right_region = regions[right_index]
+                smaller_cover, iou, center_ratio = self._region_overlap_metrics(left_region, right_region)
+                if smaller_cover < 0.55 and not (iou >= 0.33 and center_ratio <= 0.45):
+                    continue
+                text_similarity = self._region_text_similarity(left_region, right_region)
+                suspects.append(
+                    self._build_overlap_debug_entry(
+                        kept_index=left_index,
+                        kept_region=left_region,
+                        other_index=right_index,
+                        other_region=right_region,
+                        smaller_cover=smaller_cover,
+                        iou=iou,
+                        center_ratio=center_ratio,
+                        text_similarity=text_similarity,
+                        reason="surviving_overlap_candidate",
+                    )
+                )
+
+        suspects.sort(
+            key=lambda item: (
+                item["smaller_cover"],
+                item["iou"],
+                item["text_similarity"],
+            ),
+            reverse=True,
+        )
+        return suspects[:12]
+
+    def _region_debug_entry(self, index: int, region: Any) -> dict[str, Any]:
+        return {
+            "index": index,
+            "bbox": list(self._region_bbox(region)),
+            "style_region_key": str(getattr(region, "style_region_key", "") or ""),
+            "translation_region_key": str(getattr(region, "translation_region_key", "") or ""),
+            "font_style": str(getattr(region, "font_style", "") or ""),
+            "auto_font_style": str(getattr(region, "auto_font_style", "") or ""),
+            "override_font_style": str(getattr(region, "override_font_style", "") or ""),
+            "font_family": os.path.basename(str(getattr(region, "font_family", "") or "")),
+            "translation": self._region_display_text(region),
+        }
+
+    def _write_style_rerender_debug_report(
+        self,
+        session_id: str,
+        stored_name: str,
+        output_path: Path,
+        debug_info: dict[str, Any],
+        regions: list[Any],
+    ) -> None:
+        debug_dir = self._prepare_style_rerender_debug_dir(session_id, reset=False)
+        report_path = debug_dir / f"{Path(stored_name).stem}.json"
+        report = {
+            "stored_name": stored_name,
+            "output_name": output_path.name,
+            "raw_count": int(debug_info.get("raw_count", 0)),
+            "deduped_count": int(debug_info.get("deduped_count", len(regions))),
+            "suppressed_count": len(debug_info.get("suppressed", [])),
+            "surviving_overlap_count": len(debug_info.get("surviving_suspects", [])),
+            "regions": [self._region_debug_entry(index, region) for index, region in enumerate(regions)],
+            "suppressed": debug_info.get("suppressed", []),
+            "surviving_suspects": debug_info.get("surviving_suspects", []),
+        }
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            "[DEBUG] Style rerender report",
+            f"page={stored_name}",
+            f"raw={report['raw_count']}",
+            f"deduped={report['deduped_count']}",
+            f"suppressed={report['suppressed_count']}",
+            f"surviving={report['surviving_overlap_count']}",
+            f"output={output_path.name}",
+            f"report={report_path}",
+        )
+        for suspect in report["surviving_suspects"][:5]:
+            print(
+                "[DEBUG] Surviving overlap suspect",
+                f"page={stored_name}",
+                f"kept={suspect['kept_index']}",
+                f"other={suspect['other_index']}",
+                f"cover={suspect['smaller_cover']}",
+                f"iou={suspect['iou']}",
+                f"center={suspect['center_ratio']}",
+                f"sim={suspect['text_similarity']}",
+                f"kept_font={suspect['kept_font']}",
+                f"other_font={suspect['other_font']}",
+            )
 
     def _region_source_text(self, region: Any) -> str:
         text_value = str(getattr(region, "text", "") or "").strip()
@@ -2010,6 +2268,7 @@ class TranslatorEngine:
         page_cache_dir: Path,
         config: dict[str, Any],
         base_image_rgb: np.ndarray | None = None,
+        prepared_regions: list[Any] | None = None,
     ) -> None:
         self._ensure_vendor_import_path()
         from PIL import Image
@@ -2032,11 +2291,15 @@ class TranslatorEngine:
             if base_image_rgb is not None
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
-        regions = self._prepare_cached_regions_for_edit(
-            source_rgb,
-            page_cache_dir,
-            config,
-            source_path.name,
+        regions = (
+            prepared_regions
+            if prepared_regions is not None
+            else self._prepare_cached_regions_for_edit(
+                source_rgb,
+                page_cache_dir,
+                config,
+                source_path.name,
+            )
         )
         for region in regions:
             region._alignment = config["render_alignment"]

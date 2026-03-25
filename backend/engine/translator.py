@@ -225,6 +225,7 @@ class TranslatorEngine:
                     cache_page_dir,
                     config,
                     prepared_regions=prepared_regions,
+                    debug_output_dir=self._prepare_style_rerender_debug_dir(session_id, reset=False) / Path(image["stored_name"]).stem if style_debug_enabled else None,
                 )
                 if style_debug_enabled and debug_info is not None:
                     self._write_style_rerender_debug_report(
@@ -838,6 +839,7 @@ class TranslatorEngine:
                 cache_page_dir,
                 config,
                 prepared_regions=prepared_regions,
+                debug_output_dir=self._prepare_style_rerender_debug_dir(session_id, reset=False) / Path(image["stored_name"]).stem,
             )
             if debug_info is not None:
                 self._write_style_rerender_debug_report(
@@ -2269,10 +2271,15 @@ class TranslatorEngine:
         config: dict[str, Any],
         base_image_rgb: np.ndarray | None = None,
         prepared_regions: list[Any] | None = None,
+        debug_output_dir: Path | None = None,
     ) -> None:
         self._ensure_vendor_import_path()
         from PIL import Image
-        from manga_translator.rendering import dispatch as dispatch_rendering
+        from manga_translator.rendering import (
+            dispatch as dispatch_rendering,
+            render as render_region,
+            resize_regions_to_font_size,
+        )
         from manga_translator.save import save_result
         from manga_translator.utils import Context, dump_image, load_image
 
@@ -2305,18 +2312,74 @@ class TranslatorEngine:
             region._alignment = config["render_alignment"]
             region.letter_spacing = config["render_letter_spacing"]
 
-        rendered_rgb = await dispatch_rendering(
-            inpainted_rgb.copy(),
-            regions,
-            font_path=config["font_path"],
-            font_size_fixed=None,
-            font_size_offset=-6,
-            font_size_minimum=8,
-            hyphenate=True,
-            render_mask=None,
-            line_spacing=None,
-            disable_font_border=False,
-        )
+        if debug_output_dir is None:
+            rendered_rgb = await dispatch_rendering(
+                inpainted_rgb.copy(),
+                regions,
+                font_path=config["font_path"],
+                font_size_fixed=None,
+                font_size_offset=-6,
+                font_size_minimum=8,
+                hyphenate=True,
+                render_mask=None,
+                line_spacing=None,
+                disable_font_border=False,
+            )
+        else:
+            debug_output_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(
+                str(debug_output_dir / "00_base.png"),
+                cv2.cvtColor(inpainted_rgb, cv2.COLOR_RGB2BGR),
+            )
+
+            rendered_rgb = inpainted_rgb.copy()
+            dst_points_list = resize_regions_to_font_size(
+                rendered_rgb,
+                regions,
+                None,
+                -6,
+                8,
+                True,
+                None,
+                config["font_path"],
+            )
+
+            render_steps: list[dict[str, Any]] = []
+            for index, (region, dst_points) in enumerate(zip(regions, dst_points_list), start=1):
+                rendered_rgb = render_region(
+                    rendered_rgb,
+                    region,
+                    dst_points,
+                    True,
+                    None,
+                    False,
+                    config["font_path"],
+                )
+                step_name = f"step_{index:02d}.png"
+                cv2.imwrite(
+                    str(debug_output_dir / step_name),
+                    cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2BGR),
+                )
+                render_steps.append(
+                    {
+                        "index": index - 1,
+                        "step_image": step_name,
+                        "bbox": list(self._region_bbox(region)),
+                        "font_style": str(getattr(region, "font_style", "") or ""),
+                        "font_family": os.path.basename(str(getattr(region, "font_family", "") or "")),
+                        "translation": self._region_display_text(region),
+                    }
+                )
+
+            diff_rgb = cv2.absdiff(rendered_rgb, inpainted_rgb)
+            cv2.imwrite(
+                str(debug_output_dir / "99_text_diff.png"),
+                cv2.cvtColor(diff_rgb, cv2.COLOR_RGB2BGR),
+            )
+            (debug_output_dir / "render_steps.json").write_text(
+                json.dumps(render_steps, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         result_image = dump_image(source_image, rendered_rgb, alpha_ch)
 
         save_ctx = Context(save_quality=100, text_regions=regions, result=result_image)

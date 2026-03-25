@@ -528,8 +528,33 @@ h2 {
   line-height: 1.5;
 }
 
+.review-label {
+  color: #8c6a55;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .style-override-field {
   padding: 12px 14px;
+}
+
+.translation-review-textarea {
+  width: 100%;
+  min-height: 94px;
+  resize: vertical;
+  border: 1px solid rgba(155, 95, 45, 0.24);
+  border-radius: 12px;
+  background: #fffdf9;
+  padding: 10px 12px;
+  color: #2b2118;
+  line-height: 1.6;
+}
+
+.translation-review-textarea:focus {
+  outline: 2px solid rgba(216, 108, 42, 0.2);
+  border-color: rgba(185, 71, 44, 0.34);
 }
 
 @media (max-width: 768px) {

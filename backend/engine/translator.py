@@ -356,6 +356,9 @@ class TranslatorEngine:
             for style, font_key in style_font_keys.items()
         }
         style_region_overrides = self._normalize_style_region_overrides(raw_config.get("style_region_overrides"))
+        translation_region_overrides = self._normalize_translation_region_overrides(
+            raw_config.get("translation_region_overrides")
+        )
 
         return {
             "translator": translator,
@@ -370,6 +373,7 @@ class TranslatorEngine:
             "style_font_keys": style_font_keys,
             "style_font_paths": style_font_paths,
             "style_region_overrides": style_region_overrides,
+            "translation_region_overrides": translation_region_overrides,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
             "mask_cleanup_strength": mask_cleanup_strength,
@@ -446,6 +450,19 @@ class TranslatorEngine:
             style = self._normalize_style_bucket(value)
             if style:
                 normalized[key] = style
+        return normalized
+
+    def _normalize_translation_region_overrides(self, raw_value: Any) -> dict[str, str]:
+        if not isinstance(raw_value, dict):
+            return {}
+
+        normalized: dict[str, str] = {}
+        for key, value in raw_value.items():
+            if not isinstance(key, str):
+                continue
+            text = str(value or "").strip()
+            if text:
+                normalized[key] = text
         return normalized
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
@@ -705,6 +722,7 @@ class TranslatorEngine:
             source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
 
             regions = self._load_cached_regions(cache_page_dir)
+            self._apply_region_translation_overrides(regions, config, image["stored_name"])
             self._apply_region_font_styles(source_rgb, regions, config, image["stored_name"])
 
             preview_path = output_dir / image["stored_name"]
@@ -747,6 +765,67 @@ class TranslatorEngine:
             "styles": list(self.STYLE_BUCKETS),
             "pages": pages,
         }
+
+    async def inspect_translation_regions(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        pages: list[dict[str, Any]] = []
+
+        for image in session["source_images"]:
+            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            if not self._has_rerenderable_page_cache(cache_page_dir):
+                continue
+
+            source_path = source_dir / image["stored_name"]
+            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+            if source_bgr is None:
+                continue
+            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+
+            regions = self._load_cached_regions(cache_page_dir)
+            self._apply_region_translation_overrides(regions, config, image["stored_name"])
+
+            preview_path = output_dir / image["stored_name"]
+            preview_url = (
+                f"/output/{session_id}/translated/{image['stored_name']}"
+                if preview_path.exists()
+                else f"/output/{session_id}/source/{image['stored_name']}"
+            )
+
+            region_payloads: list[dict[str, Any]] = []
+            for index, region in enumerate(regions):
+                x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
+                region_payloads.append(
+                    {
+                        "id": getattr(region, "translation_region_key", self._make_style_region_key(image["stored_name"], index)),
+                        "index": index,
+                        "bbox": [x1, y1, x2, y2],
+                        "source_text": self._region_source_text(region),
+                        "machine_translation": str(getattr(region, "machine_translation", "") or ""),
+                        "override_translation": str(getattr(region, "translation_override", "") or ""),
+                        "current_translation": str(getattr(region, "translation", "") or ""),
+                        "preview_text": self._region_preview_text(region),
+                    }
+                )
+
+            pages.append(
+                {
+                    "stored_name": image["stored_name"],
+                    "name": image["name"],
+                    "image_url": preview_url,
+                    "image_width": int(source_rgb.shape[1]),
+                    "image_height": int(source_rgb.shape[0]),
+                    "regions": region_payloads,
+                }
+            )
+
+        return {"pages": pages}
 
     def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
         return config.get("image_cleanup_mode") in {"gemini-image", "seedream-image"}
@@ -1673,6 +1752,23 @@ class TranslatorEngine:
             region.font_style = resolved_style
             region.font_family = style_paths.get(resolved_style) or default_font_path
 
+    def _apply_region_translation_overrides(
+        self,
+        regions: list[Any],
+        config: dict[str, Any],
+        stored_name: str = "",
+    ) -> None:
+        overrides = config.get("translation_region_overrides") or {}
+        for index, region in enumerate(regions):
+            region_key = self._make_style_region_key(stored_name, index) if stored_name else str(index)
+            machine_translation = str(getattr(region, "translation", "") or "")
+            override_translation = str(overrides.get(region_key, "") or "").strip()
+            region.translation_region_key = region_key
+            region.machine_translation = machine_translation
+            region.translation_override = override_translation
+            if override_translation:
+                region.translation = override_translation
+
     async def _render_cached_page(
         self,
         source_path: Path,
@@ -1703,6 +1799,7 @@ class TranslatorEngine:
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
         regions = self._load_cached_regions(page_cache_dir)
+        self._apply_region_translation_overrides(regions, config, source_path.name)
         self._apply_region_font_styles(source_rgb, regions, config, source_path.name)
         for region in regions:
             region._alignment = config["render_alignment"]

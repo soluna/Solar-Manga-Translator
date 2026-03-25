@@ -222,6 +222,11 @@ const translatedDirPath = ref('')
 const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
+const reviewInspectionPages = ref([])
+const reviewInspectionLoading = ref(false)
+const selectedReviewPageKey = ref('')
+const selectedReviewRegionKey = ref('')
+const translationRegionOverrides = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const selectedStylePageKey = ref('')
@@ -237,8 +242,21 @@ const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
 const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
+const canInspectTranslations = computed(() => Boolean(sessionId.value))
 const canInspectStyles = computed(() => Boolean(sessionId.value) && config.value.font_style_mode === 'auto-map')
+const hasTranslationOverrides = computed(() => Object.keys(translationRegionOverrides.value).length > 0)
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
+const selectedReviewPage = computed(() => {
+  if (!reviewInspectionPages.value.length) {
+    return null
+  }
+
+  return (
+    reviewInspectionPages.value.find((page) => page.stored_name === selectedReviewPageKey.value)
+    || reviewInspectionPages.value[0]
+    || null
+  )
+})
 const selectedStylePage = computed(() => {
   if (!styleInspectionPages.value.length) {
     return null
@@ -300,10 +318,19 @@ function resetStyleInspector() {
   styleRegionOverrides.value = {}
 }
 
+function resetTranslationReview() {
+  reviewInspectionPages.value = []
+  reviewInspectionLoading.value = false
+  selectedReviewPageKey.value = ''
+  selectedReviewRegionKey.value = ''
+  translationRegionOverrides.value = {}
+}
+
 function buildRuntimeConfig() {
   return {
     ...config.value,
-    style_region_overrides: { ...styleRegionOverrides.value }
+    style_region_overrides: { ...styleRegionOverrides.value },
+    translation_region_overrides: { ...translationRegionOverrides.value }
   }
 }
 
@@ -313,6 +340,10 @@ function getStyleLabel(style) {
 
 function getRegionOverrideValue(region) {
   return styleRegionOverrides.value[region.id] || ''
+}
+
+function getReviewRegionText(region) {
+  return translationRegionOverrides.value[region.id] || region.current_translation || region.machine_translation || ''
 }
 
 function getStyleRegionBoxStyle(region, page) {
@@ -328,6 +359,39 @@ function getStyleRegionBoxStyle(region, page) {
     top: `${top}%`,
     width: `${boxWidth}%`,
     height: `${boxHeight}%`
+  }
+}
+
+function applyReviewInspectionPayload(payload) {
+  reviewInspectionPages.value = payload.pages || []
+  const nextOverrides = {}
+  for (const page of reviewInspectionPages.value) {
+    for (const region of page.regions || []) {
+      if (region.override_translation) {
+        nextOverrides[region.id] = region.override_translation
+      }
+    }
+  }
+  translationRegionOverrides.value = nextOverrides
+
+  if (!reviewInspectionPages.value.length) {
+    selectedReviewPageKey.value = ''
+    selectedReviewRegionKey.value = ''
+    return
+  }
+
+  if (!reviewInspectionPages.value.some((page) => page.stored_name === selectedReviewPageKey.value)) {
+    selectedReviewPageKey.value = reviewInspectionPages.value[0].stored_name
+  }
+
+  const currentPage = reviewInspectionPages.value.find((page) => page.stored_name === selectedReviewPageKey.value)
+  if (!currentPage) {
+    selectedReviewRegionKey.value = ''
+    return
+  }
+
+  if (!currentPage.regions.some((region) => region.id === selectedReviewRegionKey.value)) {
+    selectedReviewRegionKey.value = currentPage.regions[0]?.id || ''
   }
 }
 
@@ -352,6 +416,37 @@ function applyStyleInspectionPayload(payload) {
 
   if (!currentPage.regions.some((region) => region.id === selectedStyleRegionKey.value)) {
     selectedStyleRegionKey.value = currentPage.regions[0]?.id || ''
+  }
+}
+
+async function loadReviewInspection() {
+  if (!sessionId.value) {
+    reviewInspectionPages.value = []
+    selectedReviewPageKey.value = ''
+    selectedReviewRegionKey.value = ''
+    return
+  }
+
+  reviewInspectionLoading.value = true
+  try {
+    const response = await fetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ config: buildRuntimeConfig() })
+    })
+
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取翻译审校结果失败')
+    }
+
+    applyReviewInspectionPayload(payload)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取翻译审校结果失败'
+  } finally {
+    reviewInspectionLoading.value = false
   }
 }
 
@@ -401,6 +496,40 @@ function updateStyleOverride(region, nextStyle) {
   styleRegionOverrides.value = nextOverrides
   selectedStyleRegionKey.value = region.id
   status.value = '已更新当前文本框的样式覆盖。点“仅重新嵌字”即可查看新效果。'
+}
+
+function updateTranslationOverride(region, nextTranslation) {
+  const normalizedTranslation = String(nextTranslation || '').trim()
+  const machineTranslation = String(region.machine_translation || '').trim()
+  const nextOverrides = { ...translationRegionOverrides.value }
+
+  if (!normalizedTranslation || normalizedTranslation === machineTranslation) {
+    delete nextOverrides[region.id]
+    region.override_translation = ''
+    region.current_translation = machineTranslation
+    region.preview_text = machineTranslation
+  } else {
+    nextOverrides[region.id] = normalizedTranslation
+    region.override_translation = normalizedTranslation
+    region.current_translation = normalizedTranslation
+    region.preview_text = normalizedTranslation
+  }
+
+  translationRegionOverrides.value = nextOverrides
+  selectedReviewRegionKey.value = region.id
+  status.value = '已更新当前文本框的译文。点“仅重新嵌字”即可查看新效果。'
+}
+
+function clearTranslationOverrides() {
+  translationRegionOverrides.value = {}
+  for (const page of reviewInspectionPages.value) {
+    for (const region of page.regions || []) {
+      region.override_translation = ''
+      region.current_translation = region.machine_translation || ''
+      region.preview_text = region.current_translation
+    }
+  }
+  status.value = '已清空当前会话里的人工译文修改。'
 }
 
 function clearStyleOverrides() {
@@ -565,6 +694,7 @@ async function submitFile() {
   translatedDirPath.value = ''
   maskDebugDirPath.value = ''
   progress.value = { current: 0, total: 0 }
+  resetTranslationReview()
   resetStyleInspector()
   closeSocket()
 
@@ -662,6 +792,7 @@ function startTranslation(action = 'translate') {
       status.value = activeAction.value === 'rerender'
         ? `重嵌字完成，共输出 ${translatedImages.value.length} 张图片。`
         : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      void loadReviewInspection()
       if (config.value.font_style_mode === 'auto-map') {
         void loadStyleInspection()
       }
@@ -1226,6 +1357,133 @@ watch(
 
       <div v-else class="empty-state">
         点击“开始翻译”后，这里会随着后端处理逐张显示翻译后的页面。
+      </div>
+    </section>
+
+    <section v-if="canInspectTranslations" class="gallery-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Translation Review</p>
+          <h2>翻译审校</h2>
+        </div>
+        <div class="action-row">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="reviewInspectionLoading"
+            @click="loadReviewInspection"
+          >
+            {{ reviewInspectionLoading ? '正在读取...' : '刷新审校列表' }}
+          </button>
+
+          <button
+            v-if="hasTranslationOverrides"
+            class="secondary-button"
+            type="button"
+            @click="clearTranslationOverrides"
+          >
+            清空人工修改
+          </button>
+
+          <button
+            v-if="canRerender"
+            class="secondary-button"
+            type="button"
+            @click="startTranslation('rerender')"
+          >
+            确认译文并重新嵌字
+          </button>
+        </div>
+      </div>
+
+      <div v-if="reviewInspectionLoading" class="empty-state">
+        正在读取当前会话的逐框翻译结果…
+      </div>
+
+      <div v-else-if="selectedReviewPage" class="style-inspector">
+        <div class="style-toolbar">
+          <label class="field">
+            <span>审校页面</span>
+            <select v-model="selectedReviewPageKey">
+              <option
+                v-for="page in reviewInspectionPages"
+                :key="page.stored_name"
+                :value="page.stored_name"
+              >
+                {{ page.name }}（{{ page.regions.length }} 个文本框）
+              </option>
+            </select>
+          </label>
+
+          <div class="field style-summary">
+            <span>使用说明</span>
+            <small class="field-hint">
+              这里会把每个文本框的 OCR 原文和机翻结果列出来。你可以逐框改译文，确认后直接点“确认译文并重新嵌字”，就能复用缓存重新出图，不需要重跑 OCR 和擦字。
+            </small>
+          </div>
+        </div>
+
+        <div class="style-workbench">
+          <div class="style-preview">
+            <div class="style-preview-canvas">
+              <img
+                :alt="selectedReviewPage.name"
+                :src="withCacheBust(toApiUrl(selectedReviewPage.image_url))"
+              />
+
+              <button
+                v-for="region in selectedReviewPage.regions"
+                :key="region.id"
+                type="button"
+                :class="['style-box', selectedReviewRegionKey === region.id ? 'active' : '']"
+                :style="getStyleRegionBoxStyle(region, selectedReviewPage)"
+                @click="selectedReviewRegionKey = region.id"
+              >
+                <span>{{ region.index + 1 }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="style-region-list">
+            <article
+              v-for="region in selectedReviewPage.regions"
+              :key="`review-${region.id}`"
+              :class="['style-region-card', selectedReviewRegionKey === region.id ? 'active' : '']"
+              @click="selectedReviewRegionKey = region.id"
+            >
+              <div class="style-region-head">
+                <strong>文本框 #{{ region.index + 1 }}</strong>
+                <div class="style-badges">
+                  <span class="style-badge">机翻</span>
+                  <span v-if="region.override_translation" class="style-badge style-badge-strong">已人工修改</span>
+                </div>
+              </div>
+
+              <p class="review-label">原文 OCR</p>
+              <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+
+              <p class="review-label">机器翻译</p>
+              <p class="style-preview-text">{{ region.machine_translation || '（当前没有机翻结果）' }}</p>
+
+              <label class="field style-override-field">
+                <span>审校译文</span>
+                <textarea
+                  class="translation-review-textarea"
+                  :value="getReviewRegionText(region)"
+                  rows="3"
+                  @input="updateTranslationOverride(region, $event.target.value)"
+                ></textarea>
+                <small class="field-hint">
+                  留空或改回机翻原文，就会取消这一框的人工覆盖。
+                </small>
+              </label>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="empty-state">
+        当前会话还没有可审校的文本框缓存。先完整翻译一次，再回来逐框确认译文会更稳。
       </div>
     </section>
 

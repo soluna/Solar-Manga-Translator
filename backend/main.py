@@ -122,6 +122,19 @@ async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None 
     )
 
 
+@app.post("/api/review-regions/{session_id}")
+async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None = None):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在，请重新上传文件。")
+
+    return await translator_engine.inspect_translation_regions(
+        session_id=session_id,
+        session=session,
+        raw_config=(payload or {}).get("config", {}),
+    )
+
+
 @app.post("/api/upload")
 async def upload_comic(file: UploadFile = File(...)):
     filename = Path(file.filename or "upload").name

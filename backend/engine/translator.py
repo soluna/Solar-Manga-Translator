@@ -775,13 +775,27 @@ class TranslatorEngine:
         )
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
+        temp_output_dir = self.temp_dir / f"{session_id}_style_rerender"
+        temp_output_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_directory(temp_output_dir)
+
         for image in session["source_images"]:
             source_path = source_dir / image["stored_name"]
-            output_path = output_dir / image["stored_name"]
+            output_path = temp_output_dir / image["stored_name"]
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
             if not self._has_rerenderable_page_cache(cache_page_dir):
+                existing_output = self._find_existing_translated_output(output_dir, image["stored_name"], "source")
+                if existing_output is not None:
+                    shutil.copy2(existing_output, output_path)
+                else:
+                    self._copy_source_to_output(source_path, output_path)
                 continue
             await self._render_cached_page(source_path, output_path, cache_page_dir, config)
+
+        self._clear_directory(output_dir)
+        for generated_file in temp_output_dir.iterdir():
+            shutil.move(str(generated_file), str(output_dir / generated_file.name))
+        shutil.rmtree(temp_output_dir, ignore_errors=True)
 
         await progress_callback(
             {
@@ -1588,11 +1602,19 @@ class TranslatorEngine:
                     continue
 
                 smaller_cover, iou, center_ratio = self._region_overlap_metrics(region, other_region)
-                if smaller_cover < 0.84 and not (iou >= 0.62 and center_ratio <= 0.3):
+                text_similarity = self._region_text_similarity(region, other_region)
+                if smaller_cover < 0.72 and not (iou >= 0.5 and center_ratio <= 0.34):
                     continue
 
-                text_similarity = self._region_text_similarity(region, other_region)
-                if text_similarity < 0.38 and smaller_cover < 0.92:
+                if text_similarity >= 0.72 and center_ratio <= 0.36:
+                    suppressed.add(other_index)
+                    continue
+
+                if text_similarity >= 0.55 and smaller_cover >= 0.78:
+                    suppressed.add(other_index)
+                    continue
+
+                if text_similarity < 0.38 and smaller_cover < 0.9:
                     continue
 
                 suppressed.add(other_index)

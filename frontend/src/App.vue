@@ -500,53 +500,7 @@ function clearManualDraft(options = {}) {
   }
 }
 
-function startManualDraw(event, page) {
-  if (!manualDrawMode.value || !canCreateManualRegion.value || !page) {
-    return
-  }
-  if (event.button !== 0) {
-    return
-  }
-  const point = getCanvasPoint(event, page)
-  manualDrawDraft.value = {
-    stored_name: page.stored_name,
-    startX: point.x,
-    startY: point.y,
-    currentX: point.x,
-    currentY: point.y,
-    pointerId: event.pointerId
-  }
-  selectedEditPageKey.value = page.stored_name
-  event.currentTarget.setPointerCapture?.(event.pointerId)
-  event.preventDefault()
-}
-
-function updateManualDraw(event, page) {
-  const draft = manualDrawDraft.value
-  if (!draft || !page || draft.stored_name !== page.stored_name) {
-    return
-  }
-  const point = getCanvasPoint(event, page)
-  draft.currentX = point.x
-  draft.currentY = point.y
-}
-
-async function finishManualDraw(event, page) {
-  const draft = manualDrawDraft.value
-  if (!draft || !page || draft.stored_name !== page.stored_name) {
-    return
-  }
-  const point = getCanvasPoint(event, page)
-  draft.currentX = point.x
-  draft.currentY = point.y
-  event.currentTarget.releasePointerCapture?.(draft.pointerId)
-  const bbox = getManualDraftBBox(page)
-  if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
-    clearManualDraft({ keepMode: true })
-    status.value = '补漏框太小了，拖大一点会更稳。'
-    return
-  }
-
+async function submitManualDraw(page, bbox) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
@@ -574,8 +528,83 @@ async function finishManualDraw(event, page) {
     errorMessage.value = error instanceof Error ? error.message : '新增补漏框失败'
   } finally {
     creatingManualRegion.value = false
-    clearManualDraft({ keepMode: true })
   }
+}
+
+function startManualDraw(event, page) {
+  if (!manualDrawMode.value || !canCreateManualRegion.value || !page) {
+    return
+  }
+  if (event.button !== 0) {
+    return
+  }
+
+  const point = getCanvasPoint(event, page)
+  const existingDraft = manualDrawDraft.value
+  if (existingDraft && existingDraft.stored_name === page.stored_name) {
+    existingDraft.currentX = point.x
+    existingDraft.currentY = point.y
+    existingDraft.awaitingSecondPoint = false
+    finishManualDraw(event, page, { commit: true })
+    event.preventDefault()
+    return
+  }
+
+  manualDrawDraft.value = {
+    stored_name: page.stored_name,
+    startX: point.x,
+    startY: point.y,
+    currentX: point.x,
+    currentY: point.y,
+    pointerId: event.pointerId,
+    awaitingSecondPoint: true,
+    moved: false
+  }
+  selectedEditPageKey.value = page.stored_name
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+
+function updateManualDraw(event, page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  if (Math.abs(draft.currentX - draft.startX) >= 4 || Math.abs(draft.currentY - draft.startY) >= 4) {
+    draft.awaitingSecondPoint = false
+    draft.moved = true
+  }
+}
+
+async function finishManualDraw(event, page, options = {}) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  if (event.currentTarget.hasPointerCapture?.(draft.pointerId)) {
+    event.currentTarget.releasePointerCapture?.(draft.pointerId)
+  }
+
+  if (!options.commit && draft.awaitingSecondPoint && !draft.moved) {
+    event.preventDefault()
+    return
+  }
+
+  const bbox = getManualDraftBBox(page)
+  if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
+    clearManualDraft({ keepMode: true })
+    status.value = '补漏框太小了，拖大一点会更稳。'
+    return
+  }
+
+  clearManualDraft({ keepMode: true })
+  await submitManualDraw(page, bbox)
 }
 
 async function deleteManualRegion(region) {

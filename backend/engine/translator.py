@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import time
+import zipfile
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -28,6 +29,7 @@ class TranslatorEngine:
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
+    TRANSLATED_OUTPUT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
     DOUBAO_ALLOWED_MODELS = {
         "doubao-seed-translation-250915",
         "doubao-seed-2-0-mini-260215",
@@ -189,15 +191,23 @@ class TranslatorEngine:
             }
         )
 
+        archive_files: list[Path] = []
         for index, image in enumerate(session["source_images"], start=1):
             source_path = source_dir / image["stored_name"]
-            output_path = output_dir / image["stored_name"]
+            output_path = self._translated_output_path(
+                output_dir,
+                image["stored_name"],
+                config["rerender_output_format"],
+            )
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
 
             if self._has_rerenderable_page_cache(cache_page_dir):
                 await self._render_cached_page(source_path, output_path, cache_page_dir, config)
             elif not output_path.exists():
-                shutil.copy2(source_path, output_path)
+                self._copy_source_to_output(source_path, output_path)
+
+            self._prune_translated_output_variants(output_dir, image["stored_name"], keep=output_path)
+            archive_files.append(output_path)
 
             await progress_callback(
                 {
@@ -210,11 +220,7 @@ class TranslatorEngine:
             )
 
         archive_base = self.temp_dir / f"{session_id}_translated"
-        archive_path = shutil.make_archive(
-            str(archive_base),
-            "zip",
-            root_dir=str(output_dir),
-        )
+        archive_path = self._make_selected_archive(Path(f"{archive_base}.zip"), archive_files, output_dir)
         session["download_path"] = archive_path
         session["last_config"] = config
 
@@ -352,6 +358,7 @@ class TranslatorEngine:
         image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
         mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
+        rerender_output_format = self._normalize_rerender_output_format(raw_config.get("rerender_output_format"))
         style_font_keys = self._normalize_style_font_keys(raw_config)
         style_font_paths = {
             style: self._resolve_font_path(font_key)
@@ -378,6 +385,7 @@ class TranslatorEngine:
             "translation_region_overrides": translation_region_overrides,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
+            "rerender_output_format": rerender_output_format,
             "mask_cleanup_strength": mask_cleanup_strength,
             "export_mask_debug": export_mask_debug,
             "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
@@ -424,6 +432,12 @@ class TranslatorEngine:
         except (TypeError, ValueError):
             value = 1.08
         return max(0.85, min(1.35, round(value, 2)))
+
+    def _normalize_rerender_output_format(self, raw_value: Any) -> str:
+        value = str(raw_value or "png").strip().lower()
+        if value not in {"png", "source"}:
+            return "png"
+        return value
 
     def _normalize_style_bucket(self, raw_value: Any) -> str:
         value = str(raw_value or "").strip().lower()
@@ -521,6 +535,80 @@ class TranslatorEngine:
 
         print(f"[WARN] Requested font not found: {font_key}")
         return ""
+
+    def _translated_output_path(self, output_dir: Path, stored_name: str, rerender_output_format: str) -> Path:
+        source_name = Path(stored_name)
+        if rerender_output_format == "png":
+            return output_dir / f"{source_name.stem}.png"
+        return output_dir / stored_name
+
+    def _find_existing_translated_output(
+        self,
+        output_dir: Path,
+        stored_name: str,
+        preferred_format: str = "source",
+    ) -> Path | None:
+        preferred_path = self._translated_output_path(output_dir, stored_name, preferred_format)
+        candidates: list[Path] = [preferred_path]
+        source_path = output_dir / stored_name
+        if source_path not in candidates:
+            candidates.append(source_path)
+
+        stem = Path(stored_name).stem
+        for suffix in self.TRANSLATED_OUTPUT_SUFFIXES:
+            candidate = output_dir / f"{stem}{suffix}"
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _copy_source_to_output(self, source_path: Path, output_path: Path) -> None:
+        if source_path.suffix.lower() == output_path.suffix.lower():
+            shutil.copy2(source_path, output_path)
+            return
+
+        from PIL import Image
+
+        with Image.open(source_path) as source_image:
+            suffix = output_path.suffix.lower()
+            if suffix in {".jpg", ".jpeg"}:
+                source_image.convert("RGB").save(output_path, format="JPEG", quality=100, subsampling=0)
+            elif suffix == ".png":
+                source_image.save(output_path, format="PNG")
+            elif suffix == ".webp":
+                source_image.save(output_path, format="WEBP", quality=100, lossless=True)
+            else:
+                source_image.save(output_path)
+
+    def _prune_translated_output_variants(self, output_dir: Path, stored_name: str, keep: Path) -> None:
+        stem = Path(stored_name).stem
+        keep_resolved = keep.resolve(strict=False)
+        for suffix in self.TRANSLATED_OUTPUT_SUFFIXES:
+            candidate = output_dir / f"{stem}{suffix}"
+            if candidate.resolve(strict=False) == keep_resolved:
+                continue
+            if not candidate.exists():
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+
+    def _make_selected_archive(self, archive_path: Path, files: list[Path], root_dir: Path) -> str:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        if archive_path.exists():
+            archive_path.unlink()
+
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file_path in files:
+                if not file_path.exists():
+                    continue
+                archive.write(file_path, arcname=file_path.relative_to(root_dir))
+
+        return str(archive_path.resolve())
 
     def _has_style_font_overrides(self, config: dict[str, Any]) -> bool:
         if config.get("font_style_mode") != "auto-map":
@@ -710,6 +798,9 @@ class TranslatorEngine:
         config = self._normalize_config(raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
+        preferred_output_format = self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
         pages: list[dict[str, Any]] = []
 
         for image in session["source_images"]:
@@ -727,10 +818,14 @@ class TranslatorEngine:
             self._apply_region_translation_overrides(regions, config, image["stored_name"])
             self._apply_region_font_styles(source_rgb, regions, config, image["stored_name"])
 
-            preview_path = output_dir / image["stored_name"]
+            preview_path = self._find_existing_translated_output(
+                output_dir,
+                image["stored_name"],
+                preferred_output_format,
+            )
             preview_url = (
-                f"/output/{session_id}/translated/{image['stored_name']}"
-                if preview_path.exists()
+                f"/output/{session_id}/translated/{preview_path.name}"
+                if preview_path is not None
                 else f"/output/{session_id}/source/{image['stored_name']}"
             )
 
@@ -777,6 +872,9 @@ class TranslatorEngine:
         config = self._normalize_config(raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
+        preferred_output_format = self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
         pages: list[dict[str, Any]] = []
 
         for image in session["source_images"]:
@@ -793,10 +891,14 @@ class TranslatorEngine:
             regions = self._load_cached_regions(cache_page_dir)
             self._apply_region_translation_overrides(regions, config, image["stored_name"])
 
-            preview_path = output_dir / image["stored_name"]
+            preview_path = self._find_existing_translated_output(
+                output_dir,
+                image["stored_name"],
+                preferred_output_format,
+            )
             preview_url = (
-                f"/output/{session_id}/translated/{image['stored_name']}"
-                if preview_path.exists()
+                f"/output/{session_id}/translated/{preview_path.name}"
+                if preview_path is not None
                 else f"/output/{session_id}/source/{image['stored_name']}"
             )
 

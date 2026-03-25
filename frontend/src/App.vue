@@ -72,6 +72,10 @@ function isValidFontStyleMode(value) {
   return ['single', 'auto-map'].includes(value)
 }
 
+function isValidRerenderOutputFormat(value) {
+  return ['png', 'source'].includes(value)
+}
+
 function createDefaultConfig() {
   return {
     translator: 'gemini',
@@ -89,6 +93,7 @@ function createDefaultConfig() {
     style_font_sfx_key: '',
     render_alignment: 'left',
     render_letter_spacing: 1.08,
+    rerender_output_format: 'png',
     mask_cleanup_strength: 'standard',
     export_mask_debug: false,
     advanced_text_repair: 'auto',
@@ -128,6 +133,9 @@ function normalizeStoredConfig(rawValue) {
   const fontStyleMode = typeof rawValue.font_style_mode === 'string' && isValidFontStyleMode(rawValue.font_style_mode)
     ? rawValue.font_style_mode
     : defaults.font_style_mode
+  const rerenderOutputFormat = typeof rawValue.rerender_output_format === 'string' && isValidRerenderOutputFormat(rawValue.rerender_output_format)
+    ? rawValue.rerender_output_format
+    : defaults.rerender_output_format
 
   return {
     translator,
@@ -161,6 +169,7 @@ function normalizeStoredConfig(rawValue) {
     render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
       : defaults.render_letter_spacing,
+    rerender_output_format: rerenderOutputFormat,
     mask_cleanup_strength: maskCleanupStrength,
     export_mask_debug: typeof rawValue.export_mask_debug === 'boolean'
       ? rawValue.export_mask_debug
@@ -1117,6 +1126,17 @@ watch(
           />
           <small class="field-hint">
             默认 `1.08`，会比之前稍微舒展一点。改完后也建议用“仅重新嵌字”比较效果。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>重嵌字输出</span>
+          <select v-model="config.rerender_output_format">
+            <option value="png">PNG（更清晰，推荐）</option>
+            <option value="source">跟随原图格式</option>
+          </select>
+          <small class="field-hint">
+            只影响“仅重新嵌字 / 审校后重嵌字”，不会改动首次翻译主流程。想优先保清晰度时，推荐保持 `PNG`。
           </small>
         </label>
 

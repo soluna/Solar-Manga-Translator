@@ -9,6 +9,7 @@ import re
 import tempfile
 import time
 import zipfile
+from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -814,9 +815,12 @@ class TranslatorEngine:
                 continue
             source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
 
-            regions = self._load_cached_regions(cache_page_dir)
-            self._apply_region_translation_overrides(regions, config, image["stored_name"])
-            self._apply_region_font_styles(source_rgb, regions, config, image["stored_name"])
+            regions = self._prepare_cached_regions_for_edit(
+                source_rgb,
+                cache_page_dir,
+                config,
+                image["stored_name"],
+            )
 
             preview_path = self._find_existing_translated_output(
                 output_dir,
@@ -888,8 +892,12 @@ class TranslatorEngine:
                 continue
             source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
 
-            regions = self._load_cached_regions(cache_page_dir)
-            self._apply_region_translation_overrides(regions, config, image["stored_name"])
+            regions = self._prepare_cached_regions_for_edit(
+                source_rgb,
+                cache_page_dir,
+                config,
+                image["stored_name"],
+            )
 
             preview_path = self._find_existing_translated_output(
                 output_dir,
@@ -1491,8 +1499,108 @@ class TranslatorEngine:
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
         return [self._deserialize_text_region(payload) for payload in region_payloads]
 
+    def _prepare_cached_regions_for_edit(
+        self,
+        source_rgb: np.ndarray,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+        stored_name: str,
+    ) -> list[Any]:
+        regions = self._load_cached_regions(page_cache_dir)
+        self._apply_region_translation_overrides(regions, config, stored_name)
+        self._apply_region_font_styles(source_rgb, regions, config, stored_name)
+        return self._dedupe_overlapping_regions(regions)
+
     def _make_style_region_key(self, stored_name: str, index: int) -> str:
         return f"{stored_name}::{index}"
+
+    def _region_bbox(self, region: Any) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
+        return x1, y1, x2, y2
+
+    def _region_area(self, region: Any) -> int:
+        x1, y1, x2, y2 = self._region_bbox(region)
+        return max(1, (x2 - x1) * (y2 - y1))
+
+    def _region_display_text(self, region: Any) -> str:
+        return str(getattr(region, "translation", "") or self._region_source_text(region) or "").strip()
+
+    def _region_text_similarity(self, left: Any, right: Any) -> float:
+        left_text = re.sub(r"\s+", "", self._region_display_text(left))
+        right_text = re.sub(r"\s+", "", self._region_display_text(right))
+        if not left_text or not right_text:
+            return 0.0
+        if left_text in right_text or right_text in left_text:
+            return 1.0
+        return SequenceMatcher(None, left_text, right_text).ratio()
+
+    def _region_overlap_metrics(self, left: Any, right: Any) -> tuple[float, float, float]:
+        ax1, ay1, ax2, ay2 = self._region_bbox(left)
+        bx1, by1, bx2, by2 = self._region_bbox(right)
+        intersection_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+        intersection_h = max(0, min(ay2, by2) - max(ay1, by1))
+        intersection = intersection_w * intersection_h
+        if intersection <= 0:
+            return 0.0, 0.0, 1.0
+
+        left_area = self._region_area(left)
+        right_area = self._region_area(right)
+        smaller_cover = intersection / float(max(1, min(left_area, right_area)))
+        union = max(left_area + right_area - intersection, 1)
+        iou = intersection / float(union)
+
+        left_cx = (ax1 + ax2) / 2.0
+        left_cy = (ay1 + ay2) / 2.0
+        right_cx = (bx1 + bx2) / 2.0
+        right_cy = (by1 + by2) / 2.0
+        diag = max((((max(ax2 - ax1, 1) ** 2) + (max(ay2 - ay1, 1) ** 2)) ** 0.5), 1.0)
+        center_distance = ((left_cx - right_cx) ** 2 + (left_cy - right_cy) ** 2) ** 0.5
+        center_ratio = center_distance / diag
+        return smaller_cover, iou, center_ratio
+
+    def _region_render_priority(self, region: Any) -> float:
+        translation_override = str(getattr(region, "translation_override", "") or "").strip()
+        text_value = self._region_display_text(region)
+        font_size = float(getattr(region, "font_size", 0) or 0)
+        return (
+            (1000.0 if translation_override else 0.0)
+            + len(text_value) * 12.0
+            + self._region_area(region) / 1200.0
+            + font_size
+        )
+
+    def _dedupe_overlapping_regions(self, regions: list[Any]) -> list[Any]:
+        if len(regions) < 2:
+            return regions
+
+        indexed_regions = list(enumerate(regions))
+        indexed_regions.sort(
+            key=lambda item: (self._region_render_priority(item[1]), -item[0]),
+            reverse=True,
+        )
+        suppressed: set[int] = set()
+
+        for position, (index, region) in enumerate(indexed_regions):
+            if index in suppressed:
+                continue
+            for other_index, other_region in indexed_regions[position + 1:]:
+                if other_index in suppressed:
+                    continue
+
+                smaller_cover, iou, center_ratio = self._region_overlap_metrics(region, other_region)
+                if smaller_cover < 0.84 and not (iou >= 0.62 and center_ratio <= 0.3):
+                    continue
+
+                text_similarity = self._region_text_similarity(region, other_region)
+                if text_similarity < 0.38 and smaller_cover < 0.92:
+                    continue
+
+                suppressed.add(other_index)
+
+        if not suppressed:
+            return regions
+
+        return [region for index, region in enumerate(regions) if index not in suppressed]
 
     def _region_source_text(self, region: Any) -> str:
         text_value = str(getattr(region, "text", "") or "").strip()
@@ -1902,9 +2010,12 @@ class TranslatorEngine:
             if base_image_rgb is not None
             else cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         )
-        regions = self._load_cached_regions(page_cache_dir)
-        self._apply_region_translation_overrides(regions, config, source_path.name)
-        self._apply_region_font_styles(source_rgb, regions, config, source_path.name)
+        regions = self._prepare_cached_regions_for_edit(
+            source_rgb,
+            page_cache_dir,
+            config,
+            source_path.name,
+        )
         for region in regions:
             region._alignment = config["render_alignment"]
             region.letter_spacing = config["render_letter_spacing"]

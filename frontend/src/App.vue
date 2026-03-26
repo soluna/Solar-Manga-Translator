@@ -234,6 +234,7 @@ const availableFonts = ref([])
 const reviewInspectionPages = ref([])
 const reviewInspectionLoading = ref(false)
 const translationRegionOverrides = ref({})
+const translationRegionSkipOverrides = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
@@ -254,7 +255,9 @@ const canTranslate = computed(() => Boolean(sessionId.value) && !translating.val
 const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
-const hasTranslationOverrides = computed(() => Object.keys(translationRegionOverrides.value).length > 0)
+const hasTranslationOverrides = computed(
+  () => Object.keys(translationRegionOverrides.value).length > 0 || Object.keys(translationRegionSkipOverrides.value).length > 0
+)
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
 const mergedInspectionPages = computed(() => {
@@ -383,6 +386,7 @@ function resetTranslationReview() {
   reviewInspectionPages.value = []
   reviewInspectionLoading.value = false
   translationRegionOverrides.value = {}
+  translationRegionSkipOverrides.value = {}
 }
 
 function resetEditInspectorSelection() {
@@ -395,7 +399,8 @@ function buildRuntimeConfig() {
   return {
     ...config.value,
     style_region_overrides: { ...styleRegionOverrides.value },
-    translation_region_overrides: { ...translationRegionOverrides.value }
+    translation_region_overrides: { ...translationRegionOverrides.value },
+    translation_region_skip_overrides: { ...translationRegionSkipOverrides.value }
   }
 }
 
@@ -409,6 +414,10 @@ function getRegionOverrideValue(region) {
 
 function getEditRegionText(region) {
   return translationRegionOverrides.value[region.id] || region.current_translation || region.machine_translation || ''
+}
+
+function isRegionSkipEnabled(region) {
+  return Boolean(translationRegionSkipOverrides.value[region.id] || region.override_skip)
 }
 
 function getResolvedStyle(region) {
@@ -633,6 +642,10 @@ async function deleteManualRegion(region) {
     delete nextTranslationOverrides[region.id]
     translationRegionOverrides.value = nextTranslationOverrides
 
+    const nextSkipOverrides = { ...translationRegionSkipOverrides.value }
+    delete nextSkipOverrides[region.id]
+    translationRegionSkipOverrides.value = nextSkipOverrides
+
     const nextStyleOverrides = { ...styleRegionOverrides.value }
     delete nextStyleOverrides[region.id]
     styleRegionOverrides.value = nextStyleOverrides
@@ -649,14 +662,19 @@ async function deleteManualRegion(region) {
 function applyReviewInspectionPayload(payload) {
   reviewInspectionPages.value = payload.pages || []
   const nextOverrides = {}
+  const nextSkipOverrides = {}
   for (const page of reviewInspectionPages.value) {
     for (const region of page.regions || []) {
       if (region.override_translation) {
         nextOverrides[region.id] = region.override_translation
       }
+      if (region.override_skip) {
+        nextSkipOverrides[region.id] = true
+      }
     }
   }
   translationRegionOverrides.value = nextOverrides
+  translationRegionSkipOverrides.value = nextSkipOverrides
 }
 
 function applyStyleInspectionPayload(payload) {
@@ -819,9 +837,21 @@ function updateTranslationOverride(region, nextTranslation) {
   selectedEditRegionKey.value = region.id
 }
 
+function updateTranslationSkipOverride(region, enabled) {
+  const nextOverrides = { ...translationRegionSkipOverrides.value }
+  if (enabled) {
+    nextOverrides[region.id] = true
+  } else {
+    delete nextOverrides[region.id]
+  }
+  translationRegionSkipOverrides.value = nextOverrides
+  selectedEditRegionKey.value = region.id
+}
+
 function clearTranslationOverrides() {
   translationRegionOverrides.value = {}
-  status.value = '已清空当前会话里的人工译文修改。'
+  translationRegionSkipOverrides.value = {}
+  status.value = '已清空当前会话里的人工译文修改和保留原文设置。'
 }
 
 function clearStyleOverrides() {
@@ -1848,6 +1878,9 @@ watch(
                   >
                     自动：{{ getStyleLabel(region.auto_style) }}
                   </span>
+                  <span v-if="isRegionSkipEnabled(region)" class="style-badge">
+                    保留原文
+                  </span>
                   <span v-if="translationRegionOverrides[region.id]" class="style-badge style-badge-strong">已改译文</span>
                   <button
                     v-if="isManualRegion(region)"
@@ -1884,6 +1917,21 @@ watch(
                       {{ option.label }}
                     </option>
                   </select>
+                </label>
+
+                <label
+                  class="field style-override-field compact-field compact-toggle-field"
+                  @click.stop
+                  @mousedown.stop
+                >
+                  <span class="compact-toggle-label">保留原文</span>
+                  <input
+                    :checked="isRegionSkipEnabled(region)"
+                    type="checkbox"
+                    @click.stop
+                    @mousedown.stop
+                    @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                  />
                 </label>
 
                 <label

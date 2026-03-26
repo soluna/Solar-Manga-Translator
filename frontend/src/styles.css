@@ -593,13 +593,13 @@ h2 {
 
 .region-card-controls {
   display: grid;
-  grid-template-columns: minmax(180px, 230px) minmax(0, 1fr);
+  grid-template-columns: minmax(170px, 220px) auto minmax(0, 1fr);
   gap: 8px;
-  align-items: start;
+  align-items: center;
 }
 
 .region-card-controls.compact {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
 .compact-field {
@@ -608,6 +608,19 @@ h2 {
 
 .compact-field-grow {
   min-width: 0;
+}
+
+.compact-toggle-field {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.compact-toggle-label {
+  font-size: 0.82rem;
+  color: #6f5643;
 }
 
 .compact-select-field select,

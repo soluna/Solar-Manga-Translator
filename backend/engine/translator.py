@@ -492,6 +492,9 @@ class TranslatorEngine:
         translation_region_overrides = self._normalize_translation_region_overrides(
             raw_config.get("translation_region_overrides")
         )
+        translation_region_skip_overrides = self._normalize_translation_region_skip_overrides(
+            raw_config.get("translation_region_skip_overrides")
+        )
 
         return {
             "translator": translator,
@@ -507,6 +510,7 @@ class TranslatorEngine:
             "style_font_paths": style_font_paths,
             "style_region_overrides": style_region_overrides,
             "translation_region_overrides": translation_region_overrides,
+            "translation_region_skip_overrides": translation_region_skip_overrides,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
             "rerender_output_format": rerender_output_format,
@@ -603,6 +607,18 @@ class TranslatorEngine:
             text = str(value or "").strip()
             if text:
                 normalized[key] = text
+        return normalized
+
+    def _normalize_translation_region_skip_overrides(self, raw_value: Any) -> dict[str, bool]:
+        if not isinstance(raw_value, dict):
+            return {}
+
+        normalized: dict[str, bool] = {}
+        for key, value in raw_value.items():
+            if not isinstance(key, str):
+                continue
+            if bool(value):
+                normalized[key] = True
         return normalized
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
@@ -1147,6 +1163,7 @@ class TranslatorEngine:
                         "source_text": self._region_source_text(region),
                         "machine_translation": str(getattr(region, "machine_translation", "") or ""),
                         "override_translation": str(getattr(region, "translation_override", "") or ""),
+                        "override_skip": bool(getattr(region, "skip_translation", False)),
                         "current_translation": str(getattr(region, "translation", "") or ""),
                         "preview_text": self._region_preview_text(region),
                     }
@@ -2132,6 +2149,49 @@ class TranslatorEngine:
             + font_size
         )
 
+    def _restore_original_region_pixels(
+        self,
+        source_rgb: np.ndarray,
+        base_rgb: np.ndarray,
+        region: Any,
+    ) -> None:
+        if source_rgb.shape[:2] != base_rgb.shape[:2]:
+            return
+
+        mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        drew_mask = False
+        raw_lines = getattr(region, "lines", None)
+        if isinstance(raw_lines, list):
+            for line in raw_lines:
+                try:
+                    points = np.asarray(line, dtype=np.int32).reshape(-1, 2)
+                except Exception:
+                    continue
+                if points.shape[0] >= 3:
+                    cv2.fillPoly(mask, [points], 255)
+                    drew_mask = True
+                elif points.shape[0] == 2:
+                    cv2.rectangle(mask, tuple(points[0]), tuple(points[1]), 255, -1)
+                    drew_mask = True
+
+        if not drew_mask:
+            x1, y1, x2, y2 = self._region_bbox(region)
+            x1 = max(0, min(mask.shape[1], x1))
+            x2 = max(0, min(mask.shape[1], x2))
+            y1 = max(0, min(mask.shape[0], y1))
+            y2 = max(0, min(mask.shape[0], y2))
+            if x2 <= x1 or y2 <= y1:
+                return
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 10.0)
+        dilation = int(max(1, min(8, round(font_size * 0.08))))
+        kernel = np.ones((dilation, dilation), dtype=np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        selector = mask > 0
+        if np.any(selector):
+            base_rgb[selector] = source_rgb[selector]
+
     def _dedupe_overlapping_regions(
         self,
         regions: list[Any],
@@ -2358,6 +2418,8 @@ class TranslatorEngine:
         return ""
 
     def _region_preview_text(self, region: Any) -> str:
+        if bool(getattr(region, "skip_translation", False)):
+            return self._region_source_text(region)
         preview = str(getattr(region, "translation", "") or "").strip()
         if preview:
             return preview
@@ -2721,6 +2783,7 @@ class TranslatorEngine:
         stored_name: str = "",
     ) -> None:
         overrides = config.get("translation_region_overrides") or {}
+        skip_overrides = config.get("translation_region_skip_overrides") or {}
         for index, region in enumerate(regions):
             region_key = str(
                 getattr(region, "translation_region_key", "")
@@ -2728,9 +2791,11 @@ class TranslatorEngine:
             )
             machine_translation = str(getattr(region, "translation", "") or "")
             override_translation = str(overrides.get(region_key, "") or "").strip()
+            skip_translation = bool(skip_overrides.get(region_key))
             region.translation_region_key = region_key
             region.machine_translation = machine_translation
             region.translation_override = override_translation
+            region.skip_translation = skip_translation
             if override_translation:
                 region.translation = override_translation
 
@@ -2781,14 +2846,19 @@ class TranslatorEngine:
                 session=session,
             )
         )
-        for region in regions:
+        skipped_regions = [region for region in regions if bool(getattr(region, "skip_translation", False))]
+        render_regions = [region for region in regions if not bool(getattr(region, "skip_translation", False))]
+        for region in skipped_regions:
+            self._restore_original_region_pixels(source_rgb, inpainted_rgb, region)
+
+        for region in render_regions:
             region._alignment = config["render_alignment"]
             region.letter_spacing = config["render_letter_spacing"]
 
         if debug_output_dir is None:
             rendered_rgb = await dispatch_rendering(
                 inpainted_rgb.copy(),
-                regions,
+                render_regions,
                 font_path=config["font_path"],
                 font_size_fixed=None,
                 font_size_offset=-6,
@@ -2808,7 +2878,7 @@ class TranslatorEngine:
             rendered_rgb = inpainted_rgb.copy()
             dst_points_list = resize_regions_to_font_size(
                 rendered_rgb,
-                regions,
+                render_regions,
                 None,
                 -6,
                 8,
@@ -2818,7 +2888,7 @@ class TranslatorEngine:
             )
 
             render_steps: list[dict[str, Any]] = []
-            for index, (region, dst_points) in enumerate(zip(regions, dst_points_list), start=1):
+            for index, (region, dst_points) in enumerate(zip(render_regions, dst_points_list), start=1):
                 rendered_rgb = render_region(
                     rendered_rgb,
                     region,
@@ -2855,7 +2925,7 @@ class TranslatorEngine:
             )
         result_image = dump_image(source_image, rendered_rgb, alpha_ch)
 
-        save_ctx = Context(save_quality=100, text_regions=regions, result=result_image)
+        save_ctx = Context(save_quality=100, text_regions=render_regions, result=result_image)
         self._save_result_atomic(result_image, output_path, save_ctx)
 
     def _save_result_atomic(self, result_image: Any, output_path: Path, save_ctx: Any) -> None:

@@ -176,6 +176,40 @@ h2 {
   flex-wrap: wrap;
 }
 
+.action-row-primary {
+  margin-top: 24px;
+}
+
+.settings-toggle-button {
+  min-height: 50px;
+  padding-inline: 18px;
+}
+
+.settings-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(116, 88, 62, 0.1);
+  color: #6c5440;
+  flex-wrap: wrap;
+}
+
+.settings-summary-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9b5f2d;
+}
+
+.settings-summary-text {
+  font-size: 0.94rem;
+}
+
 .file-picker {
   position: relative;
   display: flex;

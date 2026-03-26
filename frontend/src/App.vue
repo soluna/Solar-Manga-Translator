@@ -243,6 +243,7 @@ const manualDrawMode = ref(false)
 const manualDrawDraft = ref(null)
 const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
+const showAdvancedSettings = ref(false)
 
 const config = ref(loadStoredConfig())
 
@@ -340,6 +341,30 @@ const progressPercent = computed(() => {
   }
 
   return Math.min(100, Math.round((progress.value.current / progress.value.total) * 100))
+})
+const translatorLabelMap = {
+  sugoi: 'sugoi',
+  gemini: 'Gemini',
+  'doubao-ark': 'Doubao',
+  chatgpt: 'ChatGPT',
+  youdao: '有道',
+  baidu: '百度',
+  offline: 'offline',
+  none: 'none'
+}
+const targetLangLabelMap = {
+  CHS: '简中',
+  CHT: '繁中',
+  ENG: '英语',
+  JPN: '日语',
+  KOR: '韩语'
+}
+const compactConfigSummary = computed(() => {
+  const translator = translatorLabelMap[config.value.translator] || config.value.translator
+  const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
+  const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
+  const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
+  return `${translator} / ${targetLang} / ${styleMode} / ${cleanup}`
 })
 
 function toApiUrl(path) {
@@ -1274,7 +1299,48 @@ watch(
         </button>
       </div>
 
-      <div class="config-grid">
+      <div class="action-row action-row-primary">
+        <button
+          class="primary-button"
+          :disabled="!canTranslate"
+          @click="startTranslation('translate')"
+        >
+          {{ translating ? '翻译进行中...' : '开始翻译' }}
+        </button>
+
+        <button
+          v-if="downloadUrl"
+          class="secondary-button"
+          :disabled="!canRerender"
+          type="button"
+          @click="startTranslation('rerender')"
+        >
+          仅重新嵌字
+        </button>
+
+        <a
+          v-if="downloadUrl"
+          class="secondary-button"
+          :href="downloadUrl"
+        >
+          下载翻译结果
+        </a>
+
+        <button
+          class="secondary-button settings-toggle-button"
+          type="button"
+          @click="showAdvancedSettings = !showAdvancedSettings"
+        >
+          {{ showAdvancedSettings ? '收起设置' : '展开设置' }}
+        </button>
+      </div>
+
+      <div class="settings-summary">
+        <span class="settings-summary-label">当前配置</span>
+        <span class="settings-summary-text">{{ compactConfigSummary }}</span>
+      </div>
+
+      <div v-if="showAdvancedSettings" class="config-grid">
         <label class="field">
           <span>翻译器</span>
           <select v-model="config.translator">
@@ -1596,34 +1662,6 @@ watch(
         </label>
       </div>
 
-      <div class="action-row">
-        <button
-          class="primary-button"
-          :disabled="!canTranslate"
-          @click="startTranslation('translate')"
-        >
-          {{ translating ? '翻译进行中...' : '开始翻译' }}
-        </button>
-
-        <button
-          v-if="downloadUrl"
-          class="secondary-button"
-          :disabled="!canRerender"
-          type="button"
-          @click="startTranslation('rerender')"
-        >
-          仅重新嵌字
-        </button>
-
-        <a
-          v-if="downloadUrl"
-          class="secondary-button"
-          :href="downloadUrl"
-        >
-          下载翻译结果
-        </a>
-      </div>
-
       <div v-if="downloadPath || translatedDirPath || maskDebugDirPath" class="artifact-panel">
         <div class="artifact-row" v-if="downloadPath">
           <div class="artifact-copy">
@@ -1680,64 +1718,6 @@ watch(
 
       <p v-if="errorMessage" class="error-text">{{ errorMessage }}</p>
       <p v-if="sessionId" class="session-text">Session: {{ sessionId }}</p>
-    </section>
-
-    <section class="gallery-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Original</p>
-          <h2>上传预览</h2>
-        </div>
-        <p>{{ originalImages.length }} 张图片</p>
-      </div>
-
-      <div v-if="originalImages.length" class="gallery-grid">
-        <article
-          v-for="image in originalImages"
-          :key="image.id"
-          class="gallery-item"
-        >
-          <img
-            :alt="image.name"
-            :src="image.url"
-            loading="lazy"
-          />
-          <p>{{ image.name }}</p>
-        </article>
-      </div>
-
-      <div v-else class="empty-state">
-        上传完成后，这里会显示原图预览。
-      </div>
-    </section>
-
-    <section class="gallery-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Translated</p>
-          <h2>翻译结果</h2>
-        </div>
-        <p>{{ translatedImages.length }} 张图片</p>
-      </div>
-
-      <div v-if="translatedImages.length" class="gallery-grid">
-        <article
-          v-for="image in translatedImages"
-          :key="image.id"
-          class="gallery-item"
-        >
-          <img
-            :alt="image.name"
-            :src="image.url"
-            loading="lazy"
-          />
-          <p>{{ image.name }}</p>
-        </article>
-      </div>
-
-      <div v-else class="empty-state">
-        点击“开始翻译”后，这里会随着后端处理逐张显示翻译后的页面。
-      </div>
     </section>
 
     <section v-if="canInspectEditor" class="gallery-card">
@@ -1980,5 +1960,64 @@ watch(
         当前会话还没有可编辑的文本框缓存。先完整翻译一次，再回来逐框改译文和字体会更稳。
       </div>
     </section>
+
+    <section class="gallery-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Original</p>
+          <h2>上传预览</h2>
+        </div>
+        <p>{{ originalImages.length }} 张图片</p>
+      </div>
+
+      <div v-if="originalImages.length" class="gallery-grid">
+        <article
+          v-for="image in originalImages"
+          :key="image.id"
+          class="gallery-item"
+        >
+          <img
+            :alt="image.name"
+            :src="image.url"
+            loading="lazy"
+          />
+          <p>{{ image.name }}</p>
+        </article>
+      </div>
+
+      <div v-else class="empty-state">
+        上传完成后，这里会显示原图预览。
+      </div>
+    </section>
+
+    <section class="gallery-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Translated</p>
+          <h2>翻译结果</h2>
+        </div>
+        <p>{{ translatedImages.length }} 张图片</p>
+      </div>
+
+      <div v-if="translatedImages.length" class="gallery-grid">
+        <article
+          v-for="image in translatedImages"
+          :key="image.id"
+          class="gallery-item"
+        >
+          <img
+            :alt="image.name"
+            :src="image.url"
+            loading="lazy"
+          />
+          <p>{{ image.name }}</p>
+        </article>
+      </div>
+
+      <div v-else class="empty-state">
+        点击“开始翻译”后，这里会随着后端处理逐张显示翻译后的页面。
+      </div>
+    </section>
+
   </main>
 </template>

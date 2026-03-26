@@ -185,6 +185,7 @@ class TranslatorEngine:
         session: dict[str, Any],
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
+        target_stored_name: str | None = None,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self._normalize_config(raw_config)
@@ -192,16 +193,25 @@ class TranslatorEngine:
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        rerenderable_pages = self._count_rerenderable_pages(session_id, session)
+        target_images = self._resolve_rerender_images(session, target_stored_name)
+        rerenderable_pages = sum(
+            1
+            for image in target_images
+            if self._has_rerenderable_page_cache(self._rerender_cache_dir(session_id) / image["stored_name"])
+        )
         if rerenderable_pages == 0:
             raise RuntimeError("当前会话还没有可用的重嵌字缓存，请先用当前版本完整翻译一次。")
 
-        total = len(session["source_images"])
+        total = len(target_images)
         await progress_callback({"event": "start", "total_pages": total})
         await progress_callback(
             {
                 "event": "status",
-                "message": f"正在复用缓存重新嵌字，可重排页面 {rerenderable_pages} 张。",
+                "message": (
+                    f"正在复用缓存重新嵌字，当前页可重排。"
+                    if target_stored_name
+                    else f"正在复用缓存重新嵌字，可重排页面 {rerenderable_pages} 张。"
+                ),
             }
         )
 
@@ -211,8 +221,7 @@ class TranslatorEngine:
 
         rerender_variant = self._next_rerender_variant(session)
 
-        archive_files: list[Path] = []
-        for index, image in enumerate(session["source_images"], start=1):
+        for index, image in enumerate(target_images, start=1):
             source_path = source_dir / image["stored_name"]
             output_path = self._translated_output_path(
                 output_dir,
@@ -270,6 +279,12 @@ class TranslatorEngine:
                 }
             )
 
+        archive_files = self._collect_session_archive_files(
+            session=session,
+            source_dir=source_dir,
+            output_dir=output_dir,
+            preferred_output_format=config["rerender_output_format"],
+        )
         archive_base = self.temp_dir / f"{session_id}_translated"
         archive_path = self._make_selected_archive(Path(f"{archive_base}.zip"), archive_files, output_dir)
         session["download_path"] = archive_path
@@ -281,6 +296,56 @@ class TranslatorEngine:
             "translated_dir": str(output_dir.resolve()),
             "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
         }
+
+    def _resolve_rerender_images(
+        self,
+        session: dict[str, Any],
+        target_stored_name: str | None,
+    ) -> list[dict[str, Any]]:
+        source_images = list(session.get("source_images") or [])
+        if not target_stored_name:
+            return source_images
+
+        matched_images = [
+            image for image in source_images
+            if str(image.get("stored_name") or "") == target_stored_name
+        ]
+        if not matched_images:
+            raise RuntimeError("找不到当前选中的页面，无法只重嵌这一页。请刷新逐框校对后再试。")
+        return matched_images
+
+    def _collect_session_archive_files(
+        self,
+        session: dict[str, Any],
+        source_dir: Path,
+        output_dir: Path,
+        preferred_output_format: str,
+    ) -> list[Path]:
+        archive_files: list[Path] = []
+        for image in session.get("source_images") or []:
+            stored_name = str(image.get("stored_name") or "")
+            if not stored_name:
+                continue
+            current_output = self._current_translated_output(
+                session,
+                output_dir,
+                stored_name,
+                preferred_output_format,
+            )
+            if current_output is not None and current_output.exists():
+                archive_files.append(current_output)
+                continue
+
+            source_path = source_dir / stored_name
+            fallback_output = self._translated_output_path(
+                output_dir,
+                stored_name,
+                preferred_output_format,
+            )
+            self._copy_source_to_output(source_path, fallback_output)
+            self._update_translated_output_map(session, stored_name, fallback_output)
+            archive_files.append(fallback_output)
+        return archive_files
 
     def _ensure_runtime_patches(self) -> None:
         try:

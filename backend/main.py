@@ -248,6 +248,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
         payload = await websocket.receive_json()
         action = str(payload.get("action") or "translate").strip().lower()
         config = payload.get("config", {})
+        target_stored_name = str(payload.get("target_stored_name") or "").strip()
 
         async def send_event(event: dict[str, Any]) -> None:
             await websocket.send_json(event)
@@ -258,6 +259,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 session=session,
                 raw_config=config,
                 progress_callback=send_event,
+                target_stored_name=target_stored_name or None,
             )
         else:
             result = await translator_engine.translate_session(

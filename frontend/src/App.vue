@@ -679,6 +679,38 @@ function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
   return changed ? nextPages : pages
 }
 
+function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
+  const targetStoredName = payload.stored_name || ''
+  const targetName = payload.name || ''
+  const nextImage = {
+    id: `${sessionIdValue}-translated-${targetStoredName || payload.current}`,
+    name: targetName || `第 ${payload.current} 张`,
+    url: nextImageUrl,
+    stored_name: targetStoredName
+  }
+
+  let changed = false
+  const nextImages = images.map((image) => {
+    const sameStoredName = targetStoredName && image.stored_name === targetStoredName
+    const sameName = targetName && image.name === targetName
+    if (!sameStoredName && !sameName) {
+      return image
+    }
+    changed = true
+    return {
+      ...image,
+      ...nextImage,
+      id: image.id || nextImage.id,
+    }
+  })
+
+  if (changed) {
+    return nextImages
+  }
+
+  return [...images, nextImage]
+}
+
 async function loadReviewInspection() {
   if (!sessionId.value) {
     reviewInspectionPages.value = []
@@ -987,23 +1019,34 @@ function startTranslation(action = 'translate') {
   }
 
   activeAction.value = action
+  const rerenderTargetStoredName = action === 'rerender'
+    ? (selectedEditPage.value?.stored_name || '')
+    : ''
   manualDrawDraft.value = null
   renderNonce.value = Date.now()
-  translatedImages.value = []
-  downloadUrl.value = ''
-  downloadPath.value = ''
-  translatedDirPath.value = ''
-  maskDebugDirPath.value = ''
+  if (action !== 'rerender') {
+    translatedImages.value = []
+    downloadUrl.value = ''
+    downloadPath.value = ''
+    translatedDirPath.value = ''
+    maskDebugDirPath.value = ''
+  }
   errorMessage.value = ''
   translating.value = true
   progress.value = { current: 0, total: 0 }
-  status.value = action === 'rerender' ? '正在启动重嵌字任务...' : '正在启动翻译任务...'
+  status.value = action === 'rerender'
+    ? (rerenderTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
+    : '正在启动翻译任务...'
   closeSocket()
 
   socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
 
   socket.onopen = () => {
-    socket.send(JSON.stringify({ action, config: buildRuntimeConfig() }))
+    socket.send(JSON.stringify({
+      action,
+      config: buildRuntimeConfig(),
+      target_stored_name: rerenderTargetStoredName || undefined
+    }))
   }
 
   socket.onmessage = (event) => {
@@ -1012,7 +1055,9 @@ function startTranslation(action = 'translate') {
     if (payload.event === 'start') {
       progress.value = { current: 0, total: payload.total_pages }
       status.value = activeAction.value === 'rerender'
-        ? `重嵌字已开始，共 ${payload.total_pages} 张图片。`
+        ? (rerenderTargetStoredName
+          ? `当前页重嵌字已开始。`
+          : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
         : `翻译已开始，共 ${payload.total_pages} 张图片。`
       return
     }
@@ -1023,11 +1068,12 @@ function startTranslation(action = 'translate') {
         total: payload.total
       }
       const nextImageUrl = withCacheBust(toApiUrl(payload.image_url))
-      translatedImages.value.push({
-        id: `${sessionId.value}-translated-${payload.current}`,
-        name: payload.name || `第 ${payload.current} 张`,
-        url: nextImageUrl
-      })
+      translatedImages.value = upsertTranslatedImage(
+        translatedImages.value,
+        payload,
+        nextImageUrl,
+        sessionId.value,
+      )
       if (payload.stored_name) {
         reviewInspectionPages.value = updatePagePreviewUrl(
           reviewInspectionPages.value,
@@ -1041,7 +1087,9 @@ function startTranslation(action = 'translate') {
         )
       }
       status.value = activeAction.value === 'rerender'
-        ? `重嵌字进行中：${payload.current} / ${payload.total}`
+        ? (rerenderTargetStoredName
+          ? `当前页重嵌字进行中…`
+          : `重嵌字进行中：${payload.current} / ${payload.total}`)
         : `翻译进行中：${payload.current} / ${payload.total}`
       return
     }
@@ -1058,7 +1106,9 @@ function startTranslation(action = 'translate') {
       translatedDirPath.value = payload.translated_dir || ''
       maskDebugDirPath.value = payload.mask_debug_dir || ''
       status.value = activeAction.value === 'rerender'
-        ? `重嵌字完成，共输出 ${translatedImages.value.length} 张图片。`
+        ? (rerenderTargetStoredName
+          ? '当前页重嵌字完成。'
+          : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
         : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       void loadEditInspection()
       closeSocket()

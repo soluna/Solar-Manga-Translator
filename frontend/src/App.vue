@@ -94,6 +94,7 @@ function createDefaultConfig() {
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
+    pause_after_detection: false,
     mask_cleanup_strength: 'standard',
     export_mask_debug: false,
     advanced_text_repair: 'auto',
@@ -170,6 +171,9 @@ function normalizeStoredConfig(rawValue) {
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
       : defaults.render_letter_spacing,
     rerender_output_format: rerenderOutputFormat,
+    pause_after_detection: typeof rawValue.pause_after_detection === 'boolean'
+      ? rawValue.pause_after_detection
+      : defaults.pause_after_detection,
     mask_cleanup_strength: maskCleanupStrength,
     export_mask_debug: typeof rawValue.export_mask_debug === 'boolean'
       ? rawValue.export_mask_debug
@@ -244,6 +248,7 @@ const manualDrawDraft = ref(null)
 const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
 const showAdvancedSettings = ref(false)
+const workflowStage = ref('idle')
 
 const config = ref(loadStoredConfig())
 
@@ -253,7 +258,12 @@ const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
 const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
-const canRerender = computed(() => Boolean(sessionId.value) && !translating.value && Boolean(downloadUrl.value || translatedImages.value.length))
+const canContinueSegmentedTranslation = computed(
+  () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'detected'
+)
+const canRerender = computed(
+  () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
+)
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
 const hasTranslationOverrides = computed(
@@ -364,7 +374,35 @@ const compactConfigSummary = computed(() => {
   const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
   const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
   const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
-  return `${translator} / ${targetLang} / ${styleMode} / ${cleanup}`
+  const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
+  return `${translator} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow}`
+})
+
+const primaryTranslateAction = computed(() => {
+  if (workflowStage.value === 'detected') {
+    return 'resume-translate'
+  }
+  return config.value.pause_after_detection ? 'detect' : 'translate'
+})
+
+const primaryTranslateLabel = computed(() => {
+  if (translating.value) {
+    if (activeAction.value === 'detect') {
+      return '识别进行中...'
+    }
+    if (activeAction.value === 'resume-translate') {
+      return '翻译进行中...'
+    }
+    return '翻译进行中...'
+  }
+
+  if (workflowStage.value === 'detected') {
+    return '继续翻译并嵌字'
+  }
+  if (config.value.pause_after_detection) {
+    return workflowStage.value === 'translated' ? '重新识别并校对' : '先识别文本框'
+  }
+  return '开始翻译'
 })
 
 function toApiUrl(path) {
@@ -698,6 +736,9 @@ async function deleteManualRegion(region) {
 
 function applyReviewInspectionPayload(payload) {
   reviewInspectionPages.value = payload.pages || []
+  if (payload.workflow_stage) {
+    workflowStage.value = payload.workflow_stage
+  }
   const nextOverrides = {}
   const nextSkipOverrides = {}
   for (const page of reviewInspectionPages.value) {
@@ -716,6 +757,9 @@ function applyReviewInspectionPayload(payload) {
 
 function applyStyleInspectionPayload(payload) {
   styleInspectionPages.value = payload.pages || []
+  if (payload.workflow_stage) {
+    workflowStage.value = payload.workflow_stage
+  }
 }
 
 function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
@@ -1059,6 +1103,7 @@ async function submitFile() {
   downloadPath.value = ''
   translatedDirPath.value = ''
   maskDebugDirPath.value = ''
+  workflowStage.value = 'idle'
   progress.value = { current: 0, total: 0 }
   resetTranslationReview()
   resetStyleInspector()
@@ -1082,9 +1127,12 @@ async function submitFile() {
     originalImages.value = (payload.images || []).map((image, index) => ({
       id: `${payload.session_id}-${index}`,
       name: image.name,
-      url: toApiUrl(image.url)
+      url: toApiUrl(image.url),
+      stored_name: image.stored_name
     }))
-    status.value = `上传完成，共解析 ${payload.total_images} 张图片。现在可以开始翻译。`
+    status.value = config.value.pause_after_detection
+      ? `上传完成，共解析 ${payload.total_images} 张图片。现在可以先识别文本框，再逐框确认。`
+      : `上传完成，共解析 ${payload.total_images} 张图片。现在可以开始翻译。`
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '上传失败'
     status.value = '上传未完成。'
@@ -1104,7 +1152,7 @@ function startTranslation(action = 'translate') {
     : ''
   manualDrawDraft.value = null
   renderNonce.value = Date.now()
-  if (action !== 'rerender') {
+  if (action === 'translate' || action === 'detect') {
     translatedImages.value = []
     downloadUrl.value = ''
     downloadPath.value = ''
@@ -1116,7 +1164,11 @@ function startTranslation(action = 'translate') {
   progress.value = { current: 0, total: 0 }
   status.value = action === 'rerender'
     ? (rerenderTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
-    : '正在启动翻译任务...'
+    : action === 'detect'
+      ? '正在启动文本框识别任务...'
+      : action === 'resume-translate'
+        ? '正在继续翻译并嵌字...'
+        : '正在启动翻译任务...'
   closeSocket()
 
   socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
@@ -1138,6 +1190,10 @@ function startTranslation(action = 'translate') {
         ? (rerenderTargetStoredName
           ? `当前页重嵌字已开始。`
           : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
+        : activeAction.value === 'detect'
+          ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
         : `翻译已开始，共 ${payload.total_pages} 张图片。`
       return
     }
@@ -1170,6 +1226,10 @@ function startTranslation(action = 'translate') {
         ? (rerenderTargetStoredName
           ? `当前页重嵌字进行中…`
           : `重嵌字进行中：${payload.current} / ${payload.total}`)
+        : activeAction.value === 'detect'
+          ? `正在识别并准备校对：${payload.current} / ${payload.total}`
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译进行中：${payload.current} / ${payload.total}`
         : `翻译进行中：${payload.current} / ${payload.total}`
       return
     }
@@ -1181,15 +1241,20 @@ function startTranslation(action = 'translate') {
 
     if (payload.event === 'completed') {
       translating.value = false
-      downloadUrl.value = withCacheBust(toApiUrl(payload.download_url))
+      workflowStage.value = payload.workflow_stage || workflowStage.value
+      downloadUrl.value = payload.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
       downloadPath.value = payload.download_path || ''
       translatedDirPath.value = payload.translated_dir || ''
       maskDebugDirPath.value = payload.mask_debug_dir || ''
-      status.value = activeAction.value === 'rerender'
-        ? (rerenderTargetStoredName
-          ? '当前页重嵌字完成。'
-          : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
-        : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      status.value = activeAction.value === 'detect'
+        ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
+        : activeAction.value === 'resume-translate'
+          ? `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+          : activeAction.value === 'rerender'
+            ? (rerenderTargetStoredName
+              ? '当前页重嵌字完成。'
+              : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
+            : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       void loadEditInspection({ silent: true })
       closeSocket()
       return
@@ -1198,14 +1263,26 @@ function startTranslation(action = 'translate') {
     if (payload.event === 'error') {
       translating.value = false
       errorMessage.value = payload.message || '翻译失败'
-      status.value = activeAction.value === 'rerender' ? '重嵌字失败。' : '翻译失败。'
+      status.value = activeAction.value === 'rerender'
+        ? '重嵌字失败。'
+        : activeAction.value === 'detect'
+          ? '文本框识别失败。'
+          : activeAction.value === 'resume-translate'
+            ? '继续翻译失败。'
+            : '翻译失败。'
       closeSocket()
     }
   }
 
   socket.onerror = () => {
     errorMessage.value = '翻译连接中断，请查看后端控制台日志。'
-    status.value = activeAction.value === 'rerender' ? '重嵌字连接中断。' : '翻译连接中断。'
+    status.value = activeAction.value === 'rerender'
+      ? '重嵌字连接中断。'
+      : activeAction.value === 'detect'
+        ? '识别连接中断。'
+        : activeAction.value === 'resume-translate'
+          ? '继续翻译连接中断。'
+          : '翻译连接中断。'
     translating.value = false
     closeSocket()
   }
@@ -1213,7 +1290,13 @@ function startTranslation(action = 'translate') {
   socket.onclose = () => {
     if (translating.value) {
       errorMessage.value = '翻译任务意外断开，请查看后端日志。'
-      status.value = activeAction.value === 'rerender' ? '重嵌字未完成。' : '翻译未完成。'
+      status.value = activeAction.value === 'rerender'
+        ? '重嵌字未完成。'
+        : activeAction.value === 'detect'
+          ? '识别未完成。'
+          : activeAction.value === 'resume-translate'
+            ? '继续翻译未完成。'
+            : '翻译未完成。'
       translating.value = false
     }
   }
@@ -1303,9 +1386,9 @@ watch(
         <button
           class="primary-button"
           :disabled="!canTranslate"
-          @click="startTranslation('translate')"
+          @click="startTranslation(primaryTranslateAction)"
         >
-          {{ translating ? '翻译进行中...' : '开始翻译' }}
+          {{ primaryTranslateLabel }}
         </button>
 
         <button
@@ -1566,6 +1649,11 @@ watch(
           </small>
         </label>
 
+        <label class="toggle-field">
+          <input v-model="config.pause_after_detection" type="checkbox" />
+          <span>识别后先进入逐框校对</span>
+        </label>
+
         <label class="field">
           <span>擦字强度</span>
           <select v-model="config.mask_cleanup_strength">
@@ -1764,7 +1852,16 @@ watch(
           </button>
 
           <button
-            v-if="canRerender"
+            v-if="canContinueSegmentedTranslation"
+            class="secondary-button"
+            type="button"
+            @click="startTranslation('resume-translate')"
+          >
+            确认框后继续翻译
+          </button>
+
+          <button
+            v-else-if="canRerender"
             class="secondary-button"
             type="button"
             @click="startTranslation('rerender')"
@@ -1796,7 +1893,7 @@ watch(
           <div class="field style-summary">
             <span>使用说明</span>
             <small class="field-hint">
-              这里把译文和字体样式放在同一个列表里处理。改完后直接点“保存修改并重新嵌字”即可，复用缓存重新出图，不需要重跑 OCR 和擦字。
+              这里把译文和字体样式放在同一个列表里处理。开启“识别后先进入逐框校对”时，可以先补框、保留原文，再点“确认框后继续翻译”。
             </small>
           </div>
         </div>

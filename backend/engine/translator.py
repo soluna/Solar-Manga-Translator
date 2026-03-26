@@ -65,6 +65,10 @@ class TranslatorEngine:
         session["mask_debug_dir"] = str(mask_debug_dir) if mask_debug_dir is not None else None
         output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(output_dir)
+        session["translated_output_map"] = {}
+        session["download_path"] = None
+        session["workflow_stage"] = "translating"
+        session["deferred_output_names"] = set()
 
         config_path = self._write_config(session_id, config)
         log_path = self.temp_dir / f"{session_id}_translation.log"
@@ -159,12 +163,199 @@ class TranslatorEngine:
         )
         session["download_path"] = archive_path
         session["last_config"] = config
+        session["workflow_stage"] = "translated"
 
         return {
             "download_url": f"/api/download/{session_id}",
             "download_path": str(Path(archive_path).resolve()),
             "translated_dir": str(output_dir.resolve()),
             "mask_debug_dir": str(mask_debug_dir.resolve()) if mask_debug_dir is not None else "",
+            "workflow_stage": session["workflow_stage"],
+        }
+
+    async def detect_session(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+    ) -> dict[str, str]:
+        self._ensure_runtime_patches()
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
+        session["rerender_cache_dir"] = str(cache_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_directory(output_dir)
+        session["translated_output_map"] = {}
+        session["download_path"] = None
+        session["workflow_stage"] = "detecting"
+        session["deferred_output_names"] = set()
+
+        config_path = self._write_config(session_id, config, profile="detect")
+        log_path = self.temp_dir / f"{session_id}_detect.log"
+        expected_outputs = [
+            output_dir / Path(image["stored_name"])
+            for image in session["source_images"]
+        ]
+        reported: set[Path] = set()
+
+        await progress_callback({"event": "start", "total_pages": len(expected_outputs)})
+        await progress_callback(
+            {
+                "event": "status",
+                "message": "正在先识别文本框并建立可校对缓存，翻译会在你确认后再继续。",
+            }
+        )
+
+        command = self._build_command(
+            source_dir,
+            output_dir,
+            config_path,
+            config,
+            prep_manual=True,
+        )
+        process_returncode = await self._run_translation_command(
+            command=command,
+            log_path=log_path,
+            config=config,
+            session_id=session_id,
+            session=session,
+            expected_outputs=expected_outputs,
+            reported=reported,
+            progress_callback=progress_callback,
+        )
+        if process_returncode != 0:
+            raise RuntimeError(self._format_failure(log_path))
+
+        session["last_config"] = config
+        session["workflow_stage"] = "detected"
+        return {
+            "translated_dir": str(output_dir.resolve()),
+            "workflow_stage": session["workflow_stage"],
+        }
+
+    async def resume_translation_session(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+    ) -> dict[str, str]:
+        self._ensure_runtime_patches()
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        session["download_path"] = None
+        session["workflow_stage"] = "translating"
+        session["deferred_output_names"] = set()
+
+        source_images = list(session.get("source_images") or [])
+        total = len(source_images)
+        await progress_callback({"event": "start", "total_pages": total})
+        await progress_callback(
+            {
+                "event": "status",
+                "message": "正在根据你确认后的文本框继续翻译并嵌字…",
+            }
+        )
+
+        for index, image in enumerate(source_images, start=1):
+            stored_name = str(image.get("stored_name") or "")
+            source_path = source_dir / stored_name
+            cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
+            if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
+                raise RuntimeError(f"当前页面缺少可编辑缓存：{stored_name}")
+
+            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+            if source_bgr is None:
+                raise RuntimeError(f"无法读取原图：{source_path}")
+            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+
+            translated_regions = self._prepare_cached_regions_for_edit(
+                source_rgb,
+                cache_page_dir,
+                config,
+                stored_name,
+                session=session,
+            )
+            await self._translate_cached_regions(
+                translated_regions,
+                config=config,
+                session_id=session_id,
+            )
+            self._persist_translated_regions(
+                page_cache_dir=cache_page_dir,
+                session=session,
+                stored_name=stored_name,
+                regions=translated_regions,
+            )
+
+            output_path = output_dir / stored_name
+            await self._render_cached_page(
+                source_path=source_path,
+                output_path=output_path,
+                page_cache_dir=cache_page_dir,
+                config=config,
+                session=session,
+            )
+            self._update_translated_output_map(session, stored_name, output_path)
+
+            await progress_callback(
+                {
+                    "event": "progress",
+                    "current": index,
+                    "total": total,
+                    "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "stored_name": stored_name,
+                    "name": image["name"],
+                }
+            )
+
+        complex_images = self._select_complex_repair_images(session, source_dir, config)
+        if complex_images:
+            if self._wants_ai_image_cleanup(config):
+                if self._has_image_cleanup_key(config):
+                    await self._ai_clean_complex_pages(
+                        session_id=session_id,
+                        session=session,
+                        config=config,
+                        complex_images=complex_images,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    await progress_callback(
+                        {
+                            "event": "status",
+                            "message": "已启用 AI 去字，但没有可用 API Key，已保留稳定版输出。",
+                        }
+                    )
+            else:
+                await self._enhance_complex_pages(
+                    session_id=session_id,
+                    session=session,
+                    config=config,
+                    complex_images=complex_images,
+                    progress_callback=progress_callback,
+                )
+
+        archive_path = self.build_session_archive(
+            session_id=session_id,
+            session=session,
+            preferred_output_format=config["rerender_output_format"],
+        )
+        session["download_path"] = archive_path
+        session["last_config"] = config
+        session["workflow_stage"] = "translated"
+
+        return {
+            "download_url": f"/api/download/{session_id}",
+            "download_path": str(Path(archive_path).resolve()),
+            "translated_dir": str(output_dir.resolve()),
+            "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
+            "workflow_stage": session["workflow_stage"],
         }
 
     async def rerender_session(
@@ -273,12 +464,14 @@ class TranslatorEngine:
         )
         session["download_path"] = archive_path
         session["last_config"] = config
+        session["workflow_stage"] = "translated"
 
         return {
             "download_url": f"/api/download/{session_id}",
             "download_path": str(Path(archive_path).resolve()),
             "translated_dir": str(output_dir.resolve()),
             "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
+            "workflow_stage": session["workflow_stage"],
         }
 
     def _resolve_rerender_images(
@@ -491,6 +684,7 @@ class TranslatorEngine:
         mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
         rerender_output_format = self._normalize_rerender_output_format(raw_config.get("rerender_output_format"))
+        pause_after_detection = bool(raw_config.get("pause_after_detection", False))
         style_font_keys = self._normalize_style_font_keys(raw_config)
         style_font_paths = {
             style: self._resolve_font_path(font_key)
@@ -524,6 +718,7 @@ class TranslatorEngine:
             "rerender_output_format": rerender_output_format,
             "mask_cleanup_strength": mask_cleanup_strength,
             "export_mask_debug": export_mask_debug,
+            "pause_after_detection": pause_after_detection,
             "advanced_text_repair": self._normalize_advanced_text_repair(raw_config.get("advanced_text_repair")),
             "image_cleanup_mode": image_cleanup_mode,
             "image_cleanup_model": image_cleanup_model,
@@ -862,6 +1057,7 @@ class TranslatorEngine:
         output_dir: Path,
         config_path: Path,
         config: dict[str, Any],
+        prep_manual: bool = False,
     ) -> list[str]:
         command = [
             sys.executable,
@@ -881,6 +1077,8 @@ class TranslatorEngine:
         ]
         if config["font_path"]:
             command.extend(["--font-path", config["font_path"]])
+        if prep_manual:
+            command.append("--prep-manual")
         if config["use_gpu"]:
             command.insert(3, "--use-gpu")
         return command
@@ -1113,6 +1311,7 @@ class TranslatorEngine:
         return {
             "styles": list(self.STYLE_BUCKETS),
             "pages": pages,
+            "workflow_stage": self._session_workflow_stage(session),
         }
 
     async def inspect_translation_regions(
@@ -1192,7 +1391,16 @@ class TranslatorEngine:
                 }
             )
 
-        return {"pages": pages}
+        return {
+            "pages": pages,
+            "workflow_stage": self._session_workflow_stage(session),
+        }
+
+    def _session_workflow_stage(self, session: dict[str, Any]) -> str:
+        stage = str(session.get("workflow_stage") or "").strip().lower()
+        if stage in {"idle", "detecting", "detected", "translating", "translated"}:
+            return stage
+        return "translated" if session.get("download_path") else "idle"
 
     def _wants_ai_image_cleanup(self, config: dict[str, Any]) -> bool:
         return config.get("image_cleanup_mode") in {"gemini-image", "seedream-image"}
@@ -1785,6 +1993,30 @@ class TranslatorEngine:
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
         return [self._deserialize_text_region(payload) for payload in region_payloads]
 
+    def _to_json_compatible(self, value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(key): self._to_json_compatible(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._to_json_compatible(item) for item in value]
+        return value
+
+    def _save_cached_regions(self, page_cache_dir: Path, regions: list[Any]) -> None:
+        serialized_regions: list[dict[str, Any]] = []
+        for region in regions:
+            if not hasattr(region, "to_dict"):
+                continue
+            serialized_regions.append(self._to_json_compatible(region.to_dict()))
+
+        regions_path = page_cache_dir / "regions.json"
+        regions_path.write_text(
+            json.dumps(serialized_regions, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _ensure_manual_regions_store(self, session: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         manual_regions = session.get("manual_regions")
         if not isinstance(manual_regions, dict):
@@ -1985,9 +2217,23 @@ class TranslatorEngine:
         config: dict[str, Any],
         session_id: str,
     ) -> str:
-        cleaned = str(text or "").strip()
-        if not cleaned:
-            return ""
+        translations = await self._translate_text_batch([text], config, session_id)
+        return translations[0] if translations else ""
+
+    async def _translate_text_batch(
+        self,
+        texts: list[str],
+        config: dict[str, Any],
+        session_id: str,
+    ) -> list[str]:
+        cleaned_texts = [str(text or "").strip() for text in texts]
+        if not cleaned_texts:
+            return []
+        if not any(cleaned_texts):
+            return ["" for _ in cleaned_texts]
+
+        if config.get("translator") == "none":
+            return ["" for _ in cleaned_texts]
 
         self._ensure_vendor_import_path()
         from manga_translator.config import Translator, TranslatorConfig
@@ -2008,7 +2254,7 @@ class TranslatorEngine:
             try:
                 translated = await dispatch_translation(
                     translator_config.translator_gen,
-                    [cleaned],
+                    cleaned_texts,
                     translator_config=translator_config,
                     use_mtpe=False,
                     args=None,
@@ -2020,9 +2266,85 @@ class TranslatorEngine:
                 except Exception:
                     pass
 
-        if not translated:
-            return ""
-        return str(translated[0] or "").strip()
+        normalized = [str(item or "").strip() for item in (translated or [])]
+        if len(normalized) < len(cleaned_texts):
+            normalized.extend([""] * (len(cleaned_texts) - len(normalized)))
+        return normalized[:len(cleaned_texts)]
+
+    async def _translate_cached_regions(
+        self,
+        regions: list[Any],
+        config: dict[str, Any],
+        session_id: str,
+    ) -> None:
+        pending_regions: list[Any] = []
+        pending_texts: list[str] = []
+
+        for region in regions:
+            region.target_lang = config["target_lang"]
+            if bool(getattr(region, "skip_translation", False)):
+                continue
+
+            override_translation = str(getattr(region, "translation_override", "") or "").strip()
+            if override_translation:
+                region.translation = override_translation
+                continue
+
+            source_text = self._region_source_text(region)
+            if not source_text:
+                region.translation = ""
+                region.machine_translation = ""
+                continue
+
+            pending_regions.append(region)
+            pending_texts.append(source_text)
+
+        if not pending_texts:
+            return
+
+        translated_texts = await self._translate_text_batch(pending_texts, config, session_id)
+        for region, translated_text in zip(pending_regions, translated_texts):
+            resolved_translation = str(translated_text or "").strip()
+            region.machine_translation = resolved_translation
+            region.translation = resolved_translation
+
+    def _sync_manual_region_translations(
+        self,
+        session: dict[str, Any],
+        stored_name: str,
+        regions: list[Any],
+    ) -> None:
+        manual_regions = self._ensure_manual_regions_store(session)
+        page_payloads = manual_regions.get(stored_name)
+        if not isinstance(page_payloads, list):
+            return
+
+        payload_by_id = {
+            str(payload.get("id") or ""): payload
+            for payload in page_payloads
+            if isinstance(payload, dict)
+        }
+        for region in regions:
+            if not bool(getattr(region, "manual_region", False)):
+                continue
+            region_id = str(getattr(region, "manual_region_id", "") or getattr(region, "translation_region_key", "") or "")
+            payload = payload_by_id.get(region_id)
+            if not payload:
+                continue
+            payload["source_text"] = self._region_source_text(region)
+            payload["machine_translation"] = str(getattr(region, "machine_translation", "") or "")
+            payload["translation"] = str(getattr(region, "translation", "") or "")
+
+    def _persist_translated_regions(
+        self,
+        page_cache_dir: Path,
+        session: dict[str, Any],
+        stored_name: str,
+        regions: list[Any],
+    ) -> None:
+        auto_regions = [region for region in regions if not bool(getattr(region, "manual_region", False))]
+        self._save_cached_regions(page_cache_dir, auto_regions)
+        self._sync_manual_region_translations(session, stored_name, regions)
 
     async def create_manual_region(
         self,
@@ -2051,10 +2373,11 @@ class TranslatorEngine:
 
         ocr_result = await self._ocr_manual_region(source_rgb, normalized_bbox, config.get("use_gpu", True))
         translation = ""
-        try:
-            translation = await self._translate_manual_text(ocr_result.get("source_text", ""), config, session_id)
-        except Exception as exc:
-            print(f"[WARN] Manual region translation failed for {stored_name}: {exc}")
+        if self._session_workflow_stage(session) != "detected":
+            try:
+                translation = await self._translate_manual_text(ocr_result.get("source_text", ""), config, session_id)
+            except Exception as exc:
+                print(f"[WARN] Manual region translation failed for {stored_name}: {exc}")
 
         payload = self._build_manual_region_payload(
             stored_name=stored_name,

@@ -208,6 +208,7 @@ async def upload_comic(file: UploadFile = File(...)):
         "translated_output_map": {},
         "rerender_generation": 0,
         "manual_regions": {},
+        "workflow_stage": "idle",
     }
 
     return {
@@ -265,6 +266,20 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 raw_config=config,
                 progress_callback=send_event,
                 target_stored_name=target_stored_name or None,
+            )
+        elif action == "detect":
+            result = await translator_engine.detect_session(
+                session_id=session_id,
+                session=session,
+                raw_config=config,
+                progress_callback=send_event,
+            )
+        elif action == "resume-translate":
+            result = await translator_engine.resume_translation_session(
+                session_id=session_id,
+                session=session,
+                raw_config=config,
+                progress_callback=send_event,
             )
         else:
             result = await translator_engine.translate_session(

@@ -2149,16 +2149,15 @@ class TranslatorEngine:
             + font_size
         )
 
-    def _restore_original_region_pixels(
+    def _build_region_mask(
         self,
-        source_rgb: np.ndarray,
-        base_rgb: np.ndarray,
         region: Any,
-    ) -> None:
-        if source_rgb.shape[:2] != base_rgb.shape[:2]:
-            return
-
-        mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        image_shape: tuple[int, int],
+        dilation_scale: float = 0.08,
+        dilation_min: int = 1,
+        dilation_max: int = 8,
+    ) -> np.ndarray:
+        mask = np.zeros(image_shape[:2], dtype=np.uint8)
         drew_mask = False
         raw_lines = getattr(region, "lines", None)
         if isinstance(raw_lines, list):
@@ -2181,16 +2180,48 @@ class TranslatorEngine:
             y1 = max(0, min(mask.shape[0], y1))
             y2 = max(0, min(mask.shape[0], y2))
             if x2 <= x1 or y2 <= y1:
-                return
+                return mask
             cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
 
         font_size = max(float(getattr(region, "font_size", 0) or 0), 10.0)
-        dilation = int(max(1, min(8, round(font_size * 0.08))))
+        dilation = int(max(dilation_min, min(dilation_max, round(font_size * dilation_scale))))
         kernel = np.ones((dilation, dilation), dtype=np.uint8)
         mask = cv2.dilate(mask, kernel, iterations=1)
+        return mask
+
+    def _restore_original_region_pixels(
+        self,
+        source_rgb: np.ndarray,
+        base_rgb: np.ndarray,
+        region: Any,
+    ) -> None:
+        if source_rgb.shape[:2] != base_rgb.shape[:2]:
+            return
+
+        mask = self._build_region_mask(region, source_rgb.shape)
         selector = mask > 0
         if np.any(selector):
             base_rgb[selector] = source_rgb[selector]
+
+    def _erase_manual_region_pixels(
+        self,
+        base_rgb: np.ndarray,
+        region: Any,
+    ) -> None:
+        mask = self._build_region_mask(
+            region,
+            base_rgb.shape,
+            dilation_scale=0.14,
+            dilation_min=2,
+            dilation_max=12,
+        )
+        if not np.any(mask):
+            return
+
+        font_size = max(float(getattr(region, "font_size", 0) or 0), 12.0)
+        radius = int(max(3, min(9, round(font_size * 0.14))))
+        inpainted = cv2.inpaint(base_rgb, mask, radius, cv2.INPAINT_TELEA)
+        base_rgb[:, :] = inpainted
 
     def _dedupe_overlapping_regions(
         self,
@@ -2847,9 +2878,15 @@ class TranslatorEngine:
             )
         )
         skipped_regions = [region for region in regions if bool(getattr(region, "skip_translation", False))]
+        manual_render_regions = [
+            region for region in regions
+            if bool(getattr(region, "manual_region", False)) and not bool(getattr(region, "skip_translation", False))
+        ]
         render_regions = [region for region in regions if not bool(getattr(region, "skip_translation", False))]
         for region in skipped_regions:
             self._restore_original_region_pixels(source_rgb, inpainted_rgb, region)
+        for region in manual_render_regions:
+            self._erase_manual_region_pixels(inpainted_rgb, region)
 
         for region in render_regions:
             region._alignment = config["render_alignment"]

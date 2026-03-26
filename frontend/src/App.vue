@@ -529,7 +529,7 @@ async function submitManualDraw(page, bbox) {
     if (!response.ok) {
       throw new Error(payload.detail || '新增补漏框失败')
     }
-    await loadEditInspection()
+    await loadEditInspection({ silent: true })
     selectedEditPageKey.value = page.stored_name
     selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
     status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
@@ -650,7 +650,7 @@ async function deleteManualRegion(region) {
     delete nextStyleOverrides[region.id]
     styleRegionOverrides.value = nextStyleOverrides
 
-    await loadEditInspection()
+    await loadEditInspection({ silent: true })
     status.value = '已删除这个手动补漏框。'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '删除补漏框失败'
@@ -729,14 +729,17 @@ function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
   return [...images, nextImage]
 }
 
-async function loadReviewInspection() {
+async function loadReviewInspection(options = {}) {
+  const silent = Boolean(options.silent)
   if (!sessionId.value) {
     reviewInspectionPages.value = []
     syncEditSelection()
     return
   }
 
-  reviewInspectionLoading.value = true
+  if (!silent) {
+    reviewInspectionLoading.value = true
+  }
   try {
     const response = await fetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
       method: 'POST',
@@ -756,18 +759,23 @@ async function loadReviewInspection() {
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '读取翻译审校结果失败'
   } finally {
-    reviewInspectionLoading.value = false
+    if (!silent) {
+      reviewInspectionLoading.value = false
+    }
   }
 }
 
-async function loadStyleInspection() {
+async function loadStyleInspection(options = {}) {
+  const silent = Boolean(options.silent)
   if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
     styleInspectionPages.value = []
     syncEditSelection()
     return
   }
 
-  styleInspectionLoading.value = true
+  if (!silent) {
+    styleInspectionLoading.value = true
+  }
   try {
     const response = await fetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
       method: 'POST',
@@ -787,11 +795,14 @@ async function loadStyleInspection() {
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '读取字体样式识别结果失败'
   } finally {
-    styleInspectionLoading.value = false
+    if (!silent) {
+      styleInspectionLoading.value = false
+    }
   }
 }
 
-async function loadEditInspection() {
+async function loadEditInspection(options = {}) {
+  const silent = Boolean(options.silent)
   if (!sessionId.value) {
     resetTranslationReview()
     resetStyleInspector()
@@ -799,9 +810,9 @@ async function loadEditInspection() {
     return
   }
 
-  const tasks = [loadReviewInspection()]
+  const tasks = [loadReviewInspection({ silent })]
   if (config.value.font_style_mode === 'auto-map') {
-    tasks.push(loadStyleInspection())
+    tasks.push(loadStyleInspection({ silent }))
   } else {
     resetStyleInspector()
   }
@@ -852,11 +863,13 @@ function clearTranslationOverrides() {
   translationRegionOverrides.value = {}
   translationRegionSkipOverrides.value = {}
   status.value = '已清空当前会话里的人工译文修改和保留原文设置。'
+  void loadEditInspection({ silent: true })
 }
 
 function clearStyleOverrides() {
   styleRegionOverrides.value = {}
   status.value = '已清空当前会话里的手动样式覆盖。'
+  void loadEditInspection({ silent: true })
 }
 
 function clearStoredApiKey() {
@@ -1140,7 +1153,7 @@ function startTranslation(action = 'translate') {
           ? '当前页重嵌字完成。'
           : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
         : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
-      void loadEditInspection()
+      void loadEditInspection({ silent: true })
       closeSocket()
       return
     }
@@ -1208,7 +1221,7 @@ watch(
   () => config.value.font_style_mode,
   () => {
     if (sessionId.value && (downloadUrl.value || translatedImages.value.length)) {
-      void loadEditInspection()
+      void loadEditInspection({ silent: true })
       return
     }
     syncEditSelection()
@@ -1769,7 +1782,7 @@ watch(
         </div>
       </div>
 
-      <div v-if="editInspectionLoading" class="empty-state">
+      <div v-if="!selectedEditPage && editInspectionLoading" class="empty-state">
         正在读取当前会话的逐框校对数据…
       </div>
 
@@ -1868,20 +1881,46 @@ watch(
               :class="['style-region-card', selectedEditRegionKey === region.id ? 'active' : '']"
               @click="selectedEditRegionKey = region.id"
             >
-              <div class="style-region-head">
-                <strong>文本框 #{{ region.index + 1 }}</strong>
-                <div class="style-badges">
+              <div class="style-region-row">
+                <div class="style-region-copy">
+                  <strong class="style-region-index">#{{ region.index + 1 }}</strong>
+                  <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
                   <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
-                  <span
+                </div>
+
+                <div class="style-region-inline-controls" @click.stop @mousedown.stop>
+                  <label class="region-inline-toggle">
+                    <input
+                      :checked="isRegionSkipEnabled(region)"
+                      type="checkbox"
+                      @click.stop
+                      @mousedown.stop
+                      @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                    />
+                    <span>保留原文</span>
+                  </label>
+
+                  <label
                     v-if="config.font_style_mode === 'auto-map'"
-                    class="style-badge"
+                    class="compact-select-wrap"
                   >
-                    自动：{{ getStyleLabel(region.auto_style) }}
-                  </span>
-                  <span v-if="isRegionSkipEnabled(region)" class="style-badge">
-                    保留原文
-                  </span>
-                  <span v-if="translationRegionOverrides[region.id]" class="style-badge style-badge-strong">已改译文</span>
+                    <select
+                      :value="getRegionOverrideValue(region)"
+                      @click.stop
+                      @mousedown.stop
+                      @change="updateStyleOverride(region, $event.target.value)"
+                    >
+                      <option value="">{{ getStyleLabel(getResolvedStyle(region)) }}</option>
+                      <option
+                        v-for="option in styleBucketOptions"
+                        :key="`${region.id}-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+
                   <button
                     v-if="isManualRegion(region)"
                     class="inline-button inline-button-danger"
@@ -1893,56 +1932,17 @@ watch(
                 </div>
               </div>
 
-              <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
-
-              <div class="region-card-controls" :class="{ compact: config.font_style_mode !== 'auto-map' }">
-                <label
-                  v-if="config.font_style_mode === 'auto-map'"
-                  class="field style-override-field compact-field compact-select-field"
-                  @click.stop
-                  @mousedown.stop
-                >
-                  <select
-                    :value="getRegionOverrideValue(region)"
-                    @click.stop
-                    @mousedown.stop
-                    @change="updateStyleOverride(region, $event.target.value)"
-                  >
-                    <option value="">当前：{{ getStyleLabel(getResolvedStyle(region)) }}（跟随自动）</option>
-                    <option
-                      v-for="option in styleBucketOptions"
-                      :key="`${region.id}-${option.value}`"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-
-                <label
-                  class="field style-override-field compact-field compact-toggle-field"
-                  @click.stop
-                  @mousedown.stop
-                >
-                  <span class="compact-toggle-label">保留原文</span>
-                  <input
-                    :checked="isRegionSkipEnabled(region)"
-                    type="checkbox"
-                    @click.stop
-                    @mousedown.stop
-                    @change="updateTranslationSkipOverride(region, $event.target.checked)"
-                  />
-                </label>
-
+              <div class="region-card-controls region-card-controls-single">
                 <label
                   class="field style-override-field compact-field compact-field-grow"
                   @click.stop
                   @mousedown.stop
                 >
                   <input
-                    class="translation-review-input"
+                    :class="['translation-review-input', isRegionSkipEnabled(region) ? 'disabled' : '']"
                     :value="getEditRegionText(region)"
                     type="text"
+                    :disabled="isRegionSkipEnabled(region)"
                     @click.stop
                     @mousedown.stop
                     @input="updateTranslationOverride(region, $event.target.value)"

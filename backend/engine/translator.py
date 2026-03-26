@@ -152,22 +152,10 @@ class TranslatorEngine:
                 progress_callback,
             )
 
-        archive_base = self.temp_dir / f"{session_id}_translated"
-        archive_files: list[Path] = []
-        for image in session["source_images"]:
-            current_output = self._current_translated_output(
-                session,
-                output_dir,
-                image["stored_name"],
-                config["rerender_output_format"],
-            )
-            if current_output is not None:
-                archive_files.append(current_output)
-
-        archive_path = self._make_selected_archive(
-            Path(f"{archive_base}.zip"),
-            archive_files,
-            output_dir,
+        archive_path = self.build_session_archive(
+            session_id=session_id,
+            session=session,
+            preferred_output_format=config["rerender_output_format"],
         )
         session["download_path"] = archive_path
         session["last_config"] = config
@@ -266,7 +254,6 @@ class TranslatorEngine:
                 self._copy_source_to_output(source_path, output_path)
 
             self._update_translated_output_map(session, image["stored_name"], output_path)
-            archive_files.append(output_path)
 
             await progress_callback(
                 {
@@ -279,14 +266,11 @@ class TranslatorEngine:
                 }
             )
 
-        archive_files = self._collect_session_archive_files(
+        archive_path = self.build_session_archive(
+            session_id=session_id,
             session=session,
-            source_dir=source_dir,
-            output_dir=output_dir,
             preferred_output_format=config["rerender_output_format"],
         )
-        archive_base = self.temp_dir / f"{session_id}_translated"
-        archive_path = self._make_selected_archive(Path(f"{archive_base}.zip"), archive_files, output_dir)
         session["download_path"] = archive_path
         session["last_config"] = config
 
@@ -346,6 +330,30 @@ class TranslatorEngine:
             self._update_translated_output_map(session, stored_name, fallback_output)
             archive_files.append(fallback_output)
         return archive_files
+
+    def build_session_archive(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        preferred_output_format: str | None = None,
+    ) -> str:
+        source_dir = Path(session["source_dir"])
+        output_dir = Path(session["translated_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        resolved_output_format = preferred_output_format or self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
+        archive_files = self._collect_session_archive_files(
+            session=session,
+            source_dir=source_dir,
+            output_dir=output_dir,
+            preferred_output_format=resolved_output_format,
+        )
+        archive_base = self.temp_dir / f"{session_id}_translated"
+        archive_path = self._make_selected_archive(Path(f"{archive_base}.zip"), archive_files, output_dir)
+        session["download_path"] = archive_path
+        return archive_path
 
     def _ensure_runtime_patches(self) -> None:
         try:

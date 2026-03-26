@@ -220,10 +220,15 @@ async def upload_comic(file: UploadFile = File(...)):
 @app.get("/api/download/{session_id}")
 async def download_translated_archive(session_id: str):
     session = SESSIONS.get(session_id)
-    if not session or not session.get("download_path"):
+    if not session:
         raise HTTPException(status_code=404, detail="Translated archive not found")
 
-    download_path = Path(session["download_path"])
+    download_path = Path(
+        translator_engine.build_session_archive(
+            session_id=session_id,
+            session=session,
+        )
+    )
     if not download_path.exists():
         raise HTTPException(status_code=404, detail="Translated archive not found")
 

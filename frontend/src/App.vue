@@ -3,14 +3,17 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
+const doubaoModelOptions = [
+  { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
+  { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量文本)' },
+  { value: 'doubao-seed-2-0-lite-260215', label: 'doubao-seed-2-0-lite-260215 (轻量文本)' },
+  { value: 'doubao-seed-2-0-mini-260215', label: 'doubao-seed-2-0-mini-260215 (通用文本 / 多模态)' }
+]
 const translatorDefaultModels = {
   'doubao-ark': 'doubao-seed-translation-250915'
 }
 const translatorAllowedModels = {
-  'doubao-ark': new Set([
-    'doubao-seed-translation-250915',
-    'doubao-seed-2-0-mini-260215'
-  ])
+  'doubao-ark': new Set(doubaoModelOptions.map((option) => option.value))
 }
 const imageCleanupDefaultModels = {
   'gemini-image': 'gemini-2.5-flash-image',
@@ -80,6 +83,7 @@ function createDefaultConfig() {
   return {
     translator: 'gemini',
     translator_model: '',
+    translator_model_custom: '',
     target_lang: 'CHT',
     use_gpu: true,
     api_key: '',
@@ -116,9 +120,18 @@ function normalizeStoredConfig(rawValue) {
   const storedTranslatorModel = typeof rawValue.translator_model === 'string'
     ? rawValue.translator_model
     : defaults.translator_model
+  const storedTranslatorModelCustom = typeof rawValue.translator_model_custom === 'string'
+    ? rawValue.translator_model_custom.trim()
+    : ''
   const translatorModel = isValidTranslatorModel(translator, storedTranslatorModel)
     ? storedTranslatorModel
     : getDefaultTranslatorModel(translator)
+  const translatorModelCustom = translator === 'doubao-ark'
+    ? (
+        storedTranslatorModelCustom
+        || (!isValidTranslatorModel(translator, storedTranslatorModel) && storedTranslatorModel ? storedTranslatorModel : '')
+      )
+    : defaults.translator_model_custom
   const imageCleanupMode = typeof rawValue.image_cleanup_mode === 'string'
     ? rawValue.image_cleanup_mode
     : defaults.image_cleanup_mode
@@ -141,6 +154,7 @@ function normalizeStoredConfig(rawValue) {
   return {
     translator,
     translator_model: translatorModel,
+    translator_model_custom: translatorModelCustom,
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
@@ -375,7 +389,10 @@ const compactConfigSummary = computed(() => {
   const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
   const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
   const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
-  return `${translator} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow}`
+  const translatorModel = config.value.translator === 'doubao-ark'
+    ? ` / ${getResolvedTranslatorModel(config.value)}`
+    : ''
+  return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow}`
 })
 
 const primaryTranslateAction = computed(() => {
@@ -461,10 +478,24 @@ function resetEditInspectorSelection() {
 function buildRuntimeConfig() {
   return {
     ...config.value,
+    translator_model: getResolvedTranslatorModel(config.value),
     style_region_overrides: { ...styleRegionOverrides.value },
     translation_region_overrides: { ...translationRegionOverrides.value },
     translation_region_skip_overrides: { ...translationRegionSkipOverrides.value }
   }
+}
+
+function getResolvedTranslatorModel(value = config.value) {
+  if (value.translator !== 'doubao-ark') {
+    return value.translator_model || ''
+  }
+
+  const customModel = String(value.translator_model_custom || '').trim()
+  if (customModel) {
+    return customModel
+  }
+
+  return value.translator_model || getDefaultTranslatorModel(value.translator)
 }
 
 function getStyleLabel(style) {
@@ -1325,6 +1356,9 @@ watch(
     if (!isValidTranslatorModel(nextTranslator, config.value.translator_model)) {
       config.value.translator_model = getDefaultTranslatorModel(nextTranslator)
     }
+    if (nextTranslator !== 'doubao-ark') {
+      config.value.translator_model_custom = ''
+    }
   }
 )
 
@@ -1441,11 +1475,22 @@ watch(
         <label v-if="config.translator === 'doubao-ark'" class="field">
           <span>Doubao 模型</span>
           <select v-model="config.translator_model">
-            <option value="doubao-seed-translation-250915">doubao-seed-translation-250915 (翻译增强 / 推荐)</option>
-            <option value="doubao-seed-2-0-mini-260215">doubao-seed-2-0-mini-260215 (通用文本 / 多模态)</option>
+            <option
+              v-for="model in doubaoModelOptions"
+              :key="model.value"
+              :value="model.value"
+            >
+              {{ model.label }}
+            </option>
           </select>
+          <input
+            v-model="config.translator_model_custom"
+            type="text"
+            placeholder="可选：直接输入任意 Ark 模型 ID，留空则使用上面的常用模型"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border); margin-top: 8px;"
+          />
           <small class="field-hint">
-            按火山方舟官方模型列表接入；当前只开放你指定的这两个模型。
+            已内置常用官方模型；如果控制台里有更新或白名单模型，也可以直接填模型 ID，输入框优先级更高。
           </small>
         </label>
 
@@ -1472,7 +1517,7 @@ watch(
             <span>
               {{
                 config.translator === 'doubao-ark'
-                  ? '会保存在当前浏览器本地，并按火山方舟兼容 OpenAI SDK 的方式调用 Chat API。'
+                  ? '会保存在当前浏览器本地，并按火山方舟官方兼容接口调用；翻译增强模型会自动切到 Responses API。'
                   : '会保存在当前浏览器本地，下次打开页面会自动带出。'
               }}
             </span>

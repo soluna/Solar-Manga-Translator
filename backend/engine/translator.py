@@ -33,8 +33,10 @@ class TranslatorEngine:
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
     TRANSLATED_OUTPUT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
-    DOUBAO_ALLOWED_MODELS = {
+    DOUBAO_CURATED_MODELS = {
         "doubao-seed-translation-250915",
+        "doubao-seed-2-0-pro-260215",
+        "doubao-seed-2-0-lite-260215",
         "doubao-seed-2-0-mini-260215",
     }
 
@@ -654,6 +656,7 @@ class TranslatorEngine:
         translator_model = self._normalize_translator_model(
             selected_translator,
             raw_config.get("translator_model"),
+            raw_config.get("translator_model_custom"),
         )
 
         # Bug fix: Some translators use different language codes for Chinese
@@ -731,12 +734,16 @@ class TranslatorEngine:
             return "auto"
         return value
 
-    def _normalize_translator_model(self, translator: str, raw_value: Any) -> str:
+    def _normalize_translator_model(
+        self,
+        translator: str,
+        raw_value: Any,
+        raw_custom_value: Any = None,
+    ) -> str:
         value = str(raw_value or "").strip()
-        if translator == "doubao-ark" and value in self.DOUBAO_ALLOWED_MODELS:
-            return value
+        custom_value = str(raw_custom_value or "").strip()
         if translator == "doubao-ark":
-            return self.DOUBAO_DEFAULT_MODEL
+            return custom_value or value or self.DOUBAO_DEFAULT_MODEL
         return ""
 
     def _normalize_image_cleanup_mode(self, raw_value: Any) -> str:

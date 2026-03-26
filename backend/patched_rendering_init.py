@@ -23,8 +23,8 @@ from ..utils import (
 logger = get_logger('render')
 _ACTIVE_FONT_KEY = None
 _TRADITIONAL_TEXT_CONVERTER = None
-_TERMINAL_PERIOD_CHARS = {"。", "．", "."}
-_TERMINAL_PUNCTUATION_CHARS = _TERMINAL_PERIOD_CHARS | {"！", "!", "？", "?", "…", "‥", "～", "~"}
+_TERMINAL_PERIOD_CHARS = {"。", "．", ".", "｡", "﹒"}
+_TERMINAL_PUNCTUATION_CHARS = _TERMINAL_PERIOD_CHARS | {"！", "!", "﹗", "？", "?", "…", "‥", "～", "~"}
 _TRAILING_CLOSERS = "』」】》〉）)]}>'\"”’"
 
 
@@ -91,17 +91,27 @@ def _has_terminal_punctuation(text: str) -> bool:
     return bool(core and core[-1] in _TERMINAL_PUNCTUATION_CHARS)
 
 
+def _get_region_source_text(region: TextBlock) -> str:
+    for field_name in ("text_raw", "text", "source_text", "original_text", "manual_source_text"):
+        value = str(getattr(region, field_name, "") or "").strip()
+        if value:
+            return value
+
+    texts = getattr(region, "texts", None)
+    if isinstance(texts, list):
+        joined = "".join(str(item or "") for item in texts).strip()
+        if joined:
+            return joined
+
+    return ""
+
+
 def _strip_unwanted_terminal_period(region: TextBlock, text: str) -> str:
     normalized_text = str(text or "").rstrip()
     if not normalized_text:
         return normalized_text
 
-    source_text = str(getattr(region, "text", "") or "").strip()
-    if not source_text:
-        texts = getattr(region, "texts", None)
-        if isinstance(texts, list):
-            source_text = "".join(str(item or "") for item in texts).strip()
-
+    source_text = _get_region_source_text(region)
     if not source_text or _has_terminal_punctuation(source_text):
         return normalized_text
 

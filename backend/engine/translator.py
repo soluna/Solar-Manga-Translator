@@ -1865,6 +1865,8 @@ class TranslatorEngine:
         region.manual_region_id = str(payload.get("id") or "")
         region.style_region_key = region.manual_region_id
         region.translation_region_key = region.manual_region_id
+        region.source_text = source_text
+        region.text_raw = source_text
         region.machine_translation = str(payload.get("machine_translation") or translation or "")
         region.translation_override = ""
         return region
@@ -2438,9 +2440,10 @@ class TranslatorEngine:
             )
 
     def _region_source_text(self, region: Any) -> str:
-        text_value = str(getattr(region, "text", "") or "").strip()
-        if text_value:
-            return text_value
+        for field_name in ("text_raw", "text", "source_text", "original_text", "manual_source_text"):
+            text_value = str(getattr(region, field_name, "") or "").strip()
+            if text_value:
+                return text_value
         texts = getattr(region, "texts", None)
         if isinstance(texts, list):
             joined = "".join(str(item or "") for item in texts).strip()
@@ -2495,6 +2498,10 @@ class TranslatorEngine:
             region.adjust_bg_color = bool(payload["adjust_bg_color"])
         if "font_style" in payload:
             region.font_style = payload["font_style"]
+        source_text = str(payload.get("source_text") or payload.get("text_raw") or payload.get("text") or "").strip()
+        if source_text:
+            region.source_text = source_text
+            region.text_raw = source_text
         return region
 
     def _classify_region_font_style(

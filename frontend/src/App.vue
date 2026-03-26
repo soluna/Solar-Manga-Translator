@@ -461,6 +461,18 @@ function getStyleRegionBoxStyle(region, page) {
   }
 }
 
+function getStyleRegionLabelClass(region, page) {
+  const [x1, y1, x2] = region?.bbox || [0, 0, 0, 0]
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  const nearTop = (y1 / height) < 0.08
+  const nearRight = (x2 / width) > 0.84
+  return {
+    'label-below': nearTop,
+    'label-right': nearRight
+  }
+}
+
 function isManualRegion(region) {
   return Boolean(region?.manual)
 }
@@ -1834,19 +1846,24 @@ watch(
                     v-for="region in selectedEditPage.regions"
                     :key="`source-${region.id}`"
                     type="button"
-                    :class="['style-box', isManualRegion(region) ? 'manual' : '', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :class="[
+                      'style-box',
+                      isManualRegion(region) ? 'manual' : '',
+                      selectedEditRegionKey === region.id ? 'active' : '',
+                      getStyleRegionLabelClass(region, selectedEditPage)
+                    ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="selectedEditRegionKey = region.id"
                   >
-                    <span>{{ region.index + 1 }}</span>
+                    <span class="style-box-label">{{ region.index + 1 }}</span>
                   </button>
 
                   <div
                     v-if="manualDrawDraft && manualDrawDraft.stored_name === selectedEditPage.stored_name"
-                    class="style-box style-box-draft active manual"
+                    :class="['style-box', 'style-box-draft', 'active', 'manual', getStyleRegionLabelClass({ bbox: getManualDraftBBox(selectedEditPage) || [0, 0, 0, 0] }, selectedEditPage)]"
                     :style="getManualDraftStyle(selectedEditPage)"
                   >
-                    <span>新框</span>
+                    <span class="style-box-label">新框</span>
                   </div>
                 </div>
               </div>
@@ -1863,11 +1880,16 @@ watch(
                     v-for="region in selectedEditPage.regions"
                     :key="`translated-${region.id}`"
                     type="button"
-                    :class="['style-box', isManualRegion(region) ? 'manual' : '', selectedEditRegionKey === region.id ? 'active' : '']"
+                    :class="[
+                      'style-box',
+                      isManualRegion(region) ? 'manual' : '',
+                      selectedEditRegionKey === region.id ? 'active' : '',
+                      getStyleRegionLabelClass(region, selectedEditPage)
+                    ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="selectedEditRegionKey = region.id"
                   >
-                    <span>{{ region.index + 1 }}</span>
+                    <span class="style-box-label">{{ region.index + 1 }}</span>
                   </button>
                 </div>
               </div>

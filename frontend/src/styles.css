@@ -470,14 +470,13 @@ h2 {
 
 .style-box {
   position: absolute;
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
+  display: block;
   padding: 0;
   border: 2px solid rgba(217, 108, 42, 0.78);
   background: rgba(255, 209, 186, 0.12);
   cursor: pointer;
   transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+  overflow: visible;
 }
 
 .style-box:hover {
@@ -506,15 +505,32 @@ h2 {
   pointer-events: none;
 }
 
-.style-box span {
-  display: inline-block;
-  margin: 4px;
-  padding: 3px 6px;
+.style-box-label {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 6px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 3px 7px;
   border-radius: 999px;
   background: rgba(43, 33, 24, 0.82);
   color: #fffaf4;
   font-size: 0.7rem;
   line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.style-box.label-below .style-box-label {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
+.style-box.label-right .style-box-label {
+  left: auto;
+  right: -2px;
 }
 
 .style-region-list {

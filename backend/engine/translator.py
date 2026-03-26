@@ -1040,10 +1040,11 @@ class TranslatorEngine:
 
         for image in session["source_images"]:
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            source_path = source_dir / image["stored_name"]
+            self._ensure_rerenderable_page_cache(source_path, cache_page_dir)
             if not self._has_rerenderable_page_cache(cache_page_dir):
                 continue
 
-            source_path = source_dir / image["stored_name"]
             source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
             if source_bgr is None:
                 continue
@@ -1122,10 +1123,11 @@ class TranslatorEngine:
 
         for image in session["source_images"]:
             cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            source_path = source_dir / image["stored_name"]
+            self._ensure_rerenderable_page_cache(source_path, cache_page_dir)
             if not self._has_rerenderable_page_cache(cache_page_dir):
                 continue
 
-            source_path = source_dir / image["stored_name"]
             source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
             if source_bgr is None:
                 continue
@@ -1745,6 +1747,26 @@ class TranslatorEngine:
             and (page_cache_dir / "regions.json").exists()
         )
 
+    def _ensure_rerenderable_page_cache(self, source_path: Path, page_cache_dir: Path) -> bool:
+        if self._has_rerenderable_page_cache(page_cache_dir):
+            return True
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            return False
+
+        page_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        inpainted_path = page_cache_dir / "inpainted.png"
+        if not inpainted_path.exists():
+            cv2.imwrite(str(inpainted_path), source_bgr)
+
+        regions_path = page_cache_dir / "regions.json"
+        if not regions_path.exists():
+            regions_path.write_text("[]", encoding="utf-8")
+
+        return self._has_rerenderable_page_cache(page_cache_dir)
+
     def _ensure_vendor_import_path(self) -> None:
         vendor_root = str(self.base_dir / "manga-image-translator")
         if vendor_root not in sys.path:
@@ -2014,6 +2036,10 @@ class TranslatorEngine:
             raise RuntimeError("无法读取当前页面原图。")
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
         normalized_bbox = self._normalize_manual_bbox(bbox, source_rgb.shape[1], source_rgb.shape[0])
+
+        cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
+        if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
+            raise RuntimeError("无法为当前页面建立可编辑缓存，请刷新后重试。")
 
         ocr_result = await self._ocr_manual_region(source_rgb, normalized_bbox, config.get("use_gpu", True))
         translation = ""

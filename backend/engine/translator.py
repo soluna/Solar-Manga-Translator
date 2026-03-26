@@ -700,6 +700,12 @@ class TranslatorEngine:
         translation_region_skip_overrides = self._normalize_translation_region_skip_overrides(
             raw_config.get("translation_region_skip_overrides")
         )
+        translation_region_disabled_overrides = self._normalize_translation_region_disabled_overrides(
+            raw_config.get("translation_region_disabled_overrides")
+        )
+        translation_region_layout_overrides = self._normalize_translation_region_layout_overrides(
+            raw_config.get("translation_region_layout_overrides")
+        )
 
         return {
             "translator": translator,
@@ -716,6 +722,8 @@ class TranslatorEngine:
             "style_region_overrides": style_region_overrides,
             "translation_region_overrides": translation_region_overrides,
             "translation_region_skip_overrides": translation_region_skip_overrides,
+            "translation_region_disabled_overrides": translation_region_disabled_overrides,
+            "translation_region_layout_overrides": translation_region_layout_overrides,
             "render_alignment": render_alignment,
             "render_letter_spacing": render_letter_spacing,
             "rerender_output_format": rerender_output_format,
@@ -829,6 +837,46 @@ class TranslatorEngine:
                 continue
             if bool(value):
                 normalized[key] = True
+        return normalized
+
+    def _normalize_translation_region_disabled_overrides(self, raw_value: Any) -> dict[str, bool]:
+        if not isinstance(raw_value, dict):
+            return {}
+
+        normalized: dict[str, bool] = {}
+        for key, value in raw_value.items():
+            if not isinstance(key, str):
+                continue
+            if bool(value):
+                normalized[key] = True
+        return normalized
+
+    def _normalize_translation_region_layout_overrides(self, raw_value: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(raw_value, dict):
+            return {}
+
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, value in raw_value.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+
+            entry: dict[str, Any] = {}
+            bbox = value.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    entry["bbox"] = [int(round(float(item))) for item in bbox]
+                except (TypeError, ValueError):
+                    pass
+
+            font_size = value.get("font_size")
+            if font_size is not None:
+                try:
+                    entry["font_size"] = max(8, int(round(float(font_size))))
+                except (TypeError, ValueError):
+                    pass
+
+            if entry:
+                normalized[key] = entry
         return normalized
 
     def _normalize_mask_cleanup_strength(self, raw_value: Any) -> str:
@@ -1299,6 +1347,7 @@ class TranslatorEngine:
                         "source_text": self._region_source_text(region),
                         "translation": str(getattr(region, "translation", "") or ""),
                         "preview_text": self._region_preview_text(region),
+                        "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
                     }
                 )
 
@@ -1382,6 +1431,7 @@ class TranslatorEngine:
                         "override_skip": bool(getattr(region, "skip_translation", False)),
                         "current_translation": str(getattr(region, "translation", "") or ""),
                         "preview_text": self._region_preview_text(region),
+                        "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
                     }
                 )
 
@@ -2401,6 +2451,100 @@ class TranslatorEngine:
         manual_regions.setdefault(stored_name, []).append(payload)
         return payload
 
+    def _sort_regions_for_merge(self, regions: list[Any]) -> list[Any]:
+        if not regions:
+            return []
+
+        vertical_votes = sum(1 for region in regions if str(getattr(region, "direction", "") or "").startswith("v"))
+        if vertical_votes >= max(1, len(regions) // 2 + (len(regions) % 2)):
+            return sorted(
+                regions,
+                key=lambda region: (self._region_bbox(region)[0], self._region_bbox(region)[1]),
+                reverse=True,
+            )
+
+        x1 = min(self._region_bbox(region)[0] for region in regions)
+        y1 = min(self._region_bbox(region)[1] for region in regions)
+        x2 = max(self._region_bbox(region)[2] for region in regions)
+        y2 = max(self._region_bbox(region)[3] for region in regions)
+        if (y2 - y1) > (x2 - x1) * 1.15:
+            return sorted(regions, key=lambda region: (self._region_bbox(region)[0], self._region_bbox(region)[1]), reverse=True)
+
+        return sorted(regions, key=lambda region: (self._region_bbox(region)[1], self._region_bbox(region)[0]))
+
+    async def merge_regions(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        stored_name: str,
+        region_ids: list[str],
+    ) -> dict[str, Any]:
+        self._ensure_runtime_patches()
+        config = self._normalize_config(raw_config)
+        source_dir = Path(session["source_dir"])
+        source_path = source_dir / stored_name
+        if not source_path.exists():
+            raise RuntimeError("目标页面不存在，请刷新后重试。")
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError("无法读取当前页面原图。")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
+        if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
+            raise RuntimeError("无法为当前页面建立可编辑缓存，请刷新后重试。")
+
+        candidate_regions = self._prepare_cached_regions_for_edit(
+            source_rgb,
+            cache_page_dir,
+            config,
+            stored_name,
+            session=session,
+        )
+        region_id_set = {str(region_id or "").strip() for region_id in region_ids if str(region_id or "").strip()}
+        selected_regions = [
+            region for region in candidate_regions
+            if str(getattr(region, "translation_region_key", "") or getattr(region, "style_region_key", "") or "") in region_id_set
+        ]
+        if len(selected_regions) < 2:
+            raise ValueError("至少需要选择两个文本框才能合并。")
+
+        ordered_regions = self._sort_regions_for_merge(selected_regions)
+        merged_bbox = [
+            min(self._region_bbox(region)[0] for region in ordered_regions),
+            min(self._region_bbox(region)[1] for region in ordered_regions),
+            max(self._region_bbox(region)[2] for region in ordered_regions),
+            max(self._region_bbox(region)[3] for region in ordered_regions),
+        ]
+        merged_source_text = "\n".join(
+            text for text in [self._region_source_text(region) for region in ordered_regions] if text
+        ).strip()
+        merged_font_size = float(np.median([max(float(getattr(region, "font_size", 0) or 0), 8.0) for region in ordered_regions]))
+        sample_region = ordered_regions[0]
+        translation = ""
+        if self._session_workflow_stage(session) != "detected" and merged_source_text:
+            try:
+                translation = await self._translate_manual_text(merged_source_text, config, session_id)
+            except Exception as exc:
+                print(f"[WARN] Merged region translation failed for {stored_name}: {exc}")
+
+        payload = self._build_manual_region_payload(
+            stored_name=stored_name,
+            bbox=merged_bbox,
+            source_text=merged_source_text,
+            translation=translation,
+            target_lang=config["target_lang"],
+            direction=str(getattr(sample_region, "direction", "") or self._direction_from_bbox(merged_bbox)),
+            font_size=merged_font_size,
+            fg_color=tuple(getattr(sample_region, "fg_colors", getattr(sample_region, "fg_color", (0, 0, 0))) or (0, 0, 0)),
+            bg_color=tuple(getattr(sample_region, "bg_colors", getattr(sample_region, "bg_color", (255, 255, 255))) or (255, 255, 255)),
+        )
+        payload["merged_from"] = [str(getattr(region, "translation_region_key", "") or "") for region in ordered_regions]
+        manual_regions = self._ensure_manual_regions_store(session)
+        manual_regions.setdefault(stored_name, []).append(payload)
+        return payload
+
     def delete_manual_region(self, session: dict[str, Any], region_id: str) -> bool:
         manual_regions = self._ensure_manual_regions_store(session)
         removed = False
@@ -2429,6 +2573,7 @@ class TranslatorEngine:
     ) -> list[Any]:
         regions = self._load_cached_regions(page_cache_dir)
         regions = self._merge_manual_regions(session, stored_name, regions)
+        regions = self._apply_region_layout_overrides(regions, config, stored_name)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
         return self._dedupe_overlapping_regions(regions)
@@ -2443,6 +2588,7 @@ class TranslatorEngine:
     ) -> tuple[list[Any], dict[str, Any]]:
         regions = self._load_cached_regions(page_cache_dir)
         regions = self._merge_manual_regions(session, stored_name, regions)
+        regions = self._apply_region_layout_overrides(regions, config, stored_name)
         raw_count = len(regions)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
@@ -2457,6 +2603,17 @@ class TranslatorEngine:
 
     def _make_style_region_key(self, stored_name: str, index: int) -> str:
         return f"{stored_name}::{index}"
+
+    def _assign_region_keys(self, regions: list[Any], stored_name: str) -> None:
+        for index, region in enumerate(regions):
+            region_key = str(
+                getattr(region, "translation_region_key", "")
+                or getattr(region, "style_region_key", "")
+                or getattr(region, "manual_region_id", "")
+                or self._make_style_region_key(stored_name, index)
+            )
+            region.translation_region_key = region_key
+            region.style_region_key = region_key
 
     def _region_bbox(self, region: Any) -> tuple[int, int, int, int]:
         x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
@@ -2822,6 +2979,59 @@ class TranslatorEngine:
         if preview:
             return preview
         return self._region_source_text(region)
+
+    def _invalidate_region_geometry_cache(self, region: Any) -> None:
+        for field_name in (
+            "xyxy",
+            "xywh",
+            "center",
+            "unrotated_polygons",
+            "unrotated_min_rect",
+            "min_rect",
+            "polygon_aspect_ratio",
+            "unrotated_size",
+            "aspect_ratio",
+        ):
+            region.__dict__.pop(field_name, None)
+
+    def _set_region_bbox(self, region: Any, bbox: list[int]) -> None:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        region.lines = np.array(self._manual_region_lines([x1, y1, x2, y2]), dtype=np.int32)
+        region._bounding_rect = [x1, y1, x2, y2]
+        self._invalidate_region_geometry_cache(region)
+
+    def _apply_region_layout_overrides(
+        self,
+        regions: list[Any],
+        config: dict[str, Any],
+        stored_name: str,
+    ) -> list[Any]:
+        self._assign_region_keys(regions, stored_name)
+        disabled_overrides = config.get("translation_region_disabled_overrides") or {}
+        layout_overrides = config.get("translation_region_layout_overrides") or {}
+
+        visible_regions: list[Any] = []
+        for region in regions:
+            region_key = str(getattr(region, "translation_region_key", "") or "")
+            region.disabled_region = bool(disabled_overrides.get(region_key))
+            if region.disabled_region:
+                continue
+
+            layout_override = layout_overrides.get(region_key) or {}
+            bbox = layout_override.get("bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                self._set_region_bbox(region, bbox)
+
+            font_size = layout_override.get("font_size")
+            if font_size is not None:
+                try:
+                    region.font_size = max(8, int(round(float(font_size))))
+                except (TypeError, ValueError):
+                    pass
+
+            visible_regions.append(region)
+
+        return visible_regions
 
     def _deserialize_text_region(self, payload: dict[str, Any]) -> Any:
         self._ensure_vendor_import_path()
@@ -3189,6 +3399,7 @@ class TranslatorEngine:
         for index, region in enumerate(regions):
             region_key = str(
                 getattr(region, "translation_region_key", "")
+                or getattr(region, "style_region_key", "")
                 or (self._make_style_region_key(stored_name, index) if stored_name else str(index))
             )
             machine_translation = str(getattr(region, "translation", "") or "")

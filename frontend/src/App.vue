@@ -253,12 +253,17 @@ const reviewInspectionPages = ref([])
 const reviewInspectionLoading = ref(false)
 const translationRegionOverrides = ref({})
 const translationRegionSkipOverrides = ref({})
+const translationRegionDisabledOverrides = ref({})
+const translationRegionLayoutOverrides = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
+const adjustingRegionId = ref('')
 const manualDrawDraft = ref(null)
+const mergeMode = ref(false)
+const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
 const showAdvancedSettings = ref(false)
@@ -281,10 +286,23 @@ const canRerender = computed(
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
 const hasTranslationOverrides = computed(
-  () => Object.keys(translationRegionOverrides.value).length > 0 || Object.keys(translationRegionSkipOverrides.value).length > 0
+  () =>
+    Object.keys(translationRegionOverrides.value).length > 0
+    || Object.keys(translationRegionSkipOverrides.value).length > 0
+    || Object.keys(translationRegionDisabledOverrides.value).length > 0
+    || Object.keys(translationRegionLayoutOverrides.value).length > 0
 )
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
+const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
+const mergeSelectionCount = computed(() => Object.keys(mergeRegionSelection.value).length)
+const disabledRegionCountForSelectedPage = computed(() => {
+  const storedName = selectedEditPage.value?.stored_name
+  if (!storedName) {
+    return 0
+  }
+  return Object.keys(translationRegionDisabledOverrides.value).filter((regionId) => regionId.includes(storedName)).length
+})
 const mergedInspectionPages = computed(() => {
   const pageOrder = []
   const pageMap = new Map()
@@ -467,12 +485,20 @@ function resetTranslationReview() {
   reviewInspectionLoading.value = false
   translationRegionOverrides.value = {}
   translationRegionSkipOverrides.value = {}
+  translationRegionDisabledOverrides.value = {}
+  translationRegionLayoutOverrides.value = {}
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
+  adjustingRegionId.value = ''
 }
 
 function resetEditInspectorSelection() {
   selectedEditPageKey.value = ''
   selectedEditRegionKey.value = ''
   manualDrawDraft.value = null
+  adjustingRegionId.value = ''
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
 }
 
 function buildRuntimeConfig() {
@@ -481,7 +507,9 @@ function buildRuntimeConfig() {
     translator_model: getResolvedTranslatorModel(config.value),
     style_region_overrides: { ...styleRegionOverrides.value },
     translation_region_overrides: { ...translationRegionOverrides.value },
-    translation_region_skip_overrides: { ...translationRegionSkipOverrides.value }
+    translation_region_skip_overrides: { ...translationRegionSkipOverrides.value },
+    translation_region_disabled_overrides: { ...translationRegionDisabledOverrides.value },
+    translation_region_layout_overrides: { ...translationRegionLayoutOverrides.value }
   }
 }
 
@@ -514,8 +542,24 @@ function isRegionSkipEnabled(region) {
   return Boolean(translationRegionSkipOverrides.value[region.id] || region.override_skip)
 }
 
+function isRegionDisabled(region) {
+  return Boolean(translationRegionDisabledOverrides.value[region.id])
+}
+
 function getResolvedStyle(region) {
   return styleRegionOverrides.value[region.id] || region.resolved_style || region.auto_style || ''
+}
+
+function getRegionFontSize(region) {
+  const override = translationRegionLayoutOverrides.value[region.id]
+  if (override && typeof override.font_size === 'number') {
+    return override.font_size
+  }
+  return Number(region.font_size || 12)
+}
+
+function isRegionSelectedForMerge(region) {
+  return Boolean(mergeRegionSelection.value[region.id])
 }
 
 function syncEditSelection() {
@@ -539,8 +583,16 @@ function syncEditSelection() {
   }
 }
 
+function getEffectiveRegionBBox(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  const bbox = Array.isArray(override?.bbox) && override.bbox.length === 4
+    ? override.bbox
+    : region?.bbox
+  return Array.isArray(bbox) && bbox.length === 4 ? bbox : [0, 0, 0, 0]
+}
+
 function getStyleRegionBoxStyle(region, page) {
-  const [x1, y1, x2, y2] = region?.bbox || [0, 0, 0, 0]
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
   const width = Math.max(page?.image_width || 1, 1)
   const height = Math.max(page?.image_height || 1, 1)
   const left = Math.max(0, (x1 / width) * 100)
@@ -556,7 +608,7 @@ function getStyleRegionBoxStyle(region, page) {
 }
 
 function getStyleRegionLabelClass(region, page) {
-  const [x1, y1, x2] = region?.bbox || [0, 0, 0, 0]
+  const [x1, y1, x2] = getEffectiveRegionBBox(region)
   const width = Math.max(page?.image_width || 1, 1)
   const height = Math.max(page?.image_height || 1, 1)
   const nearTop = (y1 / height) < 0.08
@@ -612,6 +664,7 @@ function clearManualDraft(options = {}) {
   manualDrawDraft.value = null
   if (!options.keepMode) {
     manualDrawMode.value = false
+    adjustingRegionId.value = ''
   }
 }
 
@@ -646,8 +699,21 @@ async function submitManualDraw(page, bbox) {
   }
 }
 
+function startRegionBBoxAdjustment(region) {
+  if (!region) {
+    return
+  }
+  manualDrawMode.value = false
+  mergeMode.value = false
+  mergeRegionSelection.value = {}
+  adjustingRegionId.value = region.id
+  manualDrawDraft.value = null
+  selectedEditRegionKey.value = region.id
+  status.value = '请在原图上拖一个新框，替换当前文本框范围。'
+}
+
 function startManualDraw(event, page) {
-  if (!manualDrawMode.value || !canCreateManualRegion.value || !page) {
+  if ((!manualDrawMode.value && !adjustingRegionId.value) || !canCreateManualRegion.value || !page) {
     return
   }
   if (event.button !== 0) {
@@ -666,6 +732,8 @@ function startManualDraw(event, page) {
   }
 
   manualDrawDraft.value = {
+    action: adjustingRegionId.value ? 'adjust' : 'create',
+    regionId: adjustingRegionId.value || '',
     stored_name: page.stored_name,
     startX: point.x,
     startY: point.y,
@@ -714,11 +782,19 @@ async function finishManualDraw(event, page, options = {}) {
   const bbox = getManualDraftBBox(page)
   if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
     clearManualDraft({ keepMode: true })
-    status.value = '补漏框太小了，拖大一点会更稳。'
+    status.value = adjustingRegionId.value ? '调整后的框太小了，拖大一点会更稳。' : '补漏框太小了，拖大一点会更稳。'
     return
   }
 
+  const draftAction = draft.action
+  const draftRegionId = draft.regionId
   clearManualDraft({ keepMode: true })
+  if (draftAction === 'adjust' && draftRegionId) {
+    updateRegionLayoutOverride(draftRegionId, { bbox })
+    status.value = '已更新这个文本框的范围，重新嵌字时会按新框计算。'
+    adjustingRegionId.value = ''
+    return
+  }
   await submitManualDraw(page, bbox)
 }
 
@@ -752,9 +828,21 @@ async function deleteManualRegion(region) {
     delete nextSkipOverrides[region.id]
     translationRegionSkipOverrides.value = nextSkipOverrides
 
+    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    delete nextDisabledOverrides[region.id]
+    translationRegionDisabledOverrides.value = nextDisabledOverrides
+
+    const nextLayoutOverrides = { ...translationRegionLayoutOverrides.value }
+    delete nextLayoutOverrides[region.id]
+    translationRegionLayoutOverrides.value = nextLayoutOverrides
+
     const nextStyleOverrides = { ...styleRegionOverrides.value }
     delete nextStyleOverrides[region.id]
     styleRegionOverrides.value = nextStyleOverrides
+
+    const nextMergeSelection = { ...mergeRegionSelection.value }
+    delete nextMergeSelection[region.id]
+    mergeRegionSelection.value = nextMergeSelection
 
     await loadEditInspection({ silent: true })
     status.value = '已删除这个手动补漏框。'
@@ -971,10 +1059,159 @@ function updateTranslationSkipOverride(region, enabled) {
   selectedEditRegionKey.value = region.id
 }
 
+function updateRegionDisabledOverride(region, enabled) {
+  const nextOverrides = { ...translationRegionDisabledOverrides.value }
+  if (enabled) {
+    nextOverrides[region.id] = true
+  } else {
+    delete nextOverrides[region.id]
+  }
+  translationRegionDisabledOverrides.value = nextOverrides
+
+  const nextStyleOverrides = { ...styleRegionOverrides.value }
+  delete nextStyleOverrides[region.id]
+  styleRegionOverrides.value = nextStyleOverrides
+
+  const nextTranslationOverrides = { ...translationRegionOverrides.value }
+  delete nextTranslationOverrides[region.id]
+  translationRegionOverrides.value = nextTranslationOverrides
+
+  const nextSkipOverrides = { ...translationRegionSkipOverrides.value }
+  delete nextSkipOverrides[region.id]
+  translationRegionSkipOverrides.value = nextSkipOverrides
+
+  const nextLayoutOverrides = { ...translationRegionLayoutOverrides.value }
+  delete nextLayoutOverrides[region.id]
+  translationRegionLayoutOverrides.value = nextLayoutOverrides
+
+  const nextMergeSelection = { ...mergeRegionSelection.value }
+  delete nextMergeSelection[region.id]
+  mergeRegionSelection.value = nextMergeSelection
+
+  if (selectedEditRegionKey.value === region.id) {
+    selectedEditRegionKey.value = ''
+  }
+  selectedEditPageKey.value = selectedEditPage.value?.stored_name || selectedEditPageKey.value
+  void loadEditInspection({ silent: true })
+}
+
+function updateRegionLayoutOverride(regionId, patch) {
+  const nextOverrides = { ...translationRegionLayoutOverrides.value }
+  const currentOverride = nextOverrides[regionId] ? { ...nextOverrides[regionId] } : {}
+  if (patch.bbox) {
+    currentOverride.bbox = patch.bbox
+  }
+  if (typeof patch.font_size === 'number' && !Number.isNaN(patch.font_size)) {
+    currentOverride.font_size = Math.max(8, Math.min(240, Math.round(patch.font_size)))
+  }
+  nextOverrides[regionId] = currentOverride
+  translationRegionLayoutOverrides.value = nextOverrides
+}
+
+function updateRegionFontSize(region, nextValue) {
+  const parsed = Number(nextValue)
+  if (Number.isNaN(parsed)) {
+    return
+  }
+  updateRegionLayoutOverride(region.id, { font_size: parsed })
+  selectedEditRegionKey.value = region.id
+}
+
+function toggleMergeMode() {
+  mergeMode.value = !mergeMode.value
+  mergeRegionSelection.value = {}
+  if (mergeMode.value) {
+    manualDrawMode.value = false
+    adjustingRegionId.value = ''
+    status.value = '请在当前页选中至少两个文本框，然后点击“合并选中框”。'
+  }
+}
+
+function toggleMergeSelection(region) {
+  const nextSelection = { ...mergeRegionSelection.value }
+  if (nextSelection[region.id]) {
+    delete nextSelection[region.id]
+  } else {
+    nextSelection[region.id] = true
+  }
+  mergeRegionSelection.value = nextSelection
+  selectedEditRegionKey.value = region.id
+}
+
+async function mergeSelectedRegions() {
+  const page = selectedEditPage.value
+  const regionIds = Object.keys(mergeRegionSelection.value)
+  if (!sessionId.value || !page || regionIds.length < 2) {
+    return
+  }
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'merge',
+        stored_name: page.stored_name,
+        region_ids: regionIds,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '合并文本框失败')
+    }
+
+    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    for (const regionId of regionIds) {
+      nextDisabledOverrides[regionId] = true
+    }
+    translationRegionDisabledOverrides.value = nextDisabledOverrides
+    mergeRegionSelection.value = {}
+    mergeMode.value = false
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
+    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '合并文本框失败'
+  } finally {
+    creatingManualRegion.value = false
+  }
+}
+
+function restoreDisabledRegionsForPage(page) {
+  if (!page?.stored_name) {
+    return
+  }
+  const nextOverrides = { ...translationRegionDisabledOverrides.value }
+  let changed = false
+  for (const regionId of Object.keys(nextOverrides)) {
+    if (!regionId.includes(page.stored_name)) {
+      continue
+    }
+    delete nextOverrides[regionId]
+    changed = true
+  }
+  if (!changed) {
+    return
+  }
+  translationRegionDisabledOverrides.value = nextOverrides
+  status.value = '已恢复当前页被禁用的自动识别框。'
+  void loadEditInspection({ silent: true })
+}
+
 function clearTranslationOverrides() {
   translationRegionOverrides.value = {}
   translationRegionSkipOverrides.value = {}
-  status.value = '已清空当前会话里的人工译文修改和保留原文设置。'
+  translationRegionDisabledOverrides.value = {}
+  translationRegionLayoutOverrides.value = {}
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
+  adjustingRegionId.value = ''
+  status.value = '已清空当前会话里的译文、保留原文、禁用框和框体调整设置。'
   void loadEditInspection({ silent: true })
 }
 
@@ -1873,9 +2110,37 @@ watch(
             class="secondary-button"
             type="button"
             :disabled="!canCreateManualRegion"
-            @click="manualDrawMode = !manualDrawMode; manualDrawDraft = null"
+            @click="manualDrawMode = !manualDrawMode; adjustingRegionId = ''; manualDrawDraft = null"
           >
             {{ manualDrawMode ? '结束补漏框绘制' : '手动补漏框' }}
+          </button>
+
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="!selectedEditPage || creatingManualRegion"
+            @click="toggleMergeMode"
+          >
+            {{ mergeMode ? '取消合并选择' : '合并文本框' }}
+          </button>
+
+          <button
+            v-if="mergeSelectionCount >= 2"
+            class="secondary-button"
+            type="button"
+            :disabled="creatingManualRegion"
+            @click="mergeSelectedRegions"
+          >
+            合并选中框（{{ mergeSelectionCount }}）
+          </button>
+
+          <button
+            v-if="disabledRegionCountForSelectedPage > 0"
+            class="secondary-button"
+            type="button"
+            @click="restoreDisabledRegionsForPage(selectedEditPage)"
+          >
+            恢复本页禁用框（{{ disabledRegionCountForSelectedPage }}）
           </button>
 
           <button
@@ -1938,7 +2203,7 @@ watch(
           <div class="field style-summary">
             <span>使用说明</span>
             <small class="field-hint">
-              这里把译文和字体样式放在同一个列表里处理。开启“识别后先进入逐框校对”时，可以先补框、保留原文，再点“确认框后继续翻译”。
+              这里把译文、字体、禁用框和框体调整放在同一个列表里处理。开启“识别后先进入逐框校对”时，可以先补框、合并框、禁用误识别框，再点“确认框后继续翻译”。
             </small>
           </div>
         </div>
@@ -1949,7 +2214,7 @@ watch(
               <div class="style-preview-panel">
                 <div class="style-preview-label">原图</div>
                 <div
-                  :class="['style-preview-canvas', manualDrawMode ? 'draw-mode' : '']"
+                  :class="['style-preview-canvas', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
                   @pointerdown="startManualDraw($event, selectedEditPage)"
                   @pointermove="updateManualDraw($event, selectedEditPage)"
                   @pointerup="finishManualDraw($event, selectedEditPage)"
@@ -1964,6 +2229,10 @@ watch(
                     在原图上拖拽框出漏掉的文字区域
                   </div>
 
+                  <div v-else-if="isAdjustingRegionBBox" class="style-preview-tip">
+                    在原图上拖一个新框，替换当前文本框范围
+                  </div>
+
                   <button
                     v-for="region in selectedEditPage.regions"
                     :key="`source-${region.id}`"
@@ -1971,11 +2240,12 @@ watch(
                     :class="[
                       'style-box',
                       isManualRegion(region) ? 'manual' : '',
+                      mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
                       selectedEditRegionKey === region.id ? 'active' : '',
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="selectedEditRegionKey = region.id"
+                    @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
                   </button>
@@ -2005,11 +2275,12 @@ watch(
                     :class="[
                       'style-box',
                       isManualRegion(region) ? 'manual' : '',
+                      mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
                       selectedEditRegionKey === region.id ? 'active' : '',
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="selectedEditRegionKey = region.id"
+                    @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
                   </button>
@@ -2022,8 +2293,12 @@ watch(
             <article
               v-for="region in selectedEditPage.regions"
               :key="`edit-${region.id}`"
-              :class="['style-region-card', selectedEditRegionKey === region.id ? 'active' : '']"
-              @click="selectedEditRegionKey = region.id"
+              :class="[
+                'style-region-card',
+                selectedEditRegionKey === region.id ? 'active' : '',
+                mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : ''
+              ]"
+              @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
             >
               <div class="style-region-row">
                 <div class="style-region-copy">
@@ -2044,6 +2319,23 @@ watch(
                     <span>保留原文</span>
                   </label>
 
+                  <button
+                    v-if="!isManualRegion(region)"
+                    class="inline-button"
+                    type="button"
+                    @click.stop="updateRegionDisabledOverride(region, true)"
+                  >
+                    禁用
+                  </button>
+
+                  <button
+                    class="inline-button"
+                    type="button"
+                    @click.stop="startRegionBBoxAdjustment(region)"
+                  >
+                    调框
+                  </button>
+
                   <label
                     v-if="config.font_style_mode === 'auto-map'"
                     class="compact-select-wrap"
@@ -2063,6 +2355,19 @@ watch(
                         {{ option.label }}
                       </option>
                     </select>
+                  </label>
+
+                  <label class="compact-number-wrap" @click.stop @mousedown.stop>
+                    <input
+                      :value="getRegionFontSize(region)"
+                      type="number"
+                      min="8"
+                      max="240"
+                      step="1"
+                      @click.stop
+                      @mousedown.stop
+                      @input="updateRegionFontSize(region, $event.target.value)"
+                    />
                   </label>
 
                   <button

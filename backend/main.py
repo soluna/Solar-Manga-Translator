@@ -154,6 +154,22 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 raise HTTPException(status_code=404, detail="没有找到对应的补漏框。")
             return {"ok": True, "action": "delete", "region_id": region_id}
 
+        if action == "merge":
+            stored_name = str(payload.get("stored_name") or "").strip()
+            region_ids = payload.get("region_ids") or []
+            if not stored_name:
+                raise HTTPException(status_code=400, detail="缺少目标页面信息。")
+            if not isinstance(region_ids, list) or len(region_ids) < 2:
+                raise HTTPException(status_code=400, detail="至少需要选择两个文本框才能合并。")
+            region = await translator_engine.merge_regions(
+                session_id=session_id,
+                session=session,
+                raw_config=payload.get("config", {}),
+                stored_name=stored_name,
+                region_ids=region_ids,
+            )
+            return {"ok": True, "action": "merge", "region": region}
+
         stored_name = str(payload.get("stored_name") or "").strip()
         if not stored_name:
             raise HTTPException(status_code=400, detail="缺少目标页面信息。")

@@ -523,6 +523,12 @@ h2 {
   background: rgba(250, 180, 133, 0.18);
 }
 
+.style-box.merge-selected {
+  border-color: rgba(32, 95, 195, 0.88);
+  box-shadow: 0 0 0 3px rgba(32, 95, 195, 0.14);
+  background: rgba(140, 181, 255, 0.18);
+}
+
 .style-box.manual {
   border-style: dashed;
   border-color: rgba(32, 95, 195, 0.82);
@@ -591,6 +597,12 @@ h2 {
   border-color: rgba(185, 71, 44, 0.36);
   box-shadow: 0 16px 30px rgba(82, 52, 27, 0.08);
   transform: translateY(-1px);
+}
+
+.style-region-card.merge-selected {
+  border-color: rgba(32, 95, 195, 0.3);
+  box-shadow: 0 14px 28px rgba(32, 95, 195, 0.12);
+  background: rgba(245, 249, 255, 0.96);
 }
 
 .style-region-row {
@@ -701,6 +713,22 @@ h2 {
   min-width: 118px;
 }
 
+.compact-number-wrap {
+  display: inline-flex;
+}
+
+.compact-number-wrap input {
+  width: 76px;
+  min-height: 38px;
+  padding: 7px 8px;
+  border: 1px solid rgba(155, 95, 45, 0.24);
+  border-radius: 12px;
+  background: #fffdf9;
+  color: #2b2118;
+  line-height: 1.2;
+  text-align: center;
+}
+
 .region-card-controls-single {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -743,6 +771,7 @@ h2 {
 
 .compact-select-field select:focus,
 .compact-select-wrap select:focus,
+.compact-number-wrap input:focus,
 .translation-review-input:focus {
   outline: 2px solid rgba(216, 108, 42, 0.2);
   border-color: rgba(185, 71, 44, 0.34);

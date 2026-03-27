@@ -605,6 +605,15 @@ h2 {
   font-size: 0.8rem;
 }
 
+.snapshot-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
 .snapshot-empty {
   padding: 12px;
   border-radius: 14px;
@@ -617,6 +626,11 @@ h2 {
   min-height: 44px;
   padding-inline: 16px;
   flex: 0 0 auto;
+}
+
+.danger-button {
+  color: #b9472c;
+  border-color: rgba(185, 71, 44, 0.24);
 }
 
 .style-inspector {
@@ -1029,6 +1043,10 @@ h2 {
   .snapshot-item {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .snapshot-actions {
+    justify-content: stretch;
   }
 
   .region-card-controls {

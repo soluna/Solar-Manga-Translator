@@ -161,6 +161,29 @@ async def restore_project_snapshot(project_id: str, snapshot_id: str):
     return translator_engine.build_client_session_payload(restored_project_id, session)
 
 
+@app.post("/api/projects/{project_id}/snapshots/{snapshot_id}/pin")
+async def pin_project_snapshot(project_id: str, snapshot_id: str, payload: dict[str, Any] | None = None):
+    payload = payload or {}
+    try:
+        snapshots = translator_engine.set_snapshot_pinned(
+            project_id=project_id,
+            snapshot_id=snapshot_id,
+            pinned=bool(payload.get("pinned", True)),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"snapshots": snapshots}
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str):
+    translator_engine.delete_project(project_id)
+    SESSIONS.pop(project_id, None)
+    return {"ok": True}
+
+
 @app.post("/api/style-regions/{session_id}")
 async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = SESSIONS.get(session_id)

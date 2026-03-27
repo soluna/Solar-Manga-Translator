@@ -721,6 +721,89 @@ async function restoreSnapshot(projectId, snapshotId) {
   }
 }
 
+async function toggleSnapshotPin(projectId, snapshot) {
+  if (!projectId || !snapshot?.snapshot_id) {
+    return
+  }
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshot.snapshot_id}/pin`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        pinned: !snapshot.pinned
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '更新快照固定状态失败')
+    }
+    projectSnapshots.value = {
+      ...projectSnapshots.value,
+      [projectId]: (payload.snapshots || []).map(normalizeSnapshot)
+    }
+    await loadProjectHistory({ silent: true })
+    status.value = snapshot.pinned ? '已取消固定这个快照。' : '已固定这个快照。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '更新快照固定状态失败'
+  }
+}
+
+async function deleteProject(project) {
+  if (!project?.project_id) {
+    return
+  }
+  const confirmed = typeof window === 'undefined'
+    ? true
+    : window.confirm(`确定要删除项目「${project.title}」吗？相关历史记录和输出文件会一起移除。`)
+  if (!confirmed) {
+    return
+  }
+
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${project.project_id}`), {
+      method: 'DELETE'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '删除项目失败')
+    }
+
+    if (sessionId.value === project.project_id) {
+      closeSocket()
+      sessionId.value = ''
+      originalImages.value = []
+      translatedImages.value = []
+      downloadUrl.value = ''
+      downloadPath.value = ''
+      translatedDirPath.value = ''
+      maskDebugDirPath.value = ''
+      workflowStage.value = 'idle'
+      currentProject.value = null
+      projectTitleDraft.value = ''
+      projectNoteDraft.value = ''
+      resetTranslationReview()
+      resetStyleInspector()
+      resetEditInspectorSelection()
+    }
+
+    const nextSnapshots = { ...projectSnapshots.value }
+    delete nextSnapshots[project.project_id]
+    projectSnapshots.value = nextSnapshots
+    if (expandedProjectId.value === project.project_id) {
+      expandedProjectId.value = ''
+    }
+
+    await loadProjectHistory({ silent: true })
+    status.value = '已删除该历史项目。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除项目失败'
+  }
+}
+
 async function saveProjectMetadata() {
   if (!sessionId.value || !currentProject.value || !projectMetaDirty.value) {
     return
@@ -2471,6 +2554,14 @@ watch(
               >
                 下载当前结果
               </a>
+
+              <button
+                class="secondary-button danger-button"
+                type="button"
+                @click="deleteProject(project)"
+              >
+                删除项目
+              </button>
             </div>
 
             <div
@@ -2503,17 +2594,28 @@ watch(
                       <span>{{ snapshot.created_at }}</span>
                       <span>{{ workflowStageLabelMap[snapshot.workflow_stage] || snapshot.workflow_stage }}</span>
                       <span>{{ snapshot.kind }}</span>
+                      <span v-if="snapshot.pinned">已固定</span>
                     </div>
                   </div>
 
-                  <button
-                    class="secondary-button snapshot-button"
-                    type="button"
-                    :disabled="Boolean(restoringSnapshotId) && restoringSnapshotId !== snapshot.snapshot_id"
-                    @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
-                  >
-                    {{ restoringSnapshotId === snapshot.snapshot_id ? '正在恢复...' : '恢复为新项目' }}
-                  </button>
+                  <div class="snapshot-actions">
+                    <button
+                      class="secondary-button snapshot-button"
+                      type="button"
+                      @click="toggleSnapshotPin(project.project_id, snapshot)"
+                    >
+                      {{ snapshot.pinned ? '取消固定' : '固定快照' }}
+                    </button>
+
+                    <button
+                      class="secondary-button snapshot-button"
+                      type="button"
+                      :disabled="Boolean(restoringSnapshotId) && restoringSnapshotId !== snapshot.snapshot_id"
+                      @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
+                    >
+                      {{ restoringSnapshotId === snapshot.snapshot_id ? '正在恢复...' : '恢复为新项目' }}
+                    </button>
+                  </div>
                 </article>
               </div>
             </div>

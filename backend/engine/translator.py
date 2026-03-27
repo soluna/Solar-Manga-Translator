@@ -361,6 +361,33 @@ class TranslatorEngine:
             )
         return snapshots
 
+    def set_snapshot_pinned(self, project_id: str, snapshot_id: str, pinned: bool) -> list[dict[str, Any]]:
+        manifests = self._read_snapshot_manifests(project_id)
+        target_snapshot = next(
+            (item for item in manifests if str(item.get("snapshot_id") or "") == snapshot_id),
+            None,
+        )
+        if not target_snapshot:
+            raise FileNotFoundError("目标快照不存在，请刷新后重试。")
+
+        if pinned:
+            pinned_count = sum(1 for item in manifests if bool(item.get("pinned")))
+            if not bool(target_snapshot.get("pinned")) and pinned_count >= 10:
+                raise ValueError("固定快照最多保留 10 个，请先取消固定旧快照。")
+
+        target_snapshot["pinned"] = bool(pinned)
+        target_path = Path(str(target_snapshot.get("_path") or ""))
+        payload = {key: value for key, value in target_snapshot.items() if key != "_path"}
+        self._write_json_file(target_path, payload)
+
+        try:
+            session = self.restore_project_session(project_id)
+            self._enforce_snapshot_retention(project_id, session)
+            self._refresh_project_index_entry(self._build_project_summary(project_id, session))
+        except FileNotFoundError:
+            pass
+        return self.list_project_snapshots(project_id)
+
     def restore_project_session(self, project_id: str) -> dict[str, Any]:
         state = self._read_json_file(self._project_session_state_path(project_id), {})
         if not isinstance(state, dict) or not state:
@@ -469,6 +496,37 @@ class TranslatorEngine:
             snapshot_summary=f"从快照 {snapshot_id} 恢复继续编辑",
         )
         return new_project_id, new_session
+
+    def delete_project(self, project_id: str) -> None:
+        project_dir = self._project_dir(project_id)
+        output_dir = self.base_dir / "output_images" / project_id
+        rerender_cache_dir = self._rerender_cache_dir(project_id)
+        mask_debug_dir = self._mask_debug_dir(project_id)
+        style_debug_dir = self._style_rerender_debug_dir(project_id)
+
+        for path in (project_dir, output_dir, rerender_cache_dir, mask_debug_dir, style_debug_dir):
+            if path.exists():
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+
+        for extra_path in self.temp_dir.glob(f"{project_id}_*"):
+            if extra_path in {project_dir, mask_debug_dir, style_debug_dir}:
+                continue
+            if extra_path.is_dir():
+                shutil.rmtree(extra_path, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):
+                    extra_path.unlink()
+
+        existing = self._read_json_file(self.project_index_path, [])
+        next_items = [
+            item for item in existing
+            if isinstance(item, dict) and str(item.get("project_id") or "") != project_id
+        ]
+        self._write_project_index(next_items)
 
     def update_project_metadata(
         self,

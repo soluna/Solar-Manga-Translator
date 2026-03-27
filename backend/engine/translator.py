@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
@@ -45,10 +46,389 @@ class TranslatorEngine:
         self.temp_dir = self.base_dir / "temp_uploads"
         self.model_dir = self.base_dir / "models"
         self.rerender_cache_root = self.temp_dir / "rerender_cache"
+        self.projects_root = self.temp_dir / "projects"
+        self.project_index_path = self.temp_dir / "project_index.json"
         self.project_font_dir = self.base_dir.parent / "fonts"
         self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.model_dir.mkdir(exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
+        self.projects_root.mkdir(parents=True, exist_ok=True)
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _project_dir(self, project_id: str) -> Path:
+        return self.projects_root / project_id
+
+    def _project_manifest_path(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "project.json"
+
+    def _project_session_state_path(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "session.json"
+
+    def _project_snapshots_dir(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "snapshots"
+
+    def _read_json_file(self, path: Path, default: Any) -> Any:
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+
+    def _write_json_file(self, path: Path, payload: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=f"{path.stem}_", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(temp_path)
+
+    def _sanitize_config_for_storage(self, config: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+        sanitized = json.loads(json.dumps(config, ensure_ascii=False))
+        for secret_key in ("api_key", "image_cleanup_api_key"):
+            if secret_key in sanitized:
+                sanitized[secret_key] = ""
+        return sanitized
+
+    def _project_cover_url(self, project_id: str, session: dict[str, Any]) -> str:
+        source_images = list(session.get("source_images") or [])
+        if not source_images:
+            return ""
+        first_image = source_images[0]
+        stored_name = str(first_image.get("stored_name") or "")
+        if not stored_name:
+            return ""
+
+        output_dir = Path(session["translated_dir"])
+        preferred_format = self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
+        current_output = self._current_translated_output(session, output_dir, stored_name, preferred_format)
+        if current_output is not None and current_output.exists():
+            return f"/output/{project_id}/translated/{current_output.name}"
+        return f"/output/{project_id}/source/{stored_name}"
+
+    def _serialize_session_state(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        created_at = str(session.get("project_created_at") or self._now_iso())
+        updated_at = self._now_iso()
+        session["project_id"] = project_id
+        session["project_created_at"] = created_at
+        session["project_updated_at"] = updated_at
+
+        return {
+            "project_id": project_id,
+            "project_title": str(session.get("project_title") or ""),
+            "project_note": str(session.get("project_note") or ""),
+            "project_created_at": created_at,
+            "project_updated_at": updated_at,
+            "source_dir": str(session.get("source_dir") or ""),
+            "translated_dir": str(session.get("translated_dir") or ""),
+            "source_images": list(session.get("source_images") or []),
+            "download_path": str(session.get("download_path") or ""),
+            "translated_output_map": dict(session.get("translated_output_map") or {}),
+            "rerender_generation": int(session.get("rerender_generation") or 0),
+            "manual_regions": dict(session.get("manual_regions") or {}),
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "mask_debug_dir": str(session.get("mask_debug_dir") or ""),
+            "rerender_cache_dir": str(session.get("rerender_cache_dir") or ""),
+            "last_config": self._sanitize_config_for_storage(session.get("last_config") or {}),
+            "deferred_output_names": sorted(str(item) for item in (session.get("deferred_output_names") or [])),
+            "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+            "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+            "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+            "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+            "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+        }
+
+    def _read_snapshot_manifests(self, project_id: str) -> list[dict[str, Any]]:
+        snapshots_dir = self._project_snapshots_dir(project_id)
+        manifests: list[dict[str, Any]] = []
+        if not snapshots_dir.exists():
+            return manifests
+
+        for path in sorted(snapshots_dir.glob("*.json")):
+            payload = self._read_json_file(path, {})
+            if isinstance(payload, dict):
+                payload["_path"] = str(path)
+                manifests.append(payload)
+
+        manifests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return manifests
+
+    def _collect_referenced_output_names(self, project_id: str, session: dict[str, Any]) -> set[str]:
+        referenced: set[str] = set()
+        translated_output_map = session.get("translated_output_map") or {}
+        referenced.update(str(name) for name in translated_output_map.values() if str(name))
+
+        for snapshot in self._read_snapshot_manifests(project_id):
+            output_map = snapshot.get("translated_output_map") or {}
+            if isinstance(output_map, dict):
+                referenced.update(str(name) for name in output_map.values() if str(name))
+
+        return referenced
+
+    def _garbage_collect_project_outputs(self, project_id: str, session: dict[str, Any]) -> None:
+        output_dir = Path(session.get("translated_dir") or "")
+        if not output_dir.exists():
+            return
+
+        referenced = self._collect_referenced_output_names(project_id, session)
+        for path in output_dir.iterdir():
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in self.TRANSLATED_OUTPUT_SUFFIXES:
+                continue
+            if path.name in referenced:
+                continue
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    def _enforce_snapshot_retention(self, project_id: str, session: dict[str, Any]) -> None:
+        manifests = self._read_snapshot_manifests(project_id)
+        auto_snapshots = [item for item in manifests if not bool(item.get("pinned"))]
+
+        victims: list[dict[str, Any]] = []
+        while len(manifests) - len(victims) > 30:
+            candidate = next((item for item in reversed(auto_snapshots) if item not in victims), None)
+            if candidate is None:
+                break
+            victims.append(candidate)
+
+        while len(auto_snapshots) - sum(1 for item in victims if item in auto_snapshots) > 20:
+            candidate = next((item for item in reversed(auto_snapshots) if item not in victims), None)
+            if candidate is None:
+                break
+            victims.append(candidate)
+
+        for victim in victims:
+            victim_path = Path(str(victim.get("_path") or ""))
+            if victim_path.exists():
+                with contextlib.suppress(OSError):
+                    victim_path.unlink()
+
+        self._garbage_collect_project_outputs(project_id, session)
+
+    def _create_project_snapshot(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        kind: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        created_at = self._now_iso()
+        snapshot_id = f"{created_at.replace(':', '').replace('-', '')}_{uuid.uuid4().hex[:8]}"
+        snapshot = {
+            "snapshot_id": snapshot_id,
+            "project_id": project_id,
+            "created_at": created_at,
+            "kind": kind,
+            "summary": summary,
+            "translated_output_map": dict(session.get("translated_output_map") or {}),
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "last_config": self._sanitize_config_for_storage(session.get("last_config") or {}),
+            "manual_regions": dict(session.get("manual_regions") or {}),
+            "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+            "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+            "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+            "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+            "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            "cover_image": self._project_cover_url(project_id, session),
+            "pinned": False,
+        }
+        self._write_json_file(self._project_snapshots_dir(project_id) / f"{snapshot_id}.json", snapshot)
+        return snapshot
+
+    def _build_project_summary(self, project_id: str, session: dict[str, Any], latest_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        manifests = self._read_snapshot_manifests(project_id)
+        latest = latest_snapshot or (manifests[0] if manifests else None)
+        return {
+            "project_id": project_id,
+            "title": str(session.get("project_title") or project_id),
+            "note": str(session.get("project_note") or ""),
+            "created_at": str(session.get("project_created_at") or self._now_iso()),
+            "updated_at": str(session.get("project_updated_at") or self._now_iso()),
+            "page_count": len(session.get("source_images") or []),
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "cover_image": self._project_cover_url(project_id, session),
+            "latest_snapshot_id": str((latest or {}).get("snapshot_id") or ""),
+            "latest_snapshot_kind": str((latest or {}).get("kind") or ""),
+            "latest_snapshot_summary": str((latest or {}).get("summary") or ""),
+            "snapshot_count": len(manifests),
+            "archived": bool(session.get("project_archived", False)),
+        }
+
+    def _write_project_index(self, summaries: list[dict[str, Any]]) -> None:
+        summaries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        self._write_json_file(self.project_index_path, summaries)
+
+    def _refresh_project_index_entry(self, project_summary: dict[str, Any]) -> None:
+        existing = self._read_json_file(self.project_index_path, [])
+        next_items = [item for item in existing if isinstance(item, dict) and str(item.get("project_id") or "") != project_summary["project_id"]]
+        next_items.append(project_summary)
+        self._write_project_index(next_items)
+
+    def initialize_project(self, project_id: str, session: dict[str, Any], title: str, note: str = "") -> None:
+        now = self._now_iso()
+        session["project_id"] = project_id
+        session["project_title"] = title.strip() or project_id
+        session["project_note"] = note.strip()
+        session["project_created_at"] = str(session.get("project_created_at") or now)
+        session["project_updated_at"] = now
+        self.persist_project_state(project_id, session)
+
+    def capture_session_config(self, session: dict[str, Any], raw_config: dict[str, Any] | None) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        session["last_config"] = config
+        session["style_region_overrides"] = dict(config.get("style_region_overrides") or {})
+        session["translation_region_overrides"] = dict(config.get("translation_region_overrides") or {})
+        session["translation_region_skip_overrides"] = dict(config.get("translation_region_skip_overrides") or {})
+        session["translation_region_disabled_overrides"] = dict(config.get("translation_region_disabled_overrides") or {})
+        session["translation_region_layout_overrides"] = dict(config.get("translation_region_layout_overrides") or {})
+        return config
+
+    def persist_project_state(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        snapshot_kind: str | None = None,
+        snapshot_summary: str = "",
+    ) -> None:
+        project_dir = self._project_dir(project_id)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        self._project_snapshots_dir(project_id).mkdir(parents=True, exist_ok=True)
+
+        latest_snapshot = None
+        if snapshot_kind:
+            latest_snapshot = self._create_project_snapshot(project_id, session, snapshot_kind, snapshot_summary)
+
+        session_state = self._serialize_session_state(project_id, session)
+        self._write_json_file(self._project_session_state_path(project_id), session_state)
+
+        project_summary = self._build_project_summary(project_id, session, latest_snapshot=latest_snapshot)
+        project_manifest = {
+            **project_summary,
+            "source_dir": str(session.get("source_dir") or ""),
+            "translated_dir": str(session.get("translated_dir") or ""),
+        }
+        self._write_json_file(self._project_manifest_path(project_id), project_manifest)
+        self._refresh_project_index_entry(project_summary)
+
+        if snapshot_kind:
+            self._enforce_snapshot_retention(project_id, session)
+            refreshed_summary = self._build_project_summary(project_id, session)
+            self._write_json_file(self._project_manifest_path(project_id), {**project_manifest, **refreshed_summary})
+            self._refresh_project_index_entry(refreshed_summary)
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        index_items = self._read_json_file(self.project_index_path, [])
+        if isinstance(index_items, list) and index_items:
+            valid_items = [item for item in index_items if isinstance(item, dict)]
+            valid_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+            return valid_items
+
+        items: list[dict[str, Any]] = []
+        for project_dir in sorted(self.projects_root.iterdir()) if self.projects_root.exists() else []:
+            manifest_path = project_dir / "project.json"
+            payload = self._read_json_file(manifest_path, {})
+            if isinstance(payload, dict) and payload:
+                items.append(payload)
+        items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        if items:
+            self._write_project_index(items)
+        return items
+
+    def restore_project_session(self, project_id: str) -> dict[str, Any]:
+        state = self._read_json_file(self._project_session_state_path(project_id), {})
+        if not isinstance(state, dict) or not state:
+            raise FileNotFoundError("项目状态不存在，请重新上传。")
+
+        session = {
+            "source_dir": str(state.get("source_dir") or ""),
+            "translated_dir": str(state.get("translated_dir") or ""),
+            "source_images": list(state.get("source_images") or []),
+            "download_path": str(state.get("download_path") or ""),
+            "translated_output_map": dict(state.get("translated_output_map") or {}),
+            "rerender_generation": int(state.get("rerender_generation") or 0),
+            "manual_regions": dict(state.get("manual_regions") or {}),
+            "workflow_stage": str(state.get("workflow_stage") or "idle"),
+            "mask_debug_dir": str(state.get("mask_debug_dir") or ""),
+            "rerender_cache_dir": str(state.get("rerender_cache_dir") or ""),
+            "last_config": dict(state.get("last_config") or {}),
+            "deferred_output_names": set(state.get("deferred_output_names") or []),
+            "translation_region_overrides": dict(state.get("translation_region_overrides") or {}),
+            "translation_region_skip_overrides": dict(state.get("translation_region_skip_overrides") or {}),
+            "translation_region_disabled_overrides": dict(state.get("translation_region_disabled_overrides") or {}),
+            "translation_region_layout_overrides": dict(state.get("translation_region_layout_overrides") or {}),
+            "style_region_overrides": dict(state.get("style_region_overrides") or {}),
+            "project_id": project_id,
+            "project_title": str(state.get("project_title") or project_id),
+            "project_note": str(state.get("project_note") or ""),
+            "project_created_at": str(state.get("project_created_at") or self._now_iso()),
+            "project_updated_at": str(state.get("project_updated_at") or self._now_iso()),
+        }
+        return session
+
+    def update_project_metadata(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        title: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        if title is not None:
+            session["project_title"] = title.strip() or str(session.get("project_title") or project_id)
+        if note is not None:
+            session["project_note"] = note.strip()
+        self.persist_project_state(project_id, session)
+        return self._build_project_summary(project_id, session)
+
+    def build_client_session_payload(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        preferred_output_format = self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
+        translated_images: list[dict[str, Any]] = []
+        output_dir = Path(session["translated_dir"])
+        for index, image in enumerate(session.get("source_images") or []):
+            stored_name = str(image.get("stored_name") or "")
+            current_output = self._current_translated_output(session, output_dir, stored_name, preferred_output_format)
+            if current_output is None:
+                continue
+            translated_images.append(
+                {
+                    "id": f"{project_id}-translated-{stored_name or index}",
+                    "name": str(image.get("name") or stored_name),
+                    "url": f"/output/{project_id}/translated/{current_output.name}",
+                    "stored_name": stored_name,
+                }
+            )
+
+        return {
+            "session_id": project_id,
+            "total_images": len(session.get("source_images") or []),
+            "images": list(session.get("source_images") or []),
+            "translated_images": translated_images,
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "download_url": f"/api/download/{project_id}" if translated_images else "",
+            "download_path": str(session.get("download_path") or ""),
+            "translated_dir": str(Path(session.get("translated_dir") or "").resolve()) if session.get("translated_dir") else "",
+            "mask_debug_dir": str(Path(session.get("mask_debug_dir") or "").resolve()) if session.get("mask_debug_dir") else "",
+            "project": self._build_project_summary(project_id, session),
+            "config": self._sanitize_config_for_storage(session.get("last_config") or {}),
+            "overrides": {
+                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            },
+        }
 
     async def translate_session(
         self,
@@ -58,7 +438,7 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
-        config = self._normalize_config(raw_config)
+        config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
@@ -164,8 +544,13 @@ class TranslatorEngine:
             preferred_output_format=config["rerender_output_format"],
         )
         session["download_path"] = archive_path
-        session["last_config"] = config
         session["workflow_stage"] = "translated"
+        self.persist_project_state(
+            session_id,
+            session,
+            snapshot_kind="initial_translation",
+            snapshot_summary="完整翻译完成",
+        )
 
         return {
             "download_url": f"/api/download/{session_id}",
@@ -183,7 +568,7 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
-        config = self._normalize_config(raw_config)
+        config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
@@ -231,8 +616,13 @@ class TranslatorEngine:
         if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
 
-        session["last_config"] = config
         session["workflow_stage"] = "detected"
+        self.persist_project_state(
+            session_id,
+            session,
+            snapshot_kind="detect_only",
+            snapshot_summary="文本框识别完成，等待逐框确认",
+        )
         return {
             "translated_dir": str(output_dir.resolve()),
             "workflow_stage": session["workflow_stage"],
@@ -246,7 +636,7 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
-        config = self._normalize_config(raw_config)
+        config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -349,8 +739,13 @@ class TranslatorEngine:
             preferred_output_format=config["rerender_output_format"],
         )
         session["download_path"] = archive_path
-        session["last_config"] = config
         session["workflow_stage"] = "translated"
+        self.persist_project_state(
+            session_id,
+            session,
+            snapshot_kind="resume_translation",
+            snapshot_summary="逐框确认后继续翻译并嵌字",
+        )
 
         return {
             "download_url": f"/api/download/{session_id}",
@@ -369,7 +764,7 @@ class TranslatorEngine:
         target_stored_name: str | None = None,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
-        config = self._normalize_config(raw_config)
+        config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -465,8 +860,14 @@ class TranslatorEngine:
             preferred_output_format=config["rerender_output_format"],
         )
         session["download_path"] = archive_path
-        session["last_config"] = config
         session["workflow_stage"] = "translated"
+        rerender_scope = "当前页" if target_stored_name else "整组页面"
+        self.persist_project_state(
+            session_id,
+            session,
+            snapshot_kind="rerender",
+            snapshot_summary=f"{rerender_scope}重新嵌字完成",
+        )
 
         return {
             "download_url": f"/api/download/{session_id}",

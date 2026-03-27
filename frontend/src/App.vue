@@ -237,6 +237,9 @@ const status = ref('正在检查后端状态...')
 const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
+const historyLoading = ref(false)
+const restoringProjectId = ref('')
+const savingProjectMeta = ref(false)
 const activeAction = ref('translate')
 const renderNonce = ref(Date.now())
 const sessionId = ref('')
@@ -268,6 +271,10 @@ const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
 const showAdvancedSettings = ref(false)
 const workflowStage = ref('idle')
+const projectHistory = ref([])
+const currentProject = ref(null)
+const projectTitleDraft = ref('')
+const projectNoteDraft = ref('')
 
 const config = ref(loadStoredConfig())
 
@@ -401,6 +408,13 @@ const targetLangLabelMap = {
   JPN: '日语',
   KOR: '韩语'
 }
+const workflowStageLabelMap = {
+  idle: '未开始',
+  detecting: '识别中',
+  detected: '待校对',
+  translating: '翻译中',
+  translated: '已翻译'
+}
 const compactConfigSummary = computed(() => {
   const translator = translatorLabelMap[config.value.translator] || config.value.translator
   const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
@@ -411,6 +425,16 @@ const compactConfigSummary = computed(() => {
     ? ` / ${getResolvedTranslatorModel(config.value)}`
     : ''
   return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow}`
+})
+const projectMetaDirty = computed(() => {
+  const project = currentProject.value
+  if (!project) {
+    return false
+  }
+  return (
+    String(projectTitleDraft.value || '').trim() !== String(project.title || '').trim()
+    || String(projectNoteDraft.value || '').trim() !== String(project.note || '').trim()
+  )
 })
 
 const primaryTranslateAction = computed(() => {
@@ -499,6 +523,149 @@ function resetEditInspectorSelection() {
   adjustingRegionId.value = ''
   mergeRegionSelection.value = {}
   mergeMode.value = false
+}
+
+function normalizeHistoryProject(project) {
+  return {
+    ...project,
+    cover_image: project?.cover_image ? toApiUrl(project.cover_image) : '',
+    updated_at: project?.updated_at || '',
+    created_at: project?.created_at || '',
+    title: project?.title || project?.project_id || '未命名项目',
+    note: project?.note || '',
+    workflow_stage: project?.workflow_stage || 'idle',
+    page_count: Number(project?.page_count || 0)
+  }
+}
+
+function applySessionPayload(payload, options = {}) {
+  const resetInspectors = Boolean(options.resetInspectors)
+  renderNonce.value = Date.now()
+  sessionId.value = payload?.session_id || ''
+  workflowStage.value = payload?.workflow_stage || 'idle'
+  downloadUrl.value = payload?.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
+  downloadPath.value = payload?.download_path || ''
+  translatedDirPath.value = payload?.translated_dir || ''
+  maskDebugDirPath.value = payload?.mask_debug_dir || ''
+  originalImages.value = (payload?.images || []).map((image, index) => ({
+    id: `${sessionId.value || 'session'}-source-${index}`,
+    name: image.name,
+    url: toApiUrl(image.url),
+    stored_name: image.stored_name
+  }))
+  translatedImages.value = (payload?.translated_images || []).map((image, index) => ({
+    id: image.id || `${sessionId.value || 'session'}-translated-${index}`,
+    name: image.name,
+    url: withCacheBust(toApiUrl(image.url)),
+    stored_name: image.stored_name
+  }))
+
+  const payloadConfig = payload?.config && typeof payload.config === 'object' ? payload.config : {}
+  config.value = normalizeStoredConfig({
+    ...config.value,
+    ...payloadConfig,
+    api_key: config.value.api_key,
+    image_cleanup_api_key: config.value.image_cleanup_api_key
+  })
+
+  const overrides = payload?.overrides || {}
+  translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+  translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+  translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+  translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+  styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+
+  currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
+  projectTitleDraft.value = currentProject.value?.title || ''
+  projectNoteDraft.value = currentProject.value?.note || ''
+
+  if (resetInspectors) {
+    resetTranslationReview()
+    resetStyleInspector()
+    resetEditInspectorSelection()
+  }
+}
+
+async function loadProjectHistory(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    historyLoading.value = true
+  }
+  try {
+    const response = await fetch(toApiUrl('/api/projects'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取历史翻译列表失败')
+    }
+    projectHistory.value = (payload.projects || []).map(normalizeHistoryProject)
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取历史翻译列表失败'
+    }
+  } finally {
+    if (!silent) {
+      historyLoading.value = false
+    }
+  }
+}
+
+async function restoreProject(projectId) {
+  if (!projectId) {
+    return
+  }
+  restoringProjectId.value = projectId
+  errorMessage.value = ''
+  closeSocket()
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/restore`), {
+      method: 'POST'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '恢复历史项目失败')
+    }
+    applySessionPayload(payload, { resetInspectors: true })
+    await loadEditInspection({ silent: true })
+    await loadProjectHistory({ silent: true })
+    status.value = `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '恢复历史项目失败'
+  } finally {
+    restoringProjectId.value = ''
+  }
+}
+
+async function saveProjectMetadata() {
+  if (!sessionId.value || !currentProject.value || !projectMetaDirty.value) {
+    return
+  }
+  savingProjectMeta.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}`), {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: projectTitleDraft.value,
+        note: projectNoteDraft.value
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '保存项目名称或备注失败')
+    }
+    currentProject.value = normalizeHistoryProject(payload.project || {})
+    projectTitleDraft.value = currentProject.value?.title || ''
+    projectNoteDraft.value = currentProject.value?.note || ''
+    await loadProjectHistory({ silent: true })
+    status.value = '已保存项目名称和备注。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '保存项目名称或备注失败'
+  } finally {
+    savingProjectMeta.value = false
+  }
 }
 
 function buildRuntimeConfig() {
@@ -1367,6 +1534,9 @@ async function submitFile() {
   originalImages.value = []
   translatedImages.value = []
   sessionId.value = ''
+  currentProject.value = null
+  projectTitleDraft.value = ''
+  projectNoteDraft.value = ''
   downloadUrl.value = ''
   downloadPath.value = ''
   translatedDirPath.value = ''
@@ -1391,13 +1561,8 @@ async function submitFile() {
       throw new Error(payload.detail || '上传失败')
     }
 
-    sessionId.value = payload.session_id
-    originalImages.value = (payload.images || []).map((image, index) => ({
-      id: `${payload.session_id}-${index}`,
-      name: image.name,
-      url: toApiUrl(image.url),
-      stored_name: image.stored_name
-    }))
+    applySessionPayload(payload, { resetInspectors: true })
+    await loadProjectHistory({ silent: true })
     status.value = config.value.pause_after_detection
       ? `上传完成，共解析 ${payload.total_images} 张图片。现在可以先识别文本框，再逐框确认。`
       : `上传完成，共解析 ${payload.total_images} 张图片。现在可以开始翻译。`
@@ -1509,11 +1674,7 @@ function startTranslation(action = 'translate') {
 
     if (payload.event === 'completed') {
       translating.value = false
-      workflowStage.value = payload.workflow_stage || workflowStage.value
-      downloadUrl.value = payload.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
-      downloadPath.value = payload.download_path || ''
-      translatedDirPath.value = payload.translated_dir || ''
-      maskDebugDirPath.value = payload.mask_debug_dir || ''
+      applySessionPayload(payload)
       status.value = activeAction.value === 'detect'
         ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
         : activeAction.value === 'resume-translate'
@@ -1524,6 +1685,7 @@ function startTranslation(action = 'translate') {
               : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
             : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       void loadEditInspection({ silent: true })
+      void loadProjectHistory({ silent: true })
       closeSocket()
       return
     }
@@ -1573,6 +1735,7 @@ function startTranslation(action = 'translate') {
 onMounted(() => {
   checkBackendStatus()
   loadFonts()
+  loadProjectHistory()
 })
 
 onBeforeUnmount(() => {
@@ -2088,6 +2251,131 @@ watch(
 
       <p v-if="errorMessage" class="error-text">{{ errorMessage }}</p>
       <p v-if="sessionId" class="session-text">Session: {{ sessionId }}</p>
+    </section>
+
+    <section v-if="currentProject" class="gallery-card project-meta-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Current Project</p>
+          <h2>当前项目</h2>
+        </div>
+        <div class="project-meta-badges">
+          <span class="project-badge">{{ workflowStageLabelMap[currentProject.workflow_stage] || currentProject.workflow_stage }}</span>
+          <span class="project-badge">{{ currentProject.page_count }} 页</span>
+        </div>
+      </div>
+
+      <div class="project-meta-grid">
+        <label class="field">
+          <span>项目名称</span>
+          <input
+            v-model="projectTitleDraft"
+            type="text"
+            placeholder="给这个项目起个名字"
+          />
+        </label>
+
+        <label class="field project-note-field">
+          <span>项目备注</span>
+          <textarea
+            v-model="projectNoteDraft"
+            rows="3"
+            placeholder="可选：记录这本漫画的说明、当前进度或注意事项"
+          ></textarea>
+        </label>
+      </div>
+
+      <div class="project-meta-actions">
+        <button
+          class="secondary-button"
+          type="button"
+          :disabled="savingProjectMeta || !projectMetaDirty"
+          @click="saveProjectMetadata"
+        >
+          {{ savingProjectMeta ? '正在保存...' : '保存项目名称 / 备注' }}
+        </button>
+        <span class="project-meta-hint">
+          历史翻译列表会显示这里的名称和备注，后续恢复项目时也会一起带回。
+        </span>
+      </div>
+    </section>
+
+    <section class="gallery-card project-history-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>历史翻译</h2>
+        </div>
+        <div class="action-row">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="historyLoading"
+            @click="loadProjectHistory"
+          >
+            {{ historyLoading ? '正在读取...' : '刷新历史列表' }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!projectHistory.length && historyLoading" class="empty-state">
+        正在读取历史项目…
+      </div>
+
+      <div v-else-if="!projectHistory.length" class="empty-state">
+        还没有历史翻译项目。上传并完成一次识别或翻译后，这里会自动保存下来。
+      </div>
+
+      <div v-else class="project-history-list">
+        <article
+          v-for="project in projectHistory"
+          :key="project.project_id"
+          class="project-history-item"
+        >
+          <div class="project-history-cover">
+            <img
+              v-if="project.cover_image"
+              :src="withCacheBust(project.cover_image)"
+              :alt="`${project.title} 封面`"
+            />
+            <div v-else class="project-history-cover-fallback">
+              {{ project.page_count }} 页
+            </div>
+          </div>
+
+          <div class="project-history-body">
+            <div class="project-history-head">
+              <strong>{{ project.title }}</strong>
+              <div class="project-history-meta">
+                <span>{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
+                <span>{{ project.page_count }} 页</span>
+              </div>
+            </div>
+
+            <p v-if="project.note" class="project-history-note">{{ project.note }}</p>
+            <p class="project-history-time">最近更新：{{ project.updated_at || project.created_at }}</p>
+
+            <div class="action-row">
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="Boolean(restoringProjectId) && restoringProjectId !== project.project_id"
+                @click="restoreProject(project.project_id)"
+              >
+                {{ restoringProjectId === project.project_id ? '正在恢复...' : '继续编辑' }}
+              </button>
+
+              <a
+                v-if="sessionId === project.project_id && downloadUrl"
+                class="secondary-button"
+                :href="downloadUrl"
+              >
+                下载当前结果
+              </a>
+            </div>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section v-if="canInspectEditor" class="gallery-card">

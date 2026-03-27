@@ -109,6 +109,42 @@ async def get_fonts():
     return {"fonts": list_available_fonts()}
 
 
+@app.get("/api/projects")
+async def list_projects():
+    return {"projects": translator_engine.list_projects()}
+
+
+@app.patch("/api/projects/{project_id}")
+async def update_project(project_id: str, payload: dict[str, Any] | None = None):
+    session = SESSIONS.get(project_id)
+    if not session:
+        try:
+            session = translator_engine.restore_project_session(project_id)
+            SESSIONS[project_id] = session
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    payload = payload or {}
+    summary = translator_engine.update_project_metadata(
+        project_id=project_id,
+        session=session,
+        title=payload.get("title"),
+        note=payload.get("note"),
+    )
+    return {"project": summary}
+
+
+@app.post("/api/projects/{project_id}/restore")
+async def restore_project(project_id: str):
+    try:
+        session = translator_engine.restore_project_session(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    SESSIONS[project_id] = session
+    return translator_engine.build_client_session_payload(project_id, session)
+
+
 @app.post("/api/style-regions/{session_id}")
 async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = SESSIONS.get(session_id)
@@ -152,9 +188,16 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             removed = translator_engine.delete_manual_region(session, region_id)
             if not removed:
                 raise HTTPException(status_code=404, detail="没有找到对应的补漏框。")
+            translator_engine.persist_project_state(
+                session_id,
+                session,
+                snapshot_kind="manual_region_deleted",
+                snapshot_summary="删除手动补漏框",
+            )
             return {"ok": True, "action": "delete", "region_id": region_id}
 
         if action == "merge":
+            translator_engine.capture_session_config(session, payload.get("config", {}))
             stored_name = str(payload.get("stored_name") or "").strip()
             region_ids = payload.get("region_ids") or []
             if not stored_name:
@@ -168,8 +211,15 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 stored_name=stored_name,
                 region_ids=region_ids,
             )
+            translator_engine.persist_project_state(
+                session_id,
+                session,
+                snapshot_kind="regions_merged",
+                snapshot_summary=f"{stored_name} 合并文本框",
+            )
             return {"ok": True, "action": "merge", "region": region}
 
+        translator_engine.capture_session_config(session, payload.get("config", {}))
         stored_name = str(payload.get("stored_name") or "").strip()
         if not stored_name:
             raise HTTPException(status_code=400, detail="缺少目标页面信息。")
@@ -180,6 +230,12 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             raw_config=payload.get("config", {}),
             stored_name=stored_name,
             bbox=payload.get("bbox"),
+        )
+        translator_engine.persist_project_state(
+            session_id,
+            session,
+            snapshot_kind="manual_region_added",
+            snapshot_summary=f"{stored_name} 新增手动补漏框",
         )
         return {"ok": True, "action": "create", "region": region}
     except HTTPException:
@@ -226,12 +282,13 @@ async def upload_comic(file: UploadFile = File(...)):
         "manual_regions": {},
         "workflow_stage": "idle",
     }
+    translator_engine.initialize_project(
+        session_id,
+        SESSIONS[session_id],
+        title=Path(filename).stem,
+    )
 
-    return {
-        "session_id": session_id,
-        "total_images": len(staged_images),
-        "images": staged_images,
-    }
+    return translator_engine.build_client_session_payload(session_id, SESSIONS[session_id])
 
 
 @app.get("/api/download/{session_id}")
@@ -304,7 +361,13 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 raw_config=config,
                 progress_callback=send_event,
             )
-        await websocket.send_json({"event": "completed", **result})
+        await websocket.send_json(
+            {
+                "event": "completed",
+                **translator_engine.build_client_session_payload(session_id, session),
+                **result,
+            }
+        )
     except WebSocketDisconnect:
         return
     except Exception as exc:

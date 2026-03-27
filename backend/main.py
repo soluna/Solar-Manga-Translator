@@ -3,7 +3,7 @@ from typing import Any
 import shutil
 import uuid
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -99,6 +99,20 @@ def list_available_fonts() -> list[dict[str, str]]:
     return fonts
 
 
+def get_or_restore_session(project_id: str) -> dict[str, Any]:
+    session = SESSIONS.get(project_id)
+    if session:
+        return session
+
+    try:
+        session = translator_engine.restore_project_session(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    SESSIONS[project_id] = session
+    return session
+
+
 @app.get("/api/status")
 async def get_status():
     return {"status": "running"}
@@ -116,13 +130,7 @@ async def list_projects():
 
 @app.patch("/api/projects/{project_id}")
 async def update_project(project_id: str, payload: dict[str, Any] | None = None):
-    session = SESSIONS.get(project_id)
-    if not session:
-        try:
-            session = translator_engine.restore_project_session(project_id)
-            SESSIONS[project_id] = session
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    session = get_or_restore_session(project_id)
 
     payload = payload or {}
     summary = translator_engine.update_project_metadata(
@@ -130,18 +138,14 @@ async def update_project(project_id: str, payload: dict[str, Any] | None = None)
         session=session,
         title=payload.get("title"),
         note=payload.get("note"),
+        review_mode=payload.get("review_mode"),
     )
     return {"project": summary}
 
 
 @app.post("/api/projects/{project_id}/restore")
 async def restore_project(project_id: str):
-    try:
-        session = translator_engine.restore_project_session(project_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    SESSIONS[project_id] = session
+    session = get_or_restore_session(project_id)
     return translator_engine.build_client_session_payload(project_id, session)
 
 
@@ -186,9 +190,7 @@ async def delete_project(project_id: str):
 
 @app.post("/api/style-regions/{session_id}")
 async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None = None):
-    session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在，请重新上传文件。")
+    session = get_or_restore_session(session_id)
 
     return await translator_engine.inspect_style_regions(
         session_id=session_id,
@@ -199,9 +201,7 @@ async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None 
 
 @app.post("/api/review-regions/{session_id}")
 async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None = None):
-    session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在，请重新上传文件。")
+    session = get_or_restore_session(session_id)
 
     return await translator_engine.inspect_translation_regions(
         session_id=session_id,
@@ -212,9 +212,7 @@ async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None
 
 @app.post("/api/manual-regions/{session_id}")
 async def update_manual_regions(session_id: str, payload: dict[str, Any] | None = None):
-    session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在，请重新上传文件。")
+    session = get_or_restore_session(session_id)
 
     payload = payload or {}
     action = str(payload.get("action") or "create").strip().lower()
@@ -232,6 +230,7 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 session,
                 snapshot_kind="manual_region_deleted",
                 snapshot_summary="删除手动补漏框",
+                persist_page_documents=True,
             )
             return {"ok": True, "action": "delete", "region_id": region_id}
 
@@ -255,6 +254,7 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 session,
                 snapshot_kind="regions_merged",
                 snapshot_summary=f"{stored_name} 合并文本框",
+                persist_page_documents=True,
             )
             return {"ok": True, "action": "merge", "region": region}
 
@@ -275,6 +275,7 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             session,
             snapshot_kind="manual_region_added",
             snapshot_summary=f"{stored_name} 新增手动补漏框",
+            persist_page_documents=True,
         )
         return {"ok": True, "action": "create", "region": region}
     except HTTPException:
@@ -285,8 +286,33 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/pages/{session_id}/{page_id}/document")
+async def get_page_document(session_id: str, page_id: str):
+    session = get_or_restore_session(session_id)
+    try:
+        document = translator_engine.get_page_document(session_id, session, page_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"document": document}
+
+
+@app.get("/api/pages/{session_id}/{page_id}/base-image")
+async def get_page_base_image(session_id: str, page_id: str):
+    session = get_or_restore_session(session_id)
+    try:
+        base_path = translator_engine.get_page_base_image_path(session_id, session, page_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=base_path)
+
+
 @app.post("/api/upload")
-async def upload_comic(file: UploadFile = File(...)):
+async def upload_comic(
+    file: UploadFile = File(...),
+    review_mode: str = Form(TranslatorEngine.DEFAULT_REVIEW_MODE),
+):
     filename = Path(file.filename or "upload").name
     if not filename.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(status_code=400, detail="Unsupported file format")
@@ -320,11 +346,13 @@ async def upload_comic(file: UploadFile = File(...)):
         "rerender_generation": 0,
         "manual_regions": {},
         "workflow_stage": "idle",
+        "review_mode": review_mode,
     }
     translator_engine.initialize_project(
         session_id,
         SESSIONS[session_id],
         title=Path(filename).stem,
+        review_mode=review_mode,
     )
 
     return translator_engine.build_client_session_payload(session_id, SESSIONS[session_id])
@@ -356,8 +384,9 @@ async def download_translated_archive(session_id: str):
 async def translate_session(websocket: WebSocket, session_id: str):
     await websocket.accept()
 
-    session = SESSIONS.get(session_id)
-    if not session:
+    try:
+        session = get_or_restore_session(session_id)
+    except HTTPException:
         await websocket.send_json({"event": "error", "message": "会话不存在，请重新上传文件。"})
         await websocket.close()
         return

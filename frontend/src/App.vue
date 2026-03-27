@@ -79,6 +79,10 @@ function isValidRerenderOutputFormat(value) {
   return ['png', 'source'].includes(value)
 }
 
+function isValidReviewMode(value) {
+  return ['classic', 'canvas_beta'].includes(value)
+}
+
 function createDefaultConfig() {
   return {
     translator: 'gemini',
@@ -98,6 +102,7 @@ function createDefaultConfig() {
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
+    default_review_mode: 'classic',
     pause_after_detection: false,
     mask_cleanup_strength: 'standard',
     export_mask_debug: false,
@@ -150,6 +155,9 @@ function normalizeStoredConfig(rawValue) {
   const rerenderOutputFormat = typeof rawValue.rerender_output_format === 'string' && isValidRerenderOutputFormat(rawValue.rerender_output_format)
     ? rawValue.rerender_output_format
     : defaults.rerender_output_format
+  const defaultReviewMode = typeof rawValue.default_review_mode === 'string' && isValidReviewMode(rawValue.default_review_mode)
+    ? rawValue.default_review_mode
+    : defaults.default_review_mode
 
   return {
     translator,
@@ -185,6 +193,7 @@ function normalizeStoredConfig(rawValue) {
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
       : defaults.render_letter_spacing,
     rerender_output_format: rerenderOutputFormat,
+    default_review_mode: defaultReviewMode,
     pause_after_detection: typeof rawValue.pause_after_detection === 'boolean'
       ? rawValue.pause_after_detection
       : defaults.pause_after_detection,
@@ -419,16 +428,21 @@ const workflowStageLabelMap = {
   translating: '翻译中',
   translated: '已翻译'
 }
+const reviewModeLabelMap = {
+  classic: '经典审校',
+  canvas_beta: '画布审校（Beta）'
+}
 const compactConfigSummary = computed(() => {
   const translator = translatorLabelMap[config.value.translator] || config.value.translator
   const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
   const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
   const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
   const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
+  const reviewMode = reviewModeLabelMap[config.value.default_review_mode] || config.value.default_review_mode
   const translatorModel = config.value.translator === 'doubao-ark'
     ? ` / ${getResolvedTranslatorModel(config.value)}`
     : ''
-  return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow}`
+  return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow} / 默认${reviewMode}`
 })
 const projectMetaDirty = computed(() => {
   const project = currentProject.value
@@ -537,6 +551,7 @@ function normalizeHistoryProject(project) {
     created_at: project?.created_at || '',
     title: project?.title || project?.project_id || '未命名项目',
     note: project?.note || '',
+    review_mode: project?.review_mode || 'classic',
     workflow_stage: project?.workflow_stage || 'idle',
     page_count: Number(project?.page_count || 0)
   }
@@ -1719,6 +1734,7 @@ async function submitFile() {
   try {
     const formData = new FormData()
     formData.append('file', selectedFile.value)
+    formData.append('review_mode', config.value.default_review_mode)
 
     const response = await fetch(toApiUrl('/api/upload'), {
       method: 'POST',
@@ -2260,6 +2276,17 @@ watch(
           </select>
           <small class="field-hint">
             只影响“仅重新嵌字 / 审校后重嵌字”，不会改动首次翻译主流程。想优先保清晰度时，推荐保持 `PNG`。
+          </small>
+        </label>
+
+        <label class="field">
+          <span>默认审校模式</span>
+          <select v-model="config.default_review_mode">
+            <option value="classic">经典审校</option>
+            <option value="canvas_beta">画布审校（Beta）</option>
+          </select>
+          <small class="field-hint">
+            只影响新上传项目的默认审校工作台；历史项目会继续沿用它们创建时的模式。
           </small>
         </label>
 

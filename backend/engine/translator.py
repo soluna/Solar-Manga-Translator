@@ -34,6 +34,9 @@ class TranslatorEngine:
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
     TRANSLATED_OUTPUT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+    REVIEW_MODES = ("classic", "canvas_beta")
+    DEFAULT_REVIEW_MODE = "classic"
+    PAGE_DOCUMENT_VERSION = 1
     DOUBAO_CURATED_MODELS = {
         "doubao-seed-translation-250915",
         "doubao-seed-2-0-pro-260215",
@@ -69,6 +72,15 @@ class TranslatorEngine:
     def _project_snapshots_dir(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "snapshots"
 
+    def _project_pages_dir(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "pages"
+
+    def _project_page_dir(self, project_id: str, page_id: str) -> Path:
+        return self._project_pages_dir(project_id) / page_id
+
+    def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
+        return self._project_page_dir(project_id, page_id) / "page_document.json"
+
     def _read_json_file(self, path: Path, default: Any) -> Any:
         if not path.exists():
             return default
@@ -96,6 +108,15 @@ class TranslatorEngine:
             if secret_key in sanitized:
                 sanitized[secret_key] = ""
         return sanitized
+
+    def _normalize_review_mode(self, raw_value: Any) -> str:
+        value = str(raw_value or self.DEFAULT_REVIEW_MODE).strip().lower()
+        if value not in self.REVIEW_MODES:
+            return self.DEFAULT_REVIEW_MODE
+        return value
+
+    def _session_review_mode(self, session: dict[str, Any]) -> str:
+        return self._normalize_review_mode(session.get("review_mode"))
 
     def _project_cover_url(self, project_id: str, session: dict[str, Any]) -> str:
         source_images = list(session.get("source_images") or [])
@@ -126,6 +147,7 @@ class TranslatorEngine:
             "project_id": project_id,
             "project_title": str(session.get("project_title") or ""),
             "project_note": str(session.get("project_note") or ""),
+            "review_mode": self._session_review_mode(session),
             "project_created_at": created_at,
             "project_updated_at": updated_at,
             "source_dir": str(session.get("source_dir") or ""),
@@ -232,6 +254,7 @@ class TranslatorEngine:
             "summary": summary,
             "translated_output_map": dict(session.get("translated_output_map") or {}),
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "review_mode": self._session_review_mode(session),
             "last_config": self._sanitize_config_for_storage(session.get("last_config") or {}),
             "manual_regions": dict(session.get("manual_regions") or {}),
             "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
@@ -252,6 +275,7 @@ class TranslatorEngine:
             "project_id": project_id,
             "title": str(session.get("project_title") or project_id),
             "note": str(session.get("project_note") or ""),
+            "review_mode": self._session_review_mode(session),
             "created_at": str(session.get("project_created_at") or self._now_iso()),
             "updated_at": str(session.get("project_updated_at") or self._now_iso()),
             "page_count": len(session.get("source_images") or []),
@@ -274,14 +298,22 @@ class TranslatorEngine:
         next_items.append(project_summary)
         self._write_project_index(next_items)
 
-    def initialize_project(self, project_id: str, session: dict[str, Any], title: str, note: str = "") -> None:
+    def initialize_project(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        title: str,
+        note: str = "",
+        review_mode: str | None = None,
+    ) -> None:
         now = self._now_iso()
         session["project_id"] = project_id
         session["project_title"] = title.strip() or project_id
         session["project_note"] = note.strip()
+        session["review_mode"] = self._normalize_review_mode(review_mode or session.get("review_mode"))
         session["project_created_at"] = str(session.get("project_created_at") or now)
         session["project_updated_at"] = now
-        self.persist_project_state(project_id, session)
+        self.persist_project_state(project_id, session, persist_page_documents=True)
 
     def capture_session_config(self, session: dict[str, Any], raw_config: dict[str, Any] | None) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
@@ -299,6 +331,8 @@ class TranslatorEngine:
         session: dict[str, Any],
         snapshot_kind: str | None = None,
         snapshot_summary: str = "",
+        persist_page_documents: bool = False,
+        page_ids: list[str] | None = None,
     ) -> None:
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -319,6 +353,9 @@ class TranslatorEngine:
         }
         self._write_json_file(self._project_manifest_path(project_id), project_manifest)
         self._refresh_project_index_entry(project_summary)
+
+        if persist_page_documents:
+            self._persist_page_documents(project_id, session, page_ids=page_ids)
 
         if snapshot_kind:
             self._enforce_snapshot_retention(project_id, session)
@@ -414,6 +451,7 @@ class TranslatorEngine:
             "project_id": project_id,
             "project_title": str(state.get("project_title") or project_id),
             "project_note": str(state.get("project_note") or ""),
+            "review_mode": self._normalize_review_mode(state.get("review_mode")),
             "project_created_at": str(state.get("project_created_at") or self._now_iso()),
             "project_updated_at": str(state.get("project_updated_at") or self._now_iso()),
         }
@@ -486,6 +524,7 @@ class TranslatorEngine:
             "project_id": new_project_id,
             "project_title": f"{source_title}（快照恢复）",
             "project_note": str(source_session.get("project_note") or ""),
+            "review_mode": self._normalize_review_mode(snapshot.get("review_mode") or source_session.get("review_mode")),
             "project_created_at": self._now_iso(),
             "project_updated_at": self._now_iso(),
         }
@@ -494,6 +533,7 @@ class TranslatorEngine:
             new_session,
             snapshot_kind="snapshot_restored",
             snapshot_summary=f"从快照 {snapshot_id} 恢复继续编辑",
+            persist_page_documents=True,
         )
         return new_project_id, new_session
 
@@ -534,12 +574,19 @@ class TranslatorEngine:
         session: dict[str, Any],
         title: str | None = None,
         note: str | None = None,
+        review_mode: str | None = None,
     ) -> dict[str, Any]:
         if title is not None:
             session["project_title"] = title.strip() or str(session.get("project_title") or project_id)
         if note is not None:
             session["project_note"] = note.strip()
-        self.persist_project_state(project_id, session)
+        if review_mode is not None:
+            session["review_mode"] = self._normalize_review_mode(review_mode)
+        self.persist_project_state(
+            project_id,
+            session,
+            persist_page_documents=review_mode is not None,
+        )
         return self._build_project_summary(project_id, session)
 
     def build_client_session_payload(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -573,6 +620,7 @@ class TranslatorEngine:
 
         return {
             "session_id": project_id,
+            "review_mode": self._session_review_mode(session),
             "total_images": len(source_images),
             "images": source_images,
             "translated_images": translated_images,
@@ -591,6 +639,229 @@ class TranslatorEngine:
                 "style_region_overrides": dict(session.get("style_region_overrides") or {}),
             },
         }
+
+    def _prepare_regions_for_page_document(
+        self,
+        source_rgb: np.ndarray,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+        stored_name: str,
+        session: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        regions = self._load_cached_regions(page_cache_dir)
+        regions = self._merge_manual_regions(session, stored_name, regions)
+        self._assign_region_keys(regions, stored_name)
+        self._apply_region_translation_overrides(regions, config, stored_name)
+        self._apply_region_font_styles(source_rgb, regions, config, stored_name)
+
+        disabled_overrides = config.get("translation_region_disabled_overrides") or {}
+        layout_overrides = config.get("translation_region_layout_overrides") or {}
+        for region in regions:
+            region_key = str(getattr(region, "translation_region_key", "") or "")
+            region.disabled_region = bool(disabled_overrides.get(region_key))
+
+            layout_override = layout_overrides.get(region_key) or {}
+            bbox = layout_override.get("bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                self._set_region_bbox(region, bbox)
+
+            font_size = layout_override.get("font_size")
+            if font_size is not None:
+                try:
+                    region.font_size = max(8, int(round(float(font_size))))
+                except (TypeError, ValueError):
+                    pass
+
+        return self._dedupe_overlapping_regions(regions)
+
+    def _serialize_page_document_region(
+        self,
+        region: Any,
+        manual_payloads_by_id: dict[str, dict[str, Any]],
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        region_id = str(
+            getattr(region, "translation_region_key", "")
+            or getattr(region, "style_region_key", "")
+            or getattr(region, "manual_region_id", "")
+        )
+        bbox = [int(v) for v in self._region_bbox(region)]
+        manual_payload = manual_payloads_by_id.get(region_id) or {}
+        source_ids = [str(item) for item in (manual_payload.get("merged_from") or []) if str(item)]
+        kind = "auto"
+        if bool(getattr(region, "manual_region", False)):
+            kind = "merged" if source_ids else "manual"
+
+        font_family = str(getattr(region, "font_family", "") or "")
+        font_size_override = None
+        layout_override = (config.get("translation_region_layout_overrides") or {}).get(region_id) or {}
+        if "font_size" in layout_override:
+            try:
+                font_size_override = max(8, int(round(float(layout_override["font_size"]))))
+            except (TypeError, ValueError):
+                font_size_override = None
+
+        return {
+            "region_id": region_id,
+            "page_id": str(manual_payload.get("stored_name") or ""),
+            "kind": kind,
+            "source_ids": source_ids,
+            "bbox": bbox,
+            "polygon": None,
+            "source_text": self._region_source_text(region),
+            "ocr_confidence": float(getattr(region, "prob", 1.0) or 0.0),
+            "translation": {
+                "machine": str(getattr(region, "machine_translation", "") or ""),
+                "edited": str(getattr(region, "translation_override", "") or ""),
+                "resolved": self._region_preview_text(region),
+            },
+            "style": {
+                "font_style": str(getattr(region, "font_style", "") or ""),
+                "font_family": os.path.basename(font_family) if font_family else "",
+                "font_path": font_family,
+                "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
+                "font_size_override": font_size_override,
+                "letter_spacing": float(getattr(region, "letter_spacing", 1.0) or 1.0),
+                "line_spacing": float(getattr(region, "line_spacing", 1.0) or 1.0),
+                "alignment": str(getattr(region, "_alignment", getattr(region, "alignment", "auto")) or "auto"),
+            },
+            "flags": {
+                "disabled": bool(getattr(region, "disabled_region", False)),
+                "keep_original": bool(getattr(region, "skip_translation", False)),
+                "translation_enabled": not bool(getattr(region, "disabled_region", False)) and not bool(getattr(region, "skip_translation", False)),
+            },
+            "audit": {
+                "created_by": "user" if bool(getattr(region, "manual_region", False)) else "auto",
+                "updated_at": self._now_iso(),
+            },
+        }
+
+    def _build_page_document(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        stored_name: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_dir = Path(session.get("source_dir") or "")
+        output_dir = Path(session.get("translated_dir") or "")
+        source_path = source_dir / stored_name
+        if not source_path.exists():
+            raise FileNotFoundError(f"页面原图不存在：{stored_name}")
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取页面原图：{source_path}")
+
+        page_cache_dir = self._rerender_cache_dir(project_id) / stored_name
+        self._ensure_rerenderable_page_cache(source_path, page_cache_dir)
+        inpainted_path = page_cache_dir / "inpainted.png"
+        preview_output = self._current_translated_output(
+            session,
+            output_dir,
+            stored_name,
+            self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
+        )
+
+        regions: list[dict[str, Any]] = []
+        if self._has_rerenderable_page_cache(page_cache_dir):
+            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+            prepared_regions = self._prepare_regions_for_page_document(
+                source_rgb,
+                page_cache_dir,
+                config,
+                stored_name,
+                session=session,
+            )
+            manual_payloads_by_id = {
+                str(payload.get("id") or ""): payload
+                for payload in self._manual_regions_for_page(session, stored_name)
+                if isinstance(payload, dict)
+            }
+            regions = [
+                self._serialize_page_document_region(region, manual_payloads_by_id, config)
+                for region in prepared_regions
+            ]
+            for region_payload in regions:
+                region_payload["page_id"] = stored_name
+
+        previous_document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+        previous_metadata = previous_document.get("metadata") if isinstance(previous_document, dict) else {}
+        previous_revision = int((previous_metadata or {}).get("revision") or 0)
+
+        return {
+            "page_id": stored_name,
+            "review_mode": self._session_review_mode(session),
+            "source_image": f"/output/{project_id}/source/{stored_name}",
+            "base_image": (
+                f"/api/pages/{project_id}/{stored_name}/base-image"
+                if inpainted_path.exists()
+                else f"/output/{project_id}/source/{stored_name}"
+            ),
+            "preview_image": (
+                f"/output/{project_id}/translated/{preview_output.name}"
+                if preview_output is not None
+                else f"/output/{project_id}/source/{stored_name}"
+            ),
+            "dimensions": {
+                "width": int(source_bgr.shape[1]),
+                "height": int(source_bgr.shape[0]),
+            },
+            "regions": regions,
+            "erase_regions": [],
+            "metadata": {
+                "document_version": self.PAGE_DOCUMENT_VERSION,
+                "updated_at": self._now_iso(),
+                "revision": previous_revision + 1,
+            },
+        }
+
+    def _persist_page_documents(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_ids: list[str] | None = None,
+    ) -> None:
+        source_images = list(session.get("source_images") or [])
+        if not source_images:
+            return
+
+        target_ids = {str(page_id) for page_id in (page_ids or []) if str(page_id)}
+        config = self._normalize_config(session.get("last_config") or {})
+        for image in source_images:
+            stored_name = str(image.get("stored_name") or "")
+            if not stored_name:
+                continue
+            if target_ids and stored_name not in target_ids:
+                continue
+            try:
+                document = self._build_page_document(project_id, session, stored_name, config)
+                self._write_json_file(self._project_page_document_path(project_id, stored_name), document)
+            except Exception as exc:
+                print(f"[WARN] Failed to persist page document for {project_id}/{stored_name}: {exc}")
+
+    def get_page_document(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
+        document_path = self._project_page_document_path(project_id, page_id)
+        payload = self._read_json_file(document_path, {})
+        if isinstance(payload, dict) and payload:
+            return payload
+
+        self._persist_page_documents(project_id, session, page_ids=[page_id])
+        payload = self._read_json_file(document_path, {})
+        if isinstance(payload, dict) and payload:
+            return payload
+        raise FileNotFoundError("当前页面文档不存在，请先完成一次识别或翻译。")
+
+    def get_page_base_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
+        source_path = Path(session.get("source_dir") or "") / page_id
+        page_cache_dir = self._rerender_cache_dir(project_id) / page_id
+        self._ensure_rerenderable_page_cache(source_path, page_cache_dir)
+        base_path = page_cache_dir / "inpainted.png"
+        if base_path.exists():
+            return base_path
+        if source_path.exists():
+            return source_path
+        raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
 
     async def translate_session(
         self,
@@ -712,6 +983,7 @@ class TranslatorEngine:
             session,
             snapshot_kind="initial_translation",
             snapshot_summary="完整翻译完成",
+            persist_page_documents=True,
         )
 
         return {
@@ -784,6 +1056,7 @@ class TranslatorEngine:
             session,
             snapshot_kind="detect_only",
             snapshot_summary="文本框识别完成，等待逐框确认",
+            persist_page_documents=True,
         )
         return {
             "translated_dir": str(output_dir.resolve()),
@@ -907,6 +1180,7 @@ class TranslatorEngine:
             session,
             snapshot_kind="resume_translation",
             snapshot_summary="逐框确认后继续翻译并嵌字",
+            persist_page_documents=True,
         )
 
         return {
@@ -1029,6 +1303,8 @@ class TranslatorEngine:
             session,
             snapshot_kind="rerender",
             snapshot_summary=f"{rerender_scope}重新嵌字完成",
+            persist_page_documents=True,
+            page_ids=[target_stored_name] if target_stored_name else None,
         )
 
         return {

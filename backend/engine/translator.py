@@ -344,6 +344,23 @@ class TranslatorEngine:
             self._write_project_index(items)
         return items
 
+    def list_project_snapshots(self, project_id: str) -> list[dict[str, Any]]:
+        snapshots = []
+        for snapshot in self._read_snapshot_manifests(project_id):
+            snapshots.append(
+                {
+                    "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+                    "project_id": project_id,
+                    "created_at": str(snapshot.get("created_at") or ""),
+                    "kind": str(snapshot.get("kind") or ""),
+                    "summary": str(snapshot.get("summary") or ""),
+                    "workflow_stage": str(snapshot.get("workflow_stage") or "idle"),
+                    "cover_image": str(snapshot.get("cover_image") or ""),
+                    "pinned": bool(snapshot.get("pinned")),
+                }
+            )
+        return snapshots
+
     def restore_project_session(self, project_id: str) -> dict[str, Any]:
         state = self._read_json_file(self._project_session_state_path(project_id), {})
         if not isinstance(state, dict) or not state:
@@ -375,6 +392,84 @@ class TranslatorEngine:
         }
         return session
 
+    def restore_snapshot_as_project(self, project_id: str, snapshot_id: str) -> tuple[str, dict[str, Any]]:
+        source_session = self.restore_project_session(project_id)
+        snapshot = next(
+            (
+                item
+                for item in self._read_snapshot_manifests(project_id)
+                if str(item.get("snapshot_id") or "") == snapshot_id
+            ),
+            None,
+        )
+        if not snapshot:
+            raise FileNotFoundError("目标快照不存在，请刷新后重试。")
+
+        source_output_dir = Path(source_session.get("translated_dir") or "")
+        source_source_dir = Path(source_session.get("source_dir") or "")
+        source_cache_dir = self._rerender_cache_dir(project_id)
+
+        new_project_id = str(uuid.uuid4())
+        new_output_root = self.base_dir / "output_images" / new_project_id
+        new_source_dir = new_output_root / "source"
+        new_translated_dir = new_output_root / "translated"
+        new_output_root.mkdir(parents=True, exist_ok=True)
+        new_source_dir.mkdir(parents=True, exist_ok=True)
+        new_translated_dir.mkdir(parents=True, exist_ok=True)
+
+        if source_source_dir.exists():
+            for source_file in source_source_dir.iterdir():
+                if source_file.is_file():
+                    shutil.copy2(source_file, new_source_dir / source_file.name)
+
+        translated_output_map = dict(snapshot.get("translated_output_map") or {})
+        copied_output_map: dict[str, str] = {}
+        for stored_name, output_name in translated_output_map.items():
+            source_file = source_output_dir / str(output_name)
+            if not source_file.exists():
+                continue
+            target_file = new_translated_dir / source_file.name
+            shutil.copy2(source_file, target_file)
+            copied_output_map[str(stored_name)] = target_file.name
+
+        new_cache_dir = self._rerender_cache_dir(new_project_id)
+        if source_cache_dir.exists():
+            if new_cache_dir.exists():
+                shutil.rmtree(new_cache_dir)
+            shutil.copytree(source_cache_dir, new_cache_dir)
+
+        source_title = str(source_session.get("project_title") or project_id).strip() or project_id
+        new_session = {
+            **source_session,
+            "source_dir": str(new_source_dir),
+            "translated_dir": str(new_translated_dir),
+            "download_path": "",
+            "translated_output_map": copied_output_map,
+            "manual_regions": dict(snapshot.get("manual_regions") or source_session.get("manual_regions") or {}),
+            "workflow_stage": str(snapshot.get("workflow_stage") or source_session.get("workflow_stage") or "idle"),
+            "mask_debug_dir": "",
+            "rerender_cache_dir": str(new_cache_dir),
+            "last_config": dict(snapshot.get("last_config") or source_session.get("last_config") or {}),
+            "deferred_output_names": set(),
+            "translation_region_overrides": dict(snapshot.get("translation_region_overrides") or {}),
+            "translation_region_skip_overrides": dict(snapshot.get("translation_region_skip_overrides") or {}),
+            "translation_region_disabled_overrides": dict(snapshot.get("translation_region_disabled_overrides") or {}),
+            "translation_region_layout_overrides": dict(snapshot.get("translation_region_layout_overrides") or {}),
+            "style_region_overrides": dict(snapshot.get("style_region_overrides") or {}),
+            "project_id": new_project_id,
+            "project_title": f"{source_title}（快照恢复）",
+            "project_note": str(source_session.get("project_note") or ""),
+            "project_created_at": self._now_iso(),
+            "project_updated_at": self._now_iso(),
+        }
+        self.persist_project_state(
+            new_project_id,
+            new_session,
+            snapshot_kind="snapshot_restored",
+            snapshot_summary=f"从快照 {snapshot_id} 恢复继续编辑",
+        )
+        return new_project_id, new_session
+
     def update_project_metadata(
         self,
         project_id: str,
@@ -393,9 +488,18 @@ class TranslatorEngine:
         preferred_output_format = self._normalize_rerender_output_format(
             (session.get("last_config") or {}).get("rerender_output_format")
         )
+        source_images = [
+            {
+                "name": str(image.get("name") or image.get("stored_name") or ""),
+                "stored_name": str(image.get("stored_name") or ""),
+                "url": f"/output/{project_id}/source/{str(image.get('stored_name') or '')}",
+            }
+            for image in (session.get("source_images") or [])
+            if str(image.get("stored_name") or "")
+        ]
         translated_images: list[dict[str, Any]] = []
         output_dir = Path(session["translated_dir"])
-        for index, image in enumerate(session.get("source_images") or []):
+        for index, image in enumerate(source_images):
             stored_name = str(image.get("stored_name") or "")
             current_output = self._current_translated_output(session, output_dir, stored_name, preferred_output_format)
             if current_output is None:
@@ -411,8 +515,8 @@ class TranslatorEngine:
 
         return {
             "session_id": project_id,
-            "total_images": len(session.get("source_images") or []),
-            "images": list(session.get("source_images") or []),
+            "total_images": len(source_images),
+            "images": source_images,
             "translated_images": translated_images,
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
             "download_url": f"/api/download/{project_id}" if translated_images else "",

@@ -239,6 +239,7 @@ const uploading = ref(false)
 const translating = ref(false)
 const historyLoading = ref(false)
 const restoringProjectId = ref('')
+const restoringSnapshotId = ref('')
 const savingProjectMeta = ref(false)
 const activeAction = ref('translate')
 const renderNonce = ref(Date.now())
@@ -272,6 +273,9 @@ const selectedEditRegionKey = ref('')
 const showAdvancedSettings = ref(false)
 const workflowStage = ref('idle')
 const projectHistory = ref([])
+const projectSnapshots = ref({})
+const snapshotLoadingProjectId = ref('')
+const expandedProjectId = ref('')
 const currentProject = ref(null)
 const projectTitleDraft = ref('')
 const projectNoteDraft = ref('')
@@ -538,6 +542,19 @@ function normalizeHistoryProject(project) {
   }
 }
 
+function normalizeSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    snapshot_id: snapshot?.snapshot_id || '',
+    created_at: snapshot?.created_at || '',
+    kind: snapshot?.kind || '',
+    summary: snapshot?.summary || '',
+    workflow_stage: snapshot?.workflow_stage || 'idle',
+    cover_image: snapshot?.cover_image ? toApiUrl(snapshot.cover_image) : '',
+    pinned: Boolean(snapshot?.pinned)
+  }
+}
+
 function applySessionPayload(payload, options = {}) {
   const resetInspectors = Boolean(options.resetInspectors)
   renderNonce.value = Date.now()
@@ -609,6 +626,49 @@ async function loadProjectHistory(options = {}) {
   }
 }
 
+async function loadProjectSnapshots(projectId, options = {}) {
+  if (!projectId) {
+    return
+  }
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    snapshotLoadingProjectId.value = projectId
+  }
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots`))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取项目快照失败')
+    }
+    projectSnapshots.value = {
+      ...projectSnapshots.value,
+      [projectId]: (payload.snapshots || []).map(normalizeSnapshot)
+    }
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取项目快照失败'
+    }
+  } finally {
+    if (!silent) {
+      snapshotLoadingProjectId.value = ''
+    }
+  }
+}
+
+async function toggleProjectSnapshots(projectId) {
+  if (!projectId) {
+    return
+  }
+  if (expandedProjectId.value === projectId) {
+    expandedProjectId.value = ''
+    return
+  }
+  expandedProjectId.value = projectId
+  if (!projectSnapshots.value[projectId]) {
+    await loadProjectSnapshots(projectId)
+  }
+}
+
 async function restoreProject(projectId) {
   if (!projectId) {
     return
@@ -632,6 +692,32 @@ async function restoreProject(projectId) {
     errorMessage.value = error instanceof Error ? error.message : '恢复历史项目失败'
   } finally {
     restoringProjectId.value = ''
+  }
+}
+
+async function restoreSnapshot(projectId, snapshotId) {
+  if (!projectId || !snapshotId) {
+    return
+  }
+  restoringSnapshotId.value = snapshotId
+  errorMessage.value = ''
+  closeSocket()
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshotId}/restore`), {
+      method: 'POST'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '恢复历史快照失败')
+    }
+    applySessionPayload(payload, { resetInspectors: true })
+    await loadEditInspection({ silent: true })
+    await loadProjectHistory({ silent: true })
+    status.value = `已从历史快照恢复项目「${currentProject.value?.title || payload.session_id}」，可以继续编辑。`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '恢复历史快照失败'
+  } finally {
+    restoringSnapshotId.value = ''
   }
 }
 
@@ -2365,6 +2451,19 @@ watch(
                 {{ restoringProjectId === project.project_id ? '正在恢复...' : '继续编辑' }}
               </button>
 
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="snapshotLoadingProjectId === project.project_id"
+                @click="toggleProjectSnapshots(project.project_id)"
+              >
+                {{
+                  expandedProjectId === project.project_id
+                    ? '收起快照'
+                    : `查看快照（${project.snapshot_count || 0}）`
+                }}
+              </button>
+
               <a
                 v-if="sessionId === project.project_id && downloadUrl"
                 class="secondary-button"
@@ -2372,6 +2471,51 @@ watch(
               >
                 下载当前结果
               </a>
+            </div>
+
+            <div
+              v-if="expandedProjectId === project.project_id"
+              class="snapshot-panel"
+            >
+              <div
+                v-if="snapshotLoadingProjectId === project.project_id && !(projectSnapshots[project.project_id] || []).length"
+                class="snapshot-empty"
+              >
+                正在读取快照…
+              </div>
+
+              <div
+                v-else-if="!(projectSnapshots[project.project_id] || []).length"
+                class="snapshot-empty"
+              >
+                这个项目还没有可恢复的快照。
+              </div>
+
+              <div v-else class="snapshot-list">
+                <article
+                  v-for="snapshot in projectSnapshots[project.project_id]"
+                  :key="snapshot.snapshot_id"
+                  class="snapshot-item"
+                >
+                  <div class="snapshot-copy">
+                    <strong>{{ snapshot.summary || '未命名快照' }}</strong>
+                    <div class="snapshot-meta">
+                      <span>{{ snapshot.created_at }}</span>
+                      <span>{{ workflowStageLabelMap[snapshot.workflow_stage] || snapshot.workflow_stage }}</span>
+                      <span>{{ snapshot.kind }}</span>
+                    </div>
+                  </div>
+
+                  <button
+                    class="secondary-button snapshot-button"
+                    type="button"
+                    :disabled="Boolean(restoringSnapshotId) && restoringSnapshotId !== snapshot.snapshot_id"
+                    @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
+                  >
+                    {{ restoringSnapshotId === snapshot.snapshot_id ? '正在恢复...' : '恢复为新项目' }}
+                  </button>
+                </article>
+              </div>
             </div>
           </div>
         </article>

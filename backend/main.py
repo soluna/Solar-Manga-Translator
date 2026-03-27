@@ -145,6 +145,22 @@ async def restore_project(project_id: str):
     return translator_engine.build_client_session_payload(project_id, session)
 
 
+@app.get("/api/projects/{project_id}/snapshots")
+async def list_project_snapshots(project_id: str):
+    return {"snapshots": translator_engine.list_project_snapshots(project_id)}
+
+
+@app.post("/api/projects/{project_id}/snapshots/{snapshot_id}/restore")
+async def restore_project_snapshot(project_id: str, snapshot_id: str):
+    try:
+        restored_project_id, session = translator_engine.restore_snapshot_as_project(project_id, snapshot_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    SESSIONS[restored_project_id] = session
+    return translator_engine.build_client_session_payload(restored_project_id, session)
+
+
 @app.post("/api/style-regions/{session_id}")
 async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = SESSIONS.get(session_id)

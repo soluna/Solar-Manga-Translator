@@ -308,6 +308,29 @@ async def get_page_base_image(session_id: str, page_id: str):
     return FileResponse(path=base_path)
 
 
+@app.post("/api/pages/{session_id}/{page_id}/commands")
+async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(session_id)
+    payload = payload or {}
+
+    try:
+        result = await translator_engine.apply_page_commands(
+            project_id=session_id,
+            session=session,
+            page_id=page_id,
+            raw_config=payload.get("config", {}),
+            commands=payload.get("commands") or [],
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return result
+
+
 @app.post("/api/upload")
 async def upload_comic(
     file: UploadFile = File(...),

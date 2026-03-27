@@ -716,6 +716,8 @@ class TranslatorEngine:
                 "resolved": self._region_preview_text(region),
             },
             "style": {
+                "auto_font_style": str(getattr(region, "auto_font_style", "") or ""),
+                "font_style_override": str(getattr(region, "override_font_style", "") or ""),
                 "font_style": str(getattr(region, "font_style", "") or ""),
                 "font_family": os.path.basename(font_family) if font_family else "",
                 "font_path": font_family,
@@ -862,6 +864,294 @@ class TranslatorEngine:
         if source_path.exists():
             return source_path
         raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
+
+    def _page_display_name(self, session: dict[str, Any], page_id: str) -> str:
+        for image in session.get("source_images") or []:
+            if str(image.get("stored_name") or "") == page_id:
+                return str(image.get("name") or page_id)
+        return page_id
+
+    def _page_document_to_translation_page(
+        self,
+        page_document: dict[str, Any],
+        page_name: str,
+    ) -> dict[str, Any]:
+        region_payloads: list[dict[str, Any]] = []
+        for index, region in enumerate(page_document.get("regions") or []):
+            translation = region.get("translation") or {}
+            flags = region.get("flags") or {}
+            style = region.get("style") or {}
+            region_payloads.append(
+                {
+                    "id": str(region.get("region_id") or ""),
+                    "index": index,
+                    "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
+                    "manual": str(region.get("kind") or "") in {"manual", "merged"},
+                    "source_text": str(region.get("source_text") or ""),
+                    "machine_translation": str(translation.get("machine") or ""),
+                    "override_translation": str(translation.get("edited") or ""),
+                    "override_skip": bool(flags.get("keep_original")),
+                    "current_translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
+                    "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
+                    "font_size": int(style.get("font_size") or 12),
+                }
+            )
+
+        dimensions = page_document.get("dimensions") or {}
+        return {
+            "stored_name": str(page_document.get("page_id") or ""),
+            "name": page_name,
+            "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "source_image_url": str(page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "image_width": int(dimensions.get("width") or 0),
+            "image_height": int(dimensions.get("height") or 0),
+            "regions": region_payloads,
+        }
+
+    def _page_document_to_style_page(
+        self,
+        page_document: dict[str, Any],
+        page_name: str,
+    ) -> dict[str, Any]:
+        region_payloads: list[dict[str, Any]] = []
+        for index, region in enumerate(page_document.get("regions") or []):
+            translation = region.get("translation") or {}
+            style = region.get("style") or {}
+            region_payloads.append(
+                {
+                    "id": str(region.get("region_id") or ""),
+                    "index": index,
+                    "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
+                    "manual": str(region.get("kind") or "") in {"manual", "merged"},
+                    "auto_style": str(style.get("auto_font_style") or ""),
+                    "override_style": str(style.get("font_style_override") or ""),
+                    "resolved_style": str(style.get("font_style") or ""),
+                    "font_family": str(style.get("font_family") or ""),
+                    "source_text": str(region.get("source_text") or ""),
+                    "translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
+                    "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
+                    "font_size": int(style.get("font_size") or 12),
+                }
+            )
+
+        dimensions = page_document.get("dimensions") or {}
+        return {
+            "stored_name": str(page_document.get("page_id") or ""),
+            "name": page_name,
+            "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "source_image_url": str(page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "image_width": int(dimensions.get("width") or 0),
+            "image_height": int(dimensions.get("height") or 0),
+            "regions": region_payloads,
+        }
+
+    def _clear_region_overrides(self, session: dict[str, Any], region_id: str) -> None:
+        for field_name in (
+            "translation_region_overrides",
+            "translation_region_skip_overrides",
+            "translation_region_disabled_overrides",
+            "translation_region_layout_overrides",
+            "style_region_overrides",
+        ):
+            override_map = session.get(field_name)
+            if isinstance(override_map, dict):
+                override_map.pop(region_id, None)
+
+    def _set_region_bbox_override(self, session: dict[str, Any], region_id: str, bbox: list[int]) -> None:
+        overrides = dict(session.get("translation_region_layout_overrides") or {})
+        current = dict(overrides.get(region_id) or {})
+        current["bbox"] = [int(v) for v in bbox]
+        overrides[region_id] = current
+        session["translation_region_layout_overrides"] = overrides
+
+    def _set_region_font_size_override(self, session: dict[str, Any], region_id: str, font_size: int | None) -> None:
+        overrides = dict(session.get("translation_region_layout_overrides") or {})
+        current = dict(overrides.get(region_id) or {})
+        if font_size is None:
+            current.pop("font_size", None)
+        else:
+            current["font_size"] = int(font_size)
+        if current:
+            overrides[region_id] = current
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_layout_overrides"] = overrides
+
+    def _set_region_translation_override_value(self, session: dict[str, Any], region_id: str, text: str) -> None:
+        overrides = dict(session.get("translation_region_overrides") or {})
+        normalized_text = str(text or "").strip()
+        if normalized_text:
+            overrides[region_id] = normalized_text
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_overrides"] = overrides
+
+    def _set_region_keep_original(self, session: dict[str, Any], region_id: str, enabled: bool) -> None:
+        overrides = dict(session.get("translation_region_skip_overrides") or {})
+        if enabled:
+            overrides[region_id] = True
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_skip_overrides"] = overrides
+
+    def _set_region_disabled(self, session: dict[str, Any], region_id: str, enabled: bool) -> None:
+        overrides = dict(session.get("translation_region_disabled_overrides") or {})
+        if enabled:
+            overrides[region_id] = True
+            self._clear_region_overrides(session, region_id)
+            overrides[region_id] = True
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_disabled_overrides"] = overrides
+
+    def _set_region_style_override_value(self, session: dict[str, Any], region_id: str, style_bucket: str) -> None:
+        overrides = dict(session.get("style_region_overrides") or {})
+        normalized_style = self._normalize_style_bucket(style_bucket)
+        if normalized_style:
+            overrides[region_id] = normalized_style
+        else:
+            overrides.pop(region_id, None)
+        session["style_region_overrides"] = overrides
+
+    async def apply_page_commands(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        raw_config: dict[str, Any] | None,
+        commands: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
+            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
+        if not isinstance(commands, list) or not commands:
+            raise ValueError("至少需要一条页面命令。")
+
+        config = self.capture_session_config(session, raw_config)
+        updated_region_ids: list[str] = []
+        snapshot_hints: list[str] = []
+
+        for command in commands:
+            if not isinstance(command, dict):
+                continue
+            command_type = str(command.get("type") or "").strip().lower()
+            if not command_type:
+                continue
+
+            if command_type == "update_translation":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_translation_override_value(session, region_id, str(command.get("text") or command.get("translation") or ""))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("translation_updated")
+                continue
+
+            if command_type == "set_keep_original":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_keep_original(session, region_id, bool(command.get("enabled")))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("keep_original_updated")
+                continue
+
+            if command_type == "disable_region":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_disabled(session, region_id, True)
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("region_disabled")
+                continue
+
+            if command_type == "restore_region":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_disabled(session, region_id, False)
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("region_restored")
+                continue
+
+            if command_type == "update_region_bbox":
+                region_id = str(command.get("region_id") or "").strip()
+                bbox = command.get("bbox")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    raise ValueError("缺少有效的文本框坐标。")
+                self._set_region_bbox_override(session, region_id, [int(round(float(v))) for v in bbox])
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("layout_adjusted")
+                continue
+
+            if command_type == "update_font_size":
+                region_id = str(command.get("region_id") or "").strip()
+                raw_font_size = command.get("font_size")
+                if raw_font_size is None:
+                    self._set_region_font_size_override(session, region_id, None)
+                else:
+                    self._set_region_font_size_override(session, region_id, max(8, int(round(float(raw_font_size)))))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("font_size_updated")
+                continue
+
+            if command_type == "update_font_style":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_style_override_value(session, region_id, str(command.get("style") or ""))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("font_style_updated")
+                continue
+
+            if command_type == "create_region":
+                bbox = command.get("bbox")
+                region = await self.create_manual_region(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    stored_name=page_id,
+                    bbox=bbox,
+                )
+                updated_region_ids.append(str(region.get("id") or ""))
+                snapshot_hints.append("manual_region_added")
+                continue
+
+            if command_type == "merge_regions":
+                region_ids = command.get("region_ids") or []
+                region = await self.merge_regions(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    stored_name=page_id,
+                    region_ids=region_ids,
+                )
+                merged_from = [str(item) for item in (region.get("merged_from") or []) if str(item)]
+                for source_region_id in merged_from:
+                    self._set_region_disabled(session, source_region_id, True)
+                updated_region_ids.extend(merged_from)
+                updated_region_ids.append(str(region.get("id") or ""))
+                snapshot_hints.append("regions_merged")
+                continue
+
+            if command_type == "delete_manual_region":
+                region_id = str(command.get("region_id") or "").strip()
+                removed = self.delete_manual_region(session, region_id)
+                if not removed:
+                    raise FileNotFoundError("没有找到对应的手动补框。")
+                self._clear_region_overrides(session, region_id)
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("manual_region_deleted")
+                continue
+
+            raise ValueError(f"暂不支持的页面命令：{command_type}")
+
+        self.persist_project_state(
+            project_id,
+            session,
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+        document = self.get_page_document(project_id, session, page_id)
+        return {
+            "page_id": page_id,
+            "document": document,
+            "revision": int((document.get("metadata") or {}).get("revision") or 0),
+            "updated_region_ids": sorted({region_id for region_id in updated_region_ids if region_id}),
+            "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
+            "executed_commands": [str(command.get("type") or "") for command in commands if isinstance(command, dict)],
+        }
 
     async def translate_session(
         self,
@@ -2131,77 +2421,15 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
     ) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
-        source_dir = Path(session["source_dir"])
-        output_dir = Path(session["translated_dir"])
-        preferred_output_format = self._normalize_rerender_output_format(
-            (session.get("last_config") or {}).get("rerender_output_format")
-        )
         pages: list[dict[str, Any]] = []
 
         for image in session["source_images"]:
-            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
-            source_path = source_dir / image["stored_name"]
-            self._ensure_rerenderable_page_cache(source_path, cache_page_dir)
-            if not self._has_rerenderable_page_cache(cache_page_dir):
+            try:
+                page_document = self._build_page_document(session_id, session, image["stored_name"], config)
+            except Exception as exc:
+                print(f"[WARN] Failed to build style inspection page for {session_id}/{image['stored_name']}: {exc}")
                 continue
-
-            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-            if source_bgr is None:
-                continue
-            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-
-            regions = self._prepare_cached_regions_for_edit(
-                source_rgb,
-                cache_page_dir,
-                config,
-                image["stored_name"],
-                session=session,
-            )
-
-            preview_path = self._current_translated_output(
-                session,
-                output_dir,
-                image["stored_name"],
-                preferred_output_format,
-            )
-            preview_url = (
-                f"/output/{session_id}/translated/{preview_path.name}"
-                if preview_path is not None
-                else f"/output/{session_id}/source/{image['stored_name']}"
-            )
-
-            region_payloads: list[dict[str, Any]] = []
-            for index, region in enumerate(regions):
-                x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
-                region_payloads.append(
-                    {
-                        "id": getattr(region, "style_region_key", self._make_style_region_key(image["stored_name"], index)),
-                        "index": index,
-                        "bbox": [x1, y1, x2, y2],
-                        "manual": bool(getattr(region, "manual_region", False)),
-                        "auto_style": getattr(region, "auto_font_style", ""),
-                        "override_style": getattr(region, "override_font_style", ""),
-                        "resolved_style": getattr(region, "font_style", ""),
-                        "font_family": str(getattr(region, "font_family", "") or ""),
-                        "source_text": self._region_source_text(region),
-                        "translation": str(getattr(region, "translation", "") or ""),
-                        "preview_text": self._region_preview_text(region),
-                        "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
-                    }
-                )
-
-            pages.append(
-                {
-                    "stored_name": image["stored_name"],
-                    "name": image["name"],
-                    "image_url": preview_url,
-                    "source_image_url": f"/output/{session_id}/source/{image['stored_name']}",
-                    "translated_image_url": preview_url,
-                    "image_width": int(source_rgb.shape[1]),
-                    "image_height": int(source_rgb.shape[0]),
-                    "regions": region_payloads,
-                }
-            )
+            pages.append(self._page_document_to_style_page(page_document, str(image.get("name") or image["stored_name"])))
 
         return {
             "styles": list(self.STYLE_BUCKETS),
@@ -2216,76 +2444,15 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
     ) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
-        source_dir = Path(session["source_dir"])
-        output_dir = Path(session["translated_dir"])
-        preferred_output_format = self._normalize_rerender_output_format(
-            (session.get("last_config") or {}).get("rerender_output_format")
-        )
         pages: list[dict[str, Any]] = []
 
         for image in session["source_images"]:
-            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
-            source_path = source_dir / image["stored_name"]
-            self._ensure_rerenderable_page_cache(source_path, cache_page_dir)
-            if not self._has_rerenderable_page_cache(cache_page_dir):
+            try:
+                page_document = self._build_page_document(session_id, session, image["stored_name"], config)
+            except Exception as exc:
+                print(f"[WARN] Failed to build review inspection page for {session_id}/{image['stored_name']}: {exc}")
                 continue
-
-            source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-            if source_bgr is None:
-                continue
-            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-
-            regions = self._prepare_cached_regions_for_edit(
-                source_rgb,
-                cache_page_dir,
-                config,
-                image["stored_name"],
-                session=session,
-            )
-
-            preview_path = self._current_translated_output(
-                session,
-                output_dir,
-                image["stored_name"],
-                preferred_output_format,
-            )
-            preview_url = (
-                f"/output/{session_id}/translated/{preview_path.name}"
-                if preview_path is not None
-                else f"/output/{session_id}/source/{image['stored_name']}"
-            )
-
-            region_payloads: list[dict[str, Any]] = []
-            for index, region in enumerate(regions):
-                x1, y1, x2, y2 = [int(v) for v in getattr(region, "xyxy", [0, 0, 0, 0])]
-                region_payloads.append(
-                    {
-                        "id": getattr(region, "translation_region_key", self._make_style_region_key(image["stored_name"], index)),
-                        "index": index,
-                        "bbox": [x1, y1, x2, y2],
-                        "manual": bool(getattr(region, "manual_region", False)),
-                        "source_text": self._region_source_text(region),
-                        "machine_translation": str(getattr(region, "machine_translation", "") or ""),
-                        "override_translation": str(getattr(region, "translation_override", "") or ""),
-                        "override_skip": bool(getattr(region, "skip_translation", False)),
-                        "current_translation": str(getattr(region, "translation", "") or ""),
-                        "preview_text": self._region_preview_text(region),
-                        "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
-                    }
-                )
-
-            pages.append(
-                {
-                    "stored_name": image["stored_name"],
-                    "name": image["name"],
-                    "image_url": preview_url,
-                    "source_image_url": f"/output/{session_id}/source/{image['stored_name']}",
-                    "translated_image_url": preview_url,
-                    "image_width": int(source_rgb.shape[1]),
-                    "image_height": int(source_rgb.shape[0]),
-                    "regions": region_payloads,
-                }
-            )
+            pages.append(self._page_document_to_translation_page(page_document, str(image.get("name") or image["stored_name"])))
 
         return {
             "pages": pages,

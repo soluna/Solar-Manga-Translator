@@ -5,9 +5,9 @@ const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 const configStorageKey = 'manga-translator.ui-config'
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
-  { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量文本)' },
-  { value: 'doubao-seed-2-0-lite-260215', label: 'doubao-seed-2-0-lite-260215 (轻量文本)' },
-  { value: 'doubao-seed-2-0-mini-260215', label: 'doubao-seed-2-0-mini-260215 (通用文本 / 多模态)' }
+  { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量通用文本 / OCR 漫画翻译实验)' },
+  { value: 'doubao-seed-2-0-lite-260215', label: 'doubao-seed-2-0-lite-260215 (轻量通用文本 / OCR 漫画翻译实验)' },
+  { value: 'doubao-seed-2-0-mini-260215', label: 'doubao-seed-2-0-mini-260215 (通用文本 / 多模态 / OCR 漫画翻译实验)' }
 ]
 const translatorDefaultModels = {
   'doubao-ark': 'doubao-seed-translation-250915'
@@ -3276,7 +3276,7 @@ watch(
             style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border); margin-top: 8px;"
           />
           <small class="field-hint">
-            已内置常用官方模型；如果控制台里有更新或白名单模型，也可以直接填模型 ID，输入框优先级更高。
+            已内置常用官方模型；如果控制台里有更新或白名单模型，也可以直接填模型 ID，输入框优先级更高。漫画 OCR 翻译优先推荐 `doubao-seed-translation-250915`，其余 2.0 系列更适合作为实验选项。
           </small>
         </label>
 

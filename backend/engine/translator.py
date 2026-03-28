@@ -1323,6 +1323,21 @@ class TranslatorEngine:
                     "message": "已启用字体样式映射，翻译完成后会自动按黑体 / 宋体 / 圆体 / 卡通 / 手写 / 拟声重新嵌字。",
                 }
             )
+        selected_model = str(config.get("translator_model") or "").strip()
+        if (
+            str(config.get("selected_translator") or "").strip() == "doubao-ark"
+            and selected_model
+            and not selected_model.startswith("doubao-seed-translation")
+        ):
+            await progress_callback(
+                {
+                    "event": "status",
+                    "message": (
+                        f"当前使用 {selected_model}。这类 Doubao 通用模型在 OCR 噪声较重的漫画翻译场景下可能不稳定；"
+                        "若出现乱码或大量重试，建议改用 doubao-seed-translation-250915。"
+                    ),
+                }
+            )
         session["deferred_output_names"] = deferred_output_names
 
         command = self._build_command(source_dir, output_dir, config_path, config)
@@ -4909,6 +4924,7 @@ class TranslatorEngine:
         if not any(marker in content for marker in failure_markers):
             return ""
 
+        model_name = self._extract_model_name_from_log(content)
         lang_label = {
             "CHS": "简体中文",
             "CHT": "繁體中文",
@@ -4916,10 +4932,35 @@ class TranslatorEngine:
             "JPN": "日文",
         }.get(str(target_lang or "").strip().upper(), "目标语言")
         lines = deque(content.splitlines(), maxlen=18)
+        model_hint = self._format_quality_failure_model_hint(model_name)
         return (
             f"翻译模型连续未能产出有效的{lang_label}结果，本次输出已中止，避免生成乱码嵌字图。\n"
             "这通常是模型不适配当前 OCR 文本，或 OCR 结果本身质量过差导致的。\n"
-            "建议先切换更稳的翻译模型，或改用“识别后先校对再翻译”的流程。\n"
+            f"{model_hint}\n"
             "日志摘要：\n"
             + "\n".join(lines)
         )
+
+    def _extract_model_name_from_log(self, content: str) -> str:
+        if not content:
+            return ""
+        match = re.search(r"Using Responses API for model:\s*([^\s]+)", content)
+        if match:
+            return str(match.group(1) or "").strip()
+        return ""
+
+    def _format_quality_failure_model_hint(self, model_name: str) -> str:
+        normalized = str(model_name or "").strip().lower()
+        if normalized.startswith("doubao-seed-translation"):
+            return "建议先检查 OCR 结果是否过脏，或改用“识别后先校对再翻译”的流程。"
+        if normalized.startswith("doubao-seed-2-0-lite"):
+            return (
+                f"当前使用的是 {model_name}，它更偏轻量通用文本，不太适合 OCR 噪声较重的漫画翻译。\n"
+                "建议切换到 doubao-seed-translation-250915，或先手动校对识别框后再翻译。"
+            )
+        if normalized.startswith("doubao-seed-2-0-"):
+            return (
+                f"当前使用的是 {model_name}，它属于通用文本模型，在 OCR 噪声较重的漫画翻译场景下可能不稳定。\n"
+                "建议优先改用 doubao-seed-translation-250915。"
+            )
+        return "建议先切换更稳的翻译模型，或改用“识别后先校对再翻译”的流程。"

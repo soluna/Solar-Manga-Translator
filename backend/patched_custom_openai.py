@@ -364,23 +364,10 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             return base_url
         return f"{base_url}/responses"
 
-    def _responses_prompt_input(self, model_name: str, to_lang: str, prompt: str):
-        normalized_model = str(model_name or "").strip().lower()
-        if normalized_model.startswith("doubao-seed-translation"):
-            # Translation-only Doubao models accept a single input item.
-            return [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": self._format_prompt_log(to_lang, prompt),
-                        }
-                    ],
-                }
-            ]
+    def _is_translation_responses_model(self, model_name: str) -> bool:
+        return str(model_name or "").strip().lower().startswith("doubao-seed-translation")
 
+    def _responses_prompt_input(self, model_name: str, to_lang: str, prompt: str):
         return [
             {
                 "type": "message",
@@ -394,6 +381,57 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             }
             for message in self._build_messages(to_lang, prompt)
         ]
+
+    def _translation_responses_prompt_candidates(self, to_lang: str, prompt: str):
+        prompt_text = self._format_prompt_log(to_lang, prompt)
+        return [
+            (
+                "single_message_string",
+                [
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                    }
+                ],
+            ),
+            ("single_string", prompt_text),
+            (
+                "single_message_input_text",
+                [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": prompt_text,
+                            }
+                        ],
+                    }
+                ],
+            ),
+        ]
+
+    async def _call_responses_api(self, model_name: str, prompt_input):
+        if self.ark_client is not None and str(model_name or "").strip().lower().startswith("doubao-seed"):
+            self.logger.debug("Using official Ark SDK for Responses API.")
+            return await asyncio.to_thread(
+                self.ark_client.responses.create,
+                model=model_name,
+                input=prompt_input,
+            )
+        if hasattr(self.client, "responses"):
+            return await self.client.responses.create(
+                model=model_name,
+                input=prompt_input,
+            )
+
+        self.logger.debug("OpenAI SDK does not expose responses API; falling back to direct HTTP request.")
+        return await asyncio.to_thread(
+            self._request_responses_via_http_sync,
+            model_name,
+            prompt_input,
+        )
 
     def _request_responses_via_http_sync(self, model_name: str, prompt_input):
         payload = {
@@ -423,30 +461,29 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     async def _request_translation(self, to_lang: str, prompt: str) -> str:
         messages = self._build_messages(to_lang, prompt)
         model_name = self.model or CUSTOM_OPENAI_MODEL
-        force_responses_api = str(model_name or "").strip().lower().startswith("doubao-seed-translation")
+        force_responses_api = self._is_translation_responses_model(model_name)
 
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
-            prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
-            if self.ark_client is not None and str(model_name or "").strip().lower().startswith("doubao-seed"):
-                self.logger.debug("Using official Ark SDK for Responses API.")
-                response = await asyncio.to_thread(
-                    self.ark_client.responses.create,
-                    model=model_name,
-                    input=prompt_input,
-                )
-            elif hasattr(self.client, "responses"):
-                response = await self.client.responses.create(
-                    model=model_name,
-                    input=prompt_input,
-                )
+            if force_responses_api:
+                response = None
+                last_error = None
+                for candidate_name, prompt_input in self._translation_responses_prompt_candidates(to_lang, prompt):
+                    try:
+                        self.logger.debug(f"Trying translation Responses payload: {candidate_name}")
+                        response = await self._call_responses_api(model_name, prompt_input)
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        self.logger.warning(
+                            f"Translation Responses payload {candidate_name} failed: {exc}"
+                        )
+                if response is None:
+                    assert last_error is not None
+                    raise last_error
             else:
-                self.logger.debug("OpenAI SDK does not expose responses API; falling back to direct HTTP request.")
-                response = await asyncio.to_thread(
-                    self._request_responses_via_http_sync,
-                    model_name,
-                    prompt_input,
-                )
+                prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
+                response = await self._call_responses_api(model_name, prompt_input)
             response_text = self._extract_responses_text(response)
             self.logger.debug("\n-- GPT Response (raw) --")
             self.logger.debug(response_text)

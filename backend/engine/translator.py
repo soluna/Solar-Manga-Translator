@@ -695,11 +695,14 @@ class TranslatorEngine:
                 except (TypeError, ValueError):
                     pass
 
-            region.direction = self._resolve_region_direction(
-                self._region_bbox(region),
-                getattr(region, "direction", ""),
-                config.get("target_lang"),
-                layout_override=layout_override,
+            self._assign_region_direction(
+                region,
+                self._resolve_region_direction(
+                    self._region_bbox(region),
+                    getattr(region, "direction", ""),
+                    config.get("target_lang"),
+                    layout_override=layout_override,
+                ),
             )
 
         return self._dedupe_overlapping_regions(regions)
@@ -1167,6 +1170,14 @@ class TranslatorEngine:
         if value in {"h", "horizontal", "horizontal-tb"}:
             return "horizontal"
         return "auto"
+
+    def _assign_region_direction(self, region: Any, direction: str) -> None:
+        # Vendor TextBlock exposes `direction` as a computed read-only property.
+        # Persist the resolved direction through the backing field instead.
+        try:
+            setattr(region, "_direction", str(direction or "").strip().lower())
+        except Exception:
+            pass
 
     def _set_region_direction_override(self, session: dict[str, Any], region_id: str, direction: str | None) -> None:
         overrides = dict(session.get("translation_region_layout_overrides") or {})
@@ -4420,11 +4431,14 @@ class TranslatorEngine:
                 except (TypeError, ValueError):
                     pass
 
-            region.direction = self._resolve_region_direction(
-                self._region_bbox(region),
-                getattr(region, "direction", ""),
-                config.get("target_lang"),
-                layout_override=layout_override,
+            self._assign_region_direction(
+                region,
+                self._resolve_region_direction(
+                    self._region_bbox(region),
+                    getattr(region, "direction", ""),
+                    config.get("target_lang"),
+                    layout_override=layout_override,
+                ),
             )
 
             visible_regions.append(region)

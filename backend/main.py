@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 import shutil
 import uuid
+from urllib.parse import quote
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,10 +94,23 @@ def list_available_fonts() -> list[dict[str, str]]:
                     "name": path.name,
                     "label": f"{path.stem} ({source_label})",
                     "source": source,
+                    "url": f"/api/fonts/file/{source}/{quote(path.name)}",
                 }
             )
 
     return fonts
+
+
+def resolve_font_file(source: str, font_name: str) -> Path:
+    font_dir = FONT_DIRECTORIES.get(source)
+    if font_dir is None or not font_dir.exists():
+        raise HTTPException(status_code=404, detail="字体文件不存在。")
+    if Path(font_name).name != font_name:
+        raise HTTPException(status_code=404, detail="字体文件不存在。")
+    target_path = (font_dir / font_name).resolve()
+    if not target_path.exists() or target_path.parent != font_dir.resolve():
+        raise HTTPException(status_code=404, detail="字体文件不存在。")
+    return target_path
 
 
 def get_or_restore_session(project_id: str) -> dict[str, Any]:
@@ -121,6 +135,12 @@ async def get_status():
 @app.get("/api/fonts")
 async def get_fonts():
     return {"fonts": list_available_fonts()}
+
+
+@app.get("/api/fonts/file/{source}/{font_name:path}")
+async def get_font_file(source: str, font_name: str):
+    font_path = resolve_font_file(source, font_name)
+    return FileResponse(font_path)
 
 
 @app.get("/api/projects")

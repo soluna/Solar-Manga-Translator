@@ -48,6 +48,14 @@ const defaultStyleFontNameMap = {
   handwritten: ['華康竹風體.ttf', '華康竹風體'],
   sfx: ['方正剪紙GBK.ttf', '方正剪紙GBK']
 }
+const styleFontConfigKeyMap = {
+  gothic: 'style_font_gothic_key',
+  mincho: 'style_font_mincho_key',
+  rounded: 'style_font_rounded_key',
+  cartoon: 'style_font_cartoon_key',
+  handwritten: 'style_font_handwritten_key',
+  sfx: 'style_font_sfx_key'
+}
 
 function getDefaultImageCleanupModel(mode) {
   return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
@@ -479,6 +487,17 @@ const projectMetaDirty = computed(() => {
     String(projectTitleDraft.value || '').trim() !== String(project.title || '').trim()
     || String(projectNoteDraft.value || '').trim() !== String(project.note || '').trim()
   )
+})
+const previewFontFaceCss = computed(() => {
+  const rules = []
+  for (const font of availableFonts.value) {
+    if (!font?.id || !font?.url) {
+      continue
+    }
+    const family = getPreviewFontAlias(font.id)
+    rules.push(`@font-face{font-family:'${family}';src:url('${toApiUrl(font.url)}') format('truetype');font-display:swap;}`)
+  }
+  return rules.join('\n')
 })
 
 const primaryTranslateAction = computed(() => {
@@ -945,20 +964,42 @@ function normalizeFontFamilyName(value) {
     .trim()
 }
 
-function getConfiguredFontFamily() {
-  if (!config.value.font_key) {
+function getPreviewFontAlias(fontId) {
+  return `codex-preview-font-${String(fontId || '').replace(/[^a-zA-Z0-9_-]+/g, '_')}`
+}
+
+function getConfiguredFontId() {
+  return String(config.value.font_key || '').trim()
+}
+
+function getConfiguredStyleFontId(styleBucket) {
+  const configKey = styleFontConfigKeyMap[styleBucket]
+  if (!configKey) {
     return ''
   }
-  const matched = availableFonts.value.find((font) => font.id === config.value.font_key)
-  return normalizeFontFamilyName(matched?.name || matched?.label || '')
+  return String(config.value[configKey] || '').trim()
+}
+
+function getFontById(fontId) {
+  return availableFonts.value.find((font) => font.id === fontId) || null
 }
 
 function getRegionPreviewFontFamily(region) {
-  const family = normalizeFontFamilyName(region?.font_family || '') || getConfiguredFontFamily()
-  if (!family) {
+  let fontId = ''
+  if (config.value.font_style_mode === 'auto-map') {
+    fontId = getConfiguredStyleFontId(getResolvedStyle(region)) || getConfiguredFontId()
+  } else {
+    fontId = getConfiguredFontId()
+  }
+  if (fontId) {
+    return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+  }
+
+  const fallbackFamily = normalizeFontFamilyName(region?.font_family || '')
+  if (!fallbackFamily) {
     return '"Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif'
   }
-  return `"${family}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+  return `"${fallbackFamily}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
 }
 
 function isVerticalRegion(region) {
@@ -2973,6 +3014,7 @@ watch(
 </script>
 
 <template>
+  <component :is="'style'">{{ previewFontFaceCss }}</component>
   <main class="page-shell">
     <section class="hero-card">
       <p class="eyebrow">Manga Auto-Translator</p>

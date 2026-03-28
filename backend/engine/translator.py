@@ -1345,6 +1345,13 @@ class TranslatorEngine:
         if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
 
+        quality_failure = self._format_quality_failure(log_path, config.get("target_lang"))
+        if quality_failure:
+            self._clear_directory(output_dir)
+            session["translated_output_map"] = {}
+            session["download_path"] = None
+            raise RuntimeError(quality_failure)
+
         rerenderable_pages = self._count_rerenderable_pages(session_id, session)
         if rerenderable_pages == 0:
             raise RuntimeError("翻译已完成，但没有生成任何可校对缓存，请检查后端日志中的 rerender cache 写入情况。")
@@ -4888,3 +4895,31 @@ class TranslatorEngine:
             return "manga-image-translator 执行失败，请检查依赖是否安装完整。"
 
         return "manga-image-translator 执行失败:\n" + "\n".join(lines)
+
+    def _format_quality_failure(self, log_path: Path, target_lang: str | None) -> str:
+        if not log_path.exists():
+            return ""
+
+        content = log_path.read_text(encoding="utf-8", errors="ignore")
+        failure_markers = (
+            "Page-level target language check failed after all",
+            "Batch-level target language check failed after all",
+            "Single image target language check failed after all",
+        )
+        if not any(marker in content for marker in failure_markers):
+            return ""
+
+        lang_label = {
+            "CHS": "简体中文",
+            "CHT": "繁體中文",
+            "ENG": "英文",
+            "JPN": "日文",
+        }.get(str(target_lang or "").strip().upper(), "目标语言")
+        lines = deque(content.splitlines(), maxlen=18)
+        return (
+            f"翻译模型连续未能产出有效的{lang_label}结果，本次输出已中止，避免生成乱码嵌字图。\n"
+            "这通常是模型不适配当前 OCR 文本，或 OCR 结果本身质量过差导致的。\n"
+            "建议先切换更稳的翻译模型，或改用“识别后先校对再翻译”的流程。\n"
+            "日志摘要：\n"
+            + "\n".join(lines)
+        )

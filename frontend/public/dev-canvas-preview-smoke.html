@@ -108,10 +108,7 @@
       </label>
       <label>
         后端地址
-        <select id="apiBase">
-          <option value="http://127.0.0.1:8000">http://127.0.0.1:8000</option>
-          <option value="http://localhost:8000">http://localhost:8000</option>
-        </select>
+        <select id="apiBase"></select>
       </label>
     </div>
     <div class="stage">
@@ -146,10 +143,18 @@
         return ''
       }
 
-      async function loadFonts() {
-        const response = await fetch(`${apiBase.value}/api/fonts`)
+      function getSelectedApiBase() {
+        return String(apiBase.value || window.location.origin || 'http://127.0.0.1:8000').replace(/\/+$/, '')
+      }
+
+      async function fetchFonts() {
+        const response = await fetch(`${getSelectedApiBase()}/api/fonts`)
         const payload = await response.json()
-        const fonts = payload.fonts || []
+        return payload.fonts || []
+      }
+
+      async function loadFonts() {
+        const fonts = await fetchFonts()
         fontA.innerHTML = ''
         fontB.innerHTML = ''
         for (const font of fonts) {
@@ -172,6 +177,24 @@
         await render(fonts)
       }
 
+      function fillApiBaseOptions() {
+        const queryBase = new URLSearchParams(window.location.search).get('apiBase')
+        const candidates = Array.from(new Set([
+          queryBase,
+          window.location.origin,
+          'http://127.0.0.1:8000',
+          'http://localhost:8000',
+        ].filter(Boolean)))
+        apiBase.innerHTML = ''
+        for (const base of candidates) {
+          const option = document.createElement('option')
+          option.value = base
+          option.textContent = base
+          apiBase.appendChild(option)
+        }
+        apiBase.value = queryBase || window.location.origin || candidates[0] || 'http://127.0.0.1:8000'
+      }
+
       function injectFontFaces(fonts) {
         const old = document.getElementById('font-face-style')
         if (old) old.remove()
@@ -180,11 +203,21 @@
         style.textContent = fonts.map((font) => {
           const fmt = formatHint(font)
           const src = fmt
-            ? `url('${apiBase.value}${font.url}') format('${fmt}')`
-            : `url('${apiBase.value}${font.url}')`
+            ? `url('${getSelectedApiBase()}${font.url}') format('${fmt}')`
+            : `url('${getSelectedApiBase()}${font.url}')`
           return `@font-face{font-family:'${alias(font.id)}';src:${src};font-style:normal;font-weight:400;font-display:swap;}`
         }).join('\n')
         document.head.appendChild(style)
+      }
+
+      function measureTextWidth(fontFamily, text) {
+        const canvas = document.createElement('canvas')
+        const context = canvas.getContext('2d')
+        if (!context) {
+          return 0
+        }
+        context.font = `48px "${fontFamily}", "Microsoft JhengHei", sans-serif`
+        return Math.round(context.measureText(text).width * 100) / 100
       }
 
       async function render(fonts) {
@@ -217,13 +250,16 @@
           writingModeB: computedB.writingMode,
           fontFamilyA: computedA.fontFamily,
           fontFamilyB: computedB.fontFamily,
+          metricA: measureTextWidth(familyA, '測試漢字ABC'),
+          metricB: measureTextWidth(familyB, '測試漢字ABC'),
         }, null, 2)
       }
 
-      fontA.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
-      fontB.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
-      direction.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
+      fontA.addEventListener('change', async () => render(await fetchFonts()))
+      fontB.addEventListener('change', async () => render(await fetchFonts()))
+      direction.addEventListener('change', async () => render(await fetchFonts()))
       apiBase.addEventListener('change', loadFonts)
+      fillApiBaseOptions()
       loadFonts().catch((error) => {
         log.textContent = `加载失败：${error?.message || error}`
       })

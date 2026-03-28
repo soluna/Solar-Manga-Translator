@@ -1319,6 +1319,14 @@ async function deleteManualRegion(region) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
+    if (isCanvasReviewMode.value && selectedEditPage.value) {
+      await runCanvasStructuredAction(selectedEditPage.value, {
+        kind: 'delete_manual_region',
+        regionIds: [region.id]
+      })
+      return
+    }
+
     const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
@@ -1798,6 +1806,57 @@ async function undoCanvasEdit() {
         undoCommands.push({ type: 'restore_region', region_id: sourceRegionId })
       }
       await applyPageCommands(pageId, undoCommands)
+    } else if (entry.kind === 'delete_manual_region') {
+      const restoreCommands = [
+        {
+          type: 'restore_manual_region',
+          payload: entry.deletedPayload || {}
+        }
+      ]
+      const restoredRegionId = String(entry.deletedPayload?.id || '')
+      const overrides = entry.regionOverrides || {}
+      if (overrides.translation) {
+        restoreCommands.push({
+          type: 'update_translation',
+          region_id: restoredRegionId,
+          text: overrides.translation
+        })
+      }
+      if (overrides.keepOriginal) {
+        restoreCommands.push({
+          type: 'set_keep_original',
+          region_id: restoredRegionId,
+          enabled: true
+        })
+      }
+      if (overrides.disabled) {
+        restoreCommands.push({
+          type: 'disable_region',
+          region_id: restoredRegionId
+        })
+      }
+      if (overrides.style) {
+        restoreCommands.push({
+          type: 'update_font_style',
+          region_id: restoredRegionId,
+          style: overrides.style
+        })
+      }
+      if (overrides.layout?.bbox) {
+        restoreCommands.push({
+          type: 'update_region_bbox',
+          region_id: restoredRegionId,
+          bbox: overrides.layout.bbox
+        })
+      }
+      if (typeof overrides.layout?.font_size === 'number') {
+        restoreCommands.push({
+          type: 'update_font_size',
+          region_id: restoredRegionId,
+          font_size: overrides.layout.font_size
+        })
+      }
+      await applyPageCommands(pageId, restoreCommands)
     } else {
       await applyPageCommands(pageId, entry.undoCommands)
     }
@@ -1810,6 +1869,8 @@ async function undoCanvasEdit() {
     selectedEditPageKey.value = pageId
     if (entry.kind === 'merge_regions' && Array.isArray(entry.regionIds) && entry.regionIds.length) {
       selectedEditRegionKey.value = entry.regionIds[0]
+    } else if (entry.kind === 'delete_manual_region') {
+      selectedEditRegionKey.value = String(entry.deletedPayload?.id || '')
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '撤销失败'
@@ -1850,6 +1911,12 @@ async function redoCanvasEdit() {
         redo: current.redo.slice(0, -1)
       })
       selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else if (entry.kind === 'delete_manual_region') {
+      await applyPageCommands(pageId, [{ type: 'delete_manual_region', region_id: String(entry.deletedPayload?.id || '') }])
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
     } else {
       await applyPageCommands(pageId, entry.redoCommands)
       replacePageHistoryState(pageId, {
@@ -1908,6 +1975,33 @@ async function runCanvasStructuredAction(page, options) {
     await loadEditInspection({ silent: true })
     selectedEditPageKey.value = page.stored_name
     selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    return
+  }
+
+  if (kind === 'delete_manual_region' && regionIds.length === 1) {
+    const targetRegionId = regionIds[0]
+    const result = await applyPageCommands(page.stored_name, [{ type: 'delete_manual_region', region_id: targetRegionId }])
+    const deletedPayload = result?.deleted_region_payload || {}
+    const historyEntry = {
+      kind: 'delete_manual_region',
+      label: '删除补漏框',
+      pageId: page.stored_name,
+      regionIds,
+      deletedPayload,
+      regionOverrides: {
+        translation: translationRegionOverrides.value[targetRegionId] || '',
+        keepOriginal: Boolean(translationRegionSkipOverrides.value[targetRegionId]),
+        disabled: Boolean(translationRegionDisabledOverrides.value[targetRegionId]),
+        layout: translationRegionLayoutOverrides.value[targetRegionId]
+          ? { ...translationRegionLayoutOverrides.value[targetRegionId] }
+          : null,
+        style: styleRegionOverrides.value[targetRegionId] || ''
+      }
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已删除这个手动补漏框。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
     return
   }
 }

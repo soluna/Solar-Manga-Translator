@@ -1033,6 +1033,7 @@ class TranslatorEngine:
         snapshot_hints: list[str] = []
         created_region_id = ""
         deleted_region_id = ""
+        deleted_region_payload: dict[str, Any] | None = None
 
         for command in commands:
             if not isinstance(command, dict):
@@ -1131,13 +1132,24 @@ class TranslatorEngine:
 
             if command_type == "delete_manual_region":
                 region_id = str(command.get("region_id") or "").strip()
-                removed = self.delete_manual_region(session, region_id)
-                if not removed:
+                removed_payload = self.pop_manual_region(session, region_id)
+                if not removed_payload:
                     raise FileNotFoundError("没有找到对应的手动补框。")
                 self._clear_region_overrides(session, region_id)
                 deleted_region_id = region_id
+                deleted_region_payload = removed_payload
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("manual_region_deleted")
+                continue
+
+            if command_type == "restore_manual_region":
+                raw_payload = command.get("payload")
+                if not isinstance(raw_payload, dict):
+                    raise ValueError("缺少可恢复的手动补框数据。")
+                restored_payload = self.restore_manual_region(session, raw_payload)
+                created_region_id = str(restored_payload.get("id") or "")
+                updated_region_ids.append(created_region_id)
+                snapshot_hints.append("manual_region_restored")
                 continue
 
             raise ValueError(f"暂不支持的页面命令：{command_type}")
@@ -1156,6 +1168,7 @@ class TranslatorEngine:
             "updated_region_ids": sorted({region_id for region_id in updated_region_ids if region_id}),
             "created_region_id": created_region_id,
             "deleted_region_id": deleted_region_id,
+            "deleted_region_payload": deleted_region_payload or {},
             "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
             "executed_commands": [str(command.get("type") or "") for command in commands if isinstance(command, dict)],
         }
@@ -3220,6 +3233,46 @@ class TranslatorEngine:
                 print(f"[WARN] Failed to restore manual region {payload.get('id')}: {exc}")
         return merged_regions
 
+    def _normalize_manual_region_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        stored_name = str(payload.get("stored_name") or "").strip()
+        bbox = payload.get("bbox") or [0, 0, 0, 0]
+        if not stored_name:
+            raise ValueError("手动框缺少页面标识。")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError("手动框缺少有效坐标。")
+
+        normalized = dict(payload)
+        normalized["id"] = str(payload.get("id") or f"manual::{stored_name}::{uuid.uuid4().hex}")
+        normalized["stored_name"] = stored_name
+        normalized["bbox"] = [int(round(float(value))) for value in bbox]
+        normalized["lines"] = payload.get("lines") or self._manual_region_lines(normalized["bbox"])
+        normalized["source_text"] = str(payload.get("source_text") or "").strip()
+        normalized["machine_translation"] = str(payload.get("machine_translation") or "").strip()
+        normalized["translation"] = str(payload.get("translation") or normalized["machine_translation"]).strip()
+        normalized["direction"] = str(payload.get("direction") or self._direction_from_bbox(normalized["bbox"]))
+        normalized["alignment"] = str(payload.get("alignment") or "auto")
+        normalized["font_size"] = max(8, int(round(float(payload.get("font_size") or 14))))
+        normalized["fg_color"] = [int(v) for v in (payload.get("fg_color") or (0, 0, 0))]
+        normalized["bg_color"] = [int(v) for v in (payload.get("bg_color") or (255, 255, 255))]
+        normalized["target_lang"] = str(payload.get("target_lang") or "")
+        normalized["manual"] = True
+        normalized["created_at"] = float(payload.get("created_at") or time.time())
+        if "merged_from" in payload:
+            normalized["merged_from"] = [str(item) for item in (payload.get("merged_from") or []) if str(item)]
+        return normalized
+
+    def restore_manual_region(self, session: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_manual_region_payload(payload)
+        manual_regions = self._ensure_manual_regions_store(session)
+        stored_name = normalized["stored_name"]
+        page_regions = [
+            item for item in (manual_regions.get(stored_name) or [])
+            if str(item.get("id") or "") != normalized["id"]
+        ]
+        page_regions.append(normalized)
+        manual_regions[stored_name] = page_regions
+        return normalized
+
     @contextlib.contextmanager
     def _temporary_environment(self, updates: dict[str, str]):
         sentinel = object()
@@ -3558,23 +3611,28 @@ class TranslatorEngine:
         manual_regions.setdefault(stored_name, []).append(payload)
         return payload
 
-    def delete_manual_region(self, session: dict[str, Any], region_id: str) -> bool:
+    def pop_manual_region(self, session: dict[str, Any], region_id: str) -> dict[str, Any] | None:
         manual_regions = self._ensure_manual_regions_store(session)
-        removed = False
         for stored_name, page_regions in list(manual_regions.items()):
             if not isinstance(page_regions, list):
                 continue
-            next_page_regions = [
-                payload for payload in page_regions
-                if str(payload.get("id") or "") != region_id
-            ]
-            if len(next_page_regions) != len(page_regions):
-                removed = True
+            next_page_regions: list[dict[str, Any]] = []
+            removed_payload: dict[str, Any] | None = None
+            for payload in page_regions:
+                if removed_payload is None and str(payload.get("id") or "") == region_id:
+                    removed_payload = dict(payload)
+                    continue
+                next_page_regions.append(payload)
+            if removed_payload is not None:
                 if next_page_regions:
                     manual_regions[stored_name] = next_page_regions
                 else:
                     manual_regions.pop(stored_name, None)
-        return removed
+                return removed_payload
+        return None
+
+    def delete_manual_region(self, session: dict[str, Any], region_id: str) -> bool:
+        return self.pop_manual_region(session, region_id) is not None
 
     def _prepare_cached_regions_for_edit(
         self,

@@ -836,6 +836,45 @@ h2 {
   pointer-events: none;
 }
 
+.style-box-source-crop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.style-box-source-crop img {
+  position: absolute;
+  max-width: none;
+  width: auto;
+  height: auto;
+  display: block;
+  pointer-events: none;
+}
+
+.style-box-preview-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 4px;
+  color: #18110b;
+  font-weight: 500;
+  line-height: 1.08;
+  white-space: pre-wrap;
+  overflow: hidden;
+  word-break: break-word;
+  pointer-events: none;
+  text-rendering: geometricPrecision;
+}
+
+.style-box-preview-text.vertical {
+  align-items: flex-end;
+  justify-content: flex-start;
+  word-break: normal;
+}
+
 .style-box.label-below .style-box-label {
   top: calc(100% + 6px);
   bottom: auto;

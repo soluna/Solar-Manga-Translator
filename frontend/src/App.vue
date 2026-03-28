@@ -294,6 +294,8 @@ const expandedProjectId = ref('')
 const currentProject = ref(null)
 const projectTitleDraft = ref('')
 const projectNoteDraft = ref('')
+const translatedPreviewCanvasRef = ref(null)
+const translatedPreviewScale = ref(1)
 
 const config = ref(loadStoredConfig())
 
@@ -935,6 +937,34 @@ function getResolvedStyle(region) {
   return styleRegionOverrides.value[region.id] || region.resolved_style || region.auto_style || ''
 }
 
+function normalizeFontFamilyName(value) {
+  return String(value || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.(ttf|ttc|otf)$/i, '')
+    .trim()
+}
+
+function getConfiguredFontFamily() {
+  if (!config.value.font_key) {
+    return ''
+  }
+  const matched = availableFonts.value.find((font) => font.id === config.value.font_key)
+  return normalizeFontFamilyName(matched?.name || matched?.label || '')
+}
+
+function getRegionPreviewFontFamily(region) {
+  const family = normalizeFontFamilyName(region?.font_family || '') || getConfiguredFontFamily()
+  if (!family) {
+    return '"Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif'
+  }
+  return `"${family}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+}
+
+function isVerticalRegion(region) {
+  return String(region?.direction || '').toLowerCase().startsWith('v')
+}
+
 function getRegionFontSize(region) {
   if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
     return fontSizeInputDrafts.value[region.id]
@@ -1144,6 +1174,65 @@ function getCanvasHandleCursor(handle) {
     w: 'ew-resize'
   }
   return cursorMap[handle] || 'move'
+}
+
+function getCanvasPreviewImageUrl(page) {
+  const imagePath = isCanvasReviewMode.value
+    ? (page?.base_image_url || page?.translated_image_url || page?.image_url || '')
+    : (page?.translated_image_url || page?.image_url || '')
+  return withCacheBust(toApiUrl(imagePath))
+}
+
+function getCanvasPreviewText(region) {
+  if (isRegionSkipEnabled(region) || isRegionDisabled(region)) {
+    return ''
+  }
+  const draft = Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)
+    ? String(translationInputDrafts.value[region.id] || '')
+    : ''
+  return draft || getEditRegionText(region) || region.preview_text || ''
+}
+
+function shouldShowSourceCropPreview(region) {
+  return Boolean(isCanvasReviewMode.value && (isRegionSkipEnabled(region) || isRegionDisabled(region)))
+}
+
+function getSourceCropImageStyle(region, page) {
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const regionWidth = Math.max(1, x2 - x1)
+  const regionHeight = Math.max(1, y2 - y1)
+  const pageWidth = Math.max(page?.image_width || 1, 1)
+  const pageHeight = Math.max(page?.image_height || 1, 1)
+  return {
+    width: `${(pageWidth / regionWidth) * 100}%`,
+    height: `${(pageHeight / regionHeight) * 100}%`,
+    left: `-${(x1 / regionWidth) * 100}%`,
+    top: `-${(y1 / regionHeight) * 100}%`
+  }
+}
+
+function getCanvasPreviewTextStyle(region) {
+  const rawFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
+  const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
+  const letterSpacing = Math.max(0, (config.value.render_letter_spacing - 1) * scaledFontSize * 0.2)
+  return {
+    fontFamily: getRegionPreviewFontFamily(region),
+    fontSize: `${scaledFontSize}px`,
+    letterSpacing: `${letterSpacing.toFixed(2)}px`,
+    writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
+    textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial'
+  }
+}
+
+function refreshTranslatedPreviewScale() {
+  const page = selectedEditPage.value
+  const canvasElement = translatedPreviewCanvasRef.value
+  if (!page?.image_width || !canvasElement) {
+    translatedPreviewScale.value = 1
+    return
+  }
+  const safeWidth = Math.max(canvasElement.clientWidth || 0, 1)
+  translatedPreviewScale.value = safeWidth / Math.max(page.image_width || 1, 1)
 }
 
 function getManualDraftBBox(page) {
@@ -2445,6 +2534,11 @@ async function scrollSelectedRegionCardIntoView() {
   }
 }
 
+async function syncTranslatedPreviewScale() {
+  await nextTick()
+  refreshTranslatedPreviewScale()
+}
+
 function handleGlobalCanvasKeydown(event) {
   if (!isCanvasReviewMode.value || !selectedEditPage.value) {
     return
@@ -2803,6 +2897,7 @@ onMounted(() => {
   checkBackendStatus()
   loadFonts()
   loadProjectHistory()
+  window.addEventListener('resize', refreshTranslatedPreviewScale)
   window.addEventListener('pointermove', updateCanvasRegionTransform)
   window.addEventListener('pointerup', finishCanvasRegionTransform)
   window.addEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -2811,6 +2906,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   closeSocket()
+  window.removeEventListener('resize', refreshTranslatedPreviewScale)
   window.removeEventListener('pointermove', updateCanvasRegionTransform)
   window.removeEventListener('pointerup', finishCanvasRegionTransform)
   window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -2862,6 +2958,18 @@ watch(selectedEditRegionKey, () => {
     void scrollSelectedRegionCardIntoView()
   }
 })
+
+watch(
+  () => [
+    selectedEditPage.value?.stored_name || '',
+    selectedEditPage.value?.translated_image_url || '',
+    selectedEditPage.value?.base_image_url || '',
+    isCanvasReviewMode.value
+  ],
+  () => {
+    void syncTranslatedPreviewScale()
+  }
+)
 </script>
 
 <template>
@@ -3753,10 +3861,11 @@ watch(selectedEditRegionKey, () => {
 
               <div class="style-preview-panel">
                 <div class="style-preview-label">当前译图</div>
-                <div class="style-preview-canvas">
+                <div class="style-preview-canvas" ref="translatedPreviewCanvasRef">
                   <img
                     :alt="`${selectedEditPage.name} 译图`"
-                    :src="withCacheBust(toApiUrl(selectedEditPage.translated_image_url || selectedEditPage.image_url))"
+                    :src="getCanvasPreviewImageUrl(selectedEditPage)"
+                    @load="refreshTranslatedPreviewScale"
                   />
 
                   <button
@@ -3776,6 +3885,24 @@ watch(selectedEditRegionKey, () => {
                     @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
+                    <span
+                      v-if="shouldShowSourceCropPreview(region)"
+                      class="style-box-source-crop"
+                    >
+                      <img
+                        :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
+                        :style="getSourceCropImageStyle(region, selectedEditPage)"
+                        alt=""
+                      />
+                    </span>
+                    <span
+                      v-else-if="isCanvasReviewMode && getCanvasPreviewText(region)"
+                      class="style-box-preview-text"
+                      :class="{ vertical: isVerticalRegion(region) }"
+                      :style="getCanvasPreviewTextStyle(region)"
+                    >
+                      {{ getCanvasPreviewText(region) }}
+                    </span>
                     <span
                       v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
                       v-for="handle in canvasHandleOptions"

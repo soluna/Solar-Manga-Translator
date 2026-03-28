@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
@@ -38,6 +38,7 @@ const styleBucketOptions = [
   { value: 'sfx', label: '拟声' }
 ]
 const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const maxCanvasHistoryEntries = 50
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
   gothic: ['華康儷中黑.ttf', '華康儷中黑'],
@@ -269,9 +270,12 @@ const translationRegionOverrides = ref({})
 const translationRegionSkipOverrides = ref({})
 const translationRegionDisabledOverrides = ref({})
 const translationRegionLayoutOverrides = ref({})
+const translationInputDrafts = ref({})
+const fontSizeInputDrafts = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
+const pageEditHistory = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
@@ -322,6 +326,15 @@ const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
 const canDirectManipulateCanvas = computed(
   () => Boolean(isCanvasReviewMode.value && !manualDrawMode.value && !mergeMode.value && !isAdjustingRegionBBox.value && !translating.value)
 )
+const selectedPageHistoryState = computed(() => {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return { undo: [], redo: [] }
+  }
+  return pageEditHistory.value[pageId] || { undo: [], redo: [] }
+})
+const canUndoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.undo.length > 0 && !translating.value))
+const canRedoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.redo.length > 0 && !translating.value))
 const mergeSelectionCount = computed(() => Object.keys(mergeRegionSelection.value).length)
 const disabledRegionCountForSelectedPage = computed(() => {
   const storedName = selectedEditPage.value?.stored_name
@@ -549,6 +562,9 @@ function resetEditInspectorSelection() {
   canvasTransformState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
+  translationInputDrafts.value = {}
+  fontSizeInputDrafts.value = {}
+  pageEditHistory.value = {}
 }
 
 function normalizeHistoryProject(project) {
@@ -614,6 +630,9 @@ function applySessionPayload(payload, options = {}) {
   translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
   translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
   styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+  translationInputDrafts.value = {}
+  fontSizeInputDrafts.value = {}
+  pageEditHistory.value = {}
 
   currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
   projectTitleDraft.value = currentProject.value?.title || ''
@@ -894,6 +913,9 @@ function getRegionOverrideValue(region) {
 }
 
 function getEditRegionText(region) {
+  if (Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)) {
+    return translationInputDrafts.value[region.id]
+  }
   return translationRegionOverrides.value[region.id] || region.current_translation || region.machine_translation || ''
 }
 
@@ -910,11 +932,44 @@ function getResolvedStyle(region) {
 }
 
 function getRegionFontSize(region) {
+  if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
+    return fontSizeInputDrafts.value[region.id]
+  }
   const override = translationRegionLayoutOverrides.value[region.id]
   if (override && typeof override.font_size === 'number') {
     return override.font_size
   }
   return Number(region.font_size || 12)
+}
+
+function getPageHistoryState(pageId) {
+  return pageEditHistory.value[pageId] || { undo: [], redo: [] }
+}
+
+function replacePageHistoryState(pageId, nextState) {
+  pageEditHistory.value = {
+    ...pageEditHistory.value,
+    [pageId]: nextState
+  }
+}
+
+function pushCanvasHistory(pageId, entry) {
+  if (!pageId || !entry) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const nextUndo = [...current.undo, entry].slice(-maxCanvasHistoryEntries)
+  replacePageHistoryState(pageId, {
+    undo: nextUndo,
+    redo: []
+  })
+}
+
+function isEditableTextTarget(target) {
+  if (!target || !(target instanceof HTMLElement)) {
+    return false
+  }
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
 }
 
 function isRegionSelectedForMerge(region) {
@@ -1469,11 +1524,15 @@ async function loadEditInspection(options = {}) {
   }
 
   await Promise.all(tasks)
+  translationInputDrafts.value = {}
+  fontSizeInputDrafts.value = {}
   syncEditSelection()
 }
 
 function updateStyleOverride(region, nextStyle) {
   const normalizedStyle = styleBucketOptions.some((option) => option.value === nextStyle) ? nextStyle : ''
+  const previousOverride = getRegionOverrideValue(region)
+  const page = selectedEditPage.value
   const nextOverrides = { ...styleRegionOverrides.value }
   if (!normalizedStyle || normalizedStyle === region.auto_style) {
     delete nextOverrides[region.id]
@@ -1482,6 +1541,39 @@ function updateStyleOverride(region, nextStyle) {
   }
   styleRegionOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !page || normalizedStyle === previousOverride) {
+    return
+  }
+
+  void runCanvasCommand(page, {
+    label: '修改字体样式',
+    redoCommands: [
+      {
+        type: 'update_font_style',
+        region_id: region.id,
+        style: normalizedStyle
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_font_style',
+        region_id: region.id,
+        style: previousOverride
+      }
+    ],
+    successMessage: '已更新文本框字体样式。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...styleRegionOverrides.value }
+      if (previousOverride) {
+        rollbackOverrides[region.id] = previousOverride
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      styleRegionOverrides.value = rollbackOverrides
+    }
+  })
 }
 
 function updateTranslationOverride(region, nextTranslation) {
@@ -1500,6 +1592,7 @@ function updateTranslationOverride(region, nextTranslation) {
 }
 
 function updateTranslationSkipOverride(region, enabled) {
+  const previousValue = isRegionSkipEnabled(region)
   const nextOverrides = { ...translationRegionSkipOverrides.value }
   if (enabled) {
     nextOverrides[region.id] = true
@@ -1508,9 +1601,43 @@ function updateTranslationSkipOverride(region, enabled) {
   }
   translationRegionSkipOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: enabled ? '保留原文' : '取消保留原文',
+    redoCommands: [
+      {
+        type: 'set_keep_original',
+        region_id: region.id,
+        enabled
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'set_keep_original',
+        region_id: region.id,
+        enabled: previousValue
+      }
+    ],
+    successMessage: enabled ? '这个文本框已设置为保留原文。' : '这个文本框已恢复可翻译状态。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionSkipOverrides.value }
+      if (previousValue) {
+        rollbackOverrides[region.id] = true
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      translationRegionSkipOverrides.value = rollbackOverrides
+    }
+  })
 }
 
 function updateRegionDisabledOverride(region, enabled) {
+  const previousValue = isRegionDisabled(region)
   const nextOverrides = { ...translationRegionDisabledOverrides.value }
   if (enabled) {
     nextOverrides[region.id] = true
@@ -1543,7 +1670,30 @@ function updateRegionDisabledOverride(region, enabled) {
     selectedEditRegionKey.value = ''
   }
   selectedEditPageKey.value = selectedEditPage.value?.stored_name || selectedEditPageKey.value
-  void loadEditInspection({ silent: true })
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
+    void loadEditInspection({ silent: true })
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: enabled ? '禁用文本框' : '恢复文本框',
+    redoCommands: [
+      enabled
+        ? { type: 'disable_region', region_id: region.id }
+        : { type: 'restore_region', region_id: region.id }
+    ],
+    undoCommands: [
+      previousValue
+        ? { type: 'disable_region', region_id: region.id }
+        : { type: 'restore_region', region_id: region.id }
+    ],
+    successMessage: enabled ? '已禁用这个自动识别框。' : '已恢复这个自动识别框。',
+    focusRegionId: region.id,
+    rollback: () => {
+      void loadEditInspection({ silent: true })
+    }
+  })
 }
 
 function updateRegionLayoutOverride(regionId, patch) {
@@ -1578,6 +1728,89 @@ async function applyPageCommands(pageId, commands) {
     throw new Error(payload.detail || '更新页面编辑状态失败')
   }
   return payload
+}
+
+async function runCanvasCommand(page, options) {
+  if (!page?.stored_name) {
+    return
+  }
+  const redoCommands = options?.redoCommands || []
+  const undoCommands = options?.undoCommands || []
+  if (!redoCommands.length) {
+    return
+  }
+
+  try {
+    await applyPageCommands(page.stored_name, redoCommands)
+    if (undoCommands.length) {
+      pushCanvasHistory(page.stored_name, {
+        label: String(options?.label || '编辑文本框'),
+        undoCommands,
+        redoCommands
+      })
+    }
+    if (options?.successMessage) {
+      status.value = options.successMessage
+    }
+    await loadEditInspection({ silent: true })
+    if (options?.focusRegionId) {
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = options.focusRegionId
+    }
+  } catch (error) {
+    if (typeof options?.rollback === 'function') {
+      options.rollback()
+    }
+    errorMessage.value = error instanceof Error ? error.message : '更新页面编辑状态失败'
+  }
+}
+
+async function undoCanvasEdit() {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const entry = current.undo[current.undo.length - 1]
+  if (!entry) {
+    return
+  }
+
+  try {
+    await applyPageCommands(pageId, entry.undoCommands)
+    replacePageHistoryState(pageId, {
+      undo: current.undo.slice(0, -1),
+      redo: [...current.redo, entry].slice(-maxCanvasHistoryEntries)
+    })
+    status.value = `已撤销：${entry.label}`
+    await loadEditInspection({ silent: true })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '撤销失败'
+  }
+}
+
+async function redoCanvasEdit() {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const entry = current.redo[current.redo.length - 1]
+  if (!entry) {
+    return
+  }
+
+  try {
+    await applyPageCommands(pageId, entry.redoCommands)
+    replacePageHistoryState(pageId, {
+      undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
+      redo: current.redo.slice(0, -1)
+    })
+    status.value = `已重做：${entry.label}`
+    await loadEditInspection({ silent: true })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '重做失败'
+  }
 }
 
 function startCanvasRegionTransform(event, region, page, mode = 'move', handle = '') {
@@ -1675,22 +1908,28 @@ async function finishCanvasRegionTransform(event) {
     return
   }
 
-  try {
-    await applyPageCommands(page.stored_name, [
+  await runCanvasCommand(page, {
+    label: draft.mode === 'move' ? '移动文本框' : '调整文本框大小',
+    redoCommands: [
       {
         type: 'update_region_bbox',
         region_id: draft.regionId,
         bbox: nextBBox
       }
-    ])
-    status.value = draft.mode === 'move'
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: draft.regionId,
+        bbox: draft.originBBox
+      }
+    ],
+    successMessage: draft.mode === 'move'
       ? '已移动文本框位置，重新嵌字时会按新位置计算。'
-      : '已更新文本框大小，重新嵌字时会按新框重新排版。'
-    void loadEditInspection({ silent: true })
-  } catch (error) {
-    updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
-    errorMessage.value = error instanceof Error ? error.message : '更新文本框范围失败'
-  }
+      : '已更新文本框大小，重新嵌字时会按新框重新排版。',
+    focusRegionId: draft.regionId,
+    rollback: () => updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+  })
 }
 
 function cancelCanvasRegionTransform() {
@@ -1709,6 +1948,133 @@ function updateRegionFontSize(region, nextValue) {
   }
   updateRegionLayoutOverride(region.id, { font_size: parsed })
   selectedEditRegionKey.value = region.id
+}
+
+function handleRegionTextInput(region, nextValue) {
+  selectedEditRegionKey.value = region.id
+  if (isCanvasReviewMode.value) {
+    translationInputDrafts.value = {
+      ...translationInputDrafts.value,
+      [region.id]: String(nextValue ?? '')
+    }
+    return
+  }
+  updateTranslationOverride(region, nextValue)
+}
+
+function commitRegionTextDraft(region) {
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    return
+  }
+  const draftValue = String(translationInputDrafts.value[region.id] ?? getEditRegionText(region))
+  const normalizedTranslation = draftValue.trim()
+  const previousOverride = String(translationRegionOverrides.value[region.id] || '')
+  if (normalizedTranslation === previousOverride) {
+    return
+  }
+
+  const nextOverrides = { ...translationRegionOverrides.value }
+  if (!normalizedTranslation || normalizedTranslation === String(region.machine_translation || '').trim()) {
+    delete nextOverrides[region.id]
+  } else {
+    nextOverrides[region.id] = normalizedTranslation
+  }
+  translationRegionOverrides.value = nextOverrides
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '修改译文',
+    redoCommands: [
+      {
+        type: 'update_translation',
+        region_id: region.id,
+        text: normalizedTranslation
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_translation',
+        region_id: region.id,
+        text: previousOverride
+      }
+    ],
+    successMessage: '已更新这个文本框的译文。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionOverrides.value }
+      if (previousOverride) {
+        rollbackOverrides[region.id] = previousOverride
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      translationRegionOverrides.value = rollbackOverrides
+    }
+  })
+}
+
+function handleRegionFontSizeInput(region, nextValue) {
+  const parsed = Number(nextValue)
+  if (Number.isNaN(parsed)) {
+    return
+  }
+  selectedEditRegionKey.value = region.id
+  if (isCanvasReviewMode.value) {
+    fontSizeInputDrafts.value = {
+      ...fontSizeInputDrafts.value,
+      [region.id]: Math.max(8, Math.min(240, Math.round(parsed)))
+    }
+    return
+  }
+  updateRegionFontSize(region, parsed)
+}
+
+function commitRegionFontSize(region) {
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    return
+  }
+  const nextValue = Number(fontSizeInputDrafts.value[region.id] ?? getRegionFontSize(region))
+  if (Number.isNaN(nextValue)) {
+    return
+  }
+  const currentOverride = translationRegionLayoutOverrides.value[region.id] || {}
+  const previousExplicit = typeof currentOverride.font_size === 'number' ? currentOverride.font_size : null
+  const normalizedValue = Math.max(8, Math.min(240, Math.round(nextValue)))
+
+  updateRegionLayoutOverride(region.id, { font_size: normalizedValue })
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '调整字号',
+    redoCommands: [
+      {
+        type: 'update_font_size',
+        region_id: region.id,
+        font_size: normalizedValue
+      }
+    ],
+    undoCommands: [
+      previousExplicit == null
+        ? {
+            type: 'update_font_size',
+            region_id: region.id
+          }
+        : {
+            type: 'update_font_size',
+            region_id: region.id,
+            font_size: previousExplicit
+          }
+    ],
+    successMessage: '已更新这个文本框的字号。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionLayoutOverrides.value }
+      const current = { ...(rollbackOverrides[region.id] || {}) }
+      if (previousExplicit == null) {
+        delete current.font_size
+      } else {
+        current.font_size = previousExplicit
+      }
+      rollbackOverrides[region.id] = current
+      translationRegionLayoutOverrides.value = rollbackOverrides
+    }
+  })
 }
 
 function toggleMergeMode() {
@@ -1825,6 +2191,38 @@ function clearStoredImageApiKey() {
   config.value.image_cleanup_api_key = ''
   saveStoredConfig(config.value)
   status.value = '已清除本机浏览器里保存的图像去字 API Key。'
+}
+
+async function scrollSelectedRegionCardIntoView() {
+  if (!selectedEditRegionKey.value) {
+    return
+  }
+  await nextTick()
+  const card = document.querySelector(`.style-region-card[data-region-id="${selectedEditRegionKey.value}"]`)
+  if (card instanceof HTMLElement) {
+    card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+}
+
+function handleGlobalCanvasKeydown(event) {
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    return
+  }
+  if (isEditableTextTarget(event.target)) {
+    return
+  }
+  const isUndo = (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z'
+  const isRedo = (
+    (event.metaKey || event.ctrlKey) &&
+    ((event.shiftKey && event.key.toLowerCase() === 'z') || event.key.toLowerCase() === 'y')
+  )
+  if (isUndo && canUndoCanvasEdit.value) {
+    event.preventDefault()
+    void undoCanvasEdit()
+  } else if (isRedo && canRedoCanvasEdit.value) {
+    event.preventDefault()
+    void redoCanvasEdit()
+  }
 }
 
 async function copyText(text, successMessage) {
@@ -2167,6 +2565,7 @@ onMounted(() => {
   window.addEventListener('pointermove', updateCanvasRegionTransform)
   window.addEventListener('pointerup', finishCanvasRegionTransform)
   window.addEventListener('pointercancel', cancelCanvasRegionTransform)
+  window.addEventListener('keydown', handleGlobalCanvasKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -2174,6 +2573,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointermove', updateCanvasRegionTransform)
   window.removeEventListener('pointerup', finishCanvasRegionTransform)
   window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
+  window.removeEventListener('keydown', handleGlobalCanvasKeydown)
 })
 
 watch(
@@ -2215,6 +2615,12 @@ watch(
     syncEditSelection()
   }
 )
+
+watch(selectedEditRegionKey, () => {
+  if (selectedEditRegionKey.value) {
+    void scrollSelectedRegionCardIntoView()
+  }
+})
 </script>
 
 <template>
@@ -2908,6 +3314,26 @@ watch(
         </div>
         <div class="action-row">
           <button
+            v-if="isCanvasReviewMode"
+            class="secondary-button"
+            type="button"
+            :disabled="!canUndoCanvasEdit"
+            @click="undoCanvasEdit"
+          >
+            撤销
+          </button>
+
+          <button
+            v-if="isCanvasReviewMode"
+            class="secondary-button"
+            type="button"
+            :disabled="!canRedoCanvasEdit"
+            @click="redoCanvasEdit"
+          >
+            重做
+          </button>
+
+          <button
             class="secondary-button"
             type="button"
             :disabled="editInspectionLoading"
@@ -3127,6 +3553,7 @@ watch(
             <article
               v-for="region in selectedEditPage.regions"
               :key="`edit-${region.id}`"
+              :data-region-id="region.id"
               :class="[
                 'style-region-card',
                 selectedEditRegionKey === region.id ? 'active' : '',
@@ -3201,7 +3628,8 @@ watch(
                       step="1"
                       @click.stop
                       @mousedown.stop
-                      @input="updateRegionFontSize(region, $event.target.value)"
+                      @input="handleRegionFontSizeInput(region, $event.target.value)"
+                      @change="commitRegionFontSize(region)"
                     />
                   </label>
 
@@ -3229,7 +3657,8 @@ watch(
                     :disabled="isRegionSkipEnabled(region)"
                     @click.stop
                     @mousedown.stop
-                    @input="updateTranslationOverride(region, $event.target.value)"
+                    @input="handleRegionTextInput(region, $event.target.value)"
+                    @change="commitRegionTextDraft(region)"
                   />
                 </label>
               </div>

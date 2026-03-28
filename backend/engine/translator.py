@@ -3343,7 +3343,16 @@ class TranslatorEngine:
     def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
-        return [self._deserialize_text_region(payload) for payload in region_payloads]
+        regions: list[Any] = []
+        for index, payload in enumerate(region_payloads):
+            if not isinstance(payload, dict):
+                print(f"[WARN] Skipping non-dict cached region payload at {regions_path}#{index}")
+                continue
+            try:
+                regions.append(self._deserialize_text_region(payload))
+            except Exception as exc:
+                print(f"[WARN] Failed to deserialize cached region at {regions_path}#{index}: {exc}")
+        return regions
 
     def _to_json_compatible(self, value: Any) -> Any:
         if isinstance(value, np.ndarray):
@@ -4426,9 +4435,29 @@ class TranslatorEngine:
         self._ensure_vendor_import_path()
         from manga_translator.utils.textblock import TextBlock
 
-        texts = payload.get("texts") or ([payload.get("text", "")] if payload.get("text") is not None else [])
+        texts = payload.get("texts")
+        if not isinstance(texts, list) or not texts:
+            texts = [
+                str(
+                    payload.get("text")
+                    or payload.get("text_raw")
+                    or payload.get("source_text")
+                    or ""
+                )
+            ]
+
+        lines = payload.get("lines") or []
+        if not lines:
+            bounding_rect = payload.get("_bounding_rect")
+            if isinstance(bounding_rect, (list, tuple)) and len(bounding_rect) == 4:
+                try:
+                    bbox = [int(round(float(value))) for value in bounding_rect]
+                    lines = self._manual_region_lines(bbox)
+                except (TypeError, ValueError):
+                    lines = []
+
         region = TextBlock(
-            lines=payload.get("lines", []),
+            lines=lines,
             texts=texts,
             language=payload.get("language", "unknown"),
             font_size=payload.get("font_size", -1),

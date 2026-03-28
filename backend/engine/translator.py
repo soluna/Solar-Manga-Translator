@@ -1043,6 +1043,83 @@ class TranslatorEngine:
             "document_regions": document_regions,
         }
 
+    def get_page_translation_input_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
+        page_document = self.get_page_document(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        raw_region_payloads = self._read_json_file(page_cache_dir / "regions.json", [])
+        if not isinstance(raw_region_payloads, list):
+            raw_region_payloads = []
+
+        queries: list[dict[str, Any]] = []
+        for index, payload in enumerate(raw_region_payloads):
+            if not isinstance(payload, dict):
+                continue
+            try:
+                region = self._deserialize_text_region(payload)
+            except Exception:
+                region = None
+
+            region_text = ""
+            source_text = ""
+            direction = "auto"
+            confidence = 0.0
+            bbox = [0, 0, 0, 0]
+            if region is not None:
+                region_text = str(getattr(region, "text", "") or "").strip()
+                source_text = self._region_source_text(region)
+                direction = str(getattr(region, "direction", "") or "auto")
+                confidence = float(getattr(region, "prob", 0.0) or 0.0)
+                bbox = [int(value) for value in self._region_bbox(region)]
+
+            queries.append(
+                {
+                    "index": index,
+                    "bbox": bbox,
+                    "query_text": region_text,
+                    "source_text": source_text,
+                    "text": str(payload.get("text") or ""),
+                    "text_raw": str(payload.get("text_raw") or ""),
+                    "source_text_field": str(payload.get("source_text") or ""),
+                    "direction": direction,
+                    "ocr_confidence": confidence,
+                    "raw_fields": {
+                        key: self._to_json_compatible(value)
+                        for key, value in payload.items()
+                        if key in {
+                            "text",
+                            "text_raw",
+                            "source_text",
+                            "translation",
+                            "direction",
+                            "prob",
+                            "fg_r",
+                            "fg_g",
+                            "fg_b",
+                            "bg_r",
+                            "bg_g",
+                            "bg_b",
+                            "font_size",
+                            "vertical",
+                            "src_is_vertical",
+                        }
+                    },
+                }
+            )
+
+        config = session.get("config") or {}
+        translator_config = config.get("translator", {}) if isinstance(config, dict) else {}
+        return {
+            "project_id": project_id,
+            "page_id": page_id,
+            "page_name": self._page_display_name(session, page_id),
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "translator": str(translator_config.get("translator_gen") or translator_config.get("translator") or ""),
+            "target_lang": str(translator_config.get("target_lang") or ""),
+            "query_count": len(queries),
+            "source_image": str(page_document.get("source_image") or ""),
+            "queries": queries,
+        }
+
     def _page_display_name(self, session: dict[str, Any], page_id: str) -> str:
         for image in session.get("source_images") or []:
             if str(image.get("stored_name") or "") == page_id:

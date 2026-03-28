@@ -310,6 +310,7 @@ const projectNoteDraft = ref('')
 const translatedPreviewCanvasRef = ref(null)
 const translatedPreviewScale = ref(1)
 const exportingOcrDebug = ref(false)
+const exportingTranslationInputDebug = ref(false)
 
 const config = ref(loadStoredConfig())
 
@@ -615,6 +616,42 @@ async function exportCurrentPageOcrDebug() {
     errorMessage.value = error instanceof Error ? error.message : '导出 OCR 调试信息失败'
   } finally {
     exportingOcrDebug.value = false
+  }
+}
+
+async function exportCurrentPageTranslationInputDebug() {
+  if (!sessionId.value || !selectedEditPage.value || exportingTranslationInputDebug.value) {
+    return
+  }
+
+  exportingTranslationInputDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/translation-input-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出翻译输入调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedEditPage.value.stored_name.replace(/\.[^.]+$/, '') || 'page'}-translation-input-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出当前页翻译输入调试 JSON，可以直接对照 OCR 结果看真正送翻译的文本。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '导出翻译输入调试信息失败'
+  } finally {
+    exportingTranslationInputDebug.value = false
   }
 }
 
@@ -4084,6 +4121,14 @@ watch(
               @click="exportCurrentPageOcrDebug"
             >
               {{ exportingOcrDebug ? '导出中…' : '导出 OCR 调试' }}
+            </button>
+            <button
+              class="inline-button"
+              type="button"
+              :disabled="!selectedEditPage || exportingTranslationInputDebug"
+              @click="exportCurrentPageTranslationInputDebug"
+            >
+              {{ exportingTranslationInputDebug ? '导出中…' : '导出翻译输入调试' }}
             </button>
           </div>
         </div>

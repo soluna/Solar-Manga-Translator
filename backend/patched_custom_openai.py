@@ -364,12 +364,33 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             return base_url
         return f"{base_url}/responses"
 
-    def _responses_prompt_input(self, to_lang: str, prompt: str):
+    def _responses_prompt_input(self, model_name: str, to_lang: str, prompt: str):
+        normalized_model = str(model_name or "").strip().lower()
+        if normalized_model.startswith("doubao-seed-translation"):
+            # Translation-only Doubao models accept a single input item.
+            return [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": self._format_prompt_log(to_lang, prompt),
+                        }
+                    ],
+                }
+            ]
+
         return [
             {
                 "type": "message",
                 "role": message["role"],
-                "content": message["content"],
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": str(message["content"]),
+                    }
+                ],
             }
             for message in self._build_messages(to_lang, prompt)
         ]
@@ -406,7 +427,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
-            prompt_input = self._responses_prompt_input(to_lang, prompt)
+            prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
             if self.ark_client is not None and str(model_name or "").strip().lower().startswith("doubao-seed"):
                 self.logger.debug("Using official Ark SDK for Responses API.")
                 response = await asyncio.to_thread(

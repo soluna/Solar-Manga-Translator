@@ -564,6 +564,10 @@ function withCacheBust(url) {
   return `${url}${separator}t=${renderNonce.value}`
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function formatOcrConfidence(value) {
   const numericValue = Number(value)
   if (!Number.isFinite(numericValue) || numericValue <= 0) {
@@ -1801,6 +1805,22 @@ async function loadEditInspection(options = {}) {
   translationInputDrafts.value = {}
   fontSizeInputDrafts.value = {}
   syncEditSelection()
+}
+
+async function ensureEditInspectionReadyAfterDetect() {
+  if (workflowStage.value !== 'detected') {
+    return
+  }
+
+  const retryDelays = [180, 360, 700]
+  for (const delay of retryDelays) {
+    if (mergedInspectionPages.value.length > 0) {
+      return
+    }
+    status.value = '文本框识别已完成，正在等待逐框校对数据就绪…'
+    await sleep(delay)
+    await loadEditInspection({ silent: true })
+  }
 }
 
 function updateStyleOverride(region, nextStyle) {
@@ -3051,6 +3071,9 @@ function startTranslation(action = 'translate') {
               : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
             : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
       await loadEditInspection({ silent: completedAction !== 'detect' })
+      if (completedAction === 'detect' && !mergedInspectionPages.value.length) {
+        await ensureEditInspectionReadyAfterDetect()
+      }
       if (config.value.font_style_mode === 'auto-map') {
         await loadStyleInspection({ silent: true })
       }

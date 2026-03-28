@@ -479,6 +479,17 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             prompt_input,
         )
 
+    async def _call_translation_responses_api(self, model_name: str, prompt_input):
+        # Translation models have stricter payload validation and newer fields such as
+        # translation_options. Route them through raw HTTP so SDK schema coercion does
+        # not silently strip fields before the request reaches Ark.
+        self.logger.debug("Using direct HTTP for translation-model Responses API.")
+        return await asyncio.to_thread(
+            self._request_responses_via_http_sync,
+            model_name,
+            prompt_input,
+        )
+
     def _request_responses_via_http_sync(self, model_name: str, prompt_input):
         payload = {
             "model": model_name,
@@ -517,7 +528,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
                     "Using translation-model Responses payload with translation_options:\n"
                     + json.dumps(prompt_input, ensure_ascii=False, indent=2)
                 )
-                response = await self._call_responses_api(model_name, prompt_input)
+                response = await self._call_translation_responses_api(model_name, prompt_input)
             else:
                 prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
                 response = await self._call_responses_api(model_name, prompt_input)

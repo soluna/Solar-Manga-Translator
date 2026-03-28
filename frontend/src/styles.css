@@ -645,6 +645,12 @@ h2 {
   gap: 16px;
 }
 
+.style-toolbar-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
 .style-summary {
   justify-content: center;
 }
@@ -929,6 +935,13 @@ h2 {
   flex: 1 1 auto;
 }
 
+.style-region-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .style-region-index {
   color: #50382a;
   font-size: 1.05rem;
@@ -969,6 +982,16 @@ h2 {
   margin: 0;
   font-size: 0.92rem;
   line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.style-source-meta {
+  margin: 0;
+  color: #9b7d67;
+  font-size: 0.72rem;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -942,6 +942,104 @@ class TranslatorEngine:
             return source_path
         raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
 
+    def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
+        page_document = self.get_page_document(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        raw_region_payloads = self._read_json_file(page_cache_dir / "regions.json", [])
+
+        raw_regions: list[dict[str, Any]] = []
+        if isinstance(raw_region_payloads, list):
+            for index, payload in enumerate(raw_region_payloads):
+                if not isinstance(payload, dict):
+                    continue
+                try:
+                    region = self._deserialize_text_region(payload)
+                except Exception:
+                    region = None
+
+                bbox = [0, 0, 0, 0]
+                source_text = ""
+                direction = "auto"
+                confidence = 0.0
+                if region is not None:
+                    bbox = [int(value) for value in self._region_bbox(region)]
+                    source_text = self._region_source_text(region)
+                    direction = str(getattr(region, "direction", "") or "auto")
+                    confidence = float(getattr(region, "prob", 0.0) or 0.0)
+
+                raw_regions.append(
+                    {
+                        "index": index,
+                        "bbox": bbox,
+                        "source_text": source_text,
+                        "text": str(payload.get("text") or ""),
+                        "text_raw": str(payload.get("text_raw") or ""),
+                        "source_text_field": str(payload.get("source_text") or ""),
+                        "translation": str(payload.get("translation") or ""),
+                        "direction": direction,
+                        "ocr_confidence": confidence,
+                        "raw_fields": {
+                            key: self._to_json_compatible(value)
+                            for key, value in payload.items()
+                            if key in {
+                                "text",
+                                "text_raw",
+                                "source_text",
+                                "translation",
+                                "direction",
+                                "prob",
+                                "fg_r",
+                                "fg_g",
+                                "fg_b",
+                                "bg_r",
+                                "bg_g",
+                                "bg_b",
+                                "font_size",
+                                "vertical",
+                                "src_is_vertical",
+                            }
+                        },
+                    }
+                )
+
+        document_regions: list[dict[str, Any]] = []
+        for index, region in enumerate(page_document.get("regions") or []):
+            translation = region.get("translation") or {}
+            style = region.get("style") or {}
+            flags = region.get("flags") or {}
+            document_regions.append(
+                {
+                    "index": index,
+                    "region_id": str(region.get("region_id") or ""),
+                    "kind": str(region.get("kind") or "auto"),
+                    "bbox": [int(value) for value in (region.get("bbox") or [0, 0, 0, 0])],
+                    "source_text": str(region.get("source_text") or ""),
+                    "direction": str(region.get("direction") or "auto"),
+                    "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
+                    "machine_translation": str(translation.get("machine") or ""),
+                    "resolved_translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
+                    "font_style": str(style.get("font_style") or ""),
+                    "font_family": str(style.get("font_family") or ""),
+                    "disabled": bool(flags.get("disabled")),
+                    "keep_original": bool(flags.get("keep_original")),
+                }
+            )
+
+        return {
+            "project_id": project_id,
+            "page_id": page_id,
+            "page_name": self._page_display_name(session, page_id),
+            "workflow_stage": str(session.get("workflow_stage") or "idle"),
+            "has_rerender_cache": self._has_rerenderable_page_cache(page_cache_dir),
+            "cache_dir": str(page_cache_dir.resolve()),
+            "source_image": str(page_document.get("source_image") or ""),
+            "base_image": str(page_document.get("base_image") or ""),
+            "raw_region_count": len(raw_regions),
+            "document_region_count": len(document_regions),
+            "raw_regions": raw_regions,
+            "document_regions": document_regions,
+        }
+
     def _page_display_name(self, session: dict[str, Any], page_id: str) -> str:
         for image in session.get("source_images") or []:
             if str(image.get("stored_name") or "") == page_id:
@@ -965,6 +1063,7 @@ class TranslatorEngine:
                     "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
                     "manual": str(region.get("kind") or "") in {"manual", "merged"},
                     "source_text": str(region.get("source_text") or ""),
+                    "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
                     "direction": str(region.get("direction") or "auto"),
                     "machine_translation": str(translation.get("machine") or ""),
                     "override_translation": str(translation.get("edited") or ""),
@@ -1003,6 +1102,7 @@ class TranslatorEngine:
                     "index": index,
                     "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
                     "manual": str(region.get("kind") or "") in {"manual", "merged"},
+                    "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
                     "auto_style": str(style.get("auto_font_style") or ""),
                     "override_style": str(style.get("font_style_override") or ""),
                     "resolved_style": str(style.get("font_style") or ""),

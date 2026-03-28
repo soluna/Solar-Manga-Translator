@@ -309,6 +309,7 @@ const projectTitleDraft = ref('')
 const projectNoteDraft = ref('')
 const translatedPreviewCanvasRef = ref(null)
 const translatedPreviewScale = ref(1)
+const exportingOcrDebug = ref(false)
 
 const config = ref(loadStoredConfig())
 
@@ -561,6 +562,56 @@ function withCacheBust(url) {
 
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}t=${renderNonce.value}`
+}
+
+function formatOcrConfidence(value) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 'OCR 置信度未知'
+  }
+  return `OCR ${(numericValue * 100).toFixed(numericValue >= 0.995 ? 1 : 0)}%`
+}
+
+function getRegionDirectionLabel(region) {
+  const value = String(region?.direction || 'auto')
+  const option = textDirectionOptions.find((item) => item.value === value)
+  return option?.label || '自动'
+}
+
+async function exportCurrentPageOcrDebug() {
+  if (!sessionId.value || !selectedEditPage.value || exportingOcrDebug.value) {
+    return
+  }
+
+  exportingOcrDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/ocr-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出 OCR 调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedEditPage.value.stored_name.replace(/\.[^.]+$/, '') || 'page'}-ocr-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出当前页 OCR 调试 JSON，可以直接对照看原始识别文本。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '导出 OCR 调试信息失败'
+  } finally {
+    exportingOcrDebug.value = false
+  }
 }
 
 function closeSocket() {
@@ -4001,6 +4052,17 @@ watch(
               这里把译文、字体、禁用框和框体调整放在同一个列表里处理。开启“识别后先进入逐框校对”时，可以先补框、合并框、禁用误识别框，再点“确认框后继续翻译”。
             </small>
           </div>
+
+          <div class="style-toolbar-actions">
+            <button
+              class="inline-button"
+              type="button"
+              :disabled="!selectedEditPage || exportingOcrDebug"
+              @click="exportCurrentPageOcrDebug"
+            >
+              {{ exportingOcrDebug ? '导出中…' : '导出 OCR 调试' }}
+            </button>
+          </div>
         </div>
 
         <div class="style-workbench">
@@ -4142,7 +4204,10 @@ watch(
               <div class="style-region-row">
                 <div class="style-region-copy">
                   <strong class="style-region-index">#{{ region.index + 1 }}</strong>
-                  <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                  <div class="style-region-texts">
+                    <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                    <p class="style-source-meta">{{ formatOcrConfidence(region.ocr_confidence) }} · {{ getRegionDirectionLabel(region) }}</p>
+                  </div>
                   <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
                 </div>
 

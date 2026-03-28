@@ -656,6 +656,22 @@ class TranslatorEngine:
         session: dict[str, Any] | None = None,
     ) -> list[Any]:
         regions = self._load_cached_regions(page_cache_dir)
+        return self._prepare_regions_for_page_document_from_regions(
+            source_rgb,
+            regions,
+            config,
+            stored_name,
+            session=session,
+        )
+
+    def _prepare_regions_for_page_document_from_regions(
+        self,
+        source_rgb: np.ndarray,
+        regions: list[Any],
+        config: dict[str, Any],
+        stored_name: str,
+        session: dict[str, Any] | None = None,
+    ) -> list[Any]:
         regions = self._merge_manual_regions(session, stored_name, regions)
         self._assign_region_keys(regions, stored_name)
         self._apply_region_translation_overrides(regions, config, stored_name)
@@ -776,8 +792,8 @@ class TranslatorEngine:
         if source_bgr is None:
             raise RuntimeError(f"无法读取页面原图：{source_path}")
 
-        page_cache_dir = self._rerender_cache_dir(project_id) / stored_name
-        self._ensure_rerenderable_page_cache(source_path, page_cache_dir)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, stored_name)
+        self._ensure_page_base_image_cache(source_path, page_cache_dir)
         inpainted_path = page_cache_dir / "inpainted.png"
         preview_output = self._current_translated_output(
             session,
@@ -785,6 +801,11 @@ class TranslatorEngine:
             stored_name,
             self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
         )
+
+        previous_document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+        previous_metadata = previous_document.get("metadata") if isinstance(previous_document, dict) else {}
+        previous_revision = int((previous_metadata or {}).get("revision") or 0)
+        previous_regions = previous_document.get("regions") if isinstance(previous_document, dict) else []
 
         regions: list[dict[str, Any]] = []
         if self._has_rerenderable_page_cache(page_cache_dir):
@@ -807,10 +828,45 @@ class TranslatorEngine:
             ]
             for region_payload in regions:
                 region_payload["page_id"] = stored_name
-
-        previous_document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
-        previous_metadata = previous_document.get("metadata") if isinstance(previous_document, dict) else {}
-        previous_revision = int((previous_metadata or {}).get("revision") or 0)
+        else:
+            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+            manual_only_regions = self._prepare_regions_for_page_document_from_regions(
+                source_rgb,
+                [],
+                config,
+                stored_name,
+                session=session,
+            )
+            if manual_only_regions:
+                manual_payloads_by_id = {
+                    str(payload.get("id") or ""): payload
+                    for payload in self._manual_regions_for_page(session, stored_name)
+                    if isinstance(payload, dict)
+                }
+                regions = [
+                    self._serialize_page_document_region(region, manual_payloads_by_id, config)
+                    for region in manual_only_regions
+                ]
+                for region_payload in regions:
+                    region_payload["page_id"] = stored_name
+                print(
+                    f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
+                    "using manual regions only while keeping the page editable."
+                )
+            elif isinstance(previous_regions, list) and previous_regions:
+                regions = json.loads(json.dumps(previous_regions, ensure_ascii=False))
+                for region_payload in regions:
+                    if isinstance(region_payload, dict):
+                        region_payload["page_id"] = stored_name
+                print(
+                    f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
+                    "falling back to the last persisted page document."
+                )
+            else:
+                print(
+                    f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
+                    "no cached or persisted regions are available."
+                )
 
         return {
             "page_id": stored_name,
@@ -877,8 +933,8 @@ class TranslatorEngine:
 
     def get_page_base_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
         source_path = Path(session.get("source_dir") or "") / page_id
-        page_cache_dir = self._rerender_cache_dir(project_id) / page_id
-        self._ensure_rerenderable_page_cache(source_path, page_cache_dir)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        self._ensure_page_base_image_cache(source_path, page_cache_dir)
         base_path = page_cache_dir / "inpainted.png"
         if base_path.exists():
             return base_path
@@ -1289,6 +1345,15 @@ class TranslatorEngine:
         if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
 
+        rerenderable_pages = self._count_rerenderable_pages(session_id, session)
+        if rerenderable_pages == 0:
+            raise RuntimeError("翻译已完成，但没有生成任何可校对缓存，请检查后端日志中的 rerender cache 写入情况。")
+        if rerenderable_pages < total:
+            print(
+                f"[WARN] Rerender cache only generated for {rerenderable_pages}/{total} page(s) "
+                f"during translation session {session_id}."
+            )
+
         if should_apply_font_style_map:
             await self._apply_font_style_rerender(
                 session_id=session_id,
@@ -1414,6 +1479,15 @@ class TranslatorEngine:
         if process_returncode != 0:
             raise RuntimeError(self._format_failure(log_path))
 
+        rerenderable_pages = self._count_rerenderable_pages(session_id, session)
+        if rerenderable_pages == 0:
+            raise RuntimeError("文本框识别已完成，但没有生成可校对缓存，请检查后端日志中的 rerender cache 写入情况。")
+        if rerenderable_pages < len(expected_outputs):
+            print(
+                f"[WARN] Detection cache only generated for {rerenderable_pages}/{len(expected_outputs)} "
+                f"page(s) in session {session_id}."
+            )
+
         session["workflow_stage"] = "detected"
         self.persist_project_state(
             session_id,
@@ -1456,8 +1530,8 @@ class TranslatorEngine:
         for index, image in enumerate(source_images, start=1):
             stored_name = str(image.get("stored_name") or "")
             source_path = source_dir / stored_name
-            cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
-            if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
+            cache_page_dir = self._session_page_cache_dir(session, session_id, stored_name)
+            if not self._has_rerenderable_page_cache(cache_page_dir):
                 raise RuntimeError(f"当前页面缺少可编辑缓存：{stored_name}")
 
             source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
@@ -1573,7 +1647,7 @@ class TranslatorEngine:
         rerenderable_pages = sum(
             1
             for image in target_images
-            if self._has_rerenderable_page_cache(self._rerender_cache_dir(session_id) / image["stored_name"])
+            if self._has_rerenderable_page_cache(self._session_page_cache_dir(session, session_id, image["stored_name"]))
         )
         if rerenderable_pages == 0:
             raise RuntimeError("当前会话还没有可用的重嵌字缓存，请先用当前版本完整翻译一次。")
@@ -1605,7 +1679,7 @@ class TranslatorEngine:
                 config["rerender_output_format"],
                 rerender_variant,
             )
-            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
 
             if self._has_rerenderable_page_cache(cache_page_dir):
                 prepared_regions = None
@@ -2432,7 +2506,7 @@ class TranslatorEngine:
                 config["rerender_output_format"],
                 rerender_variant,
             )
-            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
             if not self._has_rerenderable_page_cache(cache_page_dir):
                 existing_output = self._current_translated_output(
                     session,
@@ -2755,7 +2829,7 @@ class TranslatorEngine:
         for index, image in enumerate(complex_images, start=1):
             source_path = source_dir / image["stored_name"]
             output_path = output_dir / image["stored_name"]
-            cache_page_dir = self._rerender_cache_dir(session_id) / image["stored_name"]
+            cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
 
             await progress_callback(
                 {
@@ -3098,12 +3172,26 @@ class TranslatorEngine:
         return debug_dir
 
     def _count_rerenderable_pages(self, session_id: str, session: dict[str, Any]) -> int:
-        cache_dir = Path(session.get("rerender_cache_dir") or self._rerender_cache_dir(session_id))
+        cache_dir = self._session_rerender_cache_dir(session, session_id)
         return sum(
             1
             for image in session["source_images"]
             if self._has_rerenderable_page_cache(cache_dir / image["stored_name"])
         )
+
+    def _session_rerender_cache_dir(self, session: dict[str, Any] | None, project_id: str) -> Path:
+        configured = str((session or {}).get("rerender_cache_dir") or "").strip()
+        if configured:
+            return Path(configured)
+        return self._rerender_cache_dir(project_id)
+
+    def _session_page_cache_dir(
+        self,
+        session: dict[str, Any] | None,
+        project_id: str,
+        page_id: str,
+    ) -> Path:
+        return self._session_rerender_cache_dir(session, project_id) / page_id
 
     def _has_rerenderable_page_cache(self, page_cache_dir: Path) -> bool:
         return (
@@ -3112,10 +3200,7 @@ class TranslatorEngine:
             and (page_cache_dir / "regions.json").exists()
         )
 
-    def _ensure_rerenderable_page_cache(self, source_path: Path, page_cache_dir: Path) -> bool:
-        if self._has_rerenderable_page_cache(page_cache_dir):
-            return True
-
+    def _ensure_page_base_image_cache(self, source_path: Path, page_cache_dir: Path) -> bool:
         source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if source_bgr is None:
             return False
@@ -3126,11 +3211,7 @@ class TranslatorEngine:
         if not inpainted_path.exists():
             cv2.imwrite(str(inpainted_path), source_bgr)
 
-        regions_path = page_cache_dir / "regions.json"
-        if not regions_path.exists():
-            regions_path.write_text("[]", encoding="utf-8")
-
-        return self._has_rerenderable_page_cache(page_cache_dir)
+        return inpainted_path.exists()
 
     def _ensure_vendor_import_path(self) -> None:
         vendor_root = str(self.base_dir / "manga-image-translator")
@@ -3598,9 +3679,9 @@ class TranslatorEngine:
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
         normalized_bbox = self._normalize_manual_bbox(bbox, source_rgb.shape[1], source_rgb.shape[0])
 
-        cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
-        if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
-            raise RuntimeError("无法为当前页面建立可编辑缓存，请刷新后重试。")
+        cache_page_dir = self._session_page_cache_dir(session, session_id, stored_name)
+        if not self._ensure_page_base_image_cache(source_path, cache_page_dir):
+            raise RuntimeError("无法为当前页面准备底图，请刷新后重试。")
 
         ocr_result = await self._ocr_manual_region(source_rgb, normalized_bbox, config.get("use_gpu", True))
         translation = ""
@@ -3665,8 +3746,8 @@ class TranslatorEngine:
         if source_bgr is None:
             raise RuntimeError("无法读取当前页面原图。")
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-        cache_page_dir = self._rerender_cache_dir(session_id) / stored_name
-        if not self._ensure_rerenderable_page_cache(source_path, cache_page_dir):
+        cache_page_dir = self._session_page_cache_dir(session, session_id, stored_name)
+        if not self._has_rerenderable_page_cache(cache_page_dir):
             raise RuntimeError("无法为当前页面建立可编辑缓存，请刷新后重试。")
 
         candidate_regions = self._prepare_cached_regions_for_edit(

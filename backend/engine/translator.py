@@ -903,6 +903,7 @@ class TranslatorEngine:
             "name": page_name,
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
+            "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
             "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
@@ -941,6 +942,7 @@ class TranslatorEngine:
             "name": page_name,
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
+            "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
             "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
@@ -2455,6 +2457,9 @@ class TranslatorEngine:
             "styles": list(self.STYLE_BUCKETS),
             "pages": pages,
             "workflow_stage": self._session_workflow_stage(session),
+            "overrides": {
+                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            },
         }
 
     async def inspect_translation_regions(
@@ -2477,6 +2482,12 @@ class TranslatorEngine:
         return {
             "pages": pages,
             "workflow_stage": self._session_workflow_stage(session),
+            "overrides": {
+                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+            },
         }
 
     def _session_workflow_stage(self, session: dict[str, Any]) -> str:

@@ -359,6 +359,7 @@ const mergedInspectionPages = computed(() => {
         name: page.name,
         image_url: page.image_url,
         source_image_url: page.source_image_url || '',
+        base_image_url: page.base_image_url || page.source_image_url || page.image_url,
         translated_image_url: page.translated_image_url || page.image_url,
         image_width: page.image_width,
         image_height: page.image_height,
@@ -385,6 +386,9 @@ const mergedInspectionPages = computed(() => {
     }
     if (!mergedPage.source_image_url && page.source_image_url) {
       mergedPage.source_image_url = page.source_image_url
+    }
+    if (!mergedPage.base_image_url && page.base_image_url) {
+      mergedPage.base_image_url = page.base_image_url
     }
     if (!mergedPage.translated_image_url && page.translated_image_url) {
       mergedPage.translated_image_url = page.translated_image_url
@@ -1380,8 +1384,13 @@ function applyReviewInspectionPayload(payload) {
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
-  const nextOverrides = {}
-  const nextSkipOverrides = {}
+  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
+    ? payload.overrides
+    : {}
+  const nextOverrides = { ...(sessionOverrides.translation_region_overrides || {}) }
+  const nextSkipOverrides = { ...(sessionOverrides.translation_region_skip_overrides || {}) }
+  const nextDisabledOverrides = { ...(sessionOverrides.translation_region_disabled_overrides || {}) }
+  const nextLayoutOverrides = { ...(sessionOverrides.translation_region_layout_overrides || {}) }
   for (const page of reviewInspectionPages.value) {
     for (const region of page.regions || []) {
       if (region.override_translation) {
@@ -1394,6 +1403,8 @@ function applyReviewInspectionPayload(payload) {
   }
   translationRegionOverrides.value = nextOverrides
   translationRegionSkipOverrides.value = nextSkipOverrides
+  translationRegionDisabledOverrides.value = nextDisabledOverrides
+  translationRegionLayoutOverrides.value = nextLayoutOverrides
 }
 
 function applyStyleInspectionPayload(payload) {
@@ -1401,6 +1412,10 @@ function applyStyleInspectionPayload(payload) {
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
+  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
+    ? payload.overrides
+    : {}
+  styleRegionOverrides.value = { ...(sessionOverrides.style_region_overrides || styleRegionOverrides.value) }
 }
 
 function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
@@ -2205,32 +2220,55 @@ function commitRegionTextDraft(region) {
 }
 
 function handleRegionFontSizeInput(region, nextValue) {
-  const parsed = Number(nextValue)
-  if (Number.isNaN(parsed)) {
-    return
-  }
   selectedEditRegionKey.value = region.id
+  const rawValue = String(nextValue ?? '')
   if (isCanvasReviewMode.value) {
     fontSizeInputDrafts.value = {
       ...fontSizeInputDrafts.value,
-      [region.id]: Math.max(8, Math.min(240, Math.round(parsed)))
+      [region.id]: rawValue
     }
+    const parsed = Number(rawValue)
+    if (!rawValue.trim() || Number.isNaN(parsed)) {
+      return
+    }
+    updateRegionLayoutOverride(region.id, { font_size: parsed })
+    return
+  }
+  fontSizeInputDrafts.value = {
+    ...fontSizeInputDrafts.value,
+    [region.id]: rawValue
+  }
+  const parsed = Number(rawValue)
+  if (!rawValue.trim() || Number.isNaN(parsed)) {
     return
   }
   updateRegionFontSize(region, parsed)
 }
 
 function commitRegionFontSize(region) {
-  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
-    return
-  }
-  const nextValue = Number(fontSizeInputDrafts.value[region.id] ?? getRegionFontSize(region))
+  const rawDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+    ? String(fontSizeInputDrafts.value[region.id] ?? '')
+    : ''
+  const nextValue = rawDraft.trim() === ''
+    ? 8
+    : Number(rawDraft)
+
+  const nextDrafts = { ...fontSizeInputDrafts.value }
+  delete nextDrafts[region.id]
+  fontSizeInputDrafts.value = nextDrafts
+
   if (Number.isNaN(nextValue)) {
     return
   }
+  const normalizedValue = Math.max(8, Math.min(240, Math.round(nextValue)))
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    updateRegionFontSize(region, normalizedValue)
+    return
+  }
+
   const currentOverride = translationRegionLayoutOverrides.value[region.id] || {}
   const previousExplicit = typeof currentOverride.font_size === 'number' ? currentOverride.font_size : null
-  const normalizedValue = Math.max(8, Math.min(240, Math.round(nextValue)))
 
   updateRegionLayoutOverride(region.id, { font_size: normalizedValue })
   void runCanvasCommand(selectedEditPage.value, {
@@ -3829,12 +3867,13 @@ watch(selectedEditRegionKey, () => {
                       min="8"
                       max="240"
                       step="1"
-                      @click.stop
-                      @mousedown.stop
-                      @input="handleRegionFontSizeInput(region, $event.target.value)"
-                      @change="commitRegionFontSize(region)"
-                    />
-                  </label>
+                    @click.stop
+                    @mousedown.stop
+                    @input="handleRegionFontSizeInput(region, $event.target.value)"
+                    @change="commitRegionFontSize(region)"
+                    @blur="commitRegionFontSize(region)"
+                  />
+                </label>
 
                   <button
                     v-if="isManualRegion(region)"

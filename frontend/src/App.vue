@@ -37,6 +37,7 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
+const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
   gothic: ['華康儷中黑.ttf', '華康儷中黑'],
@@ -275,6 +276,7 @@ const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
 const manualDrawDraft = ref(null)
+const canvasTransformState = ref(null)
 const mergeMode = ref(false)
 const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
@@ -305,6 +307,8 @@ const canRerender = computed(
 )
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
+const activeReviewMode = computed(() => currentProject.value?.review_mode || config.value.default_review_mode || 'classic')
+const isCanvasReviewMode = computed(() => activeReviewMode.value === 'canvas_beta')
 const hasTranslationOverrides = computed(
   () =>
     Object.keys(translationRegionOverrides.value).length > 0
@@ -315,6 +319,9 @@ const hasTranslationOverrides = computed(
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
 const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
+const canDirectManipulateCanvas = computed(
+  () => Boolean(isCanvasReviewMode.value && !manualDrawMode.value && !mergeMode.value && !isAdjustingRegionBBox.value && !translating.value)
+)
 const mergeSelectionCount = computed(() => Object.keys(mergeRegionSelection.value).length)
 const disabledRegionCountForSelectedPage = computed(() => {
   const storedName = selectedEditPage.value?.stored_name
@@ -539,6 +546,7 @@ function resetEditInspectorSelection() {
   selectedEditRegionKey.value = ''
   manualDrawDraft.value = null
   adjustingRegionId.value = ''
+  canvasTransformState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
 }
@@ -975,16 +983,108 @@ function isManualRegion(region) {
 }
 
 function getCanvasPoint(event, page) {
-  const canvas = event.currentTarget
+  const canvas = event.currentTarget?.closest?.('.style-preview-canvas') || event.currentTarget
   const rect = canvas.getBoundingClientRect()
+  return getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
+}
+
+function getCanvasPointFromRect(rect, clientX, clientY, page) {
   const imageWidth = Math.max(page?.image_width || 1, 1)
   const imageHeight = Math.max(page?.image_height || 1, 1)
-  const x = Math.min(imageWidth, Math.max(0, ((event.clientX - rect.left) / rect.width) * imageWidth))
-  const y = Math.min(imageHeight, Math.max(0, ((event.clientY - rect.top) / rect.height) * imageHeight))
+  const safeWidth = Math.max(rect?.width || 1, 1)
+  const safeHeight = Math.max(rect?.height || 1, 1)
+  const x = Math.min(imageWidth, Math.max(0, ((clientX - rect.left) / safeWidth) * imageWidth))
+  const y = Math.min(imageHeight, Math.max(0, ((clientY - rect.top) / safeHeight) * imageHeight))
   return {
     x: Math.round(x),
     y: Math.round(y)
   }
+}
+
+function clampValue(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function normalizeBBoxToPage(bbox, page) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const minSize = 8
+
+  let [x1, y1, x2, y2] = (Array.isArray(bbox) ? bbox : [0, 0, 0, 0]).map((value) => Math.round(Number(value) || 0))
+  x1 = clampValue(x1, 0, imageWidth)
+  x2 = clampValue(x2, 0, imageWidth)
+  y1 = clampValue(y1, 0, imageHeight)
+  y2 = clampValue(y2, 0, imageHeight)
+
+  if (x2 < x1) {
+    [x1, x2] = [x2, x1]
+  }
+  if (y2 < y1) {
+    [y1, y2] = [y2, y1]
+  }
+
+  if (x2 - x1 < minSize) {
+    if (x1 + minSize <= imageWidth) {
+      x2 = x1 + minSize
+    } else {
+      x1 = Math.max(0, imageWidth - minSize)
+      x2 = imageWidth
+    }
+  }
+
+  if (y2 - y1 < minSize) {
+    if (y1 + minSize <= imageHeight) {
+      y2 = y1 + minSize
+    } else {
+      y1 = Math.max(0, imageHeight - minSize)
+      y2 = imageHeight
+    }
+  }
+
+  return [x1, y1, x2, y2]
+}
+
+function translateBBoxWithinPage(originBBox, deltaX, deltaY, page) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const width = Math.max(8, originBBox[2] - originBBox[0])
+  const height = Math.max(8, originBBox[3] - originBBox[1])
+  let x1 = originBBox[0] + deltaX
+  let y1 = originBBox[1] + deltaY
+  x1 = clampValue(x1, 0, Math.max(0, imageWidth - width))
+  y1 = clampValue(y1, 0, Math.max(0, imageHeight - height))
+  return [x1, y1, x1 + width, y1 + height].map((value) => Math.round(value))
+}
+
+function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page) {
+  let [x1, y1, x2, y2] = originBBox
+  if (handle.includes('n')) {
+    y1 += deltaY
+  }
+  if (handle.includes('s')) {
+    y2 += deltaY
+  }
+  if (handle.includes('w')) {
+    x1 += deltaX
+  }
+  if (handle.includes('e')) {
+    x2 += deltaX
+  }
+  return normalizeBBoxToPage([x1, y1, x2, y2], page)
+}
+
+function getCanvasHandleCursor(handle) {
+  const cursorMap = {
+    nw: 'nwse-resize',
+    se: 'nwse-resize',
+    ne: 'nesw-resize',
+    sw: 'nesw-resize',
+    n: 'ns-resize',
+    s: 'ns-resize',
+    e: 'ew-resize',
+    w: 'ew-resize'
+  }
+  return cursorMap[handle] || 'move'
 }
 
 function getManualDraftBBox(page) {
@@ -1459,6 +1559,149 @@ function updateRegionLayoutOverride(regionId, patch) {
   translationRegionLayoutOverrides.value = nextOverrides
 }
 
+async function applyPageCommands(pageId, commands) {
+  if (!sessionId.value || !pageId || !Array.isArray(commands) || !commands.length) {
+    return null
+  }
+  const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/commands`), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      config: buildRuntimeConfig(),
+      commands
+    })
+  })
+  const payload = await response.json()
+  if (!response.ok) {
+    throw new Error(payload.detail || '更新页面编辑状态失败')
+  }
+  return payload
+}
+
+function startCanvasRegionTransform(event, region, page, mode = 'move', handle = '') {
+  if (!region || !page) {
+    return
+  }
+  if (mergeMode.value) {
+    toggleMergeSelection(region)
+    return
+  }
+
+  selectedEditRegionKey.value = region.id
+
+  if (!canDirectManipulateCanvas.value) {
+    return
+  }
+
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+
+  const canvas = event.currentTarget?.closest?.('.style-preview-canvas')
+  if (!canvas) {
+    return
+  }
+
+  const rect = canvas.getBoundingClientRect()
+  const point = getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
+  canvasTransformState.value = {
+    pointerId: event.pointerId,
+    regionId: region.id,
+    pageId: page.stored_name,
+    mode,
+    handle,
+    rect,
+    startPoint: point,
+    originBBox: getEffectiveRegionBBox(region),
+    moved: false,
+    startedAt: Date.now()
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function updateCanvasRegionTransform(event) {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === draft.pageId)
+  if (!page) {
+    canvasTransformState.value = null
+    return
+  }
+
+  const point = getCanvasPointFromRect(draft.rect, event.clientX, event.clientY, page)
+  const deltaX = point.x - draft.startPoint.x
+  const deltaY = point.y - draft.startPoint.y
+  let nextBBox = draft.originBBox
+
+  if (draft.mode === 'move') {
+    nextBBox = translateBBoxWithinPage(draft.originBBox, deltaX, deltaY, page)
+  } else {
+    nextBBox = resizeBBoxWithinPage(draft.originBBox, draft.handle, deltaX, deltaY, page)
+  }
+
+  const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
+  draft.moved = draft.moved || changed
+  updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
+}
+
+async function finishCanvasRegionTransform(event) {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  if (event?.pointerId != null && draft.pointerId != null && event.pointerId !== draft.pointerId) {
+    return
+  }
+
+  canvasTransformState.value = null
+  if (!draft.moved) {
+    return
+  }
+
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === draft.pageId)
+  const region = page?.regions?.find((item) => item.id === draft.regionId)
+  const nextBBox = region ? getEffectiveRegionBBox(region) : null
+  if (!page || !nextBBox) {
+    return
+  }
+
+  try {
+    await applyPageCommands(page.stored_name, [
+      {
+        type: 'update_region_bbox',
+        region_id: draft.regionId,
+        bbox: nextBBox
+      }
+    ])
+    status.value = draft.mode === 'move'
+      ? '已移动文本框位置，重新嵌字时会按新位置计算。'
+      : '已更新文本框大小，重新嵌字时会按新框重新排版。'
+    void loadEditInspection({ silent: true })
+  } catch (error) {
+    updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+    errorMessage.value = error instanceof Error ? error.message : '更新文本框范围失败'
+  }
+}
+
+function cancelCanvasRegionTransform() {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+  canvasTransformState.value = null
+}
+
 function updateRegionFontSize(region, nextValue) {
   const parsed = Number(nextValue)
   if (Number.isNaN(parsed)) {
@@ -1921,10 +2164,16 @@ onMounted(() => {
   checkBackendStatus()
   loadFonts()
   loadProjectHistory()
+  window.addEventListener('pointermove', updateCanvasRegionTransform)
+  window.addEventListener('pointerup', finishCanvasRegionTransform)
+  window.addEventListener('pointercancel', cancelCanvasRegionTransform)
 })
 
 onBeforeUnmount(() => {
   closeSocket()
+  window.removeEventListener('pointermove', updateCanvasRegionTransform)
+  window.removeEventListener('pointerup', finishCanvasRegionTransform)
+  window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
 })
 
 watch(
@@ -2794,6 +3043,10 @@ watch(
                     在原图上拖一个新框，替换当前文本框范围
                   </div>
 
+                  <div v-else-if="isCanvasReviewMode" class="style-preview-tip">
+                    画布模式：拖动文本框可改位置，拖拽控制点可改大小
+                  </div>
+
                   <button
                     v-for="region in selectedEditPage.regions"
                     :key="`source-${region.id}`"
@@ -2803,12 +3056,22 @@ watch(
                       isManualRegion(region) ? 'manual' : '',
                       mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
                       selectedEditRegionKey === region.id ? 'active' : '',
+                      canDirectManipulateCanvas ? 'canvas-editable' : '',
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
+                    @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
+                    <span
+                      v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
+                      v-for="handle in canvasHandleOptions"
+                      :key="`${region.id}-${handle}`"
+                      :class="['style-box-handle', `handle-${handle}`]"
+                      :style="{ cursor: getCanvasHandleCursor(handle) }"
+                      @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
+                    ></span>
                   </button>
 
                   <div
@@ -2838,12 +3101,22 @@ watch(
                       isManualRegion(region) ? 'manual' : '',
                       mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
                       selectedEditRegionKey === region.id ? 'active' : '',
+                      canDirectManipulateCanvas ? 'canvas-editable' : '',
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
                     @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
+                    @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
+                    <span
+                      v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
+                      v-for="handle in canvasHandleOptions"
+                      :key="`translated-${region.id}-${handle}`"
+                      :class="['style-box-handle', `handle-${handle}`]"
+                      :style="{ cursor: getCanvasHandleCursor(handle) }"
+                      @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
+                    ></span>
                   </button>
                 </div>
               </div>
@@ -2890,6 +3163,7 @@ watch(
                   </button>
 
                   <button
+                    v-if="!isCanvasReviewMode"
                     class="inline-button"
                     type="button"
                     @click.stop="startRegionBBoxAdjustment(region)"

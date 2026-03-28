@@ -731,6 +731,10 @@ h2 {
   overflow: visible;
 }
 
+.style-box.canvas-editable {
+  cursor: move;
+}
+
 .style-box:hover {
   background: rgba(255, 209, 186, 0.2);
 }
@@ -761,6 +765,57 @@ h2 {
 
 .style-box-draft {
   pointer-events: none;
+}
+
+.style-box-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid #fffaf4;
+  background: #b9472c;
+  box-shadow: 0 2px 8px rgba(63, 37, 18, 0.2);
+  pointer-events: auto;
+}
+
+.style-box-handle.handle-nw {
+  left: -7px;
+  top: -7px;
+}
+
+.style-box-handle.handle-n {
+  left: calc(50% - 5px);
+  top: -7px;
+}
+
+.style-box-handle.handle-ne {
+  right: -7px;
+  top: -7px;
+}
+
+.style-box-handle.handle-e {
+  right: -7px;
+  top: calc(50% - 5px);
+}
+
+.style-box-handle.handle-se {
+  right: -7px;
+  bottom: -7px;
+}
+
+.style-box-handle.handle-s {
+  left: calc(50% - 5px);
+  bottom: -7px;
+}
+
+.style-box-handle.handle-sw {
+  left: -7px;
+  bottom: -7px;
+}
+
+.style-box-handle.handle-w {
+  left: -7px;
+  top: calc(50% - 5px);
 }
 
 .style-box-label {

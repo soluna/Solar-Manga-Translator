@@ -131,6 +131,27 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             ]
         )
 
+    def _format_request_log(self, model_name: str, from_lang: str, to_lang: str, prompt: str) -> str:
+        if self._is_translation_responses_model(model_name):
+            translation_options = {
+                "target_language": self._map_translation_language_code(to_lang) or "zh-Hant",
+            }
+            source_language = self._map_translation_language_code(from_lang)
+            if source_language:
+                translation_options["source_language"] = source_language
+            return (
+                "Translation model payload:\n"
+                + json.dumps(
+                    {
+                        "text": prompt,
+                        "translation_options": translation_options,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        return self._format_prompt_log(to_lang, prompt)
+
     def _normalize_response_markers(self, text: str) -> str:
         return re.sub(r"<\|?(\d+)\|?>", lambda match: f"<|{match.group(1)}|>", text or "")
 
@@ -168,12 +189,12 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         return None
 
-    async def _request_with_retries(self, to_lang: str, prompt: str) -> str:
+    async def _request_with_retries(self, from_lang: str, to_lang: str, prompt: str) -> str:
         ratelimit_attempt = 0
         server_error_attempt = 0
         timeout_attempt = 0
         while True:
-            request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+            request_task = asyncio.create_task(self._request_translation(from_lang, to_lang, prompt))
             started = time.time()
             while not request_task.done():
                 await asyncio.sleep(0.1)
@@ -183,7 +204,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
                     timeout_attempt += 1
                     self.logger.warning(f"Restarting request due to timeout. Attempt: {timeout_attempt}")
                     request_task.cancel()
-                    request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+                    request_task = asyncio.create_task(self._request_translation(from_lang, to_lang, prompt))
                     started = time.time()
             try:
                 return await request_task
@@ -230,11 +251,14 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
             prompt, query_size = assembled[0]
             split_prefix = " (split)" if split_level > 0 else ""
-            self.logger.debug(f"-- GPT Prompt{split_prefix} --\n" + self._format_prompt_log(to_lang, prompt))
+            model_name = self.model or CUSTOM_OPENAI_MODEL
+            self.logger.debug(
+                f"-- GPT Prompt{split_prefix} --\n" + self._format_request_log(model_name, from_lang, to_lang, prompt)
+            )
 
             last_response = ""
             for attempt in range(self._RETRY_ATTEMPTS):
-                last_response = await self._request_with_retries(to_lang, prompt)
+                last_response = await self._request_with_retries(from_lang, to_lang, prompt)
                 parsed = self._parse_translation_response(last_response, query_size)
                 if parsed and len(parsed) == query_size and all(text.strip() for text in parsed):
                     for idx, text in zip(batch_indices, parsed):
@@ -382,34 +406,56 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             for message in self._build_messages(to_lang, prompt)
         ]
 
-    def _translation_responses_prompt_candidates(self, to_lang: str, prompt: str):
-        prompt_text = self._format_prompt_log(to_lang, prompt)
+    def _map_translation_language_code(self, lang: str) -> str | None:
+        normalized = str(lang or "").strip().upper()
+        mapping = {
+            "AUTO": None,
+            "JPN": "ja",
+            "JA": "ja",
+            "ENG": "en",
+            "EN": "en",
+            "CHS": "zh",
+            "ZH": "zh",
+            "CHT": "zh-Hant",
+            "KOR": "ko",
+            "KO": "ko",
+            "FRA": "fr",
+            "FR": "fr",
+            "DEU": "de",
+            "DE": "de",
+            "ESP": "es",
+            "ES": "es",
+            "ITA": "it",
+            "IT": "it",
+            "RUS": "ru",
+            "RU": "ru",
+            "THA": "th",
+            "TH": "th",
+            "VIE": "vi",
+            "VI": "vi",
+            "PTB": "pt",
+            "PT": "pt",
+        }
+        return mapping.get(normalized)
+
+    def _translation_responses_prompt_input(self, from_lang: str, to_lang: str, prompt: str):
+        translation_options = {
+            "target_language": self._map_translation_language_code(to_lang) or "zh-Hant",
+        }
+        source_language = self._map_translation_language_code(from_lang)
+        if source_language:
+            translation_options["source_language"] = source_language
         return [
-            (
-                "single_message_string",
-                [
+            {
+                "role": "user",
+                "content": [
                     {
-                        "role": "user",
-                        "content": prompt_text,
+                        "type": "input_text",
+                        "text": prompt,
+                        "translation_options": translation_options,
                     }
                 ],
-            ),
-            ("single_string", prompt_text),
-            (
-                "single_message_input_text",
-                [
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": prompt_text,
-                            }
-                        ],
-                    }
-                ],
-            ),
+            }
         ]
 
     async def _call_responses_api(self, model_name: str, prompt_input):
@@ -458,7 +504,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         return json.loads(body)
 
-    async def _request_translation(self, to_lang: str, prompt: str) -> str:
+    async def _request_translation(self, from_lang: str, to_lang: str, prompt: str) -> str:
         messages = self._build_messages(to_lang, prompt)
         model_name = self.model or CUSTOM_OPENAI_MODEL
         force_responses_api = self._is_translation_responses_model(model_name)
@@ -466,21 +512,12 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
             if force_responses_api:
-                response = None
-                last_error = None
-                for candidate_name, prompt_input in self._translation_responses_prompt_candidates(to_lang, prompt):
-                    try:
-                        self.logger.debug(f"Trying translation Responses payload: {candidate_name}")
-                        response = await self._call_responses_api(model_name, prompt_input)
-                        break
-                    except Exception as exc:
-                        last_error = exc
-                        self.logger.warning(
-                            f"Translation Responses payload {candidate_name} failed: {exc}"
-                        )
-                if response is None:
-                    assert last_error is not None
-                    raise last_error
+                prompt_input = self._translation_responses_prompt_input(from_lang, to_lang, prompt)
+                self.logger.debug(
+                    "Using translation-model Responses payload with translation_options:\n"
+                    + json.dumps(prompt_input, ensure_ascii=False, indent=2)
+                )
+                response = await self._call_responses_api(model_name, prompt_input)
             else:
                 prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
                 response = await self._call_responses_api(model_name, prompt_input)

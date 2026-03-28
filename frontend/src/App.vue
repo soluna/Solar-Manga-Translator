@@ -2928,7 +2928,7 @@ function startTranslation(action = 'translate') {
     }))
   }
 
-  socket.onmessage = (event) => {
+  socket.onmessage = async (event) => {
     const payload = JSON.parse(event.data)
 
     if (payload.event === 'start') {
@@ -2989,16 +2989,20 @@ function startTranslation(action = 'translate') {
     if (payload.event === 'completed') {
       translating.value = false
       applySessionPayload(payload)
-      status.value = activeAction.value === 'detect'
+      const completedAction = activeAction.value
+      status.value = completedAction === 'detect'
         ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
-        : activeAction.value === 'resume-translate'
+        : completedAction === 'resume-translate'
           ? `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
-          : activeAction.value === 'rerender'
+          : completedAction === 'rerender'
             ? (rerenderTargetStoredName
               ? '当前页重嵌字完成。'
               : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
             : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
-      void loadEditInspection({ silent: true })
+      await loadEditInspection({ silent: completedAction !== 'detect' })
+      if (config.value.font_style_mode === 'auto-map') {
+        await loadStyleInspection({ silent: true })
+      }
       void loadProjectHistory({ silent: true })
       closeSocket()
       return
@@ -3965,6 +3969,15 @@ watch(
 
       <div v-if="!selectedEditPage && editInspectionLoading" class="empty-state">
         正在读取当前会话的逐框校对数据…
+      </div>
+
+      <div v-else-if="!selectedEditPage" class="empty-state">
+        <template v-if="workflowStage === 'detected'">
+          文本框识别已完成，但逐框校对数据尚未载入。可以先点击“刷新逐框列表”再继续确认。
+        </template>
+        <template v-else>
+          当前还没有可编辑的逐框数据。你可以先执行识别或翻译，再回到这里继续校对。
+        </template>
       </div>
 
       <div v-else-if="selectedEditPage" class="style-inspector">

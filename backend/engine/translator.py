@@ -1031,6 +1031,8 @@ class TranslatorEngine:
         config = self.capture_session_config(session, raw_config)
         updated_region_ids: list[str] = []
         snapshot_hints: list[str] = []
+        created_region_id = ""
+        deleted_region_id = ""
 
         for command in commands:
             if not isinstance(command, dict):
@@ -1104,7 +1106,8 @@ class TranslatorEngine:
                     stored_name=page_id,
                     bbox=bbox,
                 )
-                updated_region_ids.append(str(region.get("id") or ""))
+                created_region_id = str(region.get("id") or "")
+                updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_added")
                 continue
 
@@ -1118,10 +1121,11 @@ class TranslatorEngine:
                     region_ids=region_ids,
                 )
                 merged_from = [str(item) for item in (region.get("merged_from") or []) if str(item)]
+                created_region_id = str(region.get("id") or "")
                 for source_region_id in merged_from:
                     self._set_region_disabled(session, source_region_id, True)
                 updated_region_ids.extend(merged_from)
-                updated_region_ids.append(str(region.get("id") or ""))
+                updated_region_ids.append(created_region_id)
                 snapshot_hints.append("regions_merged")
                 continue
 
@@ -1131,6 +1135,7 @@ class TranslatorEngine:
                 if not removed:
                     raise FileNotFoundError("没有找到对应的手动补框。")
                 self._clear_region_overrides(session, region_id)
+                deleted_region_id = region_id
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("manual_region_deleted")
                 continue
@@ -1149,6 +1154,8 @@ class TranslatorEngine:
             "document": document,
             "revision": int((document.get("metadata") or {}).get("revision") or 0),
             "updated_region_ids": sorted({region_id for region_id in updated_region_ids if region_id}),
+            "created_region_id": created_region_id,
+            "deleted_region_id": deleted_region_id,
             "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
             "executed_commands": [str(command.get("type") or "") for command in commands if isinstance(command, dict)],
         }

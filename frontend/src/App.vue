@@ -1178,6 +1178,14 @@ async function submitManualDraw(page, bbox) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
+    if (isCanvasReviewMode.value) {
+      await runCanvasStructuredAction(page, {
+        kind: 'create_region',
+        bbox
+      })
+      return
+    }
+
     const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
@@ -1777,13 +1785,32 @@ async function undoCanvasEdit() {
   }
 
   try {
-    await applyPageCommands(pageId, entry.undoCommands)
+    if (entry.kind === 'create_region') {
+      const createdRegionId = String(entry.createdRegionId || '')
+      await applyPageCommands(pageId, [{ type: 'delete_manual_region', region_id: createdRegionId }])
+    } else if (entry.kind === 'merge_regions') {
+      const createdRegionId = String(entry.createdRegionId || '')
+      const undoCommands = []
+      if (createdRegionId) {
+        undoCommands.push({ type: 'delete_manual_region', region_id: createdRegionId })
+      }
+      for (const sourceRegionId of entry.regionIds || []) {
+        undoCommands.push({ type: 'restore_region', region_id: sourceRegionId })
+      }
+      await applyPageCommands(pageId, undoCommands)
+    } else {
+      await applyPageCommands(pageId, entry.undoCommands)
+    }
     replacePageHistoryState(pageId, {
       undo: current.undo.slice(0, -1),
       redo: [...current.redo, entry].slice(-maxCanvasHistoryEntries)
     })
     status.value = `已撤销：${entry.label}`
     await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = pageId
+    if (entry.kind === 'merge_regions' && Array.isArray(entry.regionIds) && entry.regionIds.length) {
+      selectedEditRegionKey.value = entry.regionIds[0]
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '撤销失败'
   }
@@ -1801,15 +1828,87 @@ async function redoCanvasEdit() {
   }
 
   try {
-    await applyPageCommands(pageId, entry.redoCommands)
-    replacePageHistoryState(pageId, {
-      undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
-      redo: current.redo.slice(0, -1)
-    })
+    if (entry.kind === 'create_region') {
+      const result = await applyPageCommands(pageId, [{ type: 'create_region', bbox: entry.bbox }])
+      const refreshedEntry = {
+        ...entry,
+        createdRegionId: String(result?.created_region_id || '')
+      }
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+      selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else if (entry.kind === 'merge_regions') {
+      const result = await applyPageCommands(pageId, [{ type: 'merge_regions', region_ids: entry.regionIds || [] }])
+      const refreshedEntry = {
+        ...entry,
+        createdRegionId: String(result?.created_region_id || '')
+      }
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+      selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else {
+      await applyPageCommands(pageId, entry.redoCommands)
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+    }
     status.value = `已重做：${entry.label}`
     await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = pageId
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '重做失败'
+  }
+}
+
+async function runCanvasStructuredAction(page, options) {
+  if (!page?.stored_name || !options?.kind) {
+    return
+  }
+
+  const kind = String(options.kind)
+  const regionIds = Array.isArray(options.regionIds) ? options.regionIds.map((item) => String(item || '')).filter(Boolean) : []
+  const bbox = Array.isArray(options.bbox) ? options.bbox : null
+  let result = null
+
+  if (kind === 'create_region' && bbox) {
+    result = await applyPageCommands(page.stored_name, [{ type: 'create_region', bbox }])
+    const createdRegionId = String(result?.created_region_id || '')
+    const historyEntry = {
+      kind: 'create_region',
+      label: '新增补漏框',
+      pageId: page.stored_name,
+      bbox,
+      createdRegionId
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    return
+  }
+
+  if (kind === 'merge_regions' && regionIds.length >= 2) {
+    result = await applyPageCommands(page.stored_name, [{ type: 'merge_regions', region_ids: regionIds }])
+    const createdRegionId = String(result?.created_region_id || '')
+    const historyEntry = {
+      kind: 'merge_regions',
+      label: '合并文本框',
+      pageId: page.stored_name,
+      regionIds,
+      createdRegionId
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    return
   }
 }
 
@@ -2107,6 +2206,16 @@ async function mergeSelectedRegions() {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
+    if (isCanvasReviewMode.value) {
+      await runCanvasStructuredAction(page, {
+        kind: 'merge_regions',
+        regionIds
+      })
+      mergeRegionSelection.value = {}
+      mergeMode.value = false
+      return
+    }
+
     const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {

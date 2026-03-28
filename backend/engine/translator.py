@@ -52,6 +52,7 @@ class TranslatorEngine:
         self.projects_root = self.temp_dir / "projects"
         self.project_index_path = self.temp_dir / "project_index.json"
         self.project_font_dir = self.base_dir.parent / "fonts"
+        self.project_font_legacy_dir = self.base_dir.parent / "font"
         self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.model_dir.mkdir(exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,12 @@ class TranslatorEngine:
 
     def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
         return self._project_page_dir(project_id, page_id) / "page_document.json"
+
+    def _font_directories_by_source(self) -> dict[str, list[Path]]:
+        return {
+            "project": [self.project_font_dir, self.project_font_legacy_dir],
+            "builtin": [self.builtin_font_dir],
+        }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -2115,23 +2122,20 @@ class TranslatorEngine:
         if candidate.exists():
             return str(candidate.resolve())
 
-        font_dirs = {
-            "project": self.project_font_dir,
-            "builtin": self.builtin_font_dir,
-        }
+        font_dirs = self._font_directories_by_source()
 
         if ":" in font_key:
             source, font_name = font_key.split(":", 1)
-            font_dir = font_dirs.get(source)
-            if font_dir:
+            for font_dir in font_dirs.get(source, []):
                 resolved = font_dir / font_name
                 if resolved.exists():
                     return str(resolved.resolve())
 
-        for font_dir in font_dirs.values():
-            resolved = font_dir / font_key
-            if resolved.exists():
-                return str(resolved.resolve())
+        for font_dir_group in font_dirs.values():
+            for font_dir in font_dir_group:
+                resolved = font_dir / font_key
+                if resolved.exists():
+                    return str(resolved.resolve())
 
         print(f"[WARN] Requested font not found: {font_key}")
         return ""

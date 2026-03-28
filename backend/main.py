@@ -21,9 +21,27 @@ TEMP_EXTRACTED_DIR = BASE_DIR / "temp_extracted"
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
 FONT_DIRECTORIES = {
-    "project": BASE_DIR.parent / "fonts",
-    "builtin": BASE_DIR / "manga-image-translator" / "fonts",
+    "project": (
+        BASE_DIR.parent / "fonts",
+        BASE_DIR.parent / "font",
+    ),
+    "builtin": (
+        BASE_DIR / "manga-image-translator" / "fonts",
+    ),
 }
+
+
+def iter_font_directories(source: str) -> list[Path]:
+    candidates = FONT_DIRECTORIES.get(source) or ()
+    directories: list[Path] = []
+    seen: set[str] = set()
+    for directory in candidates:
+        normalized = str(directory.resolve()) if directory.exists() else str(directory)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        directories.append(directory)
+    return directories
 SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR)
 
@@ -74,50 +92,55 @@ def list_available_fonts() -> list[dict[str, str]]:
         "NotoSansMonoCJK-VF.ttf.ttc": 3,
     }
 
-    for source, font_dir in FONT_DIRECTORIES.items():
-        if not font_dir.exists():
-            continue
+    for source in FONT_DIRECTORIES:
+        seen_names: set[str] = set()
+        for font_dir in iter_font_directories(source):
+            if not font_dir.exists():
+                continue
 
-        font_paths = sorted(
-            (
-                path for path in font_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
-            ),
-            key=lambda path: (preferred_order.get(path.name, 99), path.name.lower()),
-        )
-
-        for path in font_paths:
-            source_label = "自定义" if source == "project" else "内置"
-            suffix = path.suffix.lower()
-            format_hint = {
-                ".ttf": "truetype",
-                ".otf": "opentype",
-            }.get(suffix, "")
-            fonts.append(
-                {
-                    "id": f"{source}:{path.name}",
-                    "name": path.name,
-                    "label": f"{path.stem} ({source_label})",
-                    "source": source,
-                    "extension": suffix,
-                    "format_hint": format_hint,
-                    "url": f"/api/fonts/file/{source}/{quote(path.name)}",
-                }
+            font_paths = sorted(
+                (
+                    path for path in font_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
+                ),
+                key=lambda path: (preferred_order.get(path.name, 99), path.name.lower()),
             )
+
+            for path in font_paths:
+                if path.name in seen_names:
+                    continue
+                seen_names.add(path.name)
+                source_label = "自定义" if source == "project" else "内置"
+                suffix = path.suffix.lower()
+                format_hint = {
+                    ".ttf": "truetype",
+                    ".otf": "opentype",
+                }.get(suffix, "")
+                fonts.append(
+                    {
+                        "id": f"{source}:{path.name}",
+                        "name": path.name,
+                        "label": f"{path.stem} ({source_label})",
+                        "source": source,
+                        "extension": suffix,
+                        "format_hint": format_hint,
+                        "url": f"/api/fonts/file/{source}/{quote(path.name)}",
+                    }
+                )
 
     return fonts
 
 
 def resolve_font_file(source: str, font_name: str) -> Path:
-    font_dir = FONT_DIRECTORIES.get(source)
-    if font_dir is None or not font_dir.exists():
-        raise HTTPException(status_code=404, detail="字体文件不存在。")
     if Path(font_name).name != font_name:
         raise HTTPException(status_code=404, detail="字体文件不存在。")
-    target_path = (font_dir / font_name).resolve()
-    if not target_path.exists() or target_path.parent != font_dir.resolve():
-        raise HTTPException(status_code=404, detail="字体文件不存在。")
-    return target_path
+    for font_dir in iter_font_directories(source):
+        if not font_dir.exists():
+            continue
+        target_path = (font_dir / font_name).resolve()
+        if target_path.exists() and target_path.parent == font_dir.resolve():
+            return target_path
+    raise HTTPException(status_code=404, detail="字体文件不存在。")
 
 
 def get_or_restore_session(project_id: str) -> dict[str, Any]:

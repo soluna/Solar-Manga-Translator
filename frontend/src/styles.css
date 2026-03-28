@@ -855,9 +855,8 @@ h2 {
 .style-box-preview-text {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
+  display: block;
+  box-sizing: border-box;
   padding: 4px;
   color: #18110b;
   font-weight: 500;
@@ -870,8 +869,6 @@ h2 {
 }
 
 .style-box-preview-text.vertical {
-  align-items: flex-end;
-  justify-content: flex-start;
   word-break: normal;
 }
 

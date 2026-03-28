@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canvas Preview Smoke Test</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Inter", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #f7f5ef;
+        color: #20160f;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 22px;
+      }
+      p {
+        margin: 0 0 12px;
+        color: #5b4a3c;
+      }
+      .toolbar {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 13px;
+      }
+      select {
+        min-height: 40px;
+        border-radius: 12px;
+        border: 1px solid #c5b7a3;
+        padding: 0 12px;
+        background: #fffdf8;
+      }
+      .stage {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        gap: 20px;
+      }
+      .canvas {
+        position: relative;
+        height: 900px;
+        border-radius: 24px;
+        border: 1px solid #dccdb9;
+        background: white;
+        overflow: hidden;
+      }
+      .box {
+        position: absolute;
+        border: 2px solid rgba(185, 71, 44, 0.4);
+        background: rgba(255, 251, 244, 0.74);
+        overflow: hidden;
+      }
+      .text {
+        position: absolute;
+        inset: 0;
+        padding: 8px;
+        color: #1f130c;
+        line-height: 1.08;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-rendering: geometricPrecision;
+      }
+      .text.vertical {
+        word-break: normal;
+      }
+      .panel {
+        border-radius: 24px;
+        border: 1px solid #dccdb9;
+        background: #fffdf8;
+        padding: 16px;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Canvas Preview Smoke Test</h1>
+    <p>用来单独验证字体切换、字体加载与竖排预览，不依赖完整翻译流程。</p>
+    <div class="toolbar">
+      <label>
+        竖排字体
+        <select id="fontA"></select>
+      </label>
+      <label>
+        横排字体
+        <select id="fontB"></select>
+      </label>
+      <label>
+        文本方向
+        <select id="direction">
+          <option value="vertical">竖排</option>
+          <option value="horizontal">横排</option>
+        </select>
+      </label>
+      <label>
+        后端地址
+        <select id="apiBase">
+          <option value="http://127.0.0.1:8000">http://127.0.0.1:8000</option>
+          <option value="http://localhost:8000">http://localhost:8000</option>
+        </select>
+      </label>
+    </div>
+    <div class="stage">
+      <div class="canvas">
+        <div class="box" style="left: 80px; top: 80px; width: 200px; height: 340px;">
+          <div id="sampleA" class="text">這是竪排測試。\n需要看到字體真的切換。</div>
+        </div>
+        <div class="box" style="left: 360px; top: 140px; width: 360px; height: 160px;">
+          <div id="sampleB" class="text">這是橫排測試，需要看到不同字體與 writing-mode。</div>
+        </div>
+      </div>
+      <div class="panel">
+        <pre id="log">準備中…</pre>
+      </div>
+    </div>
+    <script>
+      const fontA = document.getElementById('fontA')
+      const fontB = document.getElementById('fontB')
+      const direction = document.getElementById('direction')
+      const apiBase = document.getElementById('apiBase')
+      const sampleA = document.getElementById('sampleA')
+      const sampleB = document.getElementById('sampleB')
+      const log = document.getElementById('log')
+
+      const alias = (fontId) => `smoke-font-${String(fontId || '').replace(/[^a-zA-Z0-9_-]+/g, '_')}`
+      const formatHint = (font) => {
+        const explicit = String(font.format_hint || '').trim().toLowerCase()
+        if (explicit) return explicit
+        const name = String(font.extension || font.name || '').toLowerCase()
+        if (name.endsWith('.ttf')) return 'truetype'
+        if (name.endsWith('.otf')) return 'opentype'
+        return ''
+      }
+
+      async function loadFonts() {
+        const response = await fetch(`${apiBase.value}/api/fonts`)
+        const payload = await response.json()
+        const fonts = payload.fonts || []
+        fontA.innerHTML = ''
+        fontB.innerHTML = ''
+        for (const font of fonts) {
+          const optionA = document.createElement('option')
+          optionA.value = font.id
+          optionA.textContent = font.label
+          fontA.appendChild(optionA)
+          const optionB = document.createElement('option')
+          optionB.value = font.id
+          optionB.textContent = font.label
+          fontB.appendChild(optionB)
+        }
+        if (fonts[0]) fontA.value = fonts[0].id
+        if (fonts[1]) {
+          fontB.value = fonts[1].id
+        } else if (fonts[0]) {
+          fontB.value = fonts[0].id
+        }
+        injectFontFaces(fonts)
+        await render(fonts)
+      }
+
+      function injectFontFaces(fonts) {
+        const old = document.getElementById('font-face-style')
+        if (old) old.remove()
+        const style = document.createElement('style')
+        style.id = 'font-face-style'
+        style.textContent = fonts.map((font) => {
+          const fmt = formatHint(font)
+          const src = fmt
+            ? `url('${apiBase.value}${font.url}') format('${fmt}')`
+            : `url('${apiBase.value}${font.url}')`
+          return `@font-face{font-family:'${alias(font.id)}';src:${src};font-style:normal;font-weight:400;font-display:swap;}`
+        }).join('\n')
+        document.head.appendChild(style)
+      }
+
+      async function render(fonts) {
+        const fontMap = new Map(fonts.map((font) => [font.id, font]))
+        const familyA = alias(fontA.value)
+        const familyB = alias(fontB.value)
+        await Promise.allSettled([
+          document.fonts.load(`18px "${familyA}"`, '測試漢字ABC'),
+          document.fonts.load(`18px "${familyB}"`, '測試漢字ABC'),
+        ])
+
+        const isVertical = direction.value === 'vertical'
+        sampleA.style.fontFamily = `"${familyA}","Microsoft JhengHei","PingFang TC",sans-serif`
+        sampleB.style.fontFamily = `"${familyB}","Microsoft JhengHei","PingFang TC",sans-serif`
+        sampleA.style.writingMode = isVertical ? 'vertical-rl' : 'horizontal-tb'
+        sampleB.style.writingMode = isVertical ? 'vertical-rl' : 'horizontal-tb'
+        sampleA.style.textOrientation = isVertical ? 'mixed' : 'initial'
+        sampleB.style.textOrientation = isVertical ? 'mixed' : 'initial'
+        sampleA.classList.toggle('vertical', isVertical)
+        sampleB.classList.toggle('vertical', isVertical)
+
+        const computedA = getComputedStyle(sampleA)
+        const computedB = getComputedStyle(sampleB)
+        log.textContent = JSON.stringify({
+          selectedA: fontMap.get(fontA.value)?.label || fontA.value,
+          selectedB: fontMap.get(fontB.value)?.label || fontB.value,
+          fontCheckA: document.fonts.check(`18px "${familyA}"`, '測試漢字ABC'),
+          fontCheckB: document.fonts.check(`18px "${familyB}"`, '測試漢字ABC'),
+          writingModeA: computedA.writingMode,
+          writingModeB: computedB.writingMode,
+          fontFamilyA: computedA.fontFamily,
+          fontFamilyB: computedB.fontFamily,
+        }, null, 2)
+      }
+
+      fontA.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
+      fontB.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
+      direction.addEventListener('change', async () => render(Array.from(await fetch(`${apiBase.value}/api/fonts`).then((r) => r.json()).then((p) => p.fonts || []))))
+      apiBase.addEventListener('change', loadFonts)
+      loadFonts().catch((error) => {
+        log.textContent = `加载失败：${error?.message || error}`
+      })
+    </script>
+  </body>
+</html>

@@ -672,6 +672,13 @@ class TranslatorEngine:
                 except (TypeError, ValueError):
                     pass
 
+            region.direction = self._resolve_region_direction(
+                self._region_bbox(region),
+                getattr(region, "direction", ""),
+                config.get("target_lang"),
+                layout_override=layout_override,
+            )
+
         return self._dedupe_overlapping_regions(regions)
 
     def _serialize_page_document_region(
@@ -695,6 +702,12 @@ class TranslatorEngine:
         font_family = str(getattr(region, "font_family", "") or "")
         font_size_override = None
         layout_override = (config.get("translation_region_layout_overrides") or {}).get(region_id) or {}
+        resolved_direction = self._resolve_region_direction(
+            bbox,
+            getattr(region, "direction", ""),
+            config.get("target_lang"),
+            layout_override=layout_override,
+        )
         if "font_size" in layout_override:
             try:
                 font_size_override = max(8, int(round(float(layout_override["font_size"]))))
@@ -708,6 +721,7 @@ class TranslatorEngine:
             "source_ids": source_ids,
             "bbox": bbox,
             "polygon": None,
+            "direction": resolved_direction,
             "source_text": self._region_source_text(region),
             "ocr_confidence": float(getattr(region, "prob", 1.0) or 0.0),
             "translation": {
@@ -983,6 +997,28 @@ class TranslatorEngine:
             overrides.pop(region_id, None)
         session["translation_region_layout_overrides"] = overrides
 
+    def _normalize_direction_override(self, raw_value: Any) -> str:
+        value = str(raw_value or "").strip().lower()
+        if value in {"v", "vertical", "vertical-rl"}:
+            return "vertical"
+        if value in {"h", "horizontal", "horizontal-tb"}:
+            return "horizontal"
+        return "auto"
+
+    def _set_region_direction_override(self, session: dict[str, Any], region_id: str, direction: str | None) -> None:
+        overrides = dict(session.get("translation_region_layout_overrides") or {})
+        current = dict(overrides.get(region_id) or {})
+        normalized_direction = self._normalize_direction_override(direction)
+        if normalized_direction == "auto":
+            current.pop("direction", None)
+        else:
+            current["direction"] = normalized_direction
+        if current:
+            overrides[region_id] = current
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_layout_overrides"] = overrides
+
     def _set_region_translation_override_value(self, session: dict[str, Any], region_id: str, text: str) -> None:
         overrides = dict(session.get("translation_region_overrides") or {})
         normalized_text = str(text or "").strip()
@@ -1093,6 +1129,13 @@ class TranslatorEngine:
                     self._set_region_font_size_override(session, region_id, max(8, int(round(float(raw_font_size)))))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("font_size_updated")
+                continue
+
+            if command_type == "update_text_direction":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_direction_override(session, region_id, str(command.get("direction") or "auto"))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("text_direction_updated")
                 continue
 
             if command_type == "update_font_style":
@@ -2027,6 +2070,12 @@ class TranslatorEngine:
                     entry["font_size"] = max(8, int(round(float(font_size))))
                 except (TypeError, ValueError):
                     pass
+
+            direction = self._normalize_direction_override(
+                value.get("direction", value.get("text_direction"))
+            )
+            if direction != "auto":
+                entry["direction"] = direction
 
             if entry:
                 normalized[key] = entry
@@ -3151,6 +3200,36 @@ class TranslatorEngine:
         height = max(y2 - y1, 1)
         return "v" if height > width * 1.15 else "h"
 
+    def _default_direction_for_target_lang(self, target_lang: str | None) -> str:
+        normalized = str(target_lang or "").strip().upper()
+        if normalized in {"CHS", "CHT"}:
+            return "v"
+        return "auto"
+
+    def _resolve_region_direction(
+        self,
+        bbox: list[int],
+        region_direction: Any,
+        target_lang: str | None,
+        layout_override: dict[str, Any] | None = None,
+    ) -> str:
+        direction_override = self._normalize_direction_override((layout_override or {}).get("direction"))
+        if direction_override == "vertical":
+            return "v"
+        if direction_override == "horizontal":
+            return "h"
+
+        default_direction = self._default_direction_for_target_lang(target_lang)
+        if default_direction != "auto":
+            return default_direction
+
+        resolved = str(region_direction or "").strip().lower()
+        if resolved.startswith("v"):
+            return "v"
+        if resolved.startswith("h"):
+            return "h"
+        return self._direction_from_bbox(bbox)
+
     def _manual_region_lines(self, bbox: list[int]) -> list[list[list[int]]]:
         x1, y1, x2, y2 = bbox
         return [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]]
@@ -3170,7 +3249,11 @@ class TranslatorEngine:
         x1, y1, x2, y2 = bbox
         width = max(x2 - x1, 1)
         height = max(y2 - y1, 1)
-        resolved_direction = direction or self._direction_from_bbox(bbox)
+        resolved_direction = self._resolve_region_direction(
+            bbox,
+            direction,
+            target_lang,
+        )
         resolved_font_size = int(round(font_size if font_size is not None else max(min(width, height), 14)))
         return {
             "id": f"manual::{stored_name}::{uuid.uuid4().hex}",
@@ -3195,7 +3278,11 @@ class TranslatorEngine:
         from manga_translator.utils.textblock import TextBlock
 
         bbox = payload.get("bbox") or [0, 0, 0, 0]
-        direction = str(payload.get("direction") or self._direction_from_bbox(bbox))
+        direction = self._resolve_region_direction(
+            bbox,
+            payload.get("direction"),
+            payload.get("target_lang"),
+        )
         translation = str(payload.get("translation") or payload.get("machine_translation") or "").strip()
         source_text = str(payload.get("source_text") or "").strip()
         region = TextBlock(
@@ -3262,7 +3349,11 @@ class TranslatorEngine:
         normalized["source_text"] = str(payload.get("source_text") or "").strip()
         normalized["machine_translation"] = str(payload.get("machine_translation") or "").strip()
         normalized["translation"] = str(payload.get("translation") or normalized["machine_translation"]).strip()
-        normalized["direction"] = str(payload.get("direction") or self._direction_from_bbox(normalized["bbox"]))
+        normalized["direction"] = self._resolve_region_direction(
+            normalized["bbox"],
+            payload.get("direction"),
+            payload.get("target_lang"),
+        )
         normalized["alignment"] = str(payload.get("alignment") or "auto")
         normalized["font_size"] = max(8, int(round(float(payload.get("font_size") or 14))))
         normalized["fg_color"] = [int(v) for v in (payload.get("fg_color") or (0, 0, 0))]
@@ -4112,6 +4203,13 @@ class TranslatorEngine:
                     region.font_size = max(8, int(round(float(font_size))))
                 except (TypeError, ValueError):
                     pass
+
+            region.direction = self._resolve_region_direction(
+                self._region_bbox(region),
+                getattr(region, "direction", ""),
+                config.get("target_lang"),
+                layout_override=layout_override,
+            )
 
             visible_regions.append(region)
 

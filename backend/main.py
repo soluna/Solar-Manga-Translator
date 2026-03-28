@@ -88,12 +88,19 @@ def list_available_fonts() -> list[dict[str, str]]:
 
         for path in font_paths:
             source_label = "自定义" if source == "project" else "内置"
+            suffix = path.suffix.lower()
+            format_hint = {
+                ".ttf": "truetype",
+                ".otf": "opentype",
+            }.get(suffix, "")
             fonts.append(
                 {
                     "id": f"{source}:{path.name}",
                     "name": path.name,
                     "label": f"{path.stem} ({source_label})",
                     "source": source,
+                    "extension": suffix,
+                    "format_hint": format_hint,
                     "url": f"/api/fonts/file/{source}/{quote(path.name)}",
                 }
             )
@@ -140,7 +147,12 @@ async def get_fonts():
 @app.get("/api/fonts/file/{source}/{font_name:path}")
 async def get_font_file(source: str, font_name: str):
     font_path = resolve_font_file(source, font_name)
-    return FileResponse(font_path)
+    media_type = {
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+        ".ttc": "font/collection",
+    }.get(font_path.suffix.lower())
+    return FileResponse(font_path, media_type=media_type)
 
 
 @app.get("/api/projects")

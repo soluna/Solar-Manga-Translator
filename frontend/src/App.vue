@@ -37,6 +37,11 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
+const textDirectionOptions = [
+  { value: 'auto', label: '自动（中文默认竖排）' },
+  { value: 'vertical', label: '竖排' },
+  { value: 'horizontal', label: '横排' }
+]
 const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const maxCanvasHistoryEntries = 50
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
@@ -495,7 +500,11 @@ const previewFontFaceCss = computed(() => {
       continue
     }
     const family = getPreviewFontAlias(font.id)
-    rules.push(`@font-face{font-family:'${family}';src:url('${toApiUrl(font.url)}') format('truetype');font-display:swap;}`)
+    const formatHint = getPreviewFontFormatHint(font)
+    const srcValue = formatHint
+      ? `url('${toApiUrl(font.url)}') format('${formatHint}')`
+      : `url('${toApiUrl(font.url)}')`
+    rules.push(`@font-face{font-family:'${family}';src:${srcValue};font-style:normal;font-weight:400;font-display:swap;}`)
   }
   return rules.join('\n')
 })
@@ -984,6 +993,23 @@ function getFontById(fontId) {
   return availableFonts.value.find((font) => font.id === fontId) || null
 }
 
+function getPreviewFontFormatHint(font) {
+  const explicitHint = String(font?.format_hint || '').trim().toLowerCase()
+  if (explicitHint) {
+    return explicitHint
+  }
+  const extension = String(font?.extension || font?.name || '')
+    .trim()
+    .toLowerCase()
+  if (extension.endsWith('.ttf')) {
+    return 'truetype'
+  }
+  if (extension.endsWith('.otf')) {
+    return 'opentype'
+  }
+  return ''
+}
+
 function getRegionPreviewFontFamily(region) {
   let fontId = ''
   if (config.value.font_style_mode === 'auto-map') {
@@ -1002,8 +1028,44 @@ function getRegionPreviewFontFamily(region) {
   return `"${fallbackFamily}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
 }
 
+function isChineseTargetLanguage() {
+  const targetLang = String(config.value.target_lang || '').trim().toUpperCase()
+  return targetLang === 'CHS' || targetLang === 'CHT'
+}
+
+function normalizeDirectionValue(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'vertical' || normalized === 'v' || normalized === 'vertical-rl') {
+    return 'vertical'
+  }
+  if (normalized === 'horizontal' || normalized === 'h' || normalized === 'horizontal-tb') {
+    return 'horizontal'
+  }
+  return 'auto'
+}
+
+function getRegionDirectionOverride(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  return normalizeDirectionValue(override?.direction)
+}
+
+function getRegionDirectionValue(region) {
+  return getRegionDirectionOverride(region)
+}
+
+function getResolvedRegionDirection(region) {
+  const override = getRegionDirectionOverride(region)
+  if (override !== 'auto') {
+    return override
+  }
+  if (isChineseTargetLanguage()) {
+    return 'vertical'
+  }
+  return normalizeDirectionValue(region?.direction) === 'vertical' ? 'vertical' : 'horizontal'
+}
+
 function isVerticalRegion(region) {
-  return String(region?.direction || '').toLowerCase().startsWith('v')
+  return getResolvedRegionDirection(region) === 'vertical'
 }
 
 function getRegionFontSize(region) {
@@ -1866,7 +1928,19 @@ function updateRegionLayoutOverride(regionId, patch) {
   if (typeof patch.font_size === 'number' && !Number.isNaN(patch.font_size)) {
     currentOverride.font_size = Math.max(8, Math.min(240, Math.round(patch.font_size)))
   }
-  nextOverrides[regionId] = currentOverride
+  if (Object.prototype.hasOwnProperty.call(patch, 'direction')) {
+    const normalizedDirection = normalizeDirectionValue(patch.direction)
+    if (normalizedDirection === 'auto') {
+      delete currentOverride.direction
+    } else {
+      currentOverride.direction = normalizedDirection
+    }
+  }
+  if (!Object.keys(currentOverride).length) {
+    delete nextOverrides[regionId]
+  } else {
+    nextOverrides[regionId] = currentOverride
+  }
   translationRegionLayoutOverrides.value = nextOverrides
 }
 
@@ -2286,6 +2360,44 @@ function updateRegionFontSize(region, nextValue) {
   }
   updateRegionLayoutOverride(region.id, { font_size: parsed })
   selectedEditRegionKey.value = region.id
+}
+
+function updateRegionTextDirection(region, nextDirection) {
+  const normalizedDirection = normalizeDirectionValue(nextDirection)
+  const previousDirection = getRegionDirectionValue(region)
+  updateRegionLayoutOverride(region.id, { direction: normalizedDirection })
+  selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || normalizedDirection === previousDirection) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '调整文本方向',
+    redoCommands: [
+      {
+        type: 'update_text_direction',
+        region_id: region.id,
+        direction: normalizedDirection
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_text_direction',
+        region_id: region.id,
+        direction: previousDirection
+      }
+    ],
+    successMessage: normalizedDirection === 'horizontal'
+      ? '已切换为横排预览。'
+      : normalizedDirection === 'vertical'
+        ? '已切换为竖排预览。'
+        : '已恢复自动文本方向。',
+    focusRegionId: region.id,
+    rollback: () => {
+      updateRegionLayoutOverride(region.id, { direction: previousDirection })
+    }
+  })
 }
 
 function handleRegionTextInput(region, nextValue) {
@@ -2954,12 +3066,55 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleGlobalCanvasKeydown)
 })
 
+async function warmPreviewFonts() {
+  if (typeof document === 'undefined' || !document.fonts) {
+    return
+  }
+
+  const fontIds = new Set()
+  if (config.value.font_key) {
+    fontIds.add(String(config.value.font_key))
+  }
+  for (const styleBucket of styleBucketOptions.map((option) => option.value)) {
+    const fontId = getConfiguredStyleFontId(styleBucket)
+    if (fontId) {
+      fontIds.add(fontId)
+    }
+  }
+
+  await Promise.allSettled(
+    Array.from(fontIds).map((fontId) =>
+      document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
+    )
+  )
+  renderNonce.value = Date.now()
+}
+
 watch(
   config,
   (nextValue) => {
     saveStoredConfig(nextValue)
   },
   { deep: true }
+)
+
+watch(
+  [
+    previewFontFaceCss,
+    () => availableFonts.value.length,
+    () => config.value.font_key,
+    () => config.value.font_style_mode,
+    () => config.value.style_font_gothic_key,
+    () => config.value.style_font_mincho_key,
+    () => config.value.style_font_rounded_key,
+    () => config.value.style_font_cartoon_key,
+    () => config.value.style_font_handwritten_key,
+    () => config.value.style_font_sfx_key
+  ],
+  () => {
+    void warmPreviewFonts()
+  },
+  { immediate: true }
 )
 
 watch(
@@ -4043,6 +4198,23 @@ watch(
                     @blur="commitRegionFontSize(region)"
                   />
                 </label>
+
+                  <label class="compact-select-wrap">
+                    <select
+                      :value="getRegionDirectionValue(region)"
+                      @click.stop
+                      @mousedown.stop
+                      @change="updateRegionTextDirection(region, $event.target.value)"
+                    >
+                      <option
+                        v-for="option in textDirectionOptions"
+                        :key="`${region.id}-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
 
                   <button
                     v-if="isManualRegion(region)"

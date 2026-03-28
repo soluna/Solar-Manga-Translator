@@ -152,6 +152,42 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             )
         return self._format_prompt_log(to_lang, prompt)
 
+    def _debug_file_path(self) -> str:
+        return str(os.getenv("MT_TRANSLATION_DEBUG_FILE", "") or "").strip()
+
+    def _to_json_compatible(self, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [self._to_json_compatible(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._to_json_compatible(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._to_json_compatible(item) for key, item in value.items()}
+        if hasattr(value, "model_dump"):
+            try:
+                return self._to_json_compatible(value.model_dump())
+            except Exception:
+                pass
+        if hasattr(value, "dict"):
+            try:
+                return self._to_json_compatible(value.dict())
+            except Exception:
+                pass
+        return str(value)
+
+    def _append_translation_debug(self, payload: dict):
+        debug_path = self._debug_file_path()
+        if not debug_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+            with open(debug_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(self._to_json_compatible(payload), ensure_ascii=False))
+                handle.write("\n")
+        except Exception:
+            pass
+
     def _normalize_response_markers(self, text: str) -> str:
         return re.sub(r"<\|?(\d+)\|?>", lambda match: f"<|{match.group(1)}|>", text or "")
 
@@ -519,20 +555,58 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         messages = self._build_messages(to_lang, prompt)
         model_name = self.model or CUSTOM_OPENAI_MODEL
         force_responses_api = self._is_translation_responses_model(model_name)
+        debug_request_id = f"req-{time.time_ns()}"
 
         if self.use_responses_api or force_responses_api:
             self.logger.debug(f"Using Responses API for model: {model_name}")
+            api_mode = "responses_translation" if force_responses_api else "responses"
             if force_responses_api:
                 prompt_input = self._translation_responses_prompt_input(from_lang, to_lang, prompt)
                 self.logger.debug(
                     "Using translation-model Responses payload with translation_options:\n"
                     + json.dumps(prompt_input, ensure_ascii=False, indent=2)
                 )
-                response = await self._call_translation_responses_api(model_name, prompt_input)
             else:
                 prompt_input = self._responses_prompt_input(model_name, to_lang, prompt)
-                response = await self._call_responses_api(model_name, prompt_input)
+            self._append_translation_debug(
+                {
+                    "request_id": debug_request_id,
+                    "phase": "request",
+                    "api_mode": api_mode,
+                    "model": model_name,
+                    "from_lang": from_lang,
+                    "to_lang": to_lang,
+                    "prompt": prompt,
+                    "input": prompt_input,
+                }
+            )
+            try:
+                if force_responses_api:
+                    response = await self._call_translation_responses_api(model_name, prompt_input)
+                else:
+                    response = await self._call_responses_api(model_name, prompt_input)
+            except Exception as exc:
+                self._append_translation_debug(
+                    {
+                        "request_id": debug_request_id,
+                        "phase": "error",
+                        "api_mode": api_mode,
+                        "model": model_name,
+                        "error": str(exc),
+                    }
+                )
+                raise
             response_text = self._extract_responses_text(response)
+            self._append_translation_debug(
+                {
+                    "request_id": debug_request_id,
+                    "phase": "response",
+                    "api_mode": api_mode,
+                    "model": model_name,
+                    "raw_response": response,
+                    "response_text": response_text,
+                }
+            )
             self.logger.debug("\n-- GPT Response (raw) --")
             self.logger.debug(response_text)
             self.logger.debug("------------------------\n")
@@ -544,17 +618,50 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             self.token_count_last = usage_total
             return response_text
 
-        response = await self.client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=self._MAX_TOKENS // 2,
-            temperature=self.temperature,
-            top_p=self.top_p,
+        self._append_translation_debug(
+            {
+                "request_id": debug_request_id,
+                "phase": "request",
+                "api_mode": "chat_completions",
+                "model": model_name,
+                "from_lang": from_lang,
+                "to_lang": to_lang,
+                "messages": messages,
+            }
         )
+        try:
+            response = await self.client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=self._MAX_TOKENS // 2,
+                temperature=self.temperature,
+                top_p=self.top_p,
+            )
+        except Exception as exc:
+            self._append_translation_debug(
+                {
+                    "request_id": debug_request_id,
+                    "phase": "error",
+                    "api_mode": "chat_completions",
+                    "model": model_name,
+                    "error": str(exc),
+                }
+            )
+            raise
 
         self.logger.debug("\n-- GPT Response (raw) --")
         self.logger.debug(response.choices[0].message.content)
         self.logger.debug("------------------------\n")
+        self._append_translation_debug(
+            {
+                "request_id": debug_request_id,
+                "phase": "response",
+                "api_mode": "chat_completions",
+                "model": model_name,
+                "raw_response": response,
+                "response_text": response.choices[0].message.content,
+            }
+        )
 
         self.token_count += response.usage.total_tokens
         self.token_count_last = response.usage.total_tokens

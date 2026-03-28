@@ -387,6 +387,18 @@ async def get_page_translation_input_debug(session_id: str, page_id: str):
     return payload
 
 
+@app.get("/api/projects/{project_id}/translation-request-debug")
+async def get_project_translation_request_debug(project_id: str):
+    _ = get_or_restore_session(project_id)
+    try:
+        payload = translator_engine.get_translation_request_debug(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload
+
+
 @app.post("/api/pages/{session_id}/{page_id}/commands")
 async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(session_id)

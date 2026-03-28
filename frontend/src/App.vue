@@ -311,6 +311,7 @@ const translatedPreviewCanvasRef = ref(null)
 const translatedPreviewScale = ref(1)
 const exportingOcrDebug = ref(false)
 const exportingTranslationInputDebug = ref(false)
+const exportingTranslationRequestDebug = ref(false)
 
 const config = ref(loadStoredConfig())
 
@@ -652,6 +653,42 @@ async function exportCurrentPageTranslationInputDebug() {
     errorMessage.value = error instanceof Error ? error.message : '导出翻译输入调试信息失败'
   } finally {
     exportingTranslationInputDebug.value = false
+  }
+}
+
+async function exportCurrentProjectTranslationRequestDebug() {
+  if (!sessionId.value || exportingTranslationRequestDebug.value) {
+    return
+  }
+
+  exportingTranslationRequestDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/projects/${sessionId.value}/translation-request-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出翻译请求调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${sessionId.value || 'project'}-translation-request-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出本次翻译请求/响应调试 JSON，可以直接核对模型调用链路。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '导出翻译请求调试信息失败'
+  } finally {
+    exportingTranslationRequestDebug.value = false
   }
 }
 
@@ -4129,6 +4166,14 @@ watch(
               @click="exportCurrentPageTranslationInputDebug"
             >
               {{ exportingTranslationInputDebug ? '导出中…' : '导出翻译输入调试' }}
+            </button>
+            <button
+              class="inline-button"
+              type="button"
+              :disabled="!sessionId || exportingTranslationRequestDebug"
+              @click="exportCurrentProjectTranslationRequestDebug"
+            >
+              {{ exportingTranslationRequestDebug ? '导出中…' : '导出翻译请求调试' }}
             </button>
           </div>
         </div>

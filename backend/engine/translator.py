@@ -82,6 +82,9 @@ class TranslatorEngine:
     def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
         return self._project_page_dir(project_id, page_id) / "page_document.json"
 
+    def _translation_request_debug_path(self, project_id: str) -> Path:
+        return self.temp_dir / f"{project_id}_translation-request-debug.jsonl"
+
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
             "project": [self.project_font_dir, self.project_font_legacy_dir],
@@ -95,6 +98,24 @@ class TranslatorEngine:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return default
+
+    def _read_jsonl_file(self, path: Path) -> list[Any]:
+        if not path.exists():
+            return []
+        rows: list[Any] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        rows.append({"type": "unparsed_line", "raw": line})
+        except Exception:
+            return []
+        return rows
 
     def _write_json_file(self, path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,6 +1141,18 @@ class TranslatorEngine:
             "queries": queries,
         }
 
+    def get_translation_request_debug(self, project_id: str) -> dict[str, Any]:
+        debug_path = self._translation_request_debug_path(project_id)
+        events = self._read_jsonl_file(debug_path)
+        if not events:
+            raise FileNotFoundError("当前项目还没有翻译请求调试数据，请先实际执行一次翻译。")
+        return {
+            "project_id": project_id,
+            "debug_file": str(debug_path.resolve()),
+            "event_count": len(events),
+            "events": events,
+        }
+
     def _page_display_name(self, session: dict[str, Any], page_id: str) -> str:
         for image in session.get("source_images") or []:
             if str(image.get("stored_name") or "") == page_id:
@@ -1486,6 +1519,8 @@ class TranslatorEngine:
         session["rerender_cache_dir"] = str(cache_dir)
         mask_debug_dir = self._prepare_mask_debug_dir(session_id, reset=True) if config["export_mask_debug"] else None
         session["mask_debug_dir"] = str(mask_debug_dir) if mask_debug_dir is not None else None
+        with contextlib.suppress(FileNotFoundError):
+            self._translation_request_debug_path(session_id).unlink()
         output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(output_dir)
         session["translated_output_map"] = {}
@@ -2646,6 +2681,7 @@ class TranslatorEngine:
             env["MT_MASK_DEBUG_DIR"] = str(self._prepare_mask_debug_dir(session_id, reset=False))
         if session_id:
             env["MT_RERENDER_CACHE_DIR"] = str(self._prepare_rerender_cache_dir(session_id, reset=False))
+            env["MT_TRANSLATION_DEBUG_FILE"] = str(self._translation_request_debug_path(session_id))
         return env
 
     def _dump_log_output(self, log_path: Path) -> None:

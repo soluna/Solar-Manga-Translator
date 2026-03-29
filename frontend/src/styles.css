@@ -735,6 +735,24 @@ h2 {
   align-items: start;
 }
 
+.style-runtime-debug {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 253, 249, 0.92);
+  border: 1px solid rgba(116, 88, 62, 0.12);
+  color: #5f4a39;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.style-runtime-debug strong {
+  color: #2b2118;
+}
+
 .style-preview,
 .style-region-list {
   background: rgba(255, 255, 255, 0.72);
@@ -974,8 +992,8 @@ h2 {
 .style-region-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 8px 10px;
   border-radius: 16px;
   background: rgba(255, 248, 241, 0.86);
   border: 1px solid rgba(116, 88, 62, 0.12);
@@ -997,9 +1015,9 @@ h2 {
 
 .style-region-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }
 
 .style-region-copy {
@@ -1058,8 +1076,8 @@ h2 {
 .style-source-text {
   color: #7a614d;
   margin: 0;
-  font-size: 0.92rem;
-  line-height: 1.25;
+  font-size: 0.88rem;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

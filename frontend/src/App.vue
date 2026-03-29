@@ -499,6 +499,21 @@ const selectedEditPage = computed(() => {
     || null
   )
 })
+const selectedEditRegion = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return null
+  }
+  return page.regions.find((region) => region.id === selectedEditRegionKey.value) || page.regions[0] || null
+})
+const selectedRegionPreviewDebug = ref({
+  regionId: '',
+  requestedFont: '',
+  requestedAlias: '',
+  computedFontFamily: '',
+  computedFontWeight: '',
+  previewLayer: '',
+})
 const progressPercent = computed(() => {
   if (!progress.value.total) {
     return 0
@@ -1287,6 +1302,62 @@ function getEffectiveRegionFontLabel(region) {
   }
 
   return effectiveFontLabel
+}
+
+async function refreshSelectedRegionPreviewDebug() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const region = selectedEditRegion.value
+  const page = selectedEditPage.value
+  if (!region || !page) {
+    selectedRegionPreviewDebug.value = {
+      regionId: '',
+      requestedFont: '',
+      requestedAlias: '',
+      computedFontFamily: '',
+      computedFontWeight: '',
+      previewLayer: '',
+    }
+    return
+  }
+
+  const requestedFontId = getEffectiveRegionFontId(region)
+  const requestedFont = requestedFontId ? getFontById(requestedFontId) : null
+  const requestedAlias = requestedFontId ? getPreviewFontAlias(requestedFontId) : ''
+  const layer = shouldShowCanvasTextOverlay(region, page)
+    ? '实时叠字预览'
+    : shouldShowSourceCropPreview(region, page)
+      ? '原文裁切预览'
+      : '最终译图'
+
+  await nextTick()
+  await new Promise((resolve) => window.requestAnimationFrame(() => resolve()))
+
+  const overlay = translatedPreviewCanvasRef.value?.querySelector?.(
+    `.style-box-preview-text[data-region-id="${region.id}"]`
+  )
+  const computedStyle = overlay ? window.getComputedStyle(overlay) : null
+
+  selectedRegionPreviewDebug.value = {
+    regionId: region.id,
+    requestedFont: requestedFont?.label || getEffectiveRegionFontLabel(region),
+    requestedAlias,
+    computedFontFamily: computedStyle?.fontFamily || '(当前未走叠字预览层)',
+    computedFontWeight: computedStyle?.fontWeight || '',
+    previewLayer: layer,
+  }
+
+  console.log('[CanvasFontDebug]', {
+    regionId: region.id,
+    requestedFontId,
+    requestedFontLabel: requestedFont?.label || '',
+    requestedAlias,
+    computedFontFamily: computedStyle?.fontFamily || '',
+    computedFontWeight: computedStyle?.fontWeight || '',
+    previewLayer: layer,
+  })
 }
 
 function getRegionPreviewFontFamily(region) {
@@ -3572,6 +3643,7 @@ watch(selectedEditRegionKey, () => {
   if (selectedEditRegionKey.value) {
     void scrollSelectedRegionCardIntoView()
   }
+  void refreshSelectedRegionPreviewDebug()
 })
 
 watch(
@@ -3583,7 +3655,24 @@ watch(
   ],
   () => {
     void syncTranslatedPreviewScale()
+    void refreshSelectedRegionPreviewDebug()
   }
+)
+
+watch(
+  () => [
+    selectedEditRegion.value?.id || '',
+    JSON.stringify(translationRegionLayoutOverrides.value),
+    JSON.stringify(translationRegionSkipOverrides.value),
+    JSON.stringify(translationRegionDisabledOverrides.value),
+    JSON.stringify(styleRegionOverrides.value),
+    previewFontFaceCss.value,
+    renderNonce.value,
+  ],
+  () => {
+    void refreshSelectedRegionPreviewDebug()
+  },
+  { deep: false }
 )
 </script>
 
@@ -4441,6 +4530,15 @@ watch(
           </div>
         </div>
 
+        <div v-if="isCanvasReviewMode && selectedEditRegion" class="style-runtime-debug">
+          <span><strong>选中框：</strong>#{{ selectedEditRegion.index + 1 }}</span>
+          <span><strong>期望字体：</strong>{{ selectedRegionPreviewDebug.requestedFont || getEffectiveRegionFontLabel(selectedEditRegion) }}</span>
+          <span><strong>预览别名：</strong>{{ selectedRegionPreviewDebug.requestedAlias || '（无）' }}</span>
+          <span><strong>实际命中：</strong>{{ selectedRegionPreviewDebug.computedFontFamily || '（未读取到）' }}</span>
+          <span><strong>字重：</strong>{{ selectedRegionPreviewDebug.computedFontWeight || '（未读取到）' }}</span>
+          <span><strong>当前层：</strong>{{ selectedRegionPreviewDebug.previewLayer || '（未知）' }}</span>
+        </div>
+
         <div class="style-workbench">
           <div class="style-preview">
             <div class="style-preview-grid">
@@ -4547,6 +4645,7 @@ watch(
                       v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
                       class="style-box-preview-text"
                       :class="{ vertical: isVerticalRegion(region) }"
+                      :data-region-id="region.id"
                       :style="getCanvasPreviewTextStyle(region)"
                     >
                       {{ getCanvasPreviewText(region) }}

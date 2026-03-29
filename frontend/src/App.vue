@@ -134,9 +134,12 @@ function normalizeStoredConfig(rawValue) {
     return defaults
   }
 
-  const translator = typeof rawValue.translator === 'string'
+  const rawTranslator = typeof rawValue.translator === 'string'
     ? rawValue.translator
     : defaults.translator
+  const translator = rawTranslator === 'custom_openai'
+    ? 'doubao-ark'
+    : rawTranslator
   const storedTranslatorModel = typeof rawValue.translator_model === 'string'
     ? rawValue.translator_model
     : defaults.translator_model

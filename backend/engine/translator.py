@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import shutil
 import sys
@@ -132,6 +133,9 @@ class TranslatorEngine:
         if not isinstance(config, dict):
             return {}
         sanitized = json.loads(json.dumps(config, ensure_ascii=False))
+        selected_translator = str(sanitized.get("selected_translator") or "").strip()
+        if selected_translator:
+            sanitized["translator"] = selected_translator
         for secret_key in ("api_key", "image_cleanup_api_key"):
             if secret_key in sanitized:
                 sanitized[secret_key] = ""
@@ -1687,6 +1691,8 @@ class TranslatorEngine:
         session["download_path"] = None
         session["workflow_stage"] = "detecting"
         session["deferred_output_names"] = set()
+        with contextlib.suppress(FileNotFoundError):
+            self._translation_request_debug_path(session_id).unlink()
 
         config_path = self._write_config(session_id, config, profile="detect")
         log_path = self.temp_dir / f"{session_id}_detect.log"
@@ -1761,6 +1767,8 @@ class TranslatorEngine:
         session["download_path"] = None
         session["workflow_stage"] = "translating"
         session["deferred_output_names"] = set()
+        with contextlib.suppress(FileNotFoundError):
+            self._translation_request_debug_path(session_id).unlink()
 
         source_images = list(session.get("source_images") or [])
         total = len(source_images)
@@ -2173,6 +2181,8 @@ class TranslatorEngine:
     def _normalize_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         raw_config = raw_config or {}
         selected_translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
+        if selected_translator == "custom_openai":
+            selected_translator = "doubao-ark"
         translator = selected_translator
         target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
         translator_model = self._normalize_translator_model(
@@ -2272,7 +2282,7 @@ class TranslatorEngine:
     ) -> str:
         value = str(raw_value or "").strip()
         custom_value = str(raw_custom_value or "").strip()
-        if translator == "doubao-ark":
+        if translator in {"doubao-ark", "custom_openai"}:
             return custom_value or value or self.DOUBAO_DEFAULT_MODEL
         return ""
 
@@ -3464,6 +3474,17 @@ class TranslatorEngine:
         if vendor_root not in sys.path:
             sys.path.insert(0, vendor_root)
 
+    def _reload_vendor_translator_modules(self) -> None:
+        self._ensure_vendor_import_path()
+        importlib.invalidate_caches()
+        for module_name in (
+            "manga_translator.translators.custom_openai",
+            "manga_translator.translators",
+        ):
+            module = sys.modules.get(module_name)
+            if module is not None:
+                importlib.reload(module)
+
     def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
         region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
@@ -3803,6 +3824,7 @@ class TranslatorEngine:
             return ["" for _ in cleaned_texts]
 
         self._ensure_vendor_import_path()
+        self._reload_vendor_translator_modules()
         from manga_translator.config import Translator, TranslatorConfig
         from manga_translator.translators import dispatch as dispatch_translation, unload as unload_translator
 

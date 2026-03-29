@@ -291,6 +291,7 @@ const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
 const pageEditHistory = ref({})
+const canvasPreviewDirtyPages = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
@@ -568,6 +569,28 @@ function withCacheBust(url) {
   return `${url}${separator}t=${renderNonce.value}`
 }
 
+function markCanvasPreviewDirty(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return
+  }
+  canvasPreviewDirtyPages.value = {
+    ...canvasPreviewDirtyPages.value,
+    [normalizedPageId]: true
+  }
+}
+
+function clearCanvasPreviewDirty(pageId = '') {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    canvasPreviewDirtyPages.value = {}
+    return
+  }
+  const nextState = { ...canvasPreviewDirtyPages.value }
+  delete nextState[normalizedPageId]
+  canvasPreviewDirtyPages.value = nextState
+}
+
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
@@ -803,6 +826,7 @@ function applySessionPayload(payload, options = {}) {
   translationInputDrafts.value = {}
   fontSizeInputDrafts.value = {}
   pageEditHistory.value = {}
+  canvasPreviewDirtyPages.value = {}
 
   currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
   projectTitleDraft.value = currentProject.value?.title || ''
@@ -1194,7 +1218,17 @@ function getRegionFontPlaceholderLabel(_region) {
 function getRegionPreviewFontFamily(region) {
   const fontId = getEffectiveRegionFontId(region)
   if (fontId) {
-    return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+    const font = getFontById(fontId)
+    const namedFamilies = [
+      getPreviewFontAlias(fontId),
+      normalizeFontFamilyName(font?.name || ''),
+      normalizeFontFamilyName(font?.label || ''),
+      normalizeFontFamilyName(region?.font_family || ''),
+      'Microsoft JhengHei',
+      'PingFang TC',
+      'Noto Sans CJK TC'
+    ].filter(Boolean)
+    return `${namedFamilies.map((family) => `"${family}"`).join(',')},sans-serif`
   }
 
   const fallbackFamily = normalizeFontFamilyName(region?.font_family || '')
@@ -1456,9 +1490,10 @@ function getCanvasHandleCursor(handle) {
 }
 
 function getCanvasPreviewImageUrl(page) {
-  const imagePath = isCanvasReviewMode.value
+  const dirty = Boolean(page?.stored_name && canvasPreviewDirtyPages.value[page.stored_name])
+  const imagePath = isCanvasReviewMode.value && dirty
     ? (page?.base_image_url || page?.translated_image_url || page?.image_url || '')
-    : (page?.translated_image_url || page?.image_url || '')
+    : (page?.translated_image_url || page?.image_url || page?.base_image_url || '')
   return withCacheBust(toApiUrl(imagePath))
 }
 
@@ -1472,8 +1507,24 @@ function getCanvasPreviewText(region) {
   return draft || getEditRegionText(region) || region.preview_text || ''
 }
 
-function shouldShowSourceCropPreview(region) {
-  return Boolean(isCanvasReviewMode.value && (isRegionSkipEnabled(region) || isRegionDisabled(region)))
+function shouldShowSourceCropPreview(region, page) {
+  return Boolean(
+    isCanvasReviewMode.value
+    && page?.stored_name
+    && canvasPreviewDirtyPages.value[page.stored_name]
+    && (isRegionSkipEnabled(region) || isRegionDisabled(region))
+  )
+}
+
+function shouldShowCanvasTextOverlay(region, page) {
+  return Boolean(
+    isCanvasReviewMode.value
+    && page?.stored_name
+    && canvasPreviewDirtyPages.value[page.stored_name]
+    && !isRegionSkipEnabled(region)
+    && !isRegionDisabled(region)
+    && getCanvasPreviewText(region)
+  )
 }
 
 function getSourceCropImageStyle(region, page) {
@@ -2016,6 +2067,9 @@ function updateTranslationSkipOverride(region, enabled) {
   }
   translationRegionSkipOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
 
   if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
     return
@@ -2085,6 +2139,9 @@ function updateRegionDisabledOverride(region, enabled) {
     selectedEditRegionKey.value = ''
   }
   selectedEditPageKey.value = selectedEditPage.value?.stored_name || selectedEditPageKey.value
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
 
   if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
     void loadEditInspection({ silent: true })
@@ -2142,6 +2199,9 @@ function updateRegionLayoutOverride(regionId, patch) {
     nextOverrides[regionId] = currentOverride
   }
   translationRegionLayoutOverrides.value = nextOverrides
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
 }
 
 async function applyPageCommands(pageId, commands) {
@@ -2376,6 +2436,7 @@ async function runCanvasStructuredAction(page, options) {
   let result = null
 
   if (kind === 'create_region' && bbox) {
+    markCanvasPreviewDirty(page.stored_name)
     result = await applyPageCommands(page.stored_name, [{ type: 'create_region', bbox }])
     const createdRegionId = String(result?.created_region_id || '')
     const historyEntry = {
@@ -2394,6 +2455,7 @@ async function runCanvasStructuredAction(page, options) {
   }
 
   if (kind === 'merge_regions' && regionIds.length >= 2) {
+    markCanvasPreviewDirty(page.stored_name)
     result = await applyPageCommands(page.stored_name, [{ type: 'merge_regions', region_ids: regionIds }])
     const createdRegionId = String(result?.created_region_id || '')
     const historyEntry = {
@@ -2413,6 +2475,7 @@ async function runCanvasStructuredAction(page, options) {
 
   if (kind === 'delete_manual_region' && regionIds.length === 1) {
     const targetRegionId = regionIds[0]
+    markCanvasPreviewDirty(page.stored_name)
     const result = await applyPageCommands(page.stored_name, [{ type: 'delete_manual_region', region_id: targetRegionId }])
     const deletedPayload = result?.deleted_region_payload || {}
     const historyEntry = {
@@ -2656,6 +2719,9 @@ function handleRegionTextInput(region, nextValue) {
     translationInputDrafts.value = {
       ...translationInputDrafts.value,
       [region.id]: String(nextValue ?? '')
+    }
+    if (selectedEditPage.value?.stored_name) {
+      markCanvasPreviewDirty(selectedEditPage.value.stored_name)
     }
     return
   }
@@ -3245,6 +3311,15 @@ function startTranslation(action = 'translate') {
       translating.value = false
       applySessionPayload(payload)
       const completedAction = activeAction.value
+      if (completedAction === 'rerender') {
+        if (rerenderTargetStoredName) {
+          clearCanvasPreviewDirty(rerenderTargetStoredName)
+        } else {
+          clearCanvasPreviewDirty()
+        }
+      } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
+        clearCanvasPreviewDirty()
+      }
       status.value = completedAction === 'detect'
         ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
         : completedAction === 'resume-translate'
@@ -4384,7 +4459,7 @@ watch(
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
                     <span
-                      v-if="shouldShowSourceCropPreview(region)"
+                      v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
                       class="style-box-source-crop"
                     >
                       <img
@@ -4394,7 +4469,7 @@ watch(
                       />
                     </span>
                     <span
-                      v-else-if="isCanvasReviewMode && getCanvasPreviewText(region)"
+                      v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
                       class="style-box-preview-text"
                       :class="{ vertical: isVerticalRegion(region) }"
                       :style="getCanvasPreviewTextStyle(region)"

@@ -4582,9 +4582,6 @@ watch(
                     <strong class="style-region-index">#{{ region.index + 1 }}</strong>
                     <div class="style-region-texts">
                       <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
-                      <p class="style-source-meta">
-                        {{ formatOcrConfidence(region.ocr_confidence) }} · {{ getRegionDirectionLabel(region) }} · {{ getEffectiveRegionFontLabel(region) }}
-                      </p>
                     </div>
                     <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
                   </div>

@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 venv/
+.venv-mac/
 __pycache__/
 *.pyc
 .DS_Store

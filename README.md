@@ -30,6 +30,28 @@ chmod +x start.sh
 ./start.sh
 ```
 
+### macOS 本机独立测试环境
+如果你希望在 Mac 上做日常开发、UI 回归或 API/工作流测试，同时**不影响 Windows 上的正式使用环境**，推荐改用单独脚本：
+
+```bash
+chmod +x start.mac.sh
+./start.mac.sh
+```
+
+这条路径会：
+1. 只使用 `backend/.venv-mac`
+2. 不会触碰 Windows 使用的 `backend/venv`
+3. 在本机启动后端 API 和前端页面，适合做：
+   - 前端/画布工作台调试
+   - 项目管理、快照、逐框校对工作流验证
+   - 翻译请求链路与调试导出验证
+   - 后端 API 冒烟测试
+
+说明：
+- macOS 这套更适合作为**开发与回归测试环境**
+- Windows + CUDA 仍然是当前的正式高性能运行环境
+- `start.mac.sh` 依赖 Python `3.10/3.11`，不会使用系统里不兼容的 `3.12+`
+
 ### 手动验证前端
 如果你想先单独确认前端依赖是否正常，可运行：
 ```bash

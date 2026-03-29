@@ -1190,6 +1190,9 @@ class TranslatorEngine:
                     "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
                     "font_size": int(style.get("font_size") or 12),
                     "font_key_override": str(style.get("font_key_override") or ""),
+                    "alignment": str(style.get("alignment") or "auto"),
+                    "letter_spacing": float(style.get("letter_spacing") or 1.0),
+                    "line_spacing": float(style.get("line_spacing") or 1.0),
                 }
             )
 
@@ -1232,6 +1235,9 @@ class TranslatorEngine:
                     "translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
                     "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
                     "font_size": int(style.get("font_size") or 12),
+                    "alignment": str(style.get("alignment") or "auto"),
+                    "letter_spacing": float(style.get("letter_spacing") or 1.0),
+                    "line_spacing": float(style.get("line_spacing") or 1.0),
                 }
             )
 

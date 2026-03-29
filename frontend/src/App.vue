@@ -1408,7 +1408,7 @@ async function refreshSelectedRegionPreviewDebug() {
   await new Promise((resolve) => window.requestAnimationFrame(() => resolve()))
 
   const overlay = translatedPreviewCanvasRef.value?.querySelector?.(
-    `.style-box-preview-text[data-region-id="${region.id}"]`
+    `.style-box-preview-text-content[data-region-id="${region.id}"]`
   )
   const computedStyle = overlay ? window.getComputedStyle(overlay) : null
 
@@ -1484,6 +1484,16 @@ function getResolvedRegionDirection(region) {
 
 function isVerticalRegion(region) {
   return getResolvedRegionDirection(region) === 'vertical'
+}
+
+function getResolvedRegionAlignment(region) {
+  const normalized = String(region?.alignment || config.value.render_alignment || 'left')
+    .trim()
+    .toLowerCase()
+  if (normalized === 'center' || normalized === 'right' || normalized === 'left') {
+    return normalized
+  }
+  return 'left'
 }
 
 function getRegionFontSize(region) {
@@ -1762,14 +1772,48 @@ function getSourceCropImageStyle(region, page) {
 function getCanvasPreviewTextStyle(region) {
   const rawFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
   const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
-  const letterSpacing = Math.max(0, (config.value.render_letter_spacing - 1) * scaledFontSize * 0.2)
+  const spacingMultiplier = Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)
+  const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
+  const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize * 0.2)
+  const lineHeight = Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
   return {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
     letterSpacing: `${letterSpacing.toFixed(2)}px`,
+    lineHeight: String(lineHeight),
     fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
-    textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial'
+    textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
+    textAlign: isVerticalRegion(region)
+      ? 'start'
+      : getResolvedRegionAlignment(region) === 'center'
+        ? 'center'
+        : getResolvedRegionAlignment(region) === 'right'
+          ? 'right'
+          : 'left'
+  }
+}
+
+function getCanvasPreviewTextContainerStyle(region) {
+  const alignment = getResolvedRegionAlignment(region)
+  if (isVerticalRegion(region)) {
+    return {
+      justifyContent: 'flex-end',
+      alignItems: alignment === 'center'
+        ? 'center'
+        : alignment === 'right'
+          ? 'flex-end'
+          : 'flex-start'
+    }
+  }
+
+  return {
+    justifyContent: alignment === 'center'
+      ? 'center'
+      : alignment === 'right'
+        ? 'flex-end'
+        : 'flex-start',
+    alignItems: 'flex-start'
   }
 }
 
@@ -4737,10 +4781,16 @@ watch(
                       v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
                       class="style-box-preview-text"
                       :class="{ vertical: isVerticalRegion(region) }"
-                      :data-region-id="region.id"
-                      :style="getCanvasPreviewTextStyle(region)"
+                      :style="getCanvasPreviewTextContainerStyle(region)"
                     >
-                      {{ getCanvasPreviewText(region) }}
+                      <span
+                        class="style-box-preview-text-content"
+                        :class="{ vertical: isVerticalRegion(region) }"
+                        :data-region-id="region.id"
+                        :style="getCanvasPreviewTextStyle(region)"
+                      >
+                        {{ getCanvasPreviewText(region) }}
+                      </span>
                     </span>
                     <span
                       v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"

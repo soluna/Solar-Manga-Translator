@@ -1210,8 +1210,21 @@ function normalizeFontFamilyName(value) {
     .trim()
 }
 
+function hashPreviewFontKey(value) {
+  let hash = 2166136261
+  for (const char of String(value || '')) {
+    hash ^= char.codePointAt(0) || 0
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
 function getPreviewFontAlias(fontId) {
-  return `codex-preview-font-${String(fontId || '').replace(/[^a-zA-Z0-9_-]+/g, '_')}`
+  const normalized = String(fontId || '').trim()
+  if (!normalized) {
+    return 'codex-preview-font-default'
+  }
+  return `codex-preview-font-${hashPreviewFontKey(normalized)}`
 }
 
 function getConfiguredFontId() {

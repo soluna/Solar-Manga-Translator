@@ -453,6 +453,41 @@ const mergedInspectionPages = computed(() => {
     }
   })
 })
+const comparisonImages = computed(() => {
+  const originalMap = new Map(
+    originalImages.value.map((image) => [String(image?.stored_name || image?.name || ''), image])
+  )
+  const translatedMap = new Map(
+    translatedImages.value.map((image) => [String(image?.stored_name || image?.name || ''), image])
+  )
+  const orderedKeys = []
+  const seen = new Set()
+
+  for (const image of originalImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    orderedKeys.push(key)
+  }
+
+  for (const image of translatedImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    orderedKeys.push(key)
+  }
+
+  return orderedKeys.map((key) => ({
+    key,
+    original: originalMap.get(key) || null,
+    translated: translatedMap.get(key) || null,
+    name: originalMap.get(key)?.name || translatedMap.get(key)?.name || key,
+  }))
+})
 const selectedEditPage = computed(() => {
   if (!mergedInspectionPages.value.length) {
     return null
@@ -1124,6 +1159,11 @@ function getStyleLabel(style) {
   return styleBucketLabelMap[style] || '未分类'
 }
 
+function getResolvedRegionStyleLabel(region) {
+  const resolvedStyle = getResolvedStyle(region)
+  return resolvedStyle ? getStyleLabel(resolvedStyle) : '未分类'
+}
+
 function getRegionOverrideValue(region) {
   return styleRegionOverrides.value[region.id] || ''
 }
@@ -1234,7 +1274,19 @@ function getEffectiveRegionFontId(region) {
 }
 
 function getRegionFontPlaceholderLabel(_region) {
-  return config.value.font_style_mode === 'auto-map' ? '跟随映射' : '跟随主字体'
+  return config.value.font_style_mode === 'auto-map' ? '跟随识别结果' : '跟随主字体'
+}
+
+function getEffectiveRegionFontLabel(region) {
+  const effectiveFontId = getEffectiveRegionFontId(region)
+  const effectiveFont = effectiveFontId ? getFontById(effectiveFontId) : null
+  const effectiveFontLabel = effectiveFont?.label || getFontById(config.value.font_key)?.label || '默认字体'
+
+  if (config.value.font_style_mode === 'auto-map') {
+    return `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}`
+  }
+
+  return effectiveFontLabel
 }
 
 function getRegionPreviewFontFamily(region) {
@@ -4526,14 +4578,16 @@ watch(
               @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
             >
               <div class="style-region-row">
-                <div class="style-region-copy">
-                  <strong class="style-region-index">#{{ region.index + 1 }}</strong>
-                  <div class="style-region-texts">
-                    <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
-                    <p class="style-source-meta">{{ formatOcrConfidence(region.ocr_confidence) }} · {{ getRegionDirectionLabel(region) }}</p>
+                  <div class="style-region-copy">
+                    <strong class="style-region-index">#{{ region.index + 1 }}</strong>
+                    <div class="style-region-texts">
+                      <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                      <p class="style-source-meta">
+                        {{ formatOcrConfidence(region.ocr_confidence) }} · {{ getRegionDirectionLabel(region) }} · {{ getEffectiveRegionFontLabel(region) }}
+                      </p>
+                    </div>
+                    <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
                   </div>
-                  <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
-                </div>
 
                 <div class="style-region-inline-controls" @click.stop @mousedown.stop>
                   <label class="region-inline-toggle">
@@ -4572,7 +4626,7 @@ watch(
                       @mousedown.stop
                       @change="updateRegionFontOverride(region, $event.target.value)"
                     >
-                      <option value="">{{ getRegionFontPlaceholderLabel(region) }}</option>
+                      <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
                       <option
                         v-for="font in availableFonts"
                         :key="`${region.id}-${font.id}`"
@@ -4658,58 +4712,53 @@ watch(
     <section class="gallery-card">
       <div class="section-head">
         <div>
-          <p class="eyebrow">Original</p>
-          <h2>上传预览</h2>
+          <p class="eyebrow">Compare</p>
+          <h2>结果对照</h2>
         </div>
-        <p>{{ originalImages.length }} 张图片</p>
+        <p>{{ comparisonImages.length }} 组页面</p>
       </div>
 
-      <div v-if="originalImages.length" class="gallery-grid">
+      <div v-if="comparisonImages.length" class="compare-grid">
         <article
-          v-for="image in originalImages"
-          :key="image.id"
-          class="gallery-item"
+          v-for="pair in comparisonImages"
+          :key="pair.key"
+          class="compare-card"
         >
-          <img
-            :alt="image.name"
-            :src="image.url"
-            loading="lazy"
-          />
-          <p>{{ image.name }}</p>
+          <div class="compare-card-head">{{ pair.name }}</div>
+          <div class="compare-card-grid">
+            <div class="compare-panel">
+              <div class="compare-panel-label">原图</div>
+              <div class="compare-image-shell">
+                <img
+                  v-if="pair.original"
+                  :alt="`${pair.name} 原图`"
+                  :src="pair.original.url"
+                  loading="lazy"
+                  class="compare-image"
+                />
+                <div v-else class="compare-image-empty">暂无原图</div>
+              </div>
+            </div>
+
+            <div class="compare-panel">
+              <div class="compare-panel-label">译图</div>
+              <div class="compare-image-shell">
+                <img
+                  v-if="pair.translated"
+                  :alt="`${pair.name} 译图`"
+                  :src="pair.translated.url"
+                  loading="lazy"
+                  class="compare-image"
+                />
+                <div v-else class="compare-image-empty">尚未生成</div>
+              </div>
+            </div>
+          </div>
         </article>
       </div>
 
       <div v-else class="empty-state">
-        上传完成后，这里会显示原图预览。
-      </div>
-    </section>
-
-    <section class="gallery-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Translated</p>
-          <h2>翻译结果</h2>
-        </div>
-        <p>{{ translatedImages.length }} 张图片</p>
-      </div>
-
-      <div v-if="translatedImages.length" class="gallery-grid">
-        <article
-          v-for="image in translatedImages"
-          :key="image.id"
-          class="gallery-item"
-        >
-          <img
-            :alt="image.name"
-            :src="image.url"
-            loading="lazy"
-          />
-          <p>{{ image.name }}</p>
-        </article>
-      </div>
-
-      <div v-else class="empty-state">
-        点击“开始翻译”后，这里会随着后端处理逐张显示翻译后的页面。
+        上传并开始翻译后，这里会按页面把原图和译图左右对照展示。
       </div>
     </section>
 

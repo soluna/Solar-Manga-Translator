@@ -1132,6 +1132,28 @@ function getFontById(fontId) {
   return availableFonts.value.find((font) => font.id === fontId) || null
 }
 
+function findFontIdByFamily(fontFamily) {
+  const normalizedFamily = normalizeFontFamilyName(fontFamily).toLowerCase()
+  if (!normalizedFamily) {
+    return ''
+  }
+  for (const font of availableFonts.value) {
+    const candidates = [
+      font?.id,
+      font?.name,
+      font?.label,
+      font?.file_name,
+      font?.filename
+    ]
+      .map((item) => normalizeFontFamilyName(item).toLowerCase())
+      .filter(Boolean)
+    if (candidates.includes(normalizedFamily)) {
+      return String(font.id || '')
+    }
+  }
+  return ''
+}
+
 function getPreviewFontFormatHint(font) {
   const explicitHint = String(font?.format_hint || '').trim().toLowerCase()
   if (explicitHint) {
@@ -1149,13 +1171,28 @@ function getPreviewFontFormatHint(font) {
   return ''
 }
 
-function getRegionPreviewFontFamily(region) {
-  let fontId = ''
+function getRegionFontOverrideId(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  return String(override?.font_key || region?.font_key_override || '').trim()
+}
+
+function getFollowRegionFontId(region) {
   if (config.value.font_style_mode === 'auto-map') {
-    fontId = getConfiguredStyleFontId(getResolvedStyle(region)) || getConfiguredFontId()
-  } else {
-    fontId = getConfiguredFontId()
+    return getConfiguredStyleFontId(getResolvedStyle(region)) || getConfiguredFontId() || findFontIdByFamily(region?.font_family || '')
   }
+  return getConfiguredFontId() || findFontIdByFamily(region?.font_family || '')
+}
+
+function getEffectiveRegionFontId(region) {
+  return getRegionFontOverrideId(region) || getFollowRegionFontId(region)
+}
+
+function getRegionFontPlaceholderLabel(_region) {
+  return config.value.font_style_mode === 'auto-map' ? '跟随映射' : '跟随主字体'
+}
+
+function getRegionPreviewFontFamily(region) {
+  const fontId = getEffectiveRegionFontId(region)
   if (fontId) {
     return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
   }
@@ -2091,6 +2128,14 @@ function updateRegionLayoutOverride(regionId, patch) {
       currentOverride.direction = normalizedDirection
     }
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'font_key')) {
+    const normalizedFontKey = String(patch.font_key || '').trim()
+    if (!normalizedFontKey) {
+      delete currentOverride.font_key
+    } else {
+      currentOverride.font_key = normalizedFontKey
+    }
+  }
   if (!Object.keys(currentOverride).length) {
     delete nextOverrides[regionId]
   } else {
@@ -2228,6 +2273,20 @@ async function undoCanvasEdit() {
           type: 'update_font_size',
           region_id: restoredRegionId,
           font_size: overrides.layout.font_size
+        })
+      }
+      if (typeof overrides.layout?.font_key === 'string') {
+        restoreCommands.push({
+          type: 'update_region_font',
+          region_id: restoredRegionId,
+          font_key: overrides.layout.font_key
+        })
+      }
+      if (typeof overrides.layout?.direction === 'string') {
+        restoreCommands.push({
+          type: 'update_text_direction',
+          region_id: restoredRegionId,
+          direction: overrides.layout.direction
         })
       }
       await applyPageCommands(pageId, restoreCommands)
@@ -2515,6 +2574,42 @@ function updateRegionFontSize(region, nextValue) {
   }
   updateRegionLayoutOverride(region.id, { font_size: parsed })
   selectedEditRegionKey.value = region.id
+}
+
+function updateRegionFontOverride(region, nextFontId) {
+  const normalizedFontId = getFontById(nextFontId) ? String(nextFontId || '').trim() : ''
+  const previousFontId = getRegionFontOverrideId(region)
+  updateRegionLayoutOverride(region.id, { font_key: normalizedFontId })
+  selectedEditRegionKey.value = region.id
+  void warmPreviewFonts()
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || normalizedFontId === previousFontId) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '修改字体',
+    redoCommands: [
+      {
+        type: 'update_region_font',
+        region_id: region.id,
+        font_key: normalizedFontId
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_font',
+        region_id: region.id,
+        font_key: previousFontId
+      }
+    ],
+    successMessage: normalizedFontId ? '已更新这个文本框的字体。' : '已恢复跟随默认字体。',
+    focusRegionId: region.id,
+    rollback: () => {
+      updateRegionLayoutOverride(region.id, { font_key: previousFontId })
+      void warmPreviewFonts()
+    }
+  })
 }
 
 function updateRegionTextDirection(region, nextDirection) {
@@ -3248,6 +3343,12 @@ async function warmPreviewFonts() {
       fontIds.add(fontId)
     }
   }
+  for (const override of Object.values(translationRegionLayoutOverrides.value || {})) {
+    const fontId = String(override?.font_key || '').trim()
+    if (fontId) {
+      fontIds.add(fontId)
+    }
+  }
 
   await Promise.allSettled(
     Array.from(fontIds).map((fontId) =>
@@ -3276,7 +3377,8 @@ watch(
     () => config.value.style_font_rounded_key,
     () => config.value.style_font_cartoon_key,
     () => config.value.style_font_handwritten_key,
-    () => config.value.style_font_sfx_key
+    () => config.value.style_font_sfx_key,
+    () => JSON.stringify(translationRegionLayoutOverrides.value)
   ],
   () => {
     void warmPreviewFonts()
@@ -4365,43 +4467,41 @@ watch(
                     调框
                   </button>
 
-                  <label
-                    v-if="config.font_style_mode === 'auto-map'"
-                    class="compact-select-wrap"
-                  >
+                  <label class="compact-select-wrap compact-select-wrap-font">
                     <select
-                      :value="getRegionOverrideValue(region)"
+                      :value="getRegionFontOverrideId(region)"
                       @click.stop
                       @mousedown.stop
-                      @change="updateStyleOverride(region, $event.target.value)"
+                      @change="updateRegionFontOverride(region, $event.target.value)"
                     >
-                      <option value="">{{ getStyleLabel(getResolvedStyle(region)) }}</option>
+                      <option value="">{{ getRegionFontPlaceholderLabel(region) }}</option>
                       <option
-                        v-for="option in styleBucketOptions"
-                        :key="`${region.id}-${option.value}`"
-                        :value="option.value"
+                        v-for="font in availableFonts"
+                        :key="`${region.id}-${font.id}`"
+                        :value="font.id"
                       >
-                        {{ option.label }}
+                        {{ font.label }}
                       </option>
                     </select>
                   </label>
 
-                  <label class="compact-number-wrap" @click.stop @mousedown.stop>
+                  <label class="compact-number-wrap compact-number-wrap-font-size" @click.stop @mousedown.stop>
                     <input
                       :value="getRegionFontSize(region)"
                       type="number"
                       min="8"
                       max="240"
                       step="1"
-                    @click.stop
-                    @mousedown.stop
-                    @input="handleRegionFontSizeInput(region, $event.target.value)"
-                    @change="commitRegionFontSize(region)"
-                    @blur="commitRegionFontSize(region)"
-                  />
-                </label>
+                      inputmode="numeric"
+                      @click.stop
+                      @mousedown.stop
+                      @input="handleRegionFontSizeInput(region, $event.target.value)"
+                      @keydown.enter.prevent="commitRegionFontSize(region)"
+                      @blur="commitRegionFontSize(region)"
+                    />
+                  </label>
 
-                  <label class="compact-select-wrap">
+                  <label class="compact-select-wrap compact-select-wrap-direction">
                     <select
                       :value="getRegionDirectionValue(region)"
                       @click.stop

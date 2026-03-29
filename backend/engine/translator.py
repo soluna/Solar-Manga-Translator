@@ -786,6 +786,7 @@ class TranslatorEngine:
                 "font_style": str(getattr(region, "font_style", "") or ""),
                 "font_family": os.path.basename(font_family) if font_family else "",
                 "font_path": font_family,
+                "font_key_override": str(layout_override.get("font_key") or ""),
                 "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
                 "font_size_override": font_size_override,
                 "letter_spacing": float(getattr(region, "letter_spacing", 1.0) or 1.0),
@@ -1188,6 +1189,7 @@ class TranslatorEngine:
                     "current_translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
                     "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
                     "font_size": int(style.get("font_size") or 12),
+                    "font_key_override": str(style.get("font_key_override") or ""),
                 }
             )
 
@@ -1224,6 +1226,7 @@ class TranslatorEngine:
                     "override_style": str(style.get("font_style_override") or ""),
                     "resolved_style": str(style.get("font_style") or ""),
                     "font_family": str(style.get("font_family") or ""),
+                    "font_key_override": str(style.get("font_key_override") or ""),
                     "direction": str(region.get("direction") or "auto"),
                     "source_text": str(region.get("source_text") or ""),
                     "translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
@@ -1301,6 +1304,20 @@ class TranslatorEngine:
             current.pop("direction", None)
         else:
             current["direction"] = normalized_direction
+        if current:
+            overrides[region_id] = current
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_layout_overrides"] = overrides
+
+    def _set_region_font_key_override(self, session: dict[str, Any], region_id: str, font_key: str | None) -> None:
+        overrides = dict(session.get("translation_region_layout_overrides") or {})
+        current = dict(overrides.get(region_id) or {})
+        normalized_font_key = str(font_key or "").strip()
+        if normalized_font_key:
+            current["font_key"] = normalized_font_key
+        else:
+            current.pop("font_key", None)
         if current:
             overrides[region_id] = current
         else:
@@ -1424,6 +1441,13 @@ class TranslatorEngine:
                 self._set_region_direction_override(session, region_id, str(command.get("direction") or "auto"))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("text_direction_updated")
+                continue
+
+            if command_type == "update_region_font":
+                region_id = str(command.get("region_id") or "").strip()
+                self._set_region_font_key_override(session, region_id, str(command.get("font_key") or command.get("font") or ""))
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("font_family_updated")
                 continue
 
             if command_type == "update_font_style":
@@ -2409,6 +2433,10 @@ class TranslatorEngine:
                     entry["font_size"] = max(8, int(round(float(font_size))))
                 except (TypeError, ValueError):
                     pass
+
+            font_key = str(value.get("font_key") or value.get("font") or "").strip()
+            if font_key:
+                entry["font_key"] = font_key
 
             direction = self._normalize_direction_override(
                 value.get("direction", value.get("text_direction"))
@@ -4929,16 +4957,21 @@ class TranslatorEngine:
         default_font_path = config.get("font_path", "")
         style_paths = config.get("style_font_paths") or {}
         style_overrides = config.get("style_region_overrides") or {}
+        layout_overrides = config.get("translation_region_layout_overrides") or {}
         if config.get("font_style_mode") != "auto-map":
             for index, region in enumerate(regions):
-                region.font_family = default_font_path
-                region.font_style = "single"
-                region.auto_font_style = "gothic"
-                region.override_font_style = ""
-                region.style_region_key = str(
+                region_key = str(
                     getattr(region, "style_region_key", "")
                     or (self._make_style_region_key(stored_name, index) if stored_name else str(index))
                 )
+                layout_override = layout_overrides.get(region_key) or {}
+                explicit_font_key = str(layout_override.get("font_key") or "")
+                explicit_font_path = self._resolve_font_path(explicit_font_key) if explicit_font_key else ""
+                region.font_family = explicit_font_path or default_font_path
+                region.font_style = "single"
+                region.auto_font_style = "gothic"
+                region.override_font_style = ""
+                region.style_region_key = region_key
             return
 
         font_sizes = [max(float(getattr(region, "font_size", 0) or 0), 1.0) for region in regions]
@@ -4952,11 +4985,16 @@ class TranslatorEngine:
             auto_style = self._classify_region_font_style(source_rgb, region, median_font_size)
             override_style = self._normalize_style_bucket(style_overrides.get(style_key, ""))
             resolved_style = override_style or auto_style
+            layout_override = layout_overrides.get(style_key) or {}
+            explicit_font_key = str(layout_override.get("font_key") or "")
+            explicit_font_path = self._resolve_font_path(explicit_font_key) if explicit_font_key else ""
             region.style_region_key = style_key
             region.auto_font_style = auto_style
             region.override_font_style = override_style
             region.font_style = resolved_style
-            if resolved_style == "gothic":
+            if explicit_font_path:
+                region.font_family = explicit_font_path
+            elif resolved_style == "gothic":
                 region.font_family = default_font_path
             else:
                 region.font_family = style_paths.get(resolved_style) or default_font_path

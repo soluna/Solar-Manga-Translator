@@ -957,11 +957,14 @@ h2 {
   color: #50382a;
   font-size: 1.05rem;
   white-space: nowrap;
+  flex: 0 0 auto;
+  min-width: 2.4ch;
+  text-align: right;
 }
 
 .style-region-inline-controls {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
@@ -1053,7 +1056,7 @@ h2 {
 
 .compact-select-wrap select {
   width: auto;
-  min-width: 118px;
+  min-width: 96px;
 }
 
 .compact-number-wrap {
@@ -1061,11 +1064,11 @@ h2 {
 }
 
 .compact-number-wrap input {
-  width: 76px;
-  min-height: 38px;
-  padding: 7px 8px;
+  width: 60px;
+  min-height: 32px;
+  padding: 5px 6px;
   border: 1px solid rgba(155, 95, 45, 0.24);
-  border-radius: 12px;
+  border-radius: 10px;
   background: #fffdf9;
   color: #2b2118;
   line-height: 1.2;
@@ -1099,10 +1102,10 @@ h2 {
 .translation-review-input {
   width: 100%;
   border: 1px solid rgba(155, 95, 45, 0.24);
-  border-radius: 12px;
+  border-radius: 10px;
   background: #fffdf9;
-  min-height: 38px;
-  padding: 7px 10px;
+  min-height: 32px;
+  padding: 5px 8px;
   color: #2b2118;
   line-height: 1.2;
 }
@@ -1122,6 +1125,20 @@ h2 {
 
 .inline-button-danger {
   color: #b9472c;
+}
+
+.compact-select-wrap-font select {
+  min-width: 98px;
+  max-width: 112px;
+}
+
+.compact-number-wrap-font-size input {
+  width: 56px;
+}
+
+.compact-select-wrap-direction select {
+  min-width: 88px;
+  max-width: 106px;
 }
 
 @media (max-width: 768px) {

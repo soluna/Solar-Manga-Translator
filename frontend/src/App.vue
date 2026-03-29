@@ -686,7 +686,12 @@ async function exportCurrentProjectTranslationRequestDebug() {
 
     status.value = '已导出本次翻译请求/响应调试 JSON，可以直接核对模型调用链路。'
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '导出翻译请求调试信息失败'
+    const message = error instanceof Error ? error.message : '导出翻译请求调试信息失败'
+    errorMessage.value = message
+    status.value = message
+    if (typeof window !== 'undefined') {
+      window.alert(message)
+    }
   } finally {
     exportingTranslationRequestDebug.value = false
   }

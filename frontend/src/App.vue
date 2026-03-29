@@ -53,6 +53,14 @@ const defaultStyleFontNameMap = {
   handwritten: ['華康竹風體.ttf', '華康竹風體'],
   sfx: ['方正剪紙GBK.ttf', '方正剪紙GBK']
 }
+const previewFallbackFontNameMap = {
+  gothic: ['華康儷中黑.ttf', '華康儷粗黑.ttf', '華康粗黑體.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf', 'msyh.ttc'],
+  rounded: ['華康儷粗圓.ttf', 'SourceHanSansSC-Medium-2.otf', 'NotoSansSC-Bold.otf'],
+  mincho: ['華康儷粗宋.ttf', 'SourceHanSansSC-Regular-2.otf', 'Arial-Unicode-Regular.ttf'],
+  cartoon: ['華康儷粗圓.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf'],
+  handwritten: ['華康儷粗圓.ttf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
+  sfx: ['方正剪紙GBK.ttf', '華康超黑體(P).ttf', '華康儷粗黑.ttf', 'NotoSansSC-Bold.otf']
+}
 const styleFontConfigKeyMap = {
   gothic: 'style_font_gothic_key',
   mincho: 'style_font_mincho_key',
@@ -279,6 +287,7 @@ const translatedDirPath = ref('')
 const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
+const previewFontLoadState = ref({})
 const reviewInspectionPages = ref([])
 const reviewInspectionLoading = ref(false)
 const translationRegionOverrides = ref({})
@@ -1246,6 +1255,18 @@ function getFontById(fontId) {
   return availableFonts.value.find((font) => font.id === fontId) || null
 }
 
+function getPreviewFontState(fontId) {
+  const normalizedFontId = String(fontId || '').trim()
+  if (!normalizedFontId) {
+    return { status: 'unknown', error: '' }
+  }
+  return previewFontLoadState.value[normalizedFontId] || { status: 'unknown', error: '' }
+}
+
+function isPreviewFontUnsupported(fontId) {
+  return getPreviewFontState(fontId).status === 'unsupported'
+}
+
 function findFontIdByFamily(fontFamily) {
   const normalizedFamily = normalizeFontFamilyName(fontFamily).toLowerCase()
   if (!normalizedFamily) {
@@ -1305,16 +1326,53 @@ function getRegionFontPlaceholderLabel(_region) {
   return config.value.font_style_mode === 'auto-map' ? '跟随识别结果' : '跟随主字体'
 }
 
+function pickPreviewFallbackFontId(region) {
+  const fallbackStyle = config.value.font_style_mode === 'auto-map'
+    ? (getResolvedStyle(region) || 'gothic')
+    : 'gothic'
+  const preferredNames = previewFallbackFontNameMap[fallbackStyle] || previewFallbackFontNameMap.gothic
+  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id))
+  const matchedFont = pickMappedStyleFont(compatibleFonts, preferredNames)
+  return matchedFont?.id || ''
+}
+
+function getResolvedPreviewFontId(region) {
+  const effectiveFontId = getEffectiveRegionFontId(region)
+  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId)) {
+    return effectiveFontId
+  }
+  return pickPreviewFallbackFontId(region)
+}
+
 function getEffectiveRegionFontLabel(region) {
   const effectiveFontId = getEffectiveRegionFontId(region)
   const effectiveFont = effectiveFontId ? getFontById(effectiveFontId) : null
   const effectiveFontLabel = effectiveFont?.label || getFontById(config.value.font_key)?.label || '默认字体'
+  const previewFontId = getResolvedPreviewFontId(region)
+  const usesPreviewFallback = Boolean(
+    effectiveFontId
+    && previewFontId
+    && previewFontId !== effectiveFontId
+  )
 
   if (config.value.font_style_mode === 'auto-map') {
-    return `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}`
+    return usesPreviewFallback
+      ? `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}（预览替代）`
+      : `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}`
   }
 
-  return effectiveFontLabel
+  return usesPreviewFallback
+    ? `${effectiveFontLabel}（预览替代）`
+    : effectiveFontLabel
+}
+
+function getPreviewFontOptionLabel(font) {
+  if (!font) {
+    return ''
+  }
+  return isPreviewFontUnsupported(font.id)
+    ? `${font.label}（仅最终重嵌）`
+    : font.label
 }
 
 async function refreshSelectedRegionPreviewDebug() {
@@ -1338,7 +1396,8 @@ async function refreshSelectedRegionPreviewDebug() {
 
   const requestedFontId = getEffectiveRegionFontId(region)
   const requestedFont = requestedFontId ? getFontById(requestedFontId) : null
-  const requestedAlias = requestedFontId ? getPreviewFontAlias(requestedFontId) : ''
+  const previewFontId = getResolvedPreviewFontId(region)
+  const requestedAlias = previewFontId ? getPreviewFontAlias(previewFontId) : ''
   const layer = shouldShowCanvasTextOverlay(region, page)
     ? '实时叠字预览'
     : shouldShowSourceCropPreview(region, page)
@@ -1366,6 +1425,7 @@ async function refreshSelectedRegionPreviewDebug() {
     regionId: region.id,
     requestedFontId,
     requestedFontLabel: requestedFont?.label || '',
+    previewFontId,
     requestedAlias,
     computedFontFamily: computedStyle?.fontFamily || '',
     computedFontWeight: computedStyle?.fontWeight || '',
@@ -1374,7 +1434,7 @@ async function refreshSelectedRegionPreviewDebug() {
 }
 
 function getRegionPreviewFontFamily(region) {
-  const fontId = getEffectiveRegionFontId(region)
+  const fontId = getResolvedPreviewFontId(region)
   if (fontId) {
     return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
   }
@@ -3568,6 +3628,11 @@ async function warmPreviewFonts() {
   }
 
   const fontIds = new Set()
+  for (const font of availableFonts.value) {
+    if (font?.id) {
+      fontIds.add(String(font.id))
+    }
+  }
   if (config.value.font_key) {
     fontIds.add(String(config.value.font_key))
   }
@@ -3584,11 +3649,25 @@ async function warmPreviewFonts() {
     }
   }
 
-  await Promise.allSettled(
-    Array.from(fontIds).map((fontId) =>
-      document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
-    )
+  const nextState = { ...previewFontLoadState.value }
+  await Promise.all(
+    Array.from(fontIds).map(async (fontId) => {
+      try {
+        await document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
+        const loaded = document.fonts.check(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
+        nextState[fontId] = {
+          status: loaded ? 'loaded' : 'unsupported',
+          error: loaded ? '' : 'document.fonts.check returned false'
+        }
+      } catch (error) {
+        nextState[fontId] = {
+          status: 'unsupported',
+          error: error instanceof Error ? error.message : String(error || '')
+        }
+      }
+    })
   )
+  previewFontLoadState.value = nextState
   renderNonce.value = Date.now()
 }
 
@@ -4741,7 +4820,7 @@ watch(
                         :key="`${region.id}-${font.id}`"
                         :value="font.id"
                       >
-                        {{ font.label }}
+                        {{ getPreviewFontOptionLabel(font) }}
                       </option>
                     </select>
                   </label>

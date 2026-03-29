@@ -364,6 +364,18 @@ const disabledRegionCountForSelectedPage = computed(() => {
   }
   return Object.keys(translationRegionDisabledOverrides.value).filter((regionId) => regionId.includes(storedName)).length
 })
+const latestTranslatedImageUrlByPage = computed(() => {
+  const mapping = {}
+  for (const image of translatedImages.value) {
+    const storedName = String(image?.stored_name || '').trim()
+    const url = String(image?.url || '').trim()
+    if (!storedName || !url) {
+      continue
+    }
+    mapping[storedName] = url
+  }
+  return mapping
+})
 const mergedInspectionPages = computed(() => {
   const pageOrder = []
   const pageMap = new Map()
@@ -421,6 +433,16 @@ const mergedInspectionPages = computed(() => {
         ...region
       })
     }
+  }
+
+  for (const storedName of pageOrder) {
+    const mergedPage = pageMap.get(storedName)
+    const latestTranslatedUrl = latestTranslatedImageUrlByPage.value[storedName] || ''
+    if (!mergedPage || !latestTranslatedUrl) {
+      continue
+    }
+    mergedPage.image_url = latestTranslatedUrl
+    mergedPage.translated_image_url = latestTranslatedUrl
   }
 
   return pageOrder.map((storedName) => {
@@ -1218,17 +1240,7 @@ function getRegionFontPlaceholderLabel(_region) {
 function getRegionPreviewFontFamily(region) {
   const fontId = getEffectiveRegionFontId(region)
   if (fontId) {
-    const font = getFontById(fontId)
-    const namedFamilies = [
-      getPreviewFontAlias(fontId),
-      normalizeFontFamilyName(font?.name || ''),
-      normalizeFontFamilyName(font?.label || ''),
-      normalizeFontFamilyName(region?.font_family || ''),
-      'Microsoft JhengHei',
-      'PingFang TC',
-      'Noto Sans CJK TC'
-    ].filter(Boolean)
-    return `${namedFamilies.map((family) => `"${family}"`).join(',')},sans-serif`
+    return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
   }
 
   const fallbackFamily = normalizeFontFamilyName(region?.font_family || '')
@@ -1491,9 +1503,19 @@ function getCanvasHandleCursor(handle) {
 
 function getCanvasPreviewImageUrl(page) {
   const dirty = Boolean(page?.stored_name && canvasPreviewDirtyPages.value[page.stored_name])
-  const imagePath = isCanvasReviewMode.value && dirty
-    ? (page?.base_image_url || page?.translated_image_url || page?.image_url || '')
-    : (page?.translated_image_url || page?.image_url || page?.base_image_url || '')
+  if (isCanvasReviewMode.value && dirty) {
+    const baseImagePath = page?.base_image_url || page?.translated_image_url || page?.image_url || ''
+    return withCacheBust(toApiUrl(baseImagePath))
+  }
+
+  const latestTranslatedUrl = page?.stored_name
+    ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
+    : ''
+  if (latestTranslatedUrl) {
+    return latestTranslatedUrl
+  }
+
+  const imagePath = page?.translated_image_url || page?.image_url || page?.base_image_url || ''
   return withCacheBust(toApiUrl(imagePath))
 }
 
@@ -1549,6 +1571,7 @@ function getCanvasPreviewTextStyle(region) {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
     letterSpacing: `${letterSpacing.toFixed(2)}px`,
+    fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
     textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial'
   }

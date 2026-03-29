@@ -851,6 +851,7 @@ h2 {
   line-height: 1.2;
   white-space: nowrap;
   pointer-events: none;
+  z-index: 4;
 }
 
 .style-box-source-crop {
@@ -883,6 +884,7 @@ h2 {
   word-break: break-word;
   pointer-events: none;
   text-rendering: geometricPrecision;
+  font-synthesis: none;
 }
 
 .style-box-preview-text.vertical {
@@ -1104,8 +1106,8 @@ h2 {
   border: 1px solid rgba(155, 95, 45, 0.24);
   border-radius: 10px;
   background: #fffdf9;
-  min-height: 32px;
-  padding: 5px 8px;
+  min-height: 28px;
+  padding: 4px 7px;
   color: #2b2118;
   line-height: 1.2;
 }
@@ -1128,17 +1130,17 @@ h2 {
 }
 
 .compact-select-wrap-font select {
-  min-width: 98px;
-  max-width: 112px;
+  min-width: 88px;
+  max-width: 100px;
 }
 
 .compact-number-wrap-font-size input {
-  width: 56px;
+  width: 50px;
 }
 
 .compact-select-wrap-direction select {
-  min-width: 88px;
-  max-width: 106px;
+  min-width: 76px;
+  max-width: 92px;
 }
 
 @media (max-width: 768px) {

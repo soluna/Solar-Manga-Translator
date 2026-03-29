@@ -35,7 +35,7 @@ chmod +x start.sh
 
 ```bash
 chmod +x start.mac.sh
-./start.mac.sh
+bash ./start.mac.sh
 ```
 
 这条路径会：

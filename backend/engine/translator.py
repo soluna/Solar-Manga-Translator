@@ -2325,7 +2325,10 @@ class TranslatorEngine:
 
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
         return {
-            "gothic": str(raw_config.get("style_font_gothic_key", "")).strip(),
+            # Gothic / 黑体 follows the primary font. Keeping a separate implicit
+            # mapping here made the UI feel broken because changing the main font
+            # often had no visible effect on standard dialogue.
+            "gothic": "",
             "mincho": str(raw_config.get("style_font_mincho_key", "")).strip(),
             "rounded": str(raw_config.get("style_font_rounded_key", "")).strip(),
             "cartoon": str(raw_config.get("style_font_cartoon_key", "")).strip(),
@@ -4953,7 +4956,10 @@ class TranslatorEngine:
             region.auto_font_style = auto_style
             region.override_font_style = override_style
             region.font_style = resolved_style
-            region.font_family = style_paths.get(resolved_style) or default_font_path
+            if resolved_style == "gothic":
+                region.font_family = default_font_path
+            else:
+                region.font_family = style_paths.get(resolved_style) or default_font_path
 
     def _apply_region_translation_overrides(
         self,

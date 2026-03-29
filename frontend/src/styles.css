@@ -162,6 +162,17 @@ h2 {
   color: #2b2118;
 }
 
+.field-static-value {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  border: 1px solid rgba(155, 95, 45, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 253, 249, 0.92);
+  padding: 0 12px;
+  color: #2b2118;
+}
+
 .toggle-field {
   flex-direction: row;
   align-items: center;

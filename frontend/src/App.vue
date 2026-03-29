@@ -186,9 +186,8 @@ function normalizeStoredConfig(rawValue) {
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
     font_style_mode: fontStyleMode,
-    style_font_gothic_key: typeof rawValue.style_font_gothic_key === 'string'
-      ? rawValue.style_font_gothic_key
-      : defaults.style_font_gothic_key,
+    // 黑体统一跟随主字体，避免“主字体改了但对白黑体不动”的混乱体验。
+    style_font_gothic_key: defaults.style_font_gothic_key,
     style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
       ? rawValue.style_font_mincho_key
       : defaults.style_font_mincho_key,
@@ -1119,6 +1118,9 @@ function getConfiguredFontId() {
 }
 
 function getConfiguredStyleFontId(styleBucket) {
+  if (styleBucket === 'gothic') {
+    return ''
+  }
   const configKey = styleFontConfigKeyMap[styleBucket]
   if (!configKey) {
     return ''
@@ -2641,9 +2643,11 @@ function handleRegionFontSizeInput(region, nextValue) {
 }
 
 function commitRegionFontSize(region) {
-  const rawDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
-    ? String(fontSizeInputDrafts.value[region.id] ?? '')
-    : ''
+  const hasDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+  if (!hasDraft) {
+    return
+  }
+  const rawDraft = String(fontSizeInputDrafts.value[region.id] ?? '')
   const nextValue = rawDraft.trim() === ''
     ? 8
     : Number(rawDraft)
@@ -2941,6 +2945,9 @@ function pickMappedStyleFont(fonts, preferredNames) {
 function applyDefaultStyleFontMappings(fonts) {
   let changed = false
   for (const [styleKey, preferredNames] of Object.entries(defaultStyleFontNameMap)) {
+    if (styleKey === 'gothic') {
+      continue
+    }
     const configKey = `style_font_${styleKey}_key`
     if (config.value[configKey]) {
       continue
@@ -3509,16 +3516,12 @@ watch(
         <template v-if="config.font_style_mode === 'auto-map'">
           <label class="field">
             <span>黑体映射</span>
-            <select v-model="config.style_font_gothic_key">
-              <option value="">跟随翻译字体</option>
-              <option
-                v-for="font in availableFonts"
-                :key="`gothic-${font.id}`"
-                :value="font.id"
-              >
-                {{ font.label }}
-              </option>
-            </select>
+            <div class="field-static-value">
+              {{ getFontById(config.font_key)?.label || '跟随主字体' }}
+            </div>
+            <small class="field-hint">
+              黑体会直接跟随上面的“翻译字体”，修改主字体后会同步影响标准对白。
+            </small>
           </label>
 
           <label class="field">

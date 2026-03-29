@@ -44,33 +44,64 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     _INCLUDE_TEMPLATE = False
 
     def __init__(self, model=None, api_base=None, api_key=None, check_openai_key=False):
+        self._explicit_model = model
+        self._explicit_api_base = api_base
+        self._explicit_api_key = api_key
+
         config_key = "ollama"
-        if CUSTOM_OPENAI_MODEL_CONF:
-            config_key += f".{CUSTOM_OPENAI_MODEL_CONF}"
+        model_conf = self._current_model_conf()
+        if model_conf:
+            config_key += f".{model_conf}"
 
         ConfigGPT.__init__(self, config_key=config_key)
         self.model = model
         CommonTranslator.__init__(self)
-        self.api_key = api_key or CUSTOM_OPENAI_API_KEY or "ollama"
-        self.client = openai.AsyncOpenAI(api_key=self.api_key)
-        self.client.base_url = api_base or CUSTOM_OPENAI_API_BASE
+        self.api_key = ""
+        self.client = None
         self.ark_client = None
         self.token_count = 0
         self.token_count_last = 0
-        self.use_responses_api = os.getenv("CUSTOM_OPENAI_USE_RESPONSES", "").strip().lower() in {
+        self.use_responses_api = False
+        self._refresh_runtime_clients()
+
+    def _env_flag(self, key: str) -> bool:
+        return os.getenv(key, "").strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-        configured_model = (self.model or CUSTOM_OPENAI_MODEL or "").strip().lower()
+
+    def _current_model_conf(self) -> str:
+        return str(os.getenv("CUSTOM_OPENAI_MODEL_CONF", CUSTOM_OPENAI_MODEL_CONF) or "").strip()
+
+    def _current_model_name(self) -> str:
+        return str(self._explicit_model or os.getenv("CUSTOM_OPENAI_MODEL", CUSTOM_OPENAI_MODEL) or "").strip()
+
+    def _current_api_base(self) -> str:
+        return str(self._explicit_api_base or os.getenv("CUSTOM_OPENAI_API_BASE", CUSTOM_OPENAI_API_BASE) or "").strip()
+
+    def _current_api_key(self) -> str:
+        return str(self._explicit_api_key or os.getenv("CUSTOM_OPENAI_API_KEY", CUSTOM_OPENAI_API_KEY) or "").strip()
+
+    def _refresh_runtime_clients(self):
+        self.api_key = self._current_api_key() or "ollama"
+        api_base = self._current_api_base() or CUSTOM_OPENAI_API_BASE
+        if openai is not None:
+            self.client = openai.AsyncOpenAI(api_key=self.api_key)
+            self.client.base_url = api_base
+
+        configured_model = self._current_model_name().lower()
+        self.use_responses_api = self._env_flag("CUSTOM_OPENAI_USE_RESPONSES")
         if configured_model.startswith("doubao-seed-translation"):
             self.use_responses_api = True
         if Ark is not None and configured_model.startswith("doubao-seed"):
             self.ark_client = Ark(
-                base_url=str(self.client.base_url).rstrip("/"),
+                base_url=str(api_base).rstrip("/"),
                 api_key=self.api_key,
             )
+        else:
+            self.ark_client = None
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
@@ -287,7 +318,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
             prompt, query_size = assembled[0]
             split_prefix = " (split)" if split_level > 0 else ""
-            model_name = self.model or CUSTOM_OPENAI_MODEL
+            model_name = self._current_model_name()
             self.logger.debug(
                 f"-- GPT Prompt{split_prefix} --\n" + self._format_request_log(model_name, from_lang, to_lang, prompt)
             )
@@ -419,6 +450,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return 0
 
     def _responses_endpoint_url(self) -> str:
+        self._refresh_runtime_clients()
         base_url = str(self.client.base_url).rstrip("/")
         if base_url.endswith("/responses"):
             return base_url
@@ -527,6 +559,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         )
 
     def _request_responses_via_http_sync(self, model_name: str, prompt_input):
+        self._refresh_runtime_clients()
         payload = {
             "model": model_name,
             "input": prompt_input,
@@ -552,8 +585,9 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return json.loads(body)
 
     async def _request_translation(self, from_lang: str, to_lang: str, prompt: str) -> str:
+        self._refresh_runtime_clients()
         messages = self._build_messages(to_lang, prompt)
-        model_name = self.model or CUSTOM_OPENAI_MODEL
+        model_name = self._current_model_name()
         force_responses_api = self._is_translation_responses_model(model_name)
         debug_request_id = f"req-{time.time_ns()}"
 

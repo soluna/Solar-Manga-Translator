@@ -346,6 +346,21 @@ const canTranslate = computed(() => Boolean(sessionId.value) && !translating.val
 const canContinueSegmentedTranslation = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'detected'
 )
+const selectedEditPageHasTranslatedResult = computed(() => {
+  const storedName = String(selectedEditPage.value?.stored_name || '').trim()
+  if (!storedName) {
+    return false
+  }
+  return Boolean(latestTranslatedImageUrlByPage.value[storedName])
+})
+const canTranslateCurrentPage = computed(
+  () => Boolean(
+    sessionId.value
+    && selectedEditPage.value
+    && !translating.value
+    && (workflowStage.value === 'detected' || !selectedEditPageHasTranslatedResult.value)
+  )
+)
 const canRerender = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
 )
@@ -642,6 +657,9 @@ const primaryTranslateLabel = computed(() => {
     if (activeAction.value === 'detect') {
       return '识别进行中...'
     }
+    if (activeAction.value === 'translate-page') {
+      return '本页翻译中...'
+    }
     if (activeAction.value === 'resume-translate') {
       return '翻译进行中...'
     }
@@ -919,6 +937,9 @@ function getBusyActionLabel(project) {
   }
   if (action === 'rerender') {
     return '重嵌中'
+  }
+  if (action === 'translate-page') {
+    return '本页翻译中'
   }
   if (action === 'resume-translate') {
     return '继续翻译中'
@@ -3596,7 +3617,7 @@ function startTranslation(action = 'translate') {
   }
 
   activeAction.value = action
-  const rerenderTargetStoredName = action === 'rerender'
+  const pageTargetStoredName = (action === 'rerender' || action === 'translate-page')
     ? (selectedEditPage.value?.stored_name || '')
     : ''
   manualDrawDraft.value = null
@@ -3612,9 +3633,11 @@ function startTranslation(action = 'translate') {
   translating.value = true
   progress.value = { current: 0, total: 0 }
   status.value = action === 'rerender'
-    ? (rerenderTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
+    ? (pageTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
     : action === 'detect'
       ? '正在启动文本框识别任务...'
+      : action === 'translate-page'
+        ? '正在启动当前页翻译任务...'
       : action === 'resume-translate'
         ? '正在继续翻译并嵌字...'
         : '正在启动翻译任务...'
@@ -3626,7 +3649,7 @@ function startTranslation(action = 'translate') {
     socket.send(JSON.stringify({
       action,
       config: buildRuntimeConfig(),
-      target_stored_name: rerenderTargetStoredName || undefined
+      target_stored_name: pageTargetStoredName || undefined
     }))
   }
 
@@ -3636,11 +3659,13 @@ function startTranslation(action = 'translate') {
     if (payload.event === 'start') {
       progress.value = { current: 0, total: payload.total_pages }
       status.value = activeAction.value === 'rerender'
-        ? (rerenderTargetStoredName
+        ? (pageTargetStoredName
           ? `当前页重嵌字已开始。`
           : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
         : activeAction.value === 'detect'
           ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译已开始。'
           : activeAction.value === 'resume-translate'
             ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
         : `翻译已开始，共 ${payload.total_pages} 张图片。`
@@ -3672,11 +3697,13 @@ function startTranslation(action = 'translate') {
         )
       }
       status.value = activeAction.value === 'rerender'
-        ? (rerenderTargetStoredName
+        ? (pageTargetStoredName
           ? `当前页重嵌字进行中…`
           : `重嵌字进行中：${payload.current} / ${payload.total}`)
         : activeAction.value === 'detect'
           ? `正在识别并准备校对：${payload.current} / ${payload.total}`
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译进行中…'
           : activeAction.value === 'resume-translate'
             ? `继续翻译进行中：${payload.current} / ${payload.total}`
         : `翻译进行中：${payload.current} / ${payload.total}`
@@ -3693,20 +3720,26 @@ function startTranslation(action = 'translate') {
       applySessionPayload(payload)
       const completedAction = activeAction.value
       if (completedAction === 'rerender') {
-        if (rerenderTargetStoredName) {
-          clearCanvasPreviewDirty(rerenderTargetStoredName)
+        if (pageTargetStoredName) {
+          clearCanvasPreviewDirty(pageTargetStoredName)
         } else {
           clearCanvasPreviewDirty()
+        }
+      } else if (completedAction === 'translate-page') {
+        if (pageTargetStoredName) {
+          clearCanvasPreviewDirty(pageTargetStoredName)
         }
       } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
         clearCanvasPreviewDirty()
       }
       status.value = completedAction === 'detect'
         ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
+        : completedAction === 'translate-page'
+          ? '当前页翻译完成，结果已回填到工作台。'
         : completedAction === 'resume-translate'
           ? `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
           : completedAction === 'rerender'
-            ? (rerenderTargetStoredName
+            ? (pageTargetStoredName
               ? '当前页重嵌字完成。'
               : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
             : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
@@ -3729,6 +3762,8 @@ function startTranslation(action = 'translate') {
         ? '重嵌字失败。'
         : activeAction.value === 'detect'
           ? '文本框识别失败。'
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译失败。'
           : activeAction.value === 'resume-translate'
             ? '继续翻译失败。'
             : '翻译失败。'
@@ -3742,6 +3777,8 @@ function startTranslation(action = 'translate') {
       ? '重嵌字连接中断。'
       : activeAction.value === 'detect'
         ? '识别连接中断。'
+        : activeAction.value === 'translate-page'
+          ? '当前页翻译连接中断。'
         : activeAction.value === 'resume-translate'
           ? '继续翻译连接中断。'
           : '翻译连接中断。'
@@ -3756,6 +3793,8 @@ function startTranslation(action = 'translate') {
         ? '重嵌字未完成。'
         : activeAction.value === 'detect'
           ? '识别未完成。'
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译未完成。'
           : activeAction.value === 'resume-translate'
             ? '继续翻译未完成。'
             : '翻译未完成。'
@@ -4744,6 +4783,15 @@ watch(
             @click="clearStyleOverrides"
           >
             清空字体覆盖
+          </button>
+
+          <button
+            v-if="canTranslateCurrentPage"
+            class="secondary-button"
+            type="button"
+            @click="startTranslation('translate-page')"
+          >
+            翻译本页
           </button>
 
           <button

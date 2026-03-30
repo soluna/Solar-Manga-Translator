@@ -546,6 +546,14 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 raw_config=config,
                 progress_callback=send_event,
             )
+        elif action == "translate-page":
+            result = await translator_engine.resume_translation_session(
+                session_id=session_id,
+                session=session,
+                raw_config=config,
+                progress_callback=send_event,
+                target_stored_name=target_stored_name or None,
+            )
         else:
             result = await translator_engine.translate_session(
                 session_id=session_id,

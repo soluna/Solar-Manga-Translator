@@ -1815,25 +1815,31 @@ class TranslatorEngine:
         session: dict[str, Any],
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
+        target_stored_name: str | None = None,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
+        previous_stage = self._session_workflow_stage(session)
         session["download_path"] = None
         session["workflow_stage"] = "translating"
         session["deferred_output_names"] = set()
         with contextlib.suppress(FileNotFoundError):
             self._translation_request_debug_path(session_id).unlink()
 
-        source_images = list(session.get("source_images") or [])
+        source_images = self._resolve_translation_images(session, target_stored_name)
         total = len(source_images)
         await progress_callback({"event": "start", "total_pages": total})
         await progress_callback(
             {
                 "event": "status",
-                "message": "正在根据你确认后的文本框继续翻译并嵌字…",
+                "message": (
+                    f"正在翻译当前页并回填到工作台：{self._page_display_name(session, target_stored_name)}…"
+                    if target_stored_name
+                    else "正在根据你确认后的文本框继续翻译并嵌字…"
+                ),
             }
         )
 
@@ -1916,24 +1922,33 @@ class TranslatorEngine:
                     progress_callback=progress_callback,
                 )
 
-        archive_path = self.build_session_archive(
-            session_id=session_id,
-            session=session,
-            preferred_output_format=config["rerender_output_format"],
-        )
-        session["download_path"] = archive_path
-        session["workflow_stage"] = "translated"
+        archive_path = ""
+        if not target_stored_name or previous_stage == "translated":
+            archive_path = self.build_session_archive(
+                session_id=session_id,
+                session=session,
+                preferred_output_format=config["rerender_output_format"],
+            )
+            session["download_path"] = archive_path
+            session["workflow_stage"] = "translated"
+        else:
+            session["workflow_stage"] = previous_stage if previous_stage in {"detected", "translated"} else "detected"
         self.persist_project_state(
             session_id,
             session,
-            snapshot_kind="resume_translation",
-            snapshot_summary="逐框确认后继续翻译并嵌字",
+            snapshot_kind="translate_page" if target_stored_name else "resume_translation",
+            snapshot_summary=(
+                f"{target_stored_name} 翻译本页并回填"
+                if target_stored_name
+                else "逐框确认后继续翻译并嵌字"
+            ),
             persist_page_documents=True,
+            page_ids=[target_stored_name] if target_stored_name else None,
         )
 
         return {
-            "download_url": f"/api/download/{session_id}",
-            "download_path": str(Path(archive_path).resolve()),
+            "download_url": f"/api/download/{session_id}" if archive_path else "",
+            "download_path": str(Path(archive_path).resolve()) if archive_path else "",
             "translated_dir": str(output_dir.resolve()),
             "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
             "workflow_stage": session["workflow_stage"],
@@ -2078,6 +2093,23 @@ class TranslatorEngine:
         ]
         if not matched_images:
             raise RuntimeError("找不到当前选中的页面，无法只重嵌这一页。请刷新逐框校对后再试。")
+        return matched_images
+
+    def _resolve_translation_images(
+        self,
+        session: dict[str, Any],
+        target_stored_name: str | None,
+    ) -> list[dict[str, Any]]:
+        source_images = list(session.get("source_images") or [])
+        if not target_stored_name:
+            return source_images
+
+        matched_images = [
+            image for image in source_images
+            if str(image.get("stored_name") or "") == target_stored_name
+        ]
+        if not matched_images:
+            raise RuntimeError("找不到当前选中的页面，无法只翻译这一页。请刷新逐框校对后再试。")
         return matched_images
 
     def _collect_session_archive_files(

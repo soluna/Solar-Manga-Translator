@@ -107,6 +107,22 @@ def patch_text_render(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "    if not text :\n        return\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    h = max(int(h or 0), font_size)\n",
+        "text_render vertical dimension guards",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    num_char_y = h // font_size\n",
+        "    num_char_y = max(h // font_size, 1)\n",
+        "text_render vertical num_char_y guard",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "    canvas_y = font_size * num_char_y + (font_size + bg_size) * 2\n",
         "    canvas_y = int(font_size * num_char_y * max(letter_spacing, 1.0)) + (font_size + bg_size) * 2\n",
         "text_render vertical canvas height",
@@ -123,9 +139,25 @@ def patch_text_render(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "    max_width = max(max_width, 2 * font_size)\n",
+        "    font_size = max(int(font_size or 0), 1)\n    max_height = max(int(max_height or 0), font_size)\n    max_width = max(max_width, 2 * font_size)\n",
+        "text_render horizontal calc guards",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "def put_text_horizontal(font_size: int, text: str, width: int, height: int, alignment: str,\n                        reversed_direction: bool, fg: Tuple[int, int, int], bg: Tuple[int, int, int],\n                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0):",
         "def put_text_horizontal(font_size: int, text: str, width: int, height: int, alignment: str,\n                        reversed_direction: bool, fg: Tuple[int, int, int], bg: Tuple[int, int, int],\n                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0, letter_spacing: float = 1.0):",
         "text_render horizontal signature",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    if not text :\n        return\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    width = max(int(width or 0), font_size)\n    height = max(int(height or 0), font_size)\n",
+        "text_render horizontal dimension guards",
     )
     changed = changed or did_change
 
@@ -166,6 +198,58 @@ def patch_text_render(target_file: Path) -> bool:
 
     return changed
 
+def patch_text_render_eng(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "        font_size = int(font_size)\n",
+        "        font_size = max(int(font_size or 0), 1)\n",
+        "text_render_eng font size guard",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        line_height = int(font_size * 0.8)\n",
+        "        line_height = max(int(font_size * 0.8), 1)\n",
+        "text_render_eng line height guard",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        lines_available = abs(xyxy[3] - xyxy[1]) // line_height + 1\n",
+        "        lines_available = max(1, abs(xyxy[3] - xyxy[1]) // max(line_height, 1) + 1)\n",
+        "text_render_eng lines available guard",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
+def patch_text_render_pillow_eng(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "        line_height = font.getmetrics()[0] - font.getmetrics()[1]\n",
+        "        line_height = max(font.getmetrics()[0] - font.getmetrics()[1], 1)\n",
+        "text_render_pillow_eng line height guard",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
 def patch_mask_refinement():
     # Detect if we're running from start.bat and find the correct path dynamically
     backend_dir = Path(__file__).parent
@@ -176,6 +260,8 @@ def patch_mask_refinement():
     patched_render_file = backend_dir / "patched_rendering_init.py"
     patched_text_render_file = backend_dir / "patched_text_render.py"
     target_text_render_file = translator_dir / "manga_translator" / "rendering" / "text_render.py"
+    target_text_render_eng_file = translator_dir / "manga_translator" / "rendering" / "text_render_eng.py"
+    target_text_render_pillow_eng_file = translator_dir / "manga_translator" / "rendering" / "text_render_pillow_eng.py"
     target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
     target_custom_openai_file = translator_dir / "manga_translator" / "translators" / "custom_openai.py"
     target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
@@ -203,6 +289,14 @@ def patch_mask_refinement():
         print(f"Error: Could not find {target_gemini_file}")
         return False
 
+    if not target_text_render_eng_file.exists():
+        print(f"Error: Could not find {target_text_render_eng_file}")
+        return False
+
+    if not target_text_render_pillow_eng_file.exists():
+        print(f"Error: Could not find {target_text_render_pillow_eng_file}")
+        return False
+
     if not target_local_file.exists():
         print(f"Error: Could not find {target_local_file}")
         return False
@@ -226,6 +320,12 @@ def patch_mask_refinement():
         else:
             patch_text_render(target_text_render_file)
             print("Successfully patched text_render.py for configurable letter spacing!")
+
+        patch_text_render_eng(target_text_render_eng_file)
+        print("Successfully patched text_render_eng.py with rendering guards!")
+
+        patch_text_render_pillow_eng(target_text_render_pillow_eng_file)
+        print("Successfully patched text_render_pillow_eng.py with rendering guards!")
 
         shutil.copy2(patched_file, target_file)
         print("Successfully replaced text_mask_utils.py with the patched version!")

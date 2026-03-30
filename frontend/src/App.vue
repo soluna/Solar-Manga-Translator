@@ -272,6 +272,7 @@ const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
 const historyLoading = ref(false)
+const deletingProjectId = ref('')
 const restoringProjectId = ref('')
 const restoringSnapshotId = ref('')
 const savingProjectMeta = ref(false)
@@ -339,6 +340,7 @@ const canContinueSegmentedTranslation = computed(
 const canRerender = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
 )
+const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
 const activeReviewMode = computed(() => currentProject.value?.review_mode || config.value.default_review_mode || 'classic')
@@ -869,7 +871,9 @@ function normalizeHistoryProject(project) {
     note: project?.note || '',
     review_mode: project?.review_mode || 'classic',
     workflow_stage: project?.workflow_stage || 'idle',
-    page_count: Number(project?.page_count || 0)
+    page_count: Number(project?.page_count || 0),
+    is_busy: Boolean(project?.is_busy),
+    busy_action: project?.busy_action || ''
   }
 }
 
@@ -884,6 +888,40 @@ function normalizeSnapshot(snapshot) {
     cover_image: snapshot?.cover_image ? toApiUrl(snapshot.cover_image) : '',
     pinned: Boolean(snapshot?.pinned)
   }
+}
+
+function isProjectBusy(project) {
+  const projectId = String(project?.project_id || '').trim()
+  if (!projectId) {
+    return false
+  }
+  return Boolean(project?.is_busy) || (Boolean(activeTaskProjectId.value) && activeTaskProjectId.value === projectId)
+}
+
+function getBusyActionLabel(project) {
+  const action = String(project?.busy_action || '').trim().toLowerCase()
+  if (action === 'detect') {
+    return '识别中'
+  }
+  if (action === 'rerender') {
+    return '重嵌中'
+  }
+  if (action === 'resume-translate') {
+    return '继续翻译中'
+  }
+  return '翻译中'
+}
+
+function canRestoreHistoryProject(project) {
+  return !translating.value && !isProjectBusy(project) && (!restoringProjectId.value || restoringProjectId.value === project?.project_id)
+}
+
+function canDeleteHistoryProject(project) {
+  return !isProjectBusy(project) && (!deletingProjectId.value || deletingProjectId.value === project?.project_id)
+}
+
+function canRestoreHistorySnapshot(project, snapshot) {
+  return !translating.value && !isProjectBusy(project) && (!restoringSnapshotId.value || restoringSnapshotId.value === snapshot?.snapshot_id)
 }
 
 function applySessionPayload(payload, options = {}) {
@@ -1008,6 +1046,11 @@ async function restoreProject(projectId) {
   if (!projectId) {
     return
   }
+  if (translating.value) {
+    errorMessage.value = '当前有识别/翻译任务在运行，暂时不能切换到别的项目。'
+    status.value = '请等待当前任务完成后，再恢复历史项目。'
+    return
+  }
   restoringProjectId.value = projectId
   errorMessage.value = ''
   closeSocket()
@@ -1032,6 +1075,11 @@ async function restoreProject(projectId) {
 
 async function restoreSnapshot(projectId, snapshotId) {
   if (!projectId || !snapshotId) {
+    return
+  }
+  if (translating.value) {
+    errorMessage.value = '当前有识别/翻译任务在运行，暂时不能恢复快照。'
+    status.value = '请等待当前任务完成后，再从快照恢复项目。'
     return
   }
   restoringSnapshotId.value = snapshotId
@@ -1090,6 +1138,11 @@ async function deleteProject(project) {
   if (!project?.project_id) {
     return
   }
+  if (isProjectBusy(project)) {
+    errorMessage.value = '该项目仍有任务在运行，暂时不能删除。'
+    status.value = '请等待当前识别/翻译任务完成后，再删除这个项目。'
+    return
+  }
   const confirmed = typeof window === 'undefined'
     ? true
     : window.confirm(`确定要删除项目「${project.title}」吗？相关历史记录和输出文件会一起移除。`)
@@ -1098,6 +1151,7 @@ async function deleteProject(project) {
   }
 
   errorMessage.value = ''
+  deletingProjectId.value = project.project_id
   try {
     const response = await fetch(toApiUrl(`/api/projects/${project.project_id}`), {
       method: 'DELETE'
@@ -1136,6 +1190,8 @@ async function deleteProject(project) {
     status.value = '已删除该历史项目。'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '删除项目失败'
+  } finally {
+    deletingProjectId.value = ''
   }
 }
 
@@ -4433,6 +4489,7 @@ watch(
               <strong>{{ project.title }}</strong>
               <div class="project-history-meta">
                 <span>{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
+                <span v-if="isProjectBusy(project)">{{ getBusyActionLabel(project) }}</span>
                 <span>{{ project.page_count }} 页</span>
               </div>
             </div>
@@ -4444,10 +4501,18 @@ watch(
               <button
                 class="secondary-button"
                 type="button"
-                :disabled="Boolean(restoringProjectId) && restoringProjectId !== project.project_id"
+                :disabled="!canRestoreHistoryProject(project)"
                 @click="restoreProject(project.project_id)"
               >
-                {{ restoringProjectId === project.project_id ? '正在恢复...' : '继续编辑' }}
+                {{
+                  translating
+                    ? '任务运行中'
+                    : restoringProjectId === project.project_id
+                      ? '正在恢复...'
+                      : isProjectBusy(project)
+                        ? '任务运行中'
+                        : '继续编辑'
+                }}
               </button>
 
               <button
@@ -4474,9 +4539,16 @@ watch(
               <button
                 class="secondary-button danger-button"
                 type="button"
+                :disabled="!canDeleteHistoryProject(project)"
                 @click="deleteProject(project)"
               >
-                删除项目
+                {{
+                  deletingProjectId === project.project_id
+                    ? '正在删除...'
+                    : isProjectBusy(project)
+                      ? '任务运行中'
+                      : '删除项目'
+                }}
               </button>
             </div>
 
@@ -4526,10 +4598,18 @@ watch(
                     <button
                       class="secondary-button snapshot-button"
                       type="button"
-                      :disabled="Boolean(restoringSnapshotId) && restoringSnapshotId !== snapshot.snapshot_id"
+                      :disabled="!canRestoreHistorySnapshot(project, snapshot)"
                       @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
                     >
-                      {{ restoringSnapshotId === snapshot.snapshot_id ? '正在恢复...' : '恢复为新项目' }}
+                      {{
+                        translating
+                          ? '任务运行中'
+                          : restoringSnapshotId === snapshot.snapshot_id
+                            ? '正在恢复...'
+                            : isProjectBusy(project)
+                              ? '任务运行中'
+                              : '恢复为新项目'
+                      }}
                     </button>
                   </div>
                 </article>

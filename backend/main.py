@@ -238,7 +238,10 @@ async def pin_project_snapshot(project_id: str, snapshot_id: str, payload: dict[
 
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
-    translator_engine.delete_project(project_id)
+    try:
+        translator_engine.delete_project(project_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     SESSIONS.pop(project_id, None)
     return {"ok": True}
 
@@ -511,6 +514,13 @@ async def translate_session(websocket: WebSocket, session_id: str):
         config = payload.get("config", {})
         target_stored_name = str(payload.get("target_stored_name") or "").strip()
 
+        if translator_engine.is_session_busy(session_id):
+            await websocket.send_json({"event": "error", "message": "该项目已有任务在运行，请等待当前任务完成。"})
+            await websocket.close()
+            return
+
+        translator_engine.mark_session_busy(session_id, action)
+
         async def send_event(event: dict[str, Any]) -> None:
             await websocket.send_json(event)
 
@@ -554,6 +564,8 @@ async def translate_session(websocket: WebSocket, session_id: str):
         return
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": str(exc)})
+    finally:
+        translator_engine.clear_session_busy(session_id)
 
 
 if __name__ == "__main__":

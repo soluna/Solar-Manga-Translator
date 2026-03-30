@@ -58,6 +58,7 @@ class TranslatorEngine:
         self.model_dir.mkdir(exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
+        self.active_sessions: dict[str, str] = {}
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -318,6 +319,8 @@ class TranslatorEngine:
             "latest_snapshot_summary": str((latest or {}).get("summary") or ""),
             "snapshot_count": len(manifests),
             "archived": bool(session.get("project_archived", False)),
+            "is_busy": self.is_session_busy(project_id),
+            "busy_action": self.active_sessions.get(project_id, ""),
         }
 
     def _write_project_index(self, summaries: list[dict[str, Any]]) -> None:
@@ -399,6 +402,10 @@ class TranslatorEngine:
         index_items = self._read_json_file(self.project_index_path, [])
         if isinstance(index_items, list) and index_items:
             valid_items = [item for item in index_items if isinstance(item, dict)]
+            for item in valid_items:
+                project_id = str(item.get("project_id") or "")
+                item["is_busy"] = self.is_session_busy(project_id)
+                item["busy_action"] = self.active_sessions.get(project_id, "")
             valid_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
             return valid_items
 
@@ -407,11 +414,29 @@ class TranslatorEngine:
             manifest_path = project_dir / "project.json"
             payload = self._read_json_file(manifest_path, {})
             if isinstance(payload, dict) and payload:
+                project_id = str(payload.get("project_id") or "")
+                payload["is_busy"] = self.is_session_busy(project_id)
+                payload["busy_action"] = self.active_sessions.get(project_id, "")
                 items.append(payload)
         items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         if items:
             self._write_project_index(items)
         return items
+
+    def mark_session_busy(self, project_id: str, action: str) -> None:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return
+        self.active_sessions[normalized_project_id] = str(action or "translate").strip().lower() or "translate"
+
+    def clear_session_busy(self, project_id: str) -> None:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return
+        self.active_sessions.pop(normalized_project_id, None)
+
+    def is_session_busy(self, project_id: str) -> bool:
+        return str(project_id or "").strip() in self.active_sessions
 
     def list_project_snapshots(self, project_id: str) -> list[dict[str, Any]]:
         snapshots = []
@@ -570,6 +595,8 @@ class TranslatorEngine:
         return new_project_id, new_session
 
     def delete_project(self, project_id: str) -> None:
+        if self.is_session_busy(project_id):
+            raise RuntimeError("该项目仍有任务在运行，请等待识别/翻译完成后再删除。")
         project_dir = self._project_dir(project_id)
         output_dir = self.base_dir / "output_images" / project_id
         rerender_cache_dir = self._rerender_cache_dir(project_id)

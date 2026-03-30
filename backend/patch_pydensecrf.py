@@ -107,9 +107,17 @@ def patch_text_render(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
-        "    if not text :\n        return\n",
-        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    h = max(int(h or 0), font_size)\n",
+        "    if not text :\n        return\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    h = max(int(h or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
         "text_render vertical dimension guards",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    width = max(int(width or 0), font_size)\n    height = max(int(height or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    h = max(int(h or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "text_render vertical wrong width/height guard cleanup",
     )
     changed = changed or did_change
 
@@ -155,9 +163,17 @@ def patch_text_render(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
-        "    if not text :\n        return\n",
-        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    width = max(int(width or 0), font_size)\n    height = max(int(height or 0), font_size)\n",
+        "    if not text :\n        return\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    width = max(int(width or 0), font_size)\n    height = max(int(height or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
         "text_render horizontal dimension guards",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    h = max(int(h or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "    if not text :\n        return\n    font_size = max(int(font_size or 0), 1)\n    width = max(int(width or 0), font_size)\n    height = max(int(height or 0), font_size)\n    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0\n",
+        "text_render horizontal wrong h guard cleanup",
     )
     changed = changed or did_change
 

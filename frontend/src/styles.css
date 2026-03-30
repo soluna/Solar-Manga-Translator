@@ -27,9 +27,17 @@ select {
 }
 
 .page-shell {
-  width: min(1720px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 40px 0 56px;
+}
+
+.page-shell.page-shell-fixed {
+  width: min(1720px, calc(100vw - 32px));
+}
+
+.page-shell.page-shell-auto {
+  width: calc(100vw - 24px);
+  max-width: none;
 }
 
 .hero-card,
@@ -43,6 +51,60 @@ select {
 
 .hero-card {
   padding: 32px;
+}
+
+.hero-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.hero-title-block {
+  min-width: min(100%, 420px);
+}
+
+.workspace-width-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(155, 95, 45, 0.16);
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.workspace-width-switch-label {
+  padding-inline: 10px 6px;
+  color: #7b5d45;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.workspace-width-switch-button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #7f6148;
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.workspace-width-switch-button:hover {
+  background: rgba(216, 108, 42, 0.08);
+}
+
+.workspace-width-switch-button.active {
+  background: linear-gradient(180deg, #d88342 0%, #bc5b2e 100%);
+  color: #fffaf6;
+  box-shadow: 0 10px 24px rgba(188, 91, 46, 0.22);
 }
 
 .gallery-card {
@@ -1269,7 +1331,9 @@ h2 {
 }
 
 @media (max-width: 768px) {
-  .page-shell {
+  .page-shell,
+  .page-shell.page-shell-fixed,
+  .page-shell.page-shell-auto {
     width: min(100vw - 20px, 1720px);
     padding: 20px 0 32px;
   }
@@ -1281,6 +1345,15 @@ h2 {
 
   .hero-card {
     padding: 24px 18px;
+  }
+
+  .hero-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace-width-switch {
+    align-self: flex-start;
   }
 
   .gallery-card {

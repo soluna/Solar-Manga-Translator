@@ -106,6 +106,10 @@ function isValidReviewMode(value) {
   return ['classic', 'canvas_beta'].includes(value)
 }
 
+function isValidWorkspaceWidthMode(value) {
+  return ['auto', 'fixed'].includes(value)
+}
+
 function createDefaultConfig() {
   return {
     translator: 'gemini',
@@ -126,6 +130,7 @@ function createDefaultConfig() {
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
     default_review_mode: 'classic',
+    workspace_width_mode: 'fixed',
     pause_after_detection: false,
     mask_cleanup_strength: 'standard',
     export_mask_debug: false,
@@ -184,6 +189,9 @@ function normalizeStoredConfig(rawValue) {
   const defaultReviewMode = typeof rawValue.default_review_mode === 'string' && isValidReviewMode(rawValue.default_review_mode)
     ? rawValue.default_review_mode
     : defaults.default_review_mode
+  const workspaceWidthMode = typeof rawValue.workspace_width_mode === 'string' && isValidWorkspaceWidthMode(rawValue.workspace_width_mode)
+    ? rawValue.workspace_width_mode
+    : defaults.workspace_width_mode
 
   return {
     translator,
@@ -219,6 +227,7 @@ function normalizeStoredConfig(rawValue) {
       : defaults.render_letter_spacing,
     rerender_output_format: rerenderOutputFormat,
     default_review_mode: defaultReviewMode,
+    workspace_width_mode: workspaceWidthMode,
     pause_after_detection: typeof rawValue.pause_after_detection === 'boolean'
       ? rawValue.pause_after_detection
       : defaults.pause_after_detection,
@@ -358,6 +367,11 @@ const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
 const canDirectManipulateCanvas = computed(
   () => Boolean(isCanvasReviewMode.value && !manualDrawMode.value && !mergeMode.value && !isAdjustingRegionBBox.value && !translating.value)
 )
+const pageShellWidthClass = computed(() => (
+  config.value.workspace_width_mode === 'auto'
+    ? 'page-shell-auto'
+    : 'page-shell-fixed'
+))
 const selectedPageHistoryState = computed(() => {
   const pageId = selectedEditPage.value?.stored_name || ''
   if (!pageId) {
@@ -3918,10 +3932,31 @@ watch(
 
 <template>
   <component :is="'style'">{{ previewFontFaceCss }}</component>
-  <main class="page-shell">
+  <main :class="['page-shell', pageShellWidthClass]">
     <section class="hero-card">
-      <p class="eyebrow">Manga Auto-Translator</p>
-      <h1>本地漫画翻译工作台</h1>
+      <div class="hero-head">
+        <div class="hero-title-block">
+          <p class="eyebrow">Manga Auto-Translator</p>
+          <h1>本地漫画翻译工作台</h1>
+        </div>
+        <div class="workspace-width-switch" aria-label="工作台宽度模式">
+          <span class="workspace-width-switch-label">宽度</span>
+          <button
+            type="button"
+            :class="['workspace-width-switch-button', config.workspace_width_mode === 'auto' ? 'active' : '']"
+            @click="config.workspace_width_mode = 'auto'"
+          >
+            自适应
+          </button>
+          <button
+            type="button"
+            :class="['workspace-width-switch-button', config.workspace_width_mode === 'fixed' ? 'active' : '']"
+            @click="config.workspace_width_mode = 'fixed'"
+          >
+            Fixed
+          </button>
+        </div>
+      </div>
       <p class="hero-copy">
         先上传压缩包或单张图片，再点击开始翻译。翻译过程中会逐张推送结果，并在完成后提供压缩包下载。
       </p>

@@ -338,6 +338,7 @@ const exportingTranslationRequestDebug = ref(false)
 const config = ref(loadStoredConfig())
 
 let socket = null
+let canvasNudgeQueue = Promise.resolve()
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
@@ -1783,6 +1784,51 @@ function translateBBoxWithinPage(originBBox, deltaX, deltaY, page) {
   x1 = clampValue(x1, 0, Math.max(0, imageWidth - width))
   y1 = clampValue(y1, 0, Math.max(0, imageHeight - height))
   return [x1, y1, x1 + width, y1 + height].map((value) => Math.round(value))
+}
+
+async function nudgeSelectedRegion(deltaX, deltaY) {
+  const page = selectedEditPage.value
+  const region = selectedEditRegion.value
+  if (!page || !region || !canDirectManipulateCanvas.value) {
+    return
+  }
+
+  const previousBBox = getEffectiveRegionBBox(region)
+  const nextBBox = translateBBoxWithinPage(previousBBox, deltaX, deltaY, page)
+  const changed = nextBBox.some((value, index) => value !== previousBBox[index])
+  if (!changed) {
+    return
+  }
+
+  updateRegionLayoutOverride(region.id, { bbox: nextBBox })
+  selectedEditRegionKey.value = region.id
+
+  await runCanvasCommand(page, {
+    label: '微调文本框位置',
+    redoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: region.id,
+        bbox: nextBBox
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: region.id,
+        bbox: previousBBox
+      }
+    ],
+    focusRegionId: region.id,
+    rollback: () => updateRegionLayoutOverride(region.id, { bbox: previousBBox })
+  })
+}
+
+function queueSelectedRegionNudge(deltaX, deltaY) {
+  canvasNudgeQueue = canvasNudgeQueue
+    .catch(() => {})
+    .then(() => nudgeSelectedRegion(deltaX, deltaY))
+  return canvasNudgeQueue
 }
 
 function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page) {
@@ -3430,6 +3476,19 @@ function handleGlobalCanvasKeydown(event) {
   } else if (isRedo && canRedoCanvasEdit.value) {
     event.preventDefault()
     void redoCanvasEdit()
+  } else if (canDirectManipulateCanvas.value && selectedEditRegion.value) {
+    const nudgeMap = {
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0]
+    }
+    const delta = nudgeMap[event.key]
+    if (!delta) {
+      return
+    }
+    event.preventDefault()
+    void queueSelectedRegionNudge(delta[0], delta[1])
   }
 }
 
@@ -5179,7 +5238,8 @@ watch(
                     @click.stop
                     @mousedown.stop
                     @input="handleRegionTextInput(region, $event.target.value)"
-                    @change="commitRegionTextDraft(region)"
+                    @keydown.enter.prevent="commitRegionTextDraft(region)"
+                    @blur="commitRegionTextDraft(region)"
                   />
                 </label>
               </div>

@@ -714,14 +714,38 @@ h2 {
 
 .style-toolbar {
   display: grid;
-  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr) auto;
   gap: 16px;
+  align-items: start;
 }
 
 .style-toolbar-actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+}
+
+.style-page-field {
+  min-width: 0;
+}
+
+.style-page-nav-controls {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.style-page-select {
+  min-width: 0;
+  width: 100%;
+}
+
+.style-page-jump-button {
+  min-width: 34px;
+  width: 34px;
+  padding-inline: 0;
+  justify-content: center;
 }
 
 .style-summary {
@@ -763,7 +787,7 @@ h2 {
 
 .style-preview-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -801,6 +825,17 @@ h2 {
   display: block;
   width: 100%;
   height: auto;
+}
+
+.style-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  padding: 20px;
+  color: #8a6f59;
+  font-size: 0.82rem;
+  text-align: center;
 }
 
 .style-preview-tip {
@@ -1227,6 +1262,12 @@ h2 {
   max-width: 92px;
 }
 
+@media (max-width: 1480px) {
+  .style-preview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
   .page-shell {
     width: min(100vw - 20px, 1720px);
@@ -1257,6 +1298,10 @@ h2 {
   .style-toolbar,
   .style-workbench {
     grid-template-columns: 1fr;
+  }
+
+  .style-toolbar-actions {
+    justify-content: flex-start;
   }
 
   .compare-card-grid {

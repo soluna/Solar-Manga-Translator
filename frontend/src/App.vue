@@ -508,6 +508,24 @@ const selectedEditPage = computed(() => {
     || null
   )
 })
+const selectedEditPageIndex = computed(() => {
+  if (!selectedEditPage.value) {
+    return -1
+  }
+  return mergedInspectionPages.value.findIndex((page) => page.stored_name === selectedEditPage.value?.stored_name)
+})
+const canSelectPreviousEditPage = computed(() => selectedEditPageIndex.value > 0)
+const canSelectNextEditPage = computed(() => {
+  return selectedEditPageIndex.value >= 0 && selectedEditPageIndex.value < mergedInspectionPages.value.length - 1
+})
+const selectedEditPageSummary = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  const pageNumber = selectedEditPageIndex.value >= 0 ? selectedEditPageIndex.value + 1 : 1
+  return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页 · ${page.regions.length} 个文本框`
+})
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
@@ -1723,6 +1741,36 @@ function getCanvasPreviewImageUrl(page) {
 
   const imagePath = page?.translated_image_url || page?.image_url || page?.base_image_url || ''
   return withCacheBust(toApiUrl(imagePath))
+}
+
+function getSavedTranslatedImageUrl(page) {
+  const latestTranslatedUrl = page?.stored_name
+    ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
+    : ''
+  if (latestTranslatedUrl) {
+    return latestTranslatedUrl
+  }
+
+  const translatedPath = String(page?.translated_image_url || '').trim()
+  if (translatedPath) {
+    return withCacheBust(toApiUrl(translatedPath))
+  }
+
+  return ''
+}
+
+function selectAdjacentEditPage(offset) {
+  if (!mergedInspectionPages.value.length || selectedEditPageIndex.value < 0) {
+    return
+  }
+  const nextIndex = Math.min(
+    mergedInspectionPages.value.length - 1,
+    Math.max(0, selectedEditPageIndex.value + offset),
+  )
+  const nextPage = mergedInspectionPages.value[nextIndex]
+  if (nextPage?.stored_name) {
+    selectedEditPageKey.value = nextPage.stored_name
+  }
 }
 
 function getCanvasPreviewText(region) {
@@ -4618,17 +4666,38 @@ watch(
 
       <div v-else-if="selectedEditPage" class="style-inspector">
         <div class="style-toolbar">
-          <label class="field">
+          <label class="field style-page-field">
             <span>校对页面</span>
-            <select v-model="selectedEditPageKey">
-              <option
-                v-for="page in mergedInspectionPages"
-                :key="page.stored_name"
-                :value="page.stored_name"
+            <div class="style-page-nav-controls">
+              <button
+                class="inline-button style-page-jump-button"
+                type="button"
+                :disabled="!canSelectPreviousEditPage"
+                title="上一页"
+                @click="selectAdjacentEditPage(-1)"
               >
-                {{ page.name }}（{{ page.regions.length }} 个文本框）
-              </option>
-            </select>
+                ↑
+              </button>
+              <select v-model="selectedEditPageKey" class="style-page-select">
+                <option
+                  v-for="page in mergedInspectionPages"
+                  :key="page.stored_name"
+                  :value="page.stored_name"
+                >
+                  {{ page.name }}
+                </option>
+              </select>
+              <button
+                class="inline-button style-page-jump-button"
+                type="button"
+                :disabled="!canSelectNextEditPage"
+                title="下一页"
+                @click="selectAdjacentEditPage(1)"
+              >
+                ↓
+              </button>
+            </div>
+            <small class="field-hint">{{ selectedEditPageSummary }}</small>
           </label>
 
           <div class="field style-summary">
@@ -4801,6 +4870,20 @@ watch(
                       @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
                     ></span>
                   </button>
+                </div>
+              </div>
+
+              <div class="style-preview-panel">
+                <div class="style-preview-label">已嵌字结果</div>
+                <div class="style-preview-canvas">
+                  <img
+                    v-if="getSavedTranslatedImageUrl(selectedEditPage)"
+                    :alt="`${selectedEditPage.name} 已嵌字结果`"
+                    :src="getSavedTranslatedImageUrl(selectedEditPage)"
+                  />
+                  <div v-else class="style-preview-empty">
+                    当前还没有可用的已嵌字结果
+                  </div>
                 </div>
               </div>
             </div>

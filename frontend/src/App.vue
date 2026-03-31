@@ -340,6 +340,7 @@ const config = ref(loadStoredConfig())
 let socket = null
 let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
+let suppressCanvasRegionClickUntil = 0
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
@@ -1650,6 +1651,20 @@ function isEditableTextTarget(target) {
 
 function isRegionSelectedForMerge(region) {
   return Boolean(mergeRegionSelection.value[region.id])
+}
+
+function handleCanvasRegionClick(region) {
+  if (!region) {
+    return
+  }
+  if (Date.now() < suppressCanvasRegionClickUntil) {
+    return
+  }
+  if (mergeMode.value) {
+    toggleMergeSelection(region)
+    return
+  }
+  selectedEditRegionKey.value = region.id
 }
 
 function syncEditSelection() {
@@ -3039,6 +3054,7 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     rect,
     startPoint: point,
     originBBox: getEffectiveRegionBBox(region),
+    currentBBox: getEffectiveRegionBBox(region),
     moved: false,
     startedAt: Date.now()
   }
@@ -3075,6 +3091,7 @@ function updateCanvasRegionTransform(event) {
 
   const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
   draft.moved = draft.moved || changed
+  draft.currentBBox = nextBBox
   updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
 }
 
@@ -3092,9 +3109,9 @@ async function finishCanvasRegionTransform(event) {
     return
   }
 
+  suppressCanvasRegionClickUntil = Date.now() + 180
   const page = mergedInspectionPages.value.find((item) => item.stored_name === draft.pageId)
-  const region = page?.regions?.find((item) => item.id === draft.regionId)
-  const nextBBox = region ? getEffectiveRegionBBox(region) : null
+  const nextBBox = Array.isArray(draft.currentBBox) ? draft.currentBBox : null
   if (!page || !nextBBox) {
     return
   }
@@ -5140,7 +5157,7 @@ watch(
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
+                    @click="handleCanvasRegionClick(region)"
                     @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>
@@ -5186,7 +5203,7 @@ watch(
                       getStyleRegionLabelClass(region, selectedEditPage)
                     ]"
                     :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
+                    @click="handleCanvasRegionClick(region)"
                     @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                   >
                     <span class="style-box-label">{{ region.index + 1 }}</span>

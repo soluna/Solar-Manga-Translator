@@ -1696,6 +1696,25 @@ function syncEditSelection() {
   }
 }
 
+function pruneRegionDraftMap(draftMap, pages) {
+  const validRegionIds = new Set()
+  for (const page of pages || []) {
+    for (const region of page?.regions || []) {
+      if (region?.id) {
+        validRegionIds.add(region.id)
+      }
+    }
+  }
+
+  const nextDrafts = {}
+  for (const [regionId, value] of Object.entries(draftMap || {})) {
+    if (validRegionIds.has(regionId)) {
+      nextDrafts[regionId] = value
+    }
+  }
+  return nextDrafts
+}
+
 function getEffectiveRegionBBox(region) {
   const override = translationRegionLayoutOverrides.value[region?.id]
   const bbox = Array.isArray(override?.bbox) && override.bbox.length === 4
@@ -2499,8 +2518,8 @@ async function loadEditInspection(options = {}) {
   }
 
   await Promise.all(tasks)
-  translationInputDrafts.value = {}
-  fontSizeInputDrafts.value = {}
+  translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
+  fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
   syncEditSelection()
 }
 
@@ -3322,10 +3341,17 @@ function commitRegionTextDraft(region) {
   if (!isCanvasReviewMode.value || !selectedEditPage.value) {
     return
   }
+  const hasDraft = Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)
+  if (!hasDraft) {
+    return
+  }
   const draftValue = String(translationInputDrafts.value[region.id] ?? getEditRegionText(region))
   const normalizedTranslation = draftValue.trim()
   const previousOverride = String(translationRegionOverrides.value[region.id] || '')
   if (normalizedTranslation === previousOverride) {
+    const nextDrafts = { ...translationInputDrafts.value }
+    delete nextDrafts[region.id]
+    translationInputDrafts.value = nextDrafts
     return
   }
 
@@ -3336,6 +3362,9 @@ function commitRegionTextDraft(region) {
     nextOverrides[region.id] = normalizedTranslation
   }
   translationRegionOverrides.value = nextOverrides
+  const nextDrafts = { ...translationInputDrafts.value }
+  delete nextDrafts[region.id]
+  translationInputDrafts.value = nextDrafts
 
   void runCanvasCommand(selectedEditPage.value, {
     label: '修改译文',
@@ -3363,6 +3392,10 @@ function commitRegionTextDraft(region) {
         delete rollbackOverrides[region.id]
       }
       translationRegionOverrides.value = rollbackOverrides
+      translationInputDrafts.value = {
+        ...translationInputDrafts.value,
+        [region.id]: draftValue
+      }
     }
   })
 }

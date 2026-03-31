@@ -370,7 +370,7 @@ async def get_page_base_image(session_id: str, page_id: str):
 async def get_page_source_image(session_id: str, page_id: str):
     session = get_or_restore_session(session_id)
     try:
-        source_path = translator_engine.get_page_source_image_path(session, page_id)
+        source_path = translator_engine.get_page_source_image_path(session_id, session, page_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(path=source_path)

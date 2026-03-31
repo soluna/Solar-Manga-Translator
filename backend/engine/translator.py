@@ -72,6 +72,15 @@ class TranslatorEngine:
     def _project_session_state_path(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "session.json"
 
+    def _project_output_dir(self, project_id: str) -> Path:
+        return self.base_dir / "output_images" / project_id
+
+    def _project_source_dir(self, project_id: str) -> Path:
+        return self._project_output_dir(project_id) / "source"
+
+    def _project_translated_dir(self, project_id: str) -> Path:
+        return self._project_output_dir(project_id) / "translated"
+
     def _project_snapshots_dir(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "snapshots"
 
@@ -271,8 +280,8 @@ class TranslatorEngine:
         if not isinstance(manifest, dict) or not manifest:
             return None
 
-        source_dir = Path(str(manifest.get("source_dir") or ""))
-        translated_dir = Path(str(manifest.get("translated_dir") or ""))
+        source_dir = Path(str(manifest.get("source_dir") or "")) if str(manifest.get("source_dir") or "").strip() else self._project_source_dir(project_id)
+        translated_dir = Path(str(manifest.get("translated_dir") or "")) if str(manifest.get("translated_dir") or "").strip() else self._project_translated_dir(project_id)
         source_images = self._infer_source_images_from_dir(source_dir)
         translated_output_map = self._infer_translated_output_map(translated_dir, source_images)
         workflow_stage = str(manifest.get("workflow_stage") or ("translated" if translated_output_map else "idle"))
@@ -597,16 +606,28 @@ class TranslatorEngine:
             session["source_dir"] = str(manifest_dict.get("source_dir") or "")
         if not session["translated_dir"]:
             session["translated_dir"] = str(manifest_dict.get("translated_dir") or "")
+        source_dir_path = Path(session["source_dir"]) if session["source_dir"] else Path()
+        translated_dir_path = Path(session["translated_dir"]) if session["translated_dir"] else Path()
+        canonical_source_dir = self._project_source_dir(project_id)
+        canonical_translated_dir = self._project_translated_dir(project_id)
+        if (not session["source_dir"] or not source_dir_path.exists()) and canonical_source_dir.exists():
+            session["source_dir"] = str(canonical_source_dir)
+            source_dir_path = canonical_source_dir
+            restored_from_manifest = True
+        if (not session["translated_dir"] or not translated_dir_path.exists()) and canonical_translated_dir.exists():
+            session["translated_dir"] = str(canonical_translated_dir)
+            translated_dir_path = canonical_translated_dir
+            restored_from_manifest = True
         if not session["project_title"]:
             session["project_title"] = str(manifest_dict.get("title") or manifest_dict.get("project_title") or project_id)
         if not session["project_note"]:
             session["project_note"] = str(manifest_dict.get("note") or manifest_dict.get("project_note") or "")
         if not session["source_images"]:
-            session["source_images"] = self._infer_source_images_from_dir(Path(session.get("source_dir") or ""))
+            session["source_images"] = self._infer_source_images_from_dir(source_dir_path)
             restored_from_manifest = True
         if not session["translated_output_map"]:
             session["translated_output_map"] = self._infer_translated_output_map(
-                Path(session.get("translated_dir") or ""),
+                translated_dir_path,
                 session["source_images"],
                 self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
             )
@@ -761,7 +782,7 @@ class TranslatorEngine:
             {
                 "name": str(image.get("name") or image.get("stored_name") or ""),
                 "stored_name": str(image.get("stored_name") or ""),
-                "url": f"/output/{project_id}/source/{str(image.get('stored_name') or '')}",
+                "url": f"/api/pages/{project_id}/{str(image.get('stored_name') or '')}/source-image",
             }
             for image in (session.get("source_images") or [])
             if str(image.get("stored_name") or "")
@@ -777,7 +798,7 @@ class TranslatorEngine:
                 {
                     "id": f"{project_id}-translated-{stored_name or index}",
                     "name": str(image.get("name") or stored_name),
-                    "url": f"/output/{project_id}/translated/{current_output.name}",
+                    "url": f"/api/pages/{project_id}/{stored_name}/translated-image",
                     "stored_name": stored_name,
                 }
             )
@@ -1089,16 +1110,22 @@ class TranslatorEngine:
         document_path = self._project_page_document_path(project_id, page_id)
         payload = self._read_json_file(document_path, {})
         if isinstance(payload, dict) and payload:
-            return payload
+            normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
+            if normalized_payload != payload:
+                self._write_json_file(document_path, normalized_payload)
+            return normalized_payload
 
         self._persist_page_documents(project_id, session, page_ids=[page_id])
         payload = self._read_json_file(document_path, {})
         if isinstance(payload, dict) and payload:
-            return payload
+            normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
+            if normalized_payload != payload:
+                self._write_json_file(document_path, normalized_payload)
+            return normalized_payload
         raise FileNotFoundError("当前页面文档不存在，请先完成一次识别或翻译。")
 
     def get_page_base_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
-        source_path = Path(session.get("source_dir") or "") / page_id
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
         page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
         self._ensure_page_base_image_cache(source_path, page_cache_dir)
         base_path = page_cache_dir / "inpainted.png"
@@ -1108,24 +1135,59 @@ class TranslatorEngine:
             return source_path
         raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
 
-    def get_page_source_image_path(self, session: dict[str, Any], page_id: str) -> Path:
-        source_path = Path(session.get("source_dir") or "") / page_id
-        if source_path.exists():
-            return source_path
+    def get_page_source_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
+        candidate_paths = [
+            Path(session.get("source_dir") or "") / page_id,
+            self._project_source_dir(project_id) / page_id,
+        ]
+        for source_path in candidate_paths:
+            if source_path.exists():
+                return source_path
         raise FileNotFoundError("当前页面原图不存在，请先重新上传或恢复项目。")
 
     def get_page_translated_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
-        output_dir = Path(session.get("translated_dir") or "")
         preferred_format = self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format"))
-        translated_path = self._current_translated_output(session, output_dir, page_id, preferred_format)
-        if translated_path is not None and translated_path.exists():
-            return translated_path
+        candidate_output_dirs = [
+            Path(session.get("translated_dir") or ""),
+            self._project_translated_dir(project_id),
+        ]
+        for output_dir in candidate_output_dirs:
+            translated_path = self._current_translated_output(session, output_dir, page_id, preferred_format)
+            if translated_path is not None and translated_path.exists():
+                return translated_path
         raise FileNotFoundError("当前页面还没有可用的已嵌字结果。")
 
     def get_page_preview_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
         with contextlib.suppress(FileNotFoundError):
             return self.get_page_translated_image_path(project_id, session, page_id)
-        return self.get_page_source_image_path(session, page_id)
+        return self.get_page_source_image_path(project_id, session, page_id)
+
+    def _normalize_page_document_image_urls(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        resolved_page_id = str(normalized.get("page_id") or page_id or "").strip()
+        if not resolved_page_id:
+            return normalized
+
+        source_image_url = f"/api/pages/{project_id}/{resolved_page_id}/source-image"
+        base_image_url = f"/api/pages/{project_id}/{resolved_page_id}/base-image"
+        preview_image_url = f"/api/pages/{project_id}/{resolved_page_id}/preview-image"
+        translated_image_url = ""
+        with contextlib.suppress(FileNotFoundError):
+            self.get_page_translated_image_path(project_id, session, resolved_page_id)
+            translated_image_url = f"/api/pages/{project_id}/{resolved_page_id}/translated-image"
+
+        normalized["page_id"] = resolved_page_id
+        normalized["source_image"] = source_image_url
+        normalized["base_image"] = base_image_url
+        normalized["preview_image"] = preview_image_url
+        normalized["translated_image"] = translated_image_url
+        return normalized
 
     def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
         page_document = self.get_page_document(project_id, session, page_id)

@@ -2,8 +2,8 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
-:: Get absolute path to the directory containing this script
-set "ROOT_DIR=%~dp0"
+:: Get absolute path to the directory containing this script, without a trailing slash.
+for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
 
 echo ===================================================
 echo Manga Auto-Translator WebUI Start Script

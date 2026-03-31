@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-setlocal
+setlocal enabledelayedexpansion
 
 :: Get absolute path to the directory containing this script
 set "ROOT_DIR=%~dp0"
@@ -8,6 +8,9 @@ set "ROOT_DIR=%~dp0"
 echo ===================================================
 echo Manga Auto-Translator WebUI Start Script
 echo ===================================================
+
+call :stop_existing_service_on_port 8000 "uvicorn main:app"
+call :stop_existing_service_on_port 5173 "vite"
 
 :: Check Python
 python --version >nul 2>&1
@@ -88,3 +91,34 @@ echo.
 echo Please keep the two new command prompt windows open.
 echo ===================================================
 pause
+exit /b
+
+:stop_existing_service_on_port
+set "TARGET_PORT=%~1"
+set "MATCH_TEXT=%~2"
+set "FOUND_MATCHING_PROCESS="
+
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /r /c:":%TARGET_PORT% .*LISTENING"') do (
+    set "PID=%%P"
+    if not "!PID!"=="" (
+        set "PROCESS_CMD="
+        for /f "tokens=* delims=" %%C in ('wmic process where "ProcessId=!PID!" get CommandLine ^| findstr /r /v "^$"') do (
+            set "PROCESS_CMD=%%C"
+        )
+        echo !PROCESS_CMD! | findstr /i /c:"%MATCH_TEXT%" >nul
+        if !errorlevel! equ 0 (
+            if not defined FOUND_MATCHING_PROCESS (
+                echo.
+                echo [Preflight] Found existing service on port %TARGET_PORT%, stopping stale process...
+                set "FOUND_MATCHING_PROCESS=1"
+            )
+            echo [Preflight] taskkill /PID !PID! /F
+            taskkill /PID !PID! /F >nul 2>&1
+        )
+    )
+)
+
+if defined FOUND_MATCHING_PROCESS (
+    timeout /t 1 >nul
+)
+exit /b

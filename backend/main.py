@@ -366,6 +366,36 @@ async def get_page_base_image(session_id: str, page_id: str):
     return FileResponse(path=base_path)
 
 
+@app.get("/api/pages/{session_id}/{page_id}/source-image")
+async def get_page_source_image(session_id: str, page_id: str):
+    session = get_or_restore_session(session_id)
+    try:
+        source_path = translator_engine.get_page_source_image_path(session, page_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=source_path)
+
+
+@app.get("/api/pages/{session_id}/{page_id}/preview-image")
+async def get_page_preview_image(session_id: str, page_id: str):
+    session = get_or_restore_session(session_id)
+    try:
+        preview_path = translator_engine.get_page_preview_image_path(session_id, session, page_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=preview_path)
+
+
+@app.get("/api/pages/{session_id}/{page_id}/translated-image")
+async def get_page_translated_image(session_id: str, page_id: str):
+    session = get_or_restore_session(session_id)
+    try:
+        translated_path = translator_engine.get_page_translated_image_path(session_id, session, page_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=translated_path)
+
+
 @app.get("/api/pages/{session_id}/{page_id}/ocr-debug")
 async def get_page_ocr_debug(session_id: str, page_id: str):
     session = get_or_restore_session(session_id)

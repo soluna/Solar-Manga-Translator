@@ -1032,16 +1032,21 @@ class TranslatorEngine:
         return {
             "page_id": stored_name,
             "review_mode": self._session_review_mode(session),
-            "source_image": f"/output/{project_id}/source/{stored_name}",
+            "source_image": f"/api/pages/{project_id}/{stored_name}/source-image",
             "base_image": (
                 f"/api/pages/{project_id}/{stored_name}/base-image"
                 if inpainted_path.exists()
-                else f"/output/{project_id}/source/{stored_name}"
+                else f"/api/pages/{project_id}/{stored_name}/source-image"
             ),
             "preview_image": (
-                f"/output/{project_id}/translated/{preview_output.name}"
+                f"/api/pages/{project_id}/{stored_name}/preview-image"
                 if preview_output is not None
-                else f"/output/{project_id}/source/{stored_name}"
+                else f"/api/pages/{project_id}/{stored_name}/source-image"
+            ),
+            "translated_image": (
+                f"/api/pages/{project_id}/{stored_name}/translated-image"
+                if preview_output is not None
+                else ""
             ),
             "dimensions": {
                 "width": int(source_bgr.shape[1]),
@@ -1102,6 +1107,25 @@ class TranslatorEngine:
         if source_path.exists():
             return source_path
         raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
+
+    def get_page_source_image_path(self, session: dict[str, Any], page_id: str) -> Path:
+        source_path = Path(session.get("source_dir") or "") / page_id
+        if source_path.exists():
+            return source_path
+        raise FileNotFoundError("当前页面原图不存在，请先重新上传或恢复项目。")
+
+    def get_page_translated_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
+        output_dir = Path(session.get("translated_dir") or "")
+        preferred_format = self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format"))
+        translated_path = self._current_translated_output(session, output_dir, page_id, preferred_format)
+        if translated_path is not None and translated_path.exists():
+            return translated_path
+        raise FileNotFoundError("当前页面还没有可用的已嵌字结果。")
+
+    def get_page_preview_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
+        with contextlib.suppress(FileNotFoundError):
+            return self.get_page_translated_image_path(project_id, session, page_id)
+        return self.get_page_source_image_path(session, page_id)
 
     def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
         page_document = self.get_page_document(project_id, session, page_id)
@@ -1335,7 +1359,7 @@ class TranslatorEngine:
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
-            "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("translated_image") or page_document.get("preview_image") or page_document.get("source_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
             "regions": region_payloads,
@@ -1380,7 +1404,7 @@ class TranslatorEngine:
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
-            "translated_image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("translated_image") or page_document.get("preview_image") or page_document.get("source_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
             "regions": region_payloads,

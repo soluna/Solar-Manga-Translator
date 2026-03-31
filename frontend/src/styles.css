@@ -1258,6 +1258,23 @@ h2 {
   text-align: center;
 }
 
+.compact-action-button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(155, 95, 45, 0.24);
+  border-radius: 10px;
+  background: rgba(255, 247, 239, 0.92);
+  color: #8a5128;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.compact-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .region-card-controls-single {
   grid-template-columns: minmax(0, 1fr);
 }

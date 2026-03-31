@@ -3177,6 +3177,69 @@ function updateRegionFontOverride(region, nextFontId) {
   })
 }
 
+function canApplyRegionFontToPage(region) {
+  return Boolean(
+    selectedEditPage.value
+    && getEffectiveRegionFontId(region)
+    && selectedEditPage.value.regions?.length
+  )
+}
+
+function applyRegionFontToPage(region) {
+  const page = selectedEditPage.value
+  const targetFontId = getEffectiveRegionFontId(region)
+  if (!page || !targetFontId) {
+    return
+  }
+
+  const redoCommands = []
+  const undoCommands = []
+  const rollbackOverrides = { ...translationRegionLayoutOverrides.value }
+  let hasChanges = false
+
+  for (const targetRegion of page.regions || []) {
+    const previousFontId = getRegionFontOverrideId(targetRegion)
+    if (previousFontId === targetFontId) {
+      continue
+    }
+    hasChanges = true
+    updateRegionLayoutOverride(targetRegion.id, { font_key: targetFontId })
+    redoCommands.push({
+      type: 'update_region_font',
+      region_id: targetRegion.id,
+      font_key: targetFontId
+    })
+    undoCommands.push({
+      type: 'update_region_font',
+      region_id: targetRegion.id,
+      font_key: previousFontId
+    })
+  }
+
+  if (!hasChanges) {
+    status.value = '本页文本框已经都是这个字体了。'
+    return
+  }
+
+  selectedEditRegionKey.value = region.id
+  void warmPreviewFonts()
+
+  void runCanvasCommand(page, {
+    label: '整页统一字体',
+    redoCommands,
+    undoCommands,
+    successMessage: '已将本页所有文本框设为当前字体。',
+    focusRegionId: region.id,
+    rollback: () => {
+      translationRegionLayoutOverrides.value = rollbackOverrides
+      if (selectedEditPage.value?.stored_name) {
+        markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+      }
+      void warmPreviewFonts()
+    }
+  })
+}
+
 function updateRegionTextDirection(region, nextDirection) {
   const normalizedDirection = normalizeDirectionValue(nextDirection)
   const previousDirection = getRegionDirectionValue(region)
@@ -5248,6 +5311,16 @@ watch(
                       </option>
                     </select>
                   </label>
+
+                  <button
+                    v-if="selectedEditRegionKey === region.id"
+                    type="button"
+                    class="compact-action-button"
+                    :disabled="!canApplyRegionFontToPage(region)"
+                    @click.stop="applyRegionFontToPage(region)"
+                  >
+                    应用到本页
+                  </button>
 
                   <label class="compact-number-wrap compact-number-wrap-font-size" @click.stop @mousedown.stop>
                     <input

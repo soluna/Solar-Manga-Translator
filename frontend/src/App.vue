@@ -338,7 +338,8 @@ const exportingTranslationRequestDebug = ref(false)
 const config = ref(loadStoredConfig())
 
 let socket = null
-let canvasNudgeQueue = Promise.resolve()
+let pendingCanvasNudge = null
+let canvasNudgeCommitTimer = null
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
@@ -1786,49 +1787,102 @@ function translateBBoxWithinPage(originBBox, deltaX, deltaY, page) {
   return [x1, y1, x1 + width, y1 + height].map((value) => Math.round(value))
 }
 
-async function nudgeSelectedRegion(deltaX, deltaY) {
-  const page = selectedEditPage.value
-  const region = selectedEditRegion.value
-  if (!page || !region || !canDirectManipulateCanvas.value) {
+function clearCanvasNudgeCommitTimer() {
+  if (canvasNudgeCommitTimer != null) {
+    window.clearTimeout(canvasNudgeCommitTimer)
+    canvasNudgeCommitTimer = null
+  }
+}
+
+function scheduleCanvasNudgeCommit() {
+  clearCanvasNudgeCommitTimer()
+  canvasNudgeCommitTimer = window.setTimeout(() => {
+    void flushPendingCanvasNudge()
+  }, 90)
+}
+
+async function flushPendingCanvasNudge() {
+  const pending = pendingCanvasNudge
+  if (!pending) {
     return
   }
 
-  const previousBBox = getEffectiveRegionBBox(region)
-  const nextBBox = translateBBoxWithinPage(previousBBox, deltaX, deltaY, page)
-  const changed = nextBBox.some((value, index) => value !== previousBBox[index])
+  pendingCanvasNudge = null
+  clearCanvasNudgeCommitTimer()
+
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === pending.pageId)
+  const region = page?.regions?.find((item) => item.id === pending.regionId)
+  const currentOverride = translationRegionLayoutOverrides.value[pending.regionId]
+  const nextBBox = Array.isArray(currentOverride?.bbox) && currentOverride.bbox.length === 4
+    ? currentOverride.bbox
+    : region
+      ? getEffectiveRegionBBox(region)
+      : null
+
+  if (!page || !nextBBox) {
+    return
+  }
+
+  const changed = nextBBox.some((value, index) => value !== pending.originBBox[index])
   if (!changed) {
     return
   }
-
-  updateRegionLayoutOverride(region.id, { bbox: nextBBox })
-  selectedEditRegionKey.value = region.id
 
   await runCanvasCommand(page, {
     label: '微调文本框位置',
     redoCommands: [
       {
         type: 'update_region_bbox',
-        region_id: region.id,
+        region_id: pending.regionId,
         bbox: nextBBox
       }
     ],
     undoCommands: [
       {
         type: 'update_region_bbox',
-        region_id: region.id,
-        bbox: previousBBox
+        region_id: pending.regionId,
+        bbox: pending.originBBox
       }
     ],
-    focusRegionId: region.id,
-    rollback: () => updateRegionLayoutOverride(region.id, { bbox: previousBBox })
+    focusRegionId: pending.regionId,
+    rollback: () => updateRegionLayoutOverride(pending.regionId, { bbox: pending.originBBox })
   })
 }
 
-function queueSelectedRegionNudge(deltaX, deltaY) {
-  canvasNudgeQueue = canvasNudgeQueue
-    .catch(() => {})
-    .then(() => nudgeSelectedRegion(deltaX, deltaY))
-  return canvasNudgeQueue
+function nudgeSelectedRegion(deltaX, deltaY) {
+  const page = selectedEditPage.value
+  const region = selectedEditRegion.value
+  if (!page || !region || !canDirectManipulateCanvas.value) {
+    return
+  }
+
+  const hasPendingForSameRegion = Boolean(
+    pendingCanvasNudge
+    && pendingCanvasNudge.pageId === page.stored_name
+    && pendingCanvasNudge.regionId === region.id
+  )
+  if (pendingCanvasNudge && !hasPendingForSameRegion) {
+    void flushPendingCanvasNudge()
+  }
+
+  const currentBBox = getEffectiveRegionBBox(region)
+  const nextBBox = translateBBoxWithinPage(currentBBox, deltaX, deltaY, page)
+  const changed = nextBBox.some((value, index) => value !== currentBBox[index])
+  if (!changed) {
+    return
+  }
+
+  if (!hasPendingForSameRegion) {
+    pendingCanvasNudge = {
+      pageId: page.stored_name,
+      regionId: region.id,
+      originBBox: currentBBox
+    }
+  }
+
+  updateRegionLayoutOverride(region.id, { bbox: nextBBox })
+  selectedEditRegionKey.value = region.id
+  scheduleCanvasNudgeCommit()
 }
 
 function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page) {
@@ -3488,8 +3542,19 @@ function handleGlobalCanvasKeydown(event) {
       return
     }
     event.preventDefault()
-    void queueSelectedRegionNudge(delta[0], delta[1])
+    const step = event.ctrlKey ? 5 : 1
+    nudgeSelectedRegion(delta[0] * step, delta[1] * step)
   }
+}
+
+function handleGlobalCanvasKeyup(event) {
+  if (!pendingCanvasNudge) {
+    return
+  }
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    return
+  }
+  void flushPendingCanvasNudge()
 }
 
 async function copyText(text, successMessage) {
@@ -3871,15 +3936,19 @@ onMounted(() => {
   window.addEventListener('pointerup', finishCanvasRegionTransform)
   window.addEventListener('pointercancel', cancelCanvasRegionTransform)
   window.addEventListener('keydown', handleGlobalCanvasKeydown)
+  window.addEventListener('keyup', handleGlobalCanvasKeyup)
 })
 
 onBeforeUnmount(() => {
   closeSocket()
+  void flushPendingCanvasNudge()
+  clearCanvasNudgeCommitTimer()
   window.removeEventListener('resize', refreshTranslatedPreviewScale)
   window.removeEventListener('pointermove', updateCanvasRegionTransform)
   window.removeEventListener('pointerup', finishCanvasRegionTransform)
   window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
   window.removeEventListener('keydown', handleGlobalCanvasKeydown)
+  window.removeEventListener('keyup', handleGlobalCanvasKeyup)
 })
 
 async function warmPreviewFonts() {

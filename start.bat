@@ -70,7 +70,8 @@ call npm install
 echo.
 echo [3/3] Starting Services...
 echo Launching managed browser session...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%start.managed.ps1" -RootDir "%ROOT_DIR%"
+set "MANAGED_SCRIPT=%ROOT_DIR%\start.managed.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%MANAGED_SCRIPT%" -RootDir "%ROOT_DIR%"
 exit /b %errorlevel%
 
 :stop_existing_service_on_port

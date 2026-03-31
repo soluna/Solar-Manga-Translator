@@ -229,6 +229,80 @@ class TranslatorEngine:
 
         return referenced
 
+    def _infer_source_images_from_dir(self, source_dir: Path) -> list[dict[str, str]]:
+        if not source_dir.exists() or not source_dir.is_dir():
+            return []
+
+        valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+        source_images: list[dict[str, str]] = []
+        for path in sorted(source_dir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in valid_suffixes:
+                continue
+            source_images.append(
+                {
+                    "name": path.name,
+                    "stored_name": path.name,
+                }
+            )
+        return source_images
+
+    def _infer_translated_output_map(
+        self,
+        translated_dir: Path,
+        source_images: list[dict[str, Any]],
+        preferred_format: str = "source",
+    ) -> dict[str, str]:
+        if not translated_dir.exists() or not translated_dir.is_dir():
+            return {}
+
+        translated_output_map: dict[str, str] = {}
+        for image in source_images:
+            stored_name = str(image.get("stored_name") or "")
+            if not stored_name:
+                continue
+            current_output = self._find_existing_translated_output(translated_dir, stored_name, preferred_format)
+            if current_output is not None and current_output.exists():
+                translated_output_map[stored_name] = current_output.name
+        return translated_output_map
+
+    def _recover_session_from_manifest(self, project_id: str, manifest: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(manifest, dict) or not manifest:
+            return None
+
+        source_dir = Path(str(manifest.get("source_dir") or ""))
+        translated_dir = Path(str(manifest.get("translated_dir") or ""))
+        source_images = self._infer_source_images_from_dir(source_dir)
+        translated_output_map = self._infer_translated_output_map(translated_dir, source_images)
+        workflow_stage = str(manifest.get("workflow_stage") or ("translated" if translated_output_map else "idle"))
+
+        return {
+            "source_dir": str(source_dir),
+            "translated_dir": str(translated_dir),
+            "source_images": source_images,
+            "download_path": "",
+            "translated_output_map": translated_output_map,
+            "rerender_generation": 0,
+            "manual_regions": {},
+            "workflow_stage": workflow_stage,
+            "mask_debug_dir": "",
+            "rerender_cache_dir": str(self._rerender_cache_dir(project_id)),
+            "last_config": {},
+            "deferred_output_names": set(),
+            "translation_region_overrides": {},
+            "translation_region_skip_overrides": {},
+            "translation_region_disabled_overrides": {},
+            "translation_region_layout_overrides": {},
+            "style_region_overrides": {},
+            "project_id": project_id,
+            "project_title": str(manifest.get("title") or manifest.get("project_title") or project_id),
+            "project_note": str(manifest.get("note") or manifest.get("project_note") or ""),
+            "review_mode": self._normalize_review_mode(manifest.get("review_mode")),
+            "project_created_at": str(manifest.get("created_at") or manifest.get("project_created_at") or self._now_iso()),
+            "project_updated_at": str(manifest.get("updated_at") or manifest.get("project_updated_at") or self._now_iso()),
+        }
+
     def _garbage_collect_project_outputs(self, project_id: str, session: dict[str, Any]) -> None:
         output_dir = Path(session.get("translated_dir") or "")
         if not output_dir.exists():
@@ -484,8 +558,14 @@ class TranslatorEngine:
 
     def restore_project_session(self, project_id: str) -> dict[str, Any]:
         state = self._read_json_file(self._project_session_state_path(project_id), {})
+        manifest = self._read_json_file(self._project_manifest_path(project_id), {})
+        restored_from_manifest = False
         if not isinstance(state, dict) or not state:
-            raise FileNotFoundError("项目状态不存在，请重新上传。")
+            recovered_session = self._recover_session_from_manifest(project_id, manifest)
+            if not recovered_session:
+                raise FileNotFoundError("项目状态不存在，请重新上传。")
+            state = self._serialize_session_state(project_id, recovered_session)
+            restored_from_manifest = True
 
         session = {
             "source_dir": str(state.get("source_dir") or ""),
@@ -512,6 +592,31 @@ class TranslatorEngine:
             "project_created_at": str(state.get("project_created_at") or self._now_iso()),
             "project_updated_at": str(state.get("project_updated_at") or self._now_iso()),
         }
+        manifest_dict = manifest if isinstance(manifest, dict) else {}
+        if not session["source_dir"]:
+            session["source_dir"] = str(manifest_dict.get("source_dir") or "")
+        if not session["translated_dir"]:
+            session["translated_dir"] = str(manifest_dict.get("translated_dir") or "")
+        if not session["project_title"]:
+            session["project_title"] = str(manifest_dict.get("title") or manifest_dict.get("project_title") or project_id)
+        if not session["project_note"]:
+            session["project_note"] = str(manifest_dict.get("note") or manifest_dict.get("project_note") or "")
+        if not session["source_images"]:
+            session["source_images"] = self._infer_source_images_from_dir(Path(session.get("source_dir") or ""))
+            restored_from_manifest = True
+        if not session["translated_output_map"]:
+            session["translated_output_map"] = self._infer_translated_output_map(
+                Path(session.get("translated_dir") or ""),
+                session["source_images"],
+                self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
+            )
+            if session["translated_output_map"]:
+                restored_from_manifest = True
+        if session.get("workflow_stage") in {"", "idle"} and session["translated_output_map"]:
+            session["workflow_stage"] = str(manifest_dict.get("workflow_stage") or "translated")
+            restored_from_manifest = True
+        if restored_from_manifest:
+            self.persist_project_state(project_id, session, persist_page_documents=False)
         return session
 
     def restore_snapshot_as_project(self, project_id: str, snapshot_id: str) -> tuple[str, dict[str, Any]]:

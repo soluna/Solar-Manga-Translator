@@ -1101,7 +1101,11 @@ async function restoreProject(projectId) {
       throw new Error(payload.detail || '恢复历史项目失败')
     }
     applySessionPayload(payload, { resetInspectors: true })
-    await loadEditInspection({ silent: true })
+    try {
+      await loadEditInspection({ silent: true })
+    } catch (inspectionError) {
+      console.warn('[HistoryRestore] review inspector preload failed', inspectionError)
+    }
     await loadProjectHistory({ silent: true })
     status.value = `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
   } catch (error) {
@@ -1132,7 +1136,11 @@ async function restoreSnapshot(projectId, snapshotId) {
       throw new Error(payload.detail || '恢复历史快照失败')
     }
     applySessionPayload(payload, { resetInspectors: true })
-    await loadEditInspection({ silent: true })
+    try {
+      await loadEditInspection({ silent: true })
+    } catch (inspectionError) {
+      console.warn('[HistoryRestore] snapshot inspector preload failed', inspectionError)
+    }
     await loadProjectHistory({ silent: true })
     status.value = `已从历史快照恢复项目「${currentProject.value?.title || payload.session_id}」，可以继续编辑。`
   } catch (error) {

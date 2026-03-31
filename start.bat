@@ -69,29 +69,9 @@ call npm install
 
 echo.
 echo [3/3] Starting Services...
-echo Starting Backend API...
-cd /d "%ROOT_DIR%"
-cd backend
-start "Manga Translator API" cmd /c "call venv\Scripts\activate.bat && uvicorn main:app --host 0.0.0.0 --port 8000"
-
-echo Waiting for backend to start...
-timeout /t 3 >nul
-
-echo Starting Frontend WebUI...
-cd /d "%ROOT_DIR%"
-cd frontend
-start "Manga Translator WebUI" cmd /c "npm run dev -- --open"
-
-echo.
-echo ===================================================
-echo All services started!
-echo Backend API: http://localhost:8000
-echo Frontend WebUI: http://localhost:5173
-echo.
-echo Please keep the two new command prompt windows open.
-echo ===================================================
-pause
-exit /b
+echo Launching managed browser session...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%start.managed.ps1" -RootDir "%ROOT_DIR%"
+exit /b %errorlevel%
 
 :stop_existing_service_on_port
 set "TARGET_PORT=%~1"

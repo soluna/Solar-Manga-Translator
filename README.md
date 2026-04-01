@@ -43,6 +43,12 @@ chmod +x start.mac.sh
 bash ./start.mac.sh
 ```
 
+如果你更希望像 Windows 一样直接双击启动，也可以在 Finder 里双击：
+
+- [<repo>/start.mac.command](<repo>/start.mac.command)
+
+第一次双击时，macOS 可能会提示权限或安全确认；允许后就可以直接在 Terminal 里启动整套服务。
+
 这条路径会：
 1. 只使用 `backend/.venv-mac`
 2. 不会触碰 Windows 使用的 `backend/venv`

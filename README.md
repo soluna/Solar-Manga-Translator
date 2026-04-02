@@ -10,6 +10,24 @@
 5. **排版 (Typesetting)**: 中文自动换行与居中渲染
 6. **Web UI**: 基于 Vue3 和 Tailwind CSS 构建的现代化画廊界面，支持拖拽压缩包流式处理
 
+## 项目主文档
+
+为了把本项目按一个严肃、可持续演进的产品来推进，后续所有迭代都会统一记录在：
+
+- [<repo>/docs/project-iteration-log.md](<repo>/docs/project-iteration-log.md)
+
+它负责沉淀：
+
+- 项目阶段
+- 关键设计决策
+- 每轮迭代摘要
+- 验证范围
+- 已知风险与下一步
+
+待办优先级与功能列表仍继续维护在：
+
+- [<repo>/BACKLOG.md](<repo>/BACKLOG.md)
+
 ## 安装与启动 (一键运行)
 为了方便在 Windows 上使用，我们提供了一键启动脚本 `start.bat`。
 

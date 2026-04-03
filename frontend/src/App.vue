@@ -478,9 +478,10 @@ const hasTranslationOverrides = computed(
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
 const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
-const canDirectManipulateCanvas = computed(
-  () => Boolean(isCanvasReviewMode.value && !manualDrawMode.value && !mergeMode.value && !isAdjustingRegionBBox.value && !translating.value)
+const isCanvasInteractionLocked = computed(
+  () => Boolean(!isCanvasReviewMode.value || !selectedEditPage.value || manualDrawMode.value || mergeMode.value || isAdjustingRegionBBox.value)
 )
+const canDirectManipulateCanvas = computed(() => !isCanvasInteractionLocked.value)
 const pageShellWidthClass = computed(() => (
   config.value.workspace_width_mode === 'auto'
     ? 'page-shell-auto'
@@ -4833,6 +4834,14 @@ watch(
   ],
   () => {
     void nextTick(() => {
+      if (selectedEditPage.value?.stored_name) {
+        updateViewportState(
+          selectedEditPage.value.stored_name,
+          'compare',
+          { zoom: 1, panX: 0, panY: 0 },
+          { syncCompare: false }
+        )
+      }
       void syncTranslatedPreviewScale()
       void refreshSelectedRegionPreviewDebug()
     })

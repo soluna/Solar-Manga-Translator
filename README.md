@@ -28,6 +28,64 @@
 
 - [<repo>/BACKLOG.md](<repo>/BACKLOG.md)
 
+核心流程体验评估现统一维护在：
+
+- [<repo>/docs/evals/core-flow-experience-scorecard-v1.md](<repo>/docs/evals/core-flow-experience-scorecard-v1.md)
+- [<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md)
+
+它负责沉淀：
+
+- 我们当前到底如何评估“主流程体验”
+- 每轮迭代的固定评分口径
+- 当前基线分数与最关键短板
+
+## Obsidian 文档同步
+
+本项目的核心文档会同步到你的 Obsidian 目录：
+
+
+当前同步范围包括：
+
+- [<repo>/README.md](<repo>/README.md)
+- [<repo>/BACKLOG.md](<repo>/BACKLOG.md)
+- [<repo>/docs](<repo>/docs) 下当前项目自维护的设计、评估与迭代文档
+
+同步脚本：
+
+```bash
+cd <repo>
+bash ./scripts/sync_obsidian_docs.sh
+```
+
+约定：
+
+- 仓库内文档是主版本
+- 修改仓库文档后，应同步运行一次脚本，把更新推送到 Obsidian
+
+## 核心流程体验评估（v1）
+
+如果我们的方向是“先把主流程打磨到极致，而不是继续堆功能”，那每轮迭代都应该先回答：
+
+- 这轮是否让用户更稳定地完成一次完整任务？
+- 中途是否更少被打断？
+- 预览与最终结果是否更一致？
+- 历史项目与异常场景是否更可靠？
+
+当前项目已经建立：
+
+- 评分规则：[<repo>/docs/evals/core-flow-experience-scorecard-v1.md](<repo>/docs/evals/core-flow-experience-scorecard-v1.md)
+- P0 修复清单：[<repo>/docs/evals/core-flow-p0-repair-checklist.md](<repo>/docs/evals/core-flow-p0-repair-checklist.md)
+- 记录模板：[<repo>/docs/evals/iteration-scorecard-template.md](<repo>/docs/evals/iteration-scorecard-template.md)
+- 当前基线：[<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md)
+- 当前正式评估：[<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md)
+
+如果要开始新一轮评分卡记录，可以直接运行：
+
+```bash
+cd <repo>
+python3 ./scripts/create_eval_record.py --slug core-flow-iteration
+```
+
 ## 安装与启动 (一键运行)
 为了方便在 Windows 上使用，我们提供了一键启动脚本 `start.bat`。
 

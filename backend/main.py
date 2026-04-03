@@ -200,7 +200,11 @@ async def update_project(project_id: str, payload: dict[str, Any] | None = None)
 
 @app.post("/api/projects/{project_id}/restore")
 async def restore_project(project_id: str):
-    session = get_or_restore_session(project_id)
+    try:
+        session = translator_engine.restore_project_session(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    SESSIONS[project_id] = session
     return translator_engine.build_client_session_payload(project_id, session)
 
 

@@ -257,6 +257,113 @@ class TranslatorEngine:
             )
         return source_images
 
+    def _merge_recovered_source_images(
+        self,
+        existing_images: list[dict[str, Any]],
+        inferred_images: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        if not inferred_images:
+            return []
+
+        existing_by_stored_name = {
+            str(item.get("stored_name") or ""): item
+            for item in existing_images
+            if isinstance(item, dict) and str(item.get("stored_name") or "").strip()
+        }
+        existing_by_name = {
+            str(item.get("name") or ""): item
+            for item in existing_images
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+
+        recovered_images: list[dict[str, str]] = []
+        for index, inferred in enumerate(inferred_images):
+            inferred_stored_name = str(inferred.get("stored_name") or "").strip()
+            inferred_display_name = str(inferred.get("name") or inferred_stored_name).strip() or inferred_stored_name
+
+            matched_existing = existing_by_stored_name.get(inferred_stored_name)
+            if matched_existing is None:
+                matched_existing = existing_by_name.get(inferred_stored_name)
+            if matched_existing is None and index < len(existing_images):
+                candidate = existing_images[index]
+                if isinstance(candidate, dict):
+                    matched_existing = candidate
+
+            display_name = inferred_display_name
+            if isinstance(matched_existing, dict):
+                display_name = (
+                    str(matched_existing.get("name") or "").strip()
+                    or str(matched_existing.get("stored_name") or "").strip()
+                    or inferred_display_name
+                )
+
+            recovered_images.append(
+                {
+                    "name": display_name,
+                    "stored_name": inferred_stored_name,
+                }
+            )
+
+        return recovered_images
+
+    def _source_images_need_recovery(
+        self,
+        source_dir: Path,
+        existing_images: list[dict[str, Any]],
+        inferred_images: list[dict[str, str]],
+    ) -> bool:
+        if not inferred_images:
+            return False
+        if not existing_images:
+            return True
+
+        existing_names = [
+            str(item.get("stored_name") or "").strip()
+            for item in existing_images
+            if isinstance(item, dict) and str(item.get("stored_name") or "").strip()
+        ]
+        inferred_names = [
+            str(item.get("stored_name") or "").strip()
+            for item in inferred_images
+            if str(item.get("stored_name") or "").strip()
+        ]
+        if not existing_names:
+            return True
+
+        existing_name_set = set(existing_names)
+        inferred_name_set = set(inferred_names)
+        if existing_name_set != inferred_name_set:
+            return True
+
+        return any(not (source_dir / name).exists() for name in existing_names)
+
+    def _translated_output_map_needs_recovery(
+        self,
+        translated_dir: Path,
+        source_images: list[dict[str, Any]],
+        translated_output_map: dict[str, Any],
+    ) -> bool:
+        if not translated_dir.exists() or not translated_dir.is_dir():
+            return bool(translated_output_map)
+
+        source_image_names = {
+            str(item.get("stored_name") or "").strip()
+            for item in source_images
+            if isinstance(item, dict) and str(item.get("stored_name") or "").strip()
+        }
+        if not translated_output_map:
+            return True
+
+        for stored_name, output_name in translated_output_map.items():
+            normalized_stored_name = str(stored_name or "").strip()
+            normalized_output_name = str(output_name or "").strip()
+            if not normalized_stored_name or normalized_stored_name not in source_image_names:
+                return True
+            if not normalized_output_name or not (translated_dir / normalized_output_name).exists():
+                return True
+
+        return False
+
     def _infer_translated_output_map(
         self,
         translated_dir: Path,
@@ -622,17 +729,24 @@ class TranslatorEngine:
             session["project_title"] = str(manifest_dict.get("title") or manifest_dict.get("project_title") or project_id)
         if not session["project_note"]:
             session["project_note"] = str(manifest_dict.get("note") or manifest_dict.get("project_note") or "")
-        if not session["source_images"]:
-            session["source_images"] = self._infer_source_images_from_dir(source_dir_path)
+        inferred_source_images = self._infer_source_images_from_dir(source_dir_path)
+        if self._source_images_need_recovery(source_dir_path, list(session.get("source_images") or []), inferred_source_images):
+            session["source_images"] = self._merge_recovered_source_images(
+                list(session.get("source_images") or []),
+                inferred_source_images,
+            )
             restored_from_manifest = True
-        if not session["translated_output_map"]:
+        if self._translated_output_map_needs_recovery(
+            translated_dir_path,
+            list(session.get("source_images") or []),
+            dict(session.get("translated_output_map") or {}),
+        ):
             session["translated_output_map"] = self._infer_translated_output_map(
                 translated_dir_path,
                 session["source_images"],
                 self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
             )
-            if session["translated_output_map"]:
-                restored_from_manifest = True
+            restored_from_manifest = True
         if session.get("workflow_stage") in {"", "idle"} and session["translated_output_map"]:
             session["workflow_stage"] = str(manifest_dict.get("workflow_stage") or "translated")
             restored_from_manifest = True
@@ -1844,7 +1958,13 @@ class TranslatorEngine:
 
         rerenderable_pages = self._count_rerenderable_pages(session_id, session)
         if rerenderable_pages == 0:
-            raise RuntimeError("翻译已完成，但没有生成任何可校对缓存，请检查后端日志中的 rerender cache 写入情况。")
+            raise RuntimeError(
+                self._format_missing_rerender_cache_failure(
+                    log_path=log_path,
+                    stage_label="翻译",
+                    default_message="翻译已完成，但没有生成任何可校对缓存，请检查后端日志中的 rerender cache 写入情况。",
+                )
+            )
         if rerenderable_pages < total:
             print(
                 f"[WARN] Rerender cache only generated for {rerenderable_pages}/{total} page(s) "
@@ -1980,7 +2100,13 @@ class TranslatorEngine:
 
         rerenderable_pages = self._count_rerenderable_pages(session_id, session)
         if rerenderable_pages == 0:
-            raise RuntimeError("文本框识别已完成，但没有生成可校对缓存，请检查后端日志中的 rerender cache 写入情况。")
+            raise RuntimeError(
+                self._format_missing_rerender_cache_failure(
+                    log_path=log_path,
+                    stage_label="文本框识别",
+                    default_message="文本框识别已完成，但没有生成可校对缓存，请检查后端日志中的 rerender cache 写入情况。",
+                )
+            )
         if rerenderable_pages < len(expected_outputs):
             print(
                 f"[WARN] Detection cache only generated for {rerenderable_pages}/{len(expected_outputs)} "
@@ -5483,11 +5609,80 @@ class TranslatorEngine:
         if not log_path.exists():
             return "manga-image-translator 执行失败，且没有生成日志。"
 
+        pre_render_failure = self._detect_pre_render_failure(log_path, "manga-image-translator 执行")
+        if pre_render_failure:
+            return pre_render_failure
+
         lines = deque(log_path.read_text(encoding="utf-8", errors="ignore").splitlines(), maxlen=24)
         if not lines:
             return "manga-image-translator 执行失败，请检查依赖是否安装完整。"
 
         return "manga-image-translator 执行失败:\n" + "\n".join(lines)
+
+    def _format_missing_rerender_cache_failure(
+        self,
+        log_path: Path,
+        stage_label: str,
+        default_message: str,
+    ) -> str:
+        pre_render_failure = self._detect_pre_render_failure(log_path, stage_label)
+        if pre_render_failure:
+            return pre_render_failure
+        return default_message
+
+    def _detect_pre_render_failure(self, log_path: Path, stage_label: str) -> str:
+        if not log_path.exists():
+            return ""
+
+        content = log_path.read_text(encoding="utf-8", errors="ignore")
+        if not content.strip():
+            return ""
+
+        tail_lines = deque(content.splitlines(), maxlen=18)
+        never_reached_render = "Running rendering" not in content and 'Saving "' not in content
+
+        if "ChunkedEncodingError" in content or "IncompleteRead(" in content:
+            download_dir = self._extract_log_match(content, r"Downloading models into\s+([^\n\r]+)")
+            download_url = self._extract_log_match(content, r'-- Downloading:\s+"([^"]+)"')
+            detail_lines = [
+                f"{stage_label}未真正完成：模型下载过程中网络连接中断，因此没有生成任何可校对缓存。"
+            ]
+            if download_url:
+                detail_lines.append(f"下载地址：{download_url}")
+            if download_dir:
+                detail_lines.append(f"本地模型目录：{download_dir}")
+            detail_lines.append("建议重试；如果问题反复出现，可先手动下载对应模型文件到本地后再继续。")
+            detail_lines.append("日志摘要：")
+            detail_lines.extend(tail_lines)
+            return "\n".join(detail_lines)
+
+        if "Downloading models into" in content and "Traceback" in content:
+            download_dir = self._extract_log_match(content, r"Downloading models into\s+([^\n\r]+)")
+            detail_lines = [
+                f"{stage_label}未真正完成：模型准备阶段发生异常，因此没有生成任何可校对缓存。"
+            ]
+            if download_dir:
+                detail_lines.append(f"本地模型目录：{download_dir}")
+            detail_lines.append("日志摘要：")
+            detail_lines.extend(tail_lines)
+            return "\n".join(detail_lines)
+
+        if "Traceback" in content and never_reached_render:
+            return (
+                f"{stage_label}未真正完成：引擎在渲染前发生异常，因此没有生成任何可校对缓存。\n"
+                "日志摘要：\n"
+                + "\n".join(tail_lines)
+            )
+
+        return ""
+
+    def _extract_log_match(self, content: str, pattern: str) -> str:
+        if not content:
+            return ""
+        match = re.search(pattern, content)
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
 
     def _format_quality_failure(self, log_path: Path, target_lang: str | None) -> str:
         if not log_path.exists():

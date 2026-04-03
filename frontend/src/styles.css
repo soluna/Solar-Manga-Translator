@@ -987,8 +987,10 @@ h2 {
   overflow: hidden;
   border-radius: 20px;
   background: #efe1d2;
+  width: 100%;
   aspect-ratio: var(--page-aspect);
-  min-height: min(68vh, 920px);
+  min-height: 0;
+  align-self: start;
   user-select: none;
 }
 

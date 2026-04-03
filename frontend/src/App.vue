@@ -2107,9 +2107,21 @@ function isManualRegion(region) {
 }
 
 function getCanvasPoint(event, page) {
-  const canvas = event.currentTarget?.closest?.('.style-preview-canvas') || event.currentTarget
+  const canvas = resolveCanvasInteractionSurface(event.currentTarget) || event.currentTarget
   const rect = canvas.getBoundingClientRect()
   return getCanvasPointFromRect(rect, event.clientX, event.clientY, page, 'main')
+}
+
+function resolveCanvasInteractionSurface(target) {
+  if (!target || typeof target.closest !== 'function') {
+    return null
+  }
+  return (
+    target.closest('.review-canvas-shell')
+    || target.closest('.style-preview-canvas')
+    || target.closest('.review-canvas-stage')
+    || null
+  )
 }
 
 function getCanvasPointFromRect(rect, clientX, clientY, page, pane = 'main') {
@@ -3576,15 +3588,17 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     return
   }
 
-  const canvas = event.currentTarget?.closest?.('.style-preview-canvas')
+  const canvas = resolveCanvasInteractionSurface(event.currentTarget)
   if (!canvas) {
     return
   }
 
   const rect = canvas.getBoundingClientRect()
+  const captureTarget = event.currentTarget instanceof Element ? event.currentTarget : null
   const point = getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
   canvasTransformState.value = {
     pointerId: event.pointerId,
+    captureTarget,
     regionId: region.id,
     pageId: page.stored_name,
     mode,
@@ -3595,6 +3609,14 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     currentBBox: getEffectiveRegionBBox(region),
     moved: false,
     startedAt: Date.now()
+  }
+
+  if (captureTarget?.setPointerCapture && event.pointerId != null) {
+    try {
+      captureTarget.setPointerCapture(event.pointerId)
+    } catch (_error) {
+      // Ignore browsers/elements that don't support explicit pointer capture here.
+    }
   }
 
   event.preventDefault()
@@ -3643,6 +3665,13 @@ async function finishCanvasRegionTransform(event) {
   }
 
   canvasTransformState.value = null
+  if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
+    try {
+      draft.captureTarget.releasePointerCapture(draft.pointerId)
+    } catch (_error) {
+      // Ignore if capture has already been released.
+    }
+  }
   if (!draft.moved) {
     return
   }
@@ -3682,6 +3711,13 @@ function cancelCanvasRegionTransform() {
   const draft = canvasTransformState.value
   if (!draft) {
     return
+  }
+  if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
+    try {
+      draft.captureTarget.releasePointerCapture(draft.pointerId)
+    } catch (_error) {
+      // Ignore if capture has already been released.
+    }
   }
   updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
   canvasTransformState.value = null
@@ -4785,6 +4821,21 @@ watch(
   () => {
     void syncTranslatedPreviewScale()
     void refreshSelectedRegionPreviewDebug()
+  }
+)
+
+watch(
+  () => [
+    config.value.workspace_width_mode,
+    reviewWorkspacePrefs.value.split_ratio,
+    reviewWorkspacePrefs.value.compare_pane_mode,
+    reviewWorkspacePrefs.value.compare_sync_enabled
+  ],
+  () => {
+    void nextTick(() => {
+      void syncTranslatedPreviewScale()
+      void refreshSelectedRegionPreviewDebug()
+    })
   }
 )
 

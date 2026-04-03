@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
+const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
   { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量通用文本 / OCR 漫画翻译实验)' },
@@ -108,6 +109,14 @@ function isValidReviewMode(value) {
 
 function isValidWorkspaceWidthMode(value) {
   return ['auto', 'fixed'].includes(value)
+}
+
+function isValidComparePaneMode(value) {
+  return ['saved', 'preview', 'source'].includes(value)
+}
+
+function isValidInspectorTab(value) {
+  return ['inspector', 'regions'].includes(value)
 }
 
 function createDefaultConfig() {
@@ -275,6 +284,83 @@ function saveStoredConfig(value) {
   }
 }
 
+function createDefaultReviewWorkspacePrefs() {
+  return {
+    split_ratio: 65,
+    compare_pane_mode: 'saved',
+    compare_sync_enabled: true,
+    inspector_tab: 'inspector',
+    show_debug: false
+  }
+}
+
+function normalizeStoredReviewWorkspacePrefs(rawValue) {
+  const defaults = createDefaultReviewWorkspacePrefs()
+  if (!rawValue || typeof rawValue !== 'object') {
+    return defaults
+  }
+
+  const splitRatio = Number(rawValue.split_ratio)
+  return {
+    split_ratio: Number.isFinite(splitRatio) ? Math.min(80, Math.max(50, Math.round(splitRatio))) : defaults.split_ratio,
+    compare_pane_mode: isValidComparePaneMode(rawValue.compare_pane_mode) ? rawValue.compare_pane_mode : defaults.compare_pane_mode,
+    compare_sync_enabled: typeof rawValue.compare_sync_enabled === 'boolean'
+      ? rawValue.compare_sync_enabled
+      : defaults.compare_sync_enabled,
+    inspector_tab: isValidInspectorTab(rawValue.inspector_tab) ? rawValue.inspector_tab : defaults.inspector_tab,
+    show_debug: typeof rawValue.show_debug === 'boolean'
+      ? rawValue.show_debug
+      : defaults.show_debug
+  }
+}
+
+function loadStoredReviewWorkspacePrefs() {
+  if (typeof window === 'undefined') {
+    return createDefaultReviewWorkspacePrefs()
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(reviewWorkspaceStorageKey)
+    if (!rawValue) {
+      return createDefaultReviewWorkspacePrefs()
+    }
+    return normalizeStoredReviewWorkspacePrefs(JSON.parse(rawValue))
+  } catch (_error) {
+    return createDefaultReviewWorkspacePrefs()
+  }
+}
+
+function saveStoredReviewWorkspacePrefs(value) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(
+      reviewWorkspaceStorageKey,
+      JSON.stringify(normalizeStoredReviewWorkspacePrefs(value))
+    )
+  } catch (error) {
+    console.warn('Failed to persist review workspace prefs locally.', error)
+  }
+}
+
+function createDefaultPerPageUiState() {
+  return {
+    selectedRegionId: '',
+    main: {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+    },
+    compare: {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+    }
+  }
+}
+
 const selectedFile = ref(null)
 const status = ref('正在检查后端状态...')
 const backendOnline = ref(false)
@@ -336,6 +422,16 @@ const exportingTranslationInputDebug = ref(false)
 const exportingTranslationRequestDebug = ref(false)
 
 const config = ref(loadStoredConfig())
+const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
+const perPageUiState = ref({})
+const regionListSearch = ref('')
+const regionListFilter = ref('all')
+const reviewCanvasZoneRef = ref(null)
+const mainCanvasShellRef = ref(null)
+const compareCanvasShellRef = ref(null)
+const viewportPanState = ref(null)
+const compareSplitterState = ref(null)
+const spacePanPressed = ref(false)
 
 let socket = null
 let pendingCanvasNudge = null
@@ -531,6 +627,12 @@ const comparisonImages = computed(() => {
     name: originalMap.get(key)?.name || translatedMap.get(key)?.name || key,
   }))
 })
+const reviewCanvasGridStyle = computed(() => {
+  const mainRatio = Math.min(80, Math.max(50, Number(reviewWorkspacePrefs.value.split_ratio || 65)))
+  return {
+    gridTemplateColumns: `minmax(0, ${mainRatio}fr) 12px minmax(300px, ${100 - mainRatio}fr)`
+  }
+})
 const selectedEditPage = computed(() => {
   if (!mergedInspectionPages.value.length) {
     return null
@@ -560,12 +662,104 @@ const selectedEditPageSummary = computed(() => {
   const pageNumber = selectedEditPageIndex.value >= 0 ? selectedEditPageIndex.value + 1 : 1
   return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页 · ${page.regions.length} 个文本框`
 })
+const selectedEditPageThumbnailUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  return withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || ''))
+})
+const selectedEditPageMainImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  return withCacheBust(toApiUrl(page.base_image_url || page.source_image_url || page.image_url || ''))
+})
+const selectedEditPageCompareImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
+    return withCacheBust(toApiUrl(page.source_image_url || page.image_url || ''))
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
+    return getCanvasPreviewImageUrl(page)
+  }
+  return getSavedTranslatedImageUrl(page) || getCanvasPreviewImageUrl(page)
+})
+const selectedEditPageCompareLabel = computed(() => {
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
+    return '原图对照'
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
+    return '当前译图'
+  }
+  return '已嵌字结果'
+})
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
     return null
   }
-  return page.regions.find((region) => region.id === selectedEditRegionKey.value) || page.regions[0] || null
+  return page.regions.find((region) => region.id === selectedEditRegionKey.value) || null
+})
+const selectedEditRegionIndexLabel = computed(() => {
+  if (!selectedEditRegion.value) {
+    return '未选中文本框'
+  }
+  return `#${selectedEditRegion.value.index + 1}`
+})
+const pageRailItems = computed(() => (
+  mergedInspectionPages.value.map((page, index) => ({
+    ...page,
+    pageNumber: index + 1,
+    thumbnailUrl: withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')),
+    translatedReady: Boolean(getSavedTranslatedImageUrl(page)),
+    selected: page.stored_name === selectedEditPageKey.value
+  }))
+))
+const filteredEditRegions = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return []
+  }
+  const search = String(regionListSearch.value || '').trim().toLowerCase()
+  const filter = String(regionListFilter.value || 'all')
+
+  return page.regions.filter((region) => {
+    if (search) {
+      const haystack = [
+        region.source_text,
+        getEditRegionText(region),
+        getEffectiveRegionFontLabel(region),
+        region.index + 1
+      ]
+        .map((item) => String(item || '').toLowerCase())
+        .join(' ')
+      if (!haystack.includes(search)) {
+        return false
+      }
+    }
+
+    if (filter === 'manual') {
+      return isManualRegion(region)
+    }
+    if (filter === 'keep-original') {
+      return isRegionSkipEnabled(region)
+    }
+    if (filter === 'untranslated') {
+      return !String(getEditRegionText(region) || '').trim()
+    }
+    if (filter === 'font-override') {
+      return Boolean(getRegionFontOverrideId(region))
+    }
+    if (filter === 'warning') {
+      return hasRegionWarning(region)
+    }
+    return true
+  })
 })
 const selectedRegionPreviewDebug = ref({
   regionId: '',
@@ -889,11 +1083,16 @@ function resetEditInspectorSelection() {
   manualDrawDraft.value = null
   adjustingRegionId.value = ''
   canvasTransformState.value = null
+  viewportPanState.value = null
+  compareSplitterState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
   translationInputDrafts.value = {}
   fontSizeInputDrafts.value = {}
   pageEditHistory.value = {}
+  perPageUiState.value = {}
+  regionListSearch.value = ''
+  regionListFilter.value = 'all'
 }
 
 function normalizeHistoryProject(project) {
@@ -1002,6 +1201,9 @@ function applySessionPayload(payload, options = {}) {
   fontSizeInputDrafts.value = {}
   pageEditHistory.value = {}
   canvasPreviewDirtyPages.value = {}
+  perPageUiState.value = {}
+  regionListSearch.value = ''
+  regionListFilter.value = 'all'
 
   currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
   projectTitleDraft.value = currentProject.value?.title || ''
@@ -1486,6 +1688,16 @@ function getEffectiveRegionFontLabel(region) {
     : effectiveFontLabel
 }
 
+function hasRegionWarning(region) {
+  const regionText = String(getEditRegionText(region) || '').trim()
+  const confidence = Number(region?.ocr_confidence || 0)
+  return Boolean(
+    (getEffectiveRegionFontId(region) && isPreviewFontUnsupported(getEffectiveRegionFontId(region)))
+    || !regionText
+    || (Number.isFinite(confidence) && confidence > 0 && confidence < 0.72)
+  )
+}
+
 function getPreviewFontOptionLabel(font) {
   if (!font) {
     return ''
@@ -1564,6 +1776,132 @@ function getRegionPreviewFontFamily(region) {
     return '"Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif'
   }
   return `"${fallbackFamily}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+}
+
+function getPageUiState(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return createDefaultPerPageUiState()
+  }
+  return perPageUiState.value[normalizedPageId] || createDefaultPerPageUiState()
+}
+
+function updatePageUiState(pageId, updater) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return
+  }
+  const current = getPageUiState(normalizedPageId)
+  const nextState = typeof updater === 'function'
+    ? updater({
+        selectedRegionId: current.selectedRegionId || '',
+        main: { ...current.main },
+        compare: { ...current.compare }
+      })
+    : updater
+  perPageUiState.value = {
+    ...perPageUiState.value,
+    [normalizedPageId]: nextState
+  }
+}
+
+function prunePerPageUiState(pages) {
+  const validPageIds = new Set((pages || []).map((page) => String(page?.stored_name || '').trim()).filter(Boolean))
+  const nextState = {}
+  for (const [pageId, value] of Object.entries(perPageUiState.value || {})) {
+    if (validPageIds.has(pageId)) {
+      nextState[pageId] = value
+    }
+  }
+  perPageUiState.value = nextState
+}
+
+function getViewportState(pageId, pane = 'main') {
+  const pageState = getPageUiState(pageId)
+  return pageState[pane] || createDefaultPerPageUiState()[pane]
+}
+
+function updateViewportState(pageId, pane, patch, options = {}) {
+  const normalizedPane = pane === 'compare' ? 'compare' : 'main'
+  updatePageUiState(pageId, (current) => {
+    const currentViewport = current[normalizedPane] || createDefaultPerPageUiState()[normalizedPane]
+    const nextViewport = {
+      zoom: Math.min(4, Math.max(1, Number(patch.zoom ?? currentViewport.zoom ?? 1))),
+      panX: Number(patch.panX ?? currentViewport.panX ?? 0),
+      panY: Number(patch.panY ?? currentViewport.panY ?? 0)
+    }
+    const nextState = {
+      ...current,
+      [normalizedPane]: nextViewport
+    }
+    if (
+      normalizedPane === 'main'
+      && reviewWorkspacePrefs.value.compare_sync_enabled
+      && options.syncCompare !== false
+    ) {
+      nextState.compare = { ...nextViewport }
+    }
+    return nextState
+  })
+}
+
+function resetViewportStateForPage(page) {
+  const pageId = String(page?.stored_name || '').trim()
+  if (!pageId) {
+    return
+  }
+  updatePageUiState(pageId, (current) => ({
+    ...current,
+    main: { zoom: 1, panX: 0, panY: 0 },
+    compare: reviewWorkspacePrefs.value.compare_sync_enabled
+      ? { zoom: 1, panX: 0, panY: 0 }
+      : { ...(current.compare || createDefaultPerPageUiState().compare), zoom: 1, panX: 0, panY: 0 }
+  }))
+}
+
+function focusSelectedRegionInViewport(page, pane = 'main') {
+  const region = selectedEditRegion.value
+  if (!page || !region) {
+    return
+  }
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  const safeWidth = Math.max(rect.width || 0, 1)
+  const safeHeight = Math.max(rect.height || 0, 1)
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const regionWidth = Math.max(8, x2 - x1)
+  const regionHeight = Math.max(8, y2 - y1)
+  const imageWidth = Math.max(page.image_width || 1, 1)
+  const imageHeight = Math.max(page.image_height || 1, 1)
+  const fitZoom = Math.min(
+    4,
+    Math.max(
+      1,
+      Math.min(
+        (safeWidth * 0.72) / ((regionWidth / imageWidth) * safeWidth),
+        (safeHeight * 0.72) / ((regionHeight / imageHeight) * safeHeight),
+      )
+    )
+  )
+  const centerX = (x1 + x2) / 2
+  const centerY = (y1 + y2) / 2
+  updateViewportState(page.stored_name, pane, {
+    zoom: fitZoom,
+    panX: (safeWidth / 2) - ((centerX / imageWidth) * safeWidth * fitZoom),
+    panY: (safeHeight / 2) - ((centerY / imageHeight) * safeHeight * fitZoom)
+  })
+}
+
+function getCanvasViewportStyle(page, pane = 'main') {
+  const pageId = String(page?.stored_name || '').trim()
+  const viewport = getViewportState(pageId, pane)
+  return {
+    transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.zoom})`,
+    transformOrigin: 'top left'
+  }
 }
 
 function isChineseTargetLanguage() {
@@ -1681,6 +2019,8 @@ function syncEditSelection() {
     return
   }
 
+  prunePerPageUiState(mergedInspectionPages.value)
+
   if (!mergedInspectionPages.value.some((page) => page.stored_name === selectedEditPageKey.value)) {
     selectedEditPageKey.value = mergedInspectionPages.value[0].stored_name
   }
@@ -1691,9 +2031,20 @@ function syncEditSelection() {
     return
   }
 
-  if (!currentPage.regions.some((region) => region.id === selectedEditRegionKey.value)) {
-    selectedEditRegionKey.value = currentPage.regions[0]?.id || ''
+  const currentState = getPageUiState(currentPage.stored_name)
+  const hadStoredState = Boolean(perPageUiState.value[currentPage.stored_name])
+  let nextSelectedRegionId = String(currentState.selectedRegionId || '')
+  if (nextSelectedRegionId && !currentPage.regions.some((region) => region.id === nextSelectedRegionId)) {
+    nextSelectedRegionId = ''
   }
+  if (!hadStoredState) {
+    nextSelectedRegionId = currentPage.regions[0]?.id || ''
+  }
+  updatePageUiState(currentPage.stored_name, (state) => ({
+    ...state,
+    selectedRegionId: nextSelectedRegionId
+  }))
+  selectedEditRegionKey.value = nextSelectedRegionId
 }
 
 function pruneRegionDraftMap(draftMap, pages) {
@@ -1758,16 +2109,24 @@ function isManualRegion(region) {
 function getCanvasPoint(event, page) {
   const canvas = event.currentTarget?.closest?.('.style-preview-canvas') || event.currentTarget
   const rect = canvas.getBoundingClientRect()
-  return getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
+  return getCanvasPointFromRect(rect, event.clientX, event.clientY, page, 'main')
 }
 
-function getCanvasPointFromRect(rect, clientX, clientY, page) {
+function getCanvasPointFromRect(rect, clientX, clientY, page, pane = 'main') {
   const imageWidth = Math.max(page?.image_width || 1, 1)
   const imageHeight = Math.max(page?.image_height || 1, 1)
   const safeWidth = Math.max(rect?.width || 1, 1)
   const safeHeight = Math.max(rect?.height || 1, 1)
-  const x = Math.min(imageWidth, Math.max(0, ((clientX - rect.left) / safeWidth) * imageWidth))
-  const y = Math.min(imageHeight, Math.max(0, ((clientY - rect.top) / safeHeight) * imageHeight))
+  const viewport = getViewportState(page?.stored_name || '', pane)
+  const zoom = Math.max(viewport.zoom || 1, 0.001)
+  const x = Math.min(
+    imageWidth,
+    Math.max(0, (((clientX - rect.left - viewport.panX) / (safeWidth * zoom)) * imageWidth))
+  )
+  const y = Math.min(
+    imageHeight,
+    Math.max(0, (((clientY - rect.top - viewport.panY) / (safeHeight * zoom)) * imageHeight))
+  )
   return {
     x: Math.round(x),
     y: Math.round(y)
@@ -1992,6 +2351,157 @@ function getSavedTranslatedImageUrl(page) {
   return ''
 }
 
+function setComparePaneMode(mode) {
+  if (!isValidComparePaneMode(mode)) {
+    return
+  }
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    compare_pane_mode: mode
+  }
+}
+
+function setInspectorTab(tab) {
+  if (!isValidInspectorTab(tab)) {
+    return
+  }
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    inspector_tab: tab
+  }
+}
+
+function toggleCompareSync() {
+  const nextEnabled = !reviewWorkspacePrefs.value.compare_sync_enabled
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    compare_sync_enabled: nextEnabled
+  }
+  if (nextEnabled && selectedEditPage.value?.stored_name) {
+    const pageId = selectedEditPage.value.stored_name
+    const mainViewport = getViewportState(pageId, 'main')
+    updateViewportState(pageId, 'compare', mainViewport, { syncCompare: false })
+  }
+}
+
+function toggleWorkspaceDebug() {
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    show_debug: !reviewWorkspacePrefs.value.show_debug
+  }
+}
+
+function startCompareSplitterDrag(event) {
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+  const zone = reviewCanvasZoneRef.value
+  if (!zone) {
+    return
+  }
+  const rect = zone.getBoundingClientRect()
+  compareSplitterState.value = {
+    pointerId: event.pointerId,
+    zoneLeft: rect.left,
+    zoneWidth: Math.max(rect.width, 1),
+    originRatio: reviewWorkspacePrefs.value.split_ratio
+  }
+  event.preventDefault()
+}
+
+function updateCompareSplitterDrag(event) {
+  const draft = compareSplitterState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  const relative = ((event.clientX - draft.zoneLeft) / draft.zoneWidth) * 100
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    split_ratio: Math.min(80, Math.max(50, Math.round(relative)))
+  }
+}
+
+function finishCompareSplitterDrag() {
+  if (!compareSplitterState.value) {
+    return
+  }
+  compareSplitterState.value = null
+}
+
+function startCanvasViewportPan(event, page, pane = 'main') {
+  if (!page || manualDrawMode.value || mergeMode.value || isAdjustingRegionBBox.value) {
+    return
+  }
+  const isMiddleMouse = event.button === 1
+  const allowPan = spacePanPressed.value || isMiddleMouse
+  if (!allowPan) {
+    return
+  }
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const viewport = getViewportState(page.stored_name, pane)
+  viewportPanState.value = {
+    pointerId: event.pointerId,
+    pageId: page.stored_name,
+    pane,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    originPanX: viewport.panX,
+    originPanY: viewport.panY
+  }
+  event.preventDefault()
+}
+
+function updateCanvasViewportPan(event) {
+  const draft = viewportPanState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  updateViewportState(draft.pageId, draft.pane, {
+    panX: draft.originPanX + (event.clientX - draft.startClientX),
+    panY: draft.originPanY + (event.clientY - draft.startClientY)
+  })
+}
+
+function finishCanvasViewportPan() {
+  viewportPanState.value = null
+}
+
+function cancelCanvasViewportPan() {
+  viewportPanState.value = null
+}
+
+function handleCanvasWheel(event, page, pane = 'main') {
+  if (!page) {
+    return
+  }
+  event.preventDefault()
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  const viewport = getViewportState(page.stored_name, pane)
+  const pointerX = event.clientX - rect.left
+  const pointerY = event.clientY - rect.top
+  const delta = event.deltaY < 0 ? 1.1 : 0.92
+  const nextZoom = Math.min(4, Math.max(1, Number((viewport.zoom * delta).toFixed(3))))
+  const ratio = nextZoom / Math.max(viewport.zoom || 1, 0.001)
+  updateViewportState(page.stored_name, pane, {
+    zoom: nextZoom,
+    panX: pointerX - ((pointerX - viewport.panX) * ratio),
+    panY: pointerY - ((pointerY - viewport.panY) * ratio)
+  })
+}
+
 function selectAdjacentEditPage(offset) {
   if (!mergedInspectionPages.value.length || selectedEditPageIndex.value < 0) {
     return
@@ -2106,7 +2616,8 @@ function refreshTranslatedPreviewScale() {
     return
   }
   const safeWidth = Math.max(canvasElement.clientWidth || 0, 1)
-  translatedPreviewScale.value = safeWidth / Math.max(page.image_width || 1, 1)
+  const zoom = getViewportState(page.stored_name, 'main').zoom || 1
+  translatedPreviewScale.value = (safeWidth / Math.max(page.image_width || 1, 1)) * zoom
 }
 
 function getManualDraftBBox(page) {
@@ -3637,6 +4148,10 @@ function handleGlobalCanvasKeydown(event) {
   if (!isCanvasReviewMode.value || !selectedEditPage.value) {
     return
   }
+  if (event.code === 'Space') {
+    spacePanPressed.value = true
+    event.preventDefault()
+  }
   if (isEditableTextTarget(event.target)) {
     return
   }
@@ -3651,6 +4166,27 @@ function handleGlobalCanvasKeydown(event) {
   } else if (isRedo && canRedoCanvasEdit.value) {
     event.preventDefault()
     void redoCanvasEdit()
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    selectedEditRegionKey.value = ''
+    updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
+      ...state,
+      selectedRegionId: ''
+    }))
+  } else if (event.shiftKey && event.code === 'Digit1') {
+    event.preventDefault()
+    resetViewportStateForPage(selectedEditPage.value)
+  } else if (event.shiftKey && event.code === 'Digit2' && selectedEditRegion.value) {
+    event.preventDefault()
+    focusSelectedRegionInViewport(selectedEditPage.value, 'main')
+  } else if (event.key === 'Enter' && selectedEditRegion.value) {
+    event.preventDefault()
+    const input = document.querySelector(
+      `.translation-review-input[data-region-id="${selectedEditRegion.value.id}"]`
+    )
+    if (input instanceof HTMLElement) {
+      input.focus()
+    }
   } else if (canDirectManipulateCanvas.value && selectedEditRegion.value) {
     const nudgeMap = {
       ArrowUp: [0, -1],
@@ -3669,6 +4205,9 @@ function handleGlobalCanvasKeydown(event) {
 }
 
 function handleGlobalCanvasKeyup(event) {
+  if (event.code === 'Space') {
+    spacePanPressed.value = false
+  }
   if (!pendingCanvasNudge) {
     return
   }
@@ -4053,6 +4592,12 @@ onMounted(() => {
   loadFonts()
   loadProjectHistory()
   window.addEventListener('resize', refreshTranslatedPreviewScale)
+  window.addEventListener('pointermove', updateCanvasViewportPan)
+  window.addEventListener('pointerup', finishCanvasViewportPan)
+  window.addEventListener('pointercancel', cancelCanvasViewportPan)
+  window.addEventListener('pointermove', updateCompareSplitterDrag)
+  window.addEventListener('pointerup', finishCompareSplitterDrag)
+  window.addEventListener('pointercancel', finishCompareSplitterDrag)
   window.addEventListener('pointermove', updateCanvasRegionTransform)
   window.addEventListener('pointerup', finishCanvasRegionTransform)
   window.addEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -4065,6 +4610,12 @@ onBeforeUnmount(() => {
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()
   window.removeEventListener('resize', refreshTranslatedPreviewScale)
+  window.removeEventListener('pointermove', updateCanvasViewportPan)
+  window.removeEventListener('pointerup', finishCanvasViewportPan)
+  window.removeEventListener('pointercancel', cancelCanvasViewportPan)
+  window.removeEventListener('pointermove', updateCompareSplitterDrag)
+  window.removeEventListener('pointerup', finishCompareSplitterDrag)
+  window.removeEventListener('pointercancel', finishCompareSplitterDrag)
   window.removeEventListener('pointermove', updateCanvasRegionTransform)
   window.removeEventListener('pointerup', finishCanvasRegionTransform)
   window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -4130,6 +4681,14 @@ watch(
 )
 
 watch(
+  reviewWorkspacePrefs,
+  (nextValue) => {
+    saveStoredReviewWorkspacePrefs(nextValue)
+  },
+  { deep: true }
+)
+
+watch(
   [
     previewFontFaceCss,
     () => availableFonts.value.length,
@@ -4182,6 +4741,12 @@ watch(
 )
 
 watch(selectedEditRegionKey, () => {
+  if (selectedEditPage.value?.stored_name) {
+    updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
+      ...state,
+      selectedRegionId: selectedEditRegionKey.value || ''
+    }))
+  }
   if (selectedEditRegionKey.value) {
     void scrollSelectedRegionCardIntoView()
   }
@@ -4189,11 +4754,33 @@ watch(selectedEditRegionKey, () => {
 })
 
 watch(
+  () => selectedEditPageKey.value,
+  (nextPageId) => {
+    const normalizedPageId = String(nextPageId || '').trim()
+    if (!normalizedPageId) {
+      return
+    }
+    const nextPage = mergedInspectionPages.value.find((page) => page.stored_name === normalizedPageId)
+    if (!nextPage) {
+      return
+    }
+    if (!perPageUiState.value[normalizedPageId]) {
+      updatePageUiState(normalizedPageId, {
+        ...createDefaultPerPageUiState(),
+        selectedRegionId: nextPage.regions[0]?.id || ''
+      })
+    }
+    selectedEditRegionKey.value = String(getPageUiState(normalizedPageId).selectedRegionId || '')
+  }
+)
+
+watch(
   () => [
     selectedEditPage.value?.stored_name || '',
     selectedEditPage.value?.translated_image_url || '',
     selectedEditPage.value?.base_image_url || '',
-    isCanvasReviewMode.value
+    isCanvasReviewMode.value,
+    getViewportState(selectedEditPage.value?.stored_name || '', 'main').zoom
   ],
   () => {
     void syncTranslatedPreviewScale()
@@ -5076,50 +5663,18 @@ watch(
         </template>
       </div>
 
-      <div v-else-if="selectedEditPage" class="style-inspector">
-        <div class="style-toolbar">
-          <label class="field style-page-field">
-            <span>校对页面</span>
-            <div class="style-page-nav-controls">
-              <button
-                class="inline-button style-page-jump-button"
-                type="button"
-                :disabled="!canSelectPreviousEditPage"
-                title="上一页"
-                @click="selectAdjacentEditPage(-1)"
-              >
-                ↑
-              </button>
-              <select v-model="selectedEditPageKey" class="style-page-select">
-                <option
-                  v-for="page in mergedInspectionPages"
-                  :key="page.stored_name"
-                  :value="page.stored_name"
-                >
-                  {{ page.name }}
-                </option>
-              </select>
-              <button
-                class="inline-button style-page-jump-button"
-                type="button"
-                :disabled="!canSelectNextEditPage"
-                title="下一页"
-                @click="selectAdjacentEditPage(1)"
-              >
-                ↓
-              </button>
+      <div v-else-if="selectedEditPage" class="review-workspace-shell">
+        <div class="review-workspace-toolbar">
+          <div class="review-workspace-toolbar-copy">
+            <div>
+              <strong>{{ selectedEditPageSummary }}</strong>
             </div>
-            <small class="field-hint">{{ selectedEditPageSummary }}</small>
-          </label>
-
-          <div class="field style-summary">
-            <span>使用说明</span>
             <small class="field-hint">
-              这里把译文、字体、禁用框和框体调整放在同一个列表里处理。开启“识别后先进入逐框校对”时，可以先补框、合并框、禁用误识别框，再点“确认框后继续翻译”。
+              主画布负责编辑，对照画布负责验证。方向键微调框位置，Ctrl + 方向键快速移动，Shift + 1 重置视图，Shift + 2 聚焦当前框。
             </small>
           </div>
 
-          <div class="style-toolbar-actions">
+          <div class="review-workspace-toolbar-actions">
             <button
               class="inline-button"
               type="button"
@@ -5144,11 +5699,14 @@ watch(
             >
               {{ exportingTranslationRequestDebug ? '导出中…' : '导出翻译请求调试' }}
             </button>
+            <button class="inline-button" type="button" @click="toggleWorkspaceDebug">
+              {{ reviewWorkspacePrefs.show_debug ? '隐藏调试' : '显示调试' }}
+            </button>
           </div>
         </div>
 
-        <div v-if="isCanvasReviewMode && selectedEditRegion" class="style-runtime-debug">
-          <span><strong>选中框：</strong>#{{ selectedEditRegion.index + 1 }}</span>
+        <div v-if="isCanvasReviewMode && reviewWorkspacePrefs.show_debug && selectedEditRegion" class="style-runtime-debug">
+          <span><strong>选中框：</strong>{{ selectedEditRegionIndexLabel }}</span>
           <span><strong>期望字体：</strong>{{ selectedRegionPreviewDebug.requestedFont || getEffectiveRegionFontLabel(selectedEditRegion) }}</span>
           <span><strong>预览别名：</strong>{{ selectedRegionPreviewDebug.requestedAlias || '（无）' }}</span>
           <span><strong>实际命中：</strong>{{ selectedRegionPreviewDebug.computedFontFamily || '（未读取到）' }}</span>
@@ -5156,213 +5714,352 @@ watch(
           <span><strong>当前层：</strong>{{ selectedRegionPreviewDebug.previewLayer || '（未知）' }}</span>
         </div>
 
-        <div class="style-workbench">
-          <div class="style-preview">
-            <div class="style-preview-grid">
-              <div class="style-preview-panel">
-                <div class="style-preview-label">原图</div>
+        <div class="review-workspace-layout">
+          <aside class="review-page-rail">
+            <div class="review-page-rail-head">
+              <label class="field style-page-field">
+                <span>页面</span>
+                <div class="style-page-nav-controls">
+                  <button
+                    class="inline-button style-page-jump-button"
+                    type="button"
+                    :disabled="!canSelectPreviousEditPage"
+                    title="上一页"
+                    @click="selectAdjacentEditPage(-1)"
+                  >
+                    ↑
+                  </button>
+                  <select v-model="selectedEditPageKey" class="style-page-select">
+                    <option
+                      v-for="page in mergedInspectionPages"
+                      :key="page.stored_name"
+                      :value="page.stored_name"
+                    >
+                      {{ page.name }}
+                    </option>
+                  </select>
+                  <button
+                    class="inline-button style-page-jump-button"
+                    type="button"
+                    :disabled="!canSelectNextEditPage"
+                    title="下一页"
+                    @click="selectAdjacentEditPage(1)"
+                  >
+                    ↓
+                  </button>
+                </div>
+                <small class="field-hint">{{ selectedEditPageSummary }}</small>
+              </label>
+            </div>
+
+            <div class="review-page-rail-list">
+              <button
+                v-for="page in pageRailItems"
+                :key="page.stored_name"
+                type="button"
+                :class="['review-page-tile', page.selected ? 'active' : '']"
+                @click="selectedEditPageKey = page.stored_name"
+              >
+                <div class="review-page-thumbnail-shell">
+                  <img
+                    v-if="page.thumbnailUrl"
+                    :alt="`${page.name} 缩略图`"
+                    :src="page.thumbnailUrl"
+                    loading="lazy"
+                    class="review-page-thumbnail"
+                  />
+                  <div v-else class="review-page-thumbnail-empty">暂无图像</div>
+                </div>
+                <div class="review-page-tile-meta">
+                  <div class="review-page-tile-title">
+                    <strong>{{ page.pageNumber }}</strong>
+                    <span>{{ page.name }}</span>
+                  </div>
+                  <small>{{ page.regions.length }} 个框 · {{ page.translatedReady ? '已嵌字' : '待检查' }}</small>
+                </div>
+              </button>
+            </div>
+          </aside>
+
+          <div class="review-canvas-layout">
+            <div class="review-canvas-topbar">
+              <div class="review-canvas-status">
+                <span><strong>当前页：</strong>{{ selectedEditPage.name }}</span>
+                <span><strong>选中：</strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</span>
+                <span><strong>主视图：</strong>无字底图 + 实时叠字</span>
+              </div>
+              <div class="review-canvas-topbar-actions">
+                <button class="inline-button" type="button" @click="resetViewportStateForPage(selectedEditPage)">重置视图</button>
+                <button class="inline-button" type="button" :disabled="!selectedEditRegion" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位当前框</button>
+              </div>
+            </div>
+
+            <div ref="reviewCanvasZoneRef" class="review-canvas-zone" :style="reviewCanvasGridStyle">
+              <section class="review-canvas-pane review-canvas-pane-main">
+                <div class="review-pane-head">
+                  <div>
+                    <div class="style-preview-label">主编辑画布</div>
+                    <small class="field-hint">拖动和缩放都在这里完成。</small>
+                  </div>
+                </div>
                 <div
-                  :class="['style-preview-canvas', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
-                  @pointerdown="startManualDraw($event, selectedEditPage)"
-                  @pointermove="updateManualDraw($event, selectedEditPage)"
-                  @pointerup="finishManualDraw($event, selectedEditPage)"
-                  @pointercancel="clearManualDraft({ keepMode: true })"
+                  ref="translatedPreviewCanvasRef"
+                  class="review-canvas-shell"
+                  :style="{ '--page-aspect': `${Math.max(selectedEditPage.image_width || 1, 1)} / ${Math.max(selectedEditPage.image_height || 1, 1)}` }"
+                  @wheel="handleCanvasWheel($event, selectedEditPage, 'main')"
+                  @pointerdown="startCanvasViewportPan($event, selectedEditPage, 'main')"
                 >
-                  <img
-                    :alt="`${selectedEditPage.name} 原图`"
-                    :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
-                  />
-
-                  <div v-if="manualDrawMode" class="style-preview-tip">
-                    在原图上拖拽框出漏掉的文字区域
-                  </div>
-
-                  <div v-else-if="isAdjustingRegionBBox" class="style-preview-tip">
-                    在原图上拖一个新框，替换当前文本框范围
-                  </div>
-
-                  <div v-else-if="isCanvasReviewMode" class="style-preview-tip">
-                    画布模式：拖动文本框可改位置，拖拽控制点可改大小
-                  </div>
-
-                  <button
-                    v-for="region in selectedEditPage.regions"
-                    :key="`source-${region.id}`"
-                    type="button"
-                    :class="[
-                      'style-box',
-                      isManualRegion(region) ? 'manual' : '',
-                      mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
-                      selectedEditRegionKey === region.id ? 'active' : '',
-                      canDirectManipulateCanvas ? 'canvas-editable' : '',
-                      getStyleRegionLabelClass(region, selectedEditPage)
-                    ]"
-                    :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="handleCanvasRegionClick(region)"
-                    @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
-                  >
-                    <span class="style-box-label">{{ region.index + 1 }}</span>
-                    <span
-                      v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
-                      v-for="handle in canvasHandleOptions"
-                      :key="`${region.id}-${handle}`"
-                      :class="['style-box-handle', `handle-${handle}`]"
-                      :style="{ cursor: getCanvasHandleCursor(handle) }"
-                      @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
-                    ></span>
-                  </button>
-
                   <div
-                    v-if="manualDrawDraft && manualDrawDraft.stored_name === selectedEditPage.stored_name"
-                    :class="['style-box', 'style-box-draft', 'active', 'manual', getStyleRegionLabelClass({ bbox: getManualDraftBBox(selectedEditPage) || [0, 0, 0, 0] }, selectedEditPage)]"
-                    :style="getManualDraftStyle(selectedEditPage)"
+                    :class="['review-canvas-stage', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
+                    :style="getCanvasViewportStyle(selectedEditPage, 'main')"
+                    @pointerdown="startManualDraw($event, selectedEditPage)"
+                    @pointermove="updateManualDraw($event, selectedEditPage)"
+                    @pointerup="finishManualDraw($event, selectedEditPage)"
+                    @pointercancel="clearManualDraft({ keepMode: true })"
                   >
-                    <span class="style-box-label">新框</span>
-                  </div>
-                </div>
-              </div>
+                    <img
+                      :alt="`${selectedEditPage.name} 主编辑画布`"
+                      :src="selectedEditPageMainImageUrl"
+                      @load="refreshTranslatedPreviewScale"
+                    />
 
-              <div class="style-preview-panel">
-                <div class="style-preview-label">当前译图</div>
-                <div class="style-preview-canvas" ref="translatedPreviewCanvasRef">
-                  <img
-                    :alt="`${selectedEditPage.name} 译图`"
-                    :src="getCanvasPreviewImageUrl(selectedEditPage)"
-                    @load="refreshTranslatedPreviewScale"
-                  />
+                    <div v-if="manualDrawMode" class="style-preview-tip">
+                      在主画布上拖拽框出漏掉的文字区域
+                    </div>
 
-                  <button
-                    v-for="region in selectedEditPage.regions"
-                    :key="`translated-${region.id}`"
-                    type="button"
-                    :class="[
-                      'style-box',
-                      isManualRegion(region) ? 'manual' : '',
-                      mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
-                      selectedEditRegionKey === region.id ? 'active' : '',
-                      canDirectManipulateCanvas ? 'canvas-editable' : '',
-                      getStyleRegionLabelClass(region, selectedEditPage)
-                    ]"
-                    :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                    @click="handleCanvasRegionClick(region)"
-                    @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
-                  >
-                    <span class="style-box-label">{{ region.index + 1 }}</span>
-                    <span
-                      v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
-                      class="style-box-source-crop"
+                    <div v-else-if="isAdjustingRegionBBox" class="style-preview-tip">
+                      在主画布上拖一个新框，替换当前文本框范围
+                    </div>
+
+                    <div v-else-if="isCanvasReviewMode" class="style-preview-tip">
+                      Space 拖动画布，方向键微调，Ctrl + 方向键快速移动
+                    </div>
+
+                    <button
+                      v-for="region in selectedEditPage.regions"
+                      :key="`main-${region.id}`"
+                      type="button"
+                      :class="[
+                        'style-box',
+                        isManualRegion(region) ? 'manual' : '',
+                        mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
+                        selectedEditRegionKey === region.id ? 'active' : '',
+                        canDirectManipulateCanvas ? 'canvas-editable' : '',
+                        getStyleRegionLabelClass(region, selectedEditPage)
+                      ]"
+                      :style="getStyleRegionBoxStyle(region, selectedEditPage)"
+                      @click="handleCanvasRegionClick(region)"
+                      @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                     >
-                      <img
-                        :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
-                        :style="getSourceCropImageStyle(region, selectedEditPage)"
-                        alt=""
-                      />
-                    </span>
-                    <span
-                      v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
-                      class="style-box-preview-text"
-                      :class="{ vertical: isVerticalRegion(region) }"
-                      :style="getCanvasPreviewTextContainerStyle(region)"
-                    >
+                      <span class="style-box-label">{{ region.index + 1 }}</span>
                       <span
-                        class="style-box-preview-text-content"
-                        :class="{ vertical: isVerticalRegion(region) }"
-                        :data-region-id="region.id"
-                        :style="getCanvasPreviewTextStyle(region)"
+                        v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
+                        class="style-box-source-crop"
                       >
-                        {{ getCanvasPreviewText(region) }}
+                        <img
+                          :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
+                          :style="getSourceCropImageStyle(region, selectedEditPage)"
+                          alt=""
+                        />
                       </span>
-                    </span>
-                    <span
-                      v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
-                      v-for="handle in canvasHandleOptions"
-                      :key="`translated-${region.id}-${handle}`"
-                      :class="['style-box-handle', `handle-${handle}`]"
-                      :style="{ cursor: getCanvasHandleCursor(handle) }"
-                      @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
-                    ></span>
-                  </button>
-                </div>
-              </div>
+                      <span
+                        v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
+                        class="style-box-preview-text"
+                        :class="{ vertical: isVerticalRegion(region) }"
+                        :style="getCanvasPreviewTextContainerStyle(region)"
+                      >
+                        <span
+                          class="style-box-preview-text-content"
+                          :class="{ vertical: isVerticalRegion(region) }"
+                          :data-region-id="region.id"
+                          :style="getCanvasPreviewTextStyle(region)"
+                        >
+                          {{ getCanvasPreviewText(region) }}
+                        </span>
+                      </span>
+                      <span
+                        v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
+                        v-for="handle in canvasHandleOptions"
+                        :key="`main-${region.id}-${handle}`"
+                        :class="['style-box-handle', `handle-${handle}`]"
+                        :style="{ cursor: getCanvasHandleCursor(handle) }"
+                        @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
+                      ></span>
+                    </button>
 
-              <div class="style-preview-panel">
-                <div class="style-preview-label">已嵌字结果</div>
-                <div class="style-preview-canvas">
-                  <img
-                    v-if="getSavedTranslatedImageUrl(selectedEditPage)"
-                    :alt="`${selectedEditPage.name} 已嵌字结果`"
-                    :src="getSavedTranslatedImageUrl(selectedEditPage)"
-                  />
-                  <div v-else class="style-preview-empty">
-                    当前还没有可用的已嵌字结果
+                    <div
+                      v-if="manualDrawDraft && manualDrawDraft.stored_name === selectedEditPage.stored_name"
+                      :class="['style-box', 'style-box-draft', 'active', 'manual', getStyleRegionLabelClass({ bbox: getManualDraftBBox(selectedEditPage) || [0, 0, 0, 0] }, selectedEditPage)]"
+                      :style="getManualDraftStyle(selectedEditPage)"
+                    >
+                      <span class="style-box-label">新框</span>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </section>
+
+              <div
+                class="review-canvas-splitter"
+                role="separator"
+                aria-label="调节主画布与结果对照宽度"
+                @pointerdown="startCompareSplitterDrag"
+              ></div>
+
+              <section class="review-canvas-pane review-canvas-pane-compare">
+                <div class="review-pane-head review-pane-head-compare">
+                  <div>
+                    <div class="style-preview-label">{{ selectedEditPageCompareLabel }}</div>
+                    <small class="field-hint">负责对照最终视觉结果。</small>
+                  </div>
+                  <div class="review-compare-controls">
+                    <div class="review-compare-mode-switch">
+                      <button
+                        type="button"
+                        :class="['compact-action-button', reviewWorkspacePrefs.compare_pane_mode === 'saved' ? 'active' : '']"
+                        @click="setComparePaneMode('saved')"
+                      >
+                        最终
+                      </button>
+                      <button
+                        type="button"
+                        :class="['compact-action-button', reviewWorkspacePrefs.compare_pane_mode === 'preview' ? 'active' : '']"
+                        @click="setComparePaneMode('preview')"
+                      >
+                        当前
+                      </button>
+                      <button
+                        type="button"
+                        :class="['compact-action-button', reviewWorkspacePrefs.compare_pane_mode === 'source' ? 'active' : '']"
+                        @click="setComparePaneMode('source')"
+                      >
+                        原图
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      :class="['compact-action-button', reviewWorkspacePrefs.compare_sync_enabled ? 'active' : '']"
+                      @click="toggleCompareSync"
+                    >
+                      {{ reviewWorkspacePrefs.compare_sync_enabled ? '缩放联动中' : '缩放独立' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  ref="compareCanvasShellRef"
+                  class="review-canvas-shell review-canvas-shell-compare"
+                  :style="{ '--page-aspect': `${Math.max(selectedEditPage.image_width || 1, 1)} / ${Math.max(selectedEditPage.image_height || 1, 1)}` }"
+                  @wheel="handleCanvasWheel($event, selectedEditPage, 'compare')"
+                  @pointerdown="startCanvasViewportPan($event, selectedEditPage, 'compare')"
+                >
+                  <div class="review-canvas-stage review-canvas-stage-readonly" :style="getCanvasViewportStyle(selectedEditPage, 'compare')">
+                    <template v-if="selectedEditPageCompareImageUrl">
+                      <img
+                        :alt="`${selectedEditPage.name} 对照结果`"
+                        :src="selectedEditPageCompareImageUrl"
+                      />
+                      <div
+                        v-if="selectedEditRegion"
+                        class="review-compare-focus"
+                        :style="getStyleRegionBoxStyle(selectedEditRegion, selectedEditPage)"
+                      >
+                        <span class="style-box-label">{{ selectedEditRegion.index + 1 }}</span>
+                      </div>
+                    </template>
+                    <div v-else class="style-preview-empty">
+                      当前还没有可用的对照结果
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
           </div>
 
-          <div class="style-region-list">
-            <article
-              v-for="region in selectedEditPage.regions"
-              :key="`edit-${region.id}`"
-              :data-region-id="region.id"
-              :class="[
-                'style-region-card',
-                selectedEditRegionKey === region.id ? 'active' : '',
-                mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : ''
-              ]"
-              @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
-            >
-              <div class="style-region-row">
-                  <div class="style-region-copy">
-                    <strong class="style-region-index">#{{ region.index + 1 }}</strong>
-                    <div class="style-region-texts">
-                      <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
-                    </div>
-                    <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
-                  </div>
+          <aside class="review-inspector-panel">
+            <div class="review-inspector-tabs">
+              <button
+                type="button"
+                :class="['review-inspector-tab', reviewWorkspacePrefs.inspector_tab === 'inspector' ? 'active' : '']"
+                @click="setInspectorTab('inspector')"
+              >
+                检查器
+              </button>
+              <button
+                type="button"
+                :class="['review-inspector-tab', reviewWorkspacePrefs.inspector_tab === 'regions' ? 'active' : '']"
+                @click="setInspectorTab('regions')"
+              >
+                框列表
+              </button>
+            </div>
 
-                <div class="style-region-inline-controls" @click.stop @mousedown.stop>
+            <div v-if="reviewWorkspacePrefs.inspector_tab === 'inspector'" class="review-inspector-body">
+              <template v-if="selectedEditRegion">
+                <div class="review-selected-summary">
+                  <div class="review-selected-summary-head">
+                    <strong>{{ selectedEditRegionIndexLabel }}</strong>
+                    <span v-if="isManualRegion(selectedEditRegion)" class="style-badge style-badge-manual">手动补框</span>
+                    <span v-if="hasRegionWarning(selectedEditRegion)" class="style-badge style-badge-strong">需留意</span>
+                  </div>
+                  <p class="style-source-text review-selected-source">{{ selectedEditRegion.source_text || '（没有识别到可用原文）' }}</p>
+                </div>
+
+                <div class="review-inspector-section">
+                  <label class="field style-override-field">
+                    <span>译文</span>
+                    <input
+                      :class="['translation-review-input', isRegionSkipEnabled(selectedEditRegion) ? 'disabled' : '']"
+                      :value="getEditRegionText(selectedEditRegion)"
+                      :data-region-id="selectedEditRegion.id"
+                      type="text"
+                      :disabled="isRegionSkipEnabled(selectedEditRegion)"
+                      @input="handleRegionTextInput(selectedEditRegion, $event.target.value)"
+                      @keydown.enter.prevent="commitRegionTextDraft(selectedEditRegion)"
+                      @blur="commitRegionTextDraft(selectedEditRegion)"
+                    />
+                  </label>
+                </div>
+
+                <div class="review-inspector-section review-inspector-grid">
                   <label class="region-inline-toggle">
                     <input
-                      :checked="isRegionSkipEnabled(region)"
+                      :checked="isRegionSkipEnabled(selectedEditRegion)"
                       type="checkbox"
-                      @click.stop
-                      @mousedown.stop
-                      @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                      @change="updateTranslationSkipOverride(selectedEditRegion, $event.target.checked)"
                     />
                     <span>保留原文</span>
                   </label>
 
                   <button
-                    v-if="!isManualRegion(region)"
+                    v-if="!isManualRegion(selectedEditRegion)"
                     class="inline-button"
                     type="button"
-                    @click.stop="updateRegionDisabledOverride(region, true)"
+                    @click="updateRegionDisabledOverride(selectedEditRegion, true)"
                   >
-                    禁用
+                    禁用此框
                   </button>
 
                   <button
-                    v-if="!isCanvasReviewMode"
-                    class="inline-button"
+                    v-if="isManualRegion(selectedEditRegion)"
+                    class="inline-button inline-button-danger"
                     type="button"
-                    @click.stop="startRegionBBoxAdjustment(region)"
+                    @click="deleteManualRegion(selectedEditRegion)"
                   >
-                    调框
+                    删除补框
                   </button>
+                </div>
 
-                  <label class="compact-select-wrap compact-select-wrap-font">
+                <div class="review-inspector-section review-inspector-grid">
+                  <label class="field style-override-field">
+                    <span>字体</span>
                     <select
-                      :value="getRegionFontOverrideId(region)"
-                      @click.stop
-                      @mousedown.stop
-                      @change="updateRegionFontOverride(region, $event.target.value)"
+                      :value="getRegionFontOverrideId(selectedEditRegion)"
+                      @change="updateRegionFontOverride(selectedEditRegion, $event.target.value)"
                     >
-                      <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
+                      <option value="">{{ getEffectiveRegionFontLabel(selectedEditRegion) }}</option>
                       <option
                         v-for="font in availableFonts"
-                        :key="`${region.id}-${font.id}`"
+                        :key="`${selectedEditRegion.id}-${font.id}`"
                         :value="font.id"
                       >
                         {{ getPreviewFontOptionLabel(font) }}
@@ -5371,80 +6068,170 @@ watch(
                   </label>
 
                   <button
-                    v-if="selectedEditRegionKey === region.id"
                     type="button"
                     class="compact-action-button"
-                    :disabled="!canApplyRegionFontToPage(region)"
-                    @click.stop="applyRegionFontToPage(region)"
+                    :disabled="!canApplyRegionFontToPage(selectedEditRegion)"
+                    @click="applyRegionFontToPage(selectedEditRegion)"
                   >
                     应用到本页
                   </button>
+                </div>
 
-                  <label class="compact-number-wrap compact-number-wrap-font-size" @click.stop @mousedown.stop>
+                <div class="review-inspector-section review-inspector-grid review-inspector-grid-compact">
+                  <label class="field style-override-field">
+                    <span>字号</span>
                     <input
-                      :value="getRegionFontSize(region)"
+                      :value="getRegionFontSize(selectedEditRegion)"
                       type="number"
                       min="8"
                       max="240"
                       step="1"
                       inputmode="numeric"
-                      @click.stop
-                      @mousedown.stop
-                      @input="handleRegionFontSizeInput(region, $event.target.value)"
-                      @keydown.enter.prevent="commitRegionFontSize(region)"
-                      @blur="commitRegionFontSize(region)"
+                      @input="handleRegionFontSizeInput(selectedEditRegion, $event.target.value)"
+                      @keydown.enter.prevent="commitRegionFontSize(selectedEditRegion)"
+                      @blur="commitRegionFontSize(selectedEditRegion)"
                     />
                   </label>
 
-                  <label class="compact-select-wrap compact-select-wrap-direction">
+                  <label class="field style-override-field">
+                    <span>方向</span>
                     <select
-                      :value="getRegionDirectionValue(region)"
-                      @click.stop
-                      @mousedown.stop
-                      @change="updateRegionTextDirection(region, $event.target.value)"
+                      :value="getRegionDirectionValue(selectedEditRegion)"
+                      @change="updateRegionTextDirection(selectedEditRegion, $event.target.value)"
                     >
                       <option
                         v-for="option in textDirectionOptions"
-                        :key="`${region.id}-${option.value}`"
+                        :key="`${selectedEditRegion.id}-${option.value}`"
                         :value="option.value"
                       >
                         {{ option.label }}
                       </option>
                     </select>
                   </label>
+                </div>
+              </template>
 
-                  <button
-                    v-if="isManualRegion(region)"
-                    class="inline-button inline-button-danger"
-                    type="button"
-                    @click.stop="deleteManualRegion(region)"
-                  >
-                    删除
-                  </button>
+              <div v-else class="empty-state review-inspector-empty">
+                先在主画布或框列表里选中一个文本框，再在这里做精修。
+              </div>
+            </div>
+
+            <div v-else class="review-region-list-panel">
+              <div class="review-region-list-toolbar">
+                <input
+                  v-model="regionListSearch"
+                  class="translation-review-input"
+                  type="search"
+                  placeholder="搜索原文 / 译文 / 字体"
+                />
+                <select v-model="regionListFilter" class="compact-select-field">
+                  <option value="all">全部</option>
+                  <option value="manual">手动补框</option>
+                  <option value="keep-original">保留原文</option>
+                  <option value="untranslated">未翻译</option>
+                  <option value="font-override">有字体覆盖</option>
+                  <option value="warning">有警告</option>
+                </select>
+              </div>
+
+              <div class="style-region-list review-region-list">
+                <article
+                  v-for="region in filteredEditRegions"
+                  :key="`edit-${region.id}`"
+                  :data-region-id="region.id"
+                  :class="[
+                    'style-region-card',
+                    selectedEditRegionKey === region.id ? 'active' : '',
+                    mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : ''
+                  ]"
+                  @click="mergeMode ? toggleMergeSelection(region) : selectedEditRegionKey = region.id"
+                >
+                  <div class="style-region-row">
+                    <div class="style-region-copy">
+                      <strong class="style-region-index">#{{ region.index + 1 }}</strong>
+                      <div class="style-region-texts">
+                        <p class="style-source-text">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                      </div>
+                      <span v-if="isManualRegion(region)" class="style-badge style-badge-manual">手动补框</span>
+                      <span v-if="hasRegionWarning(region)" class="style-badge style-badge-strong">需留意</span>
+                    </div>
+
+                    <div class="style-region-inline-controls" @click.stop @mousedown.stop>
+                      <label class="region-inline-toggle">
+                        <input
+                          :checked="isRegionSkipEnabled(region)"
+                          type="checkbox"
+                          @click.stop
+                          @mousedown.stop
+                          @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                        />
+                        <span>保留原文</span>
+                      </label>
+
+                      <label class="compact-select-wrap compact-select-wrap-font">
+                        <select
+                          :value="getRegionFontOverrideId(region)"
+                          @click.stop
+                          @mousedown.stop
+                          @change="updateRegionFontOverride(region, $event.target.value)"
+                        >
+                          <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
+                          <option
+                            v-for="font in availableFonts"
+                            :key="`${region.id}-${font.id}`"
+                            :value="font.id"
+                          >
+                            {{ getPreviewFontOptionLabel(font) }}
+                          </option>
+                        </select>
+                      </label>
+
+                      <label class="compact-number-wrap compact-number-wrap-font-size" @click.stop @mousedown.stop>
+                        <input
+                          :value="getRegionFontSize(region)"
+                          type="number"
+                          min="8"
+                          max="240"
+                          step="1"
+                          inputmode="numeric"
+                          @click.stop
+                          @mousedown.stop
+                          @input="handleRegionFontSizeInput(region, $event.target.value)"
+                          @keydown.enter.prevent="commitRegionFontSize(region)"
+                          @blur="commitRegionFontSize(region)"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="region-card-controls region-card-controls-single">
+                    <label
+                      class="field style-override-field compact-field compact-field-grow"
+                      @click.stop
+                      @mousedown.stop
+                    >
+                      <input
+                        :class="['translation-review-input', isRegionSkipEnabled(region) ? 'disabled' : '']"
+                        :value="getEditRegionText(region)"
+                        :data-region-id="region.id"
+                        type="text"
+                        :disabled="isRegionSkipEnabled(region)"
+                        @click.stop
+                        @mousedown.stop
+                        @input="handleRegionTextInput(region, $event.target.value)"
+                        @keydown.enter.prevent="commitRegionTextDraft(region)"
+                        @blur="commitRegionTextDraft(region)"
+                      />
+                    </label>
+                  </div>
+                </article>
+
+                <div v-if="!filteredEditRegions.length" class="empty-state review-region-list-empty">
+                  当前筛选条件下没有文本框。
                 </div>
               </div>
-
-              <div class="region-card-controls region-card-controls-single">
-                <label
-                  class="field style-override-field compact-field compact-field-grow"
-                  @click.stop
-                  @mousedown.stop
-                >
-                  <input
-                    :class="['translation-review-input', isRegionSkipEnabled(region) ? 'disabled' : '']"
-                    :value="getEditRegionText(region)"
-                    type="text"
-                    :disabled="isRegionSkipEnabled(region)"
-                    @click.stop
-                    @mousedown.stop
-                    @input="handleRegionTextInput(region, $event.target.value)"
-                    @keydown.enter.prevent="commitRegionTextDraft(region)"
-                    @blur="commitRegionTextDraft(region)"
-                  />
-                </label>
-              </div>
-            </article>
-          </div>
+            </div>
+          </aside>
         </div>
       </div>
 

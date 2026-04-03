@@ -61,9 +61,18 @@ fi
 
 echo "[2/4] 检查并安装后端依赖..."
 "$MAC_VENV_DIR/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+"$MAC_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
 
 if ! "$MAC_VENV_DIR/bin/python" -c "import cv2, numpy, fastapi, uvicorn, PIL, websockets, dotenv" >/dev/null 2>&1; then
   "$MAC_VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
+fi
+
+if ! PYTHONPATH="$BACKEND_DIR/manga-image-translator" "$MAC_VENV_DIR/bin/python" -c "import langcodes, manga_translator" >/dev/null 2>&1; then
+  echo "[2.5/4] 补齐 manga-image-translator 运行依赖..."
+  (
+    cd "$BACKEND_DIR"
+    "$MAC_VENV_DIR/bin/python" install_deps.py
+  )
 fi
 
 echo "[3/4] 检查前端依赖..."

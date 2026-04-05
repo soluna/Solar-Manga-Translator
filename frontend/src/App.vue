@@ -478,8 +478,26 @@ const hasTranslationOverrides = computed(
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
 const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
 const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
+const canvasInteractionLockReason = computed(() => {
+  if (!isCanvasReviewMode.value) {
+    return '当前不是画布审校模式'
+  }
+  if (!selectedEditPage.value) {
+    return '当前没有可编辑页面'
+  }
+  if (manualDrawMode.value) {
+    return '正在手动补框模式'
+  }
+  if (mergeMode.value) {
+    return '正在合并文本框模式'
+  }
+  if (isAdjustingRegionBBox.value) {
+    return '正在替换文本框范围'
+  }
+  return ''
+})
 const isCanvasInteractionLocked = computed(
-  () => Boolean(!isCanvasReviewMode.value || !selectedEditPage.value || manualDrawMode.value || mergeMode.value || isAdjustingRegionBBox.value)
+  () => Boolean(canvasInteractionLockReason.value)
 )
 const canDirectManipulateCanvas = computed(() => !isCanvasInteractionLocked.value)
 const pageShellWidthClass = computed(() => (
@@ -2046,6 +2064,41 @@ function syncEditSelection() {
     selectedRegionId: nextSelectedRegionId
   }))
   selectedEditRegionKey.value = nextSelectedRegionId
+  reconcileCanvasInteractionState()
+}
+
+function reconcileCanvasInteractionState() {
+  const currentPage = selectedEditPage.value
+  const validRegionIds = new Set((currentPage?.regions || []).map((region) => String(region?.id || '')).filter(Boolean))
+
+  if (adjustingRegionId.value && !validRegionIds.has(adjustingRegionId.value)) {
+    adjustingRegionId.value = ''
+    manualDrawDraft.value = null
+  }
+
+  if (mergeMode.value) {
+    const nextSelection = {}
+    for (const regionId of Object.keys(mergeRegionSelection.value || {})) {
+      if (validRegionIds.has(regionId)) {
+        nextSelection[regionId] = true
+      }
+    }
+    mergeRegionSelection.value = nextSelection
+    if (!Object.keys(nextSelection).length) {
+      mergeMode.value = false
+    }
+  }
+
+  if (!manualDrawMode.value && !adjustingRegionId.value && manualDrawDraft.value) {
+    manualDrawDraft.value = null
+  }
+}
+
+function clearCanvasInteractionLocks() {
+  mergeMode.value = false
+  mergeRegionSelection.value = {}
+  clearManualDraft()
+  status.value = '已解除画布交互锁，可以继续拖框、缩框和方向键微调。'
 }
 
 function pruneRegionDraftMap(draftMap, pages) {
@@ -4808,6 +4861,7 @@ watch(
       })
     }
     selectedEditRegionKey.value = String(getPageUiState(normalizedPageId).selectedRegionId || '')
+    reconcileCanvasInteractionState()
   }
 )
 
@@ -4860,6 +4914,14 @@ watch(
   ],
   () => {
     void refreshSelectedRegionPreviewDebug()
+  },
+  { deep: false }
+)
+
+watch(
+  () => mergedInspectionPages.value,
+  () => {
+    reconcileCanvasInteractionState()
   },
   { deep: false }
 )
@@ -5847,10 +5909,14 @@ watch(
                 <span><strong>当前页：</strong>{{ selectedEditPage.name }}</span>
                 <span><strong>选中：</strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</span>
                 <span><strong>主视图：</strong>无字底图 + 实时叠字</span>
+                <span :class="['review-canvas-interaction-chip', canDirectManipulateCanvas ? 'ok' : 'locked']">
+                  <strong>交互：</strong>{{ canDirectManipulateCanvas ? '可编辑' : `已锁定（${canvasInteractionLockReason}）` }}
+                </span>
               </div>
               <div class="review-canvas-topbar-actions">
                 <button class="inline-button" type="button" @click="resetViewportStateForPage(selectedEditPage)">重置视图</button>
                 <button class="inline-button" type="button" :disabled="!selectedEditRegion" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位当前框</button>
+                <button v-if="!canDirectManipulateCanvas" class="inline-button" type="button" @click="clearCanvasInteractionLocks">解除交互锁</button>
               </div>
             </div>
 

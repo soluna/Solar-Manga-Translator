@@ -935,6 +935,25 @@ h2 {
   font-size: 0.82rem;
 }
 
+.review-canvas-interaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.review-canvas-interaction-chip.ok {
+  color: #1e6a3d;
+  background: rgba(216, 243, 227, 0.95);
+}
+
+.review-canvas-interaction-chip.locked {
+  color: #8b3b20;
+  background: rgba(255, 231, 220, 0.95);
+}
+
 .review-canvas-zone {
   display: grid;
   gap: 0;

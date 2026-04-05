@@ -78,6 +78,7 @@ bash ./scripts/sync_obsidian_docs.sh
 - 记录模板：[<repo>/docs/evals/iteration-scorecard-template.md](<repo>/docs/evals/iteration-scorecard-template.md)
 - 当前基线：[<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md)
 - 当前正式评估：[<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md)
+- 本地画布回归：[<repo>/docs/evals/local-canvas-regression.md](<repo>/docs/evals/local-canvas-regression.md)
 
 如果要开始新一轮评分卡记录，可以直接运行：
 

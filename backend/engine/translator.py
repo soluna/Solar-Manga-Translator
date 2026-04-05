@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import importlib
 import json
 import shutil
@@ -1164,7 +1165,7 @@ class TranslatorEngine:
                     "no cached or persisted regions are available."
                 )
 
-        return {
+        document = {
             "page_id": stored_name,
             "review_mode": self._session_review_mode(session),
             "source_image": f"/api/pages/{project_id}/{stored_name}/source-image",
@@ -1195,6 +1196,7 @@ class TranslatorEngine:
                 "revision": previous_revision + 1,
             },
         }
+        return self._apply_session_overrides_to_page_document(session, document)
 
     def _persist_page_documents(
         self,
@@ -1225,6 +1227,7 @@ class TranslatorEngine:
         payload = self._read_json_file(document_path, {})
         if isinstance(payload, dict) and payload:
             normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
+            normalized_payload = self._apply_session_overrides_to_page_document(session, normalized_payload)
             if normalized_payload != payload:
                 self._write_json_file(document_path, normalized_payload)
             return normalized_payload
@@ -1233,6 +1236,7 @@ class TranslatorEngine:
         payload = self._read_json_file(document_path, {})
         if isinstance(payload, dict) and payload:
             normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
+            normalized_payload = self._apply_session_overrides_to_page_document(session, normalized_payload)
             if normalized_payload != payload:
                 self._write_json_file(document_path, normalized_payload)
             return normalized_payload
@@ -1301,6 +1305,107 @@ class TranslatorEngine:
         normalized["base_image"] = base_image_url
         normalized["preview_image"] = preview_image_url
         normalized["translated_image"] = translated_image_url
+        return normalized
+
+    def _apply_session_overrides_to_page_document(
+        self,
+        session: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("regions"), list):
+            return payload
+
+        normalized = copy.deepcopy(payload)
+        translation_overrides = dict(session.get("translation_region_overrides") or {})
+        skip_overrides = dict(session.get("translation_region_skip_overrides") or {})
+        disabled_overrides = dict(session.get("translation_region_disabled_overrides") or {})
+        layout_overrides = dict(session.get("translation_region_layout_overrides") or {})
+        style_overrides = dict(session.get("style_region_overrides") or {})
+
+        for region in normalized.get("regions") or []:
+            if not isinstance(region, dict):
+                continue
+
+            region_id = str(region.get("region_id") or "").strip()
+            if not region_id:
+                continue
+
+            translation_payload = region.setdefault("translation", {})
+            style_payload = region.setdefault("style", {})
+            flags_payload = region.setdefault("flags", {})
+
+            if region_id in translation_overrides:
+                edited_text = str(translation_overrides.get(region_id) or "")
+                translation_payload["edited"] = edited_text
+                translation_payload["resolved"] = edited_text or str(
+                    translation_payload.get("machine") or translation_payload.get("resolved") or ""
+                )
+
+            if region_id in style_overrides:
+                override_style = str(style_overrides.get(region_id) or "")
+                style_payload["font_style_override"] = override_style
+                if override_style:
+                    style_payload["font_style"] = override_style
+
+            if region_id in skip_overrides:
+                keep_original = bool(skip_overrides.get(region_id))
+                flags_payload["keep_original"] = keep_original
+                flags_payload["translation_enabled"] = not keep_original and not bool(flags_payload.get("disabled"))
+                if keep_original:
+                    translation_payload["resolved"] = str(region.get("source_text") or "")
+
+            if region_id in disabled_overrides:
+                disabled = bool(disabled_overrides.get(region_id))
+                flags_payload["disabled"] = disabled
+                flags_payload["translation_enabled"] = not disabled and not bool(flags_payload.get("keep_original"))
+
+            layout_override = layout_overrides.get(region_id) or {}
+            if not isinstance(layout_override, dict) or not layout_override:
+                continue
+
+            bbox = layout_override.get("bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                try:
+                    region["bbox"] = [int(round(float(value))) for value in bbox]
+                except (TypeError, ValueError):
+                    pass
+
+            font_size = layout_override.get("font_size")
+            if font_size is not None:
+                try:
+                    normalized_font_size = max(8, int(round(float(font_size))))
+                except (TypeError, ValueError):
+                    normalized_font_size = None
+                if normalized_font_size is not None:
+                    style_payload["font_size_override"] = normalized_font_size
+                    style_payload["font_size"] = normalized_font_size
+
+            font_key = str(layout_override.get("font_key") or "").strip()
+            if font_key:
+                style_payload["font_key_override"] = font_key
+
+            direction = self._normalize_direction_override(layout_override.get("direction"))
+            if direction != "auto":
+                region["direction"] = direction
+
+            alignment = str(layout_override.get("alignment") or "").strip()
+            if alignment:
+                style_payload["alignment"] = alignment
+
+            letter_spacing = layout_override.get("letter_spacing")
+            if letter_spacing is not None:
+                try:
+                    style_payload["letter_spacing"] = float(letter_spacing)
+                except (TypeError, ValueError):
+                    pass
+
+            line_spacing = layout_override.get("line_spacing")
+            if line_spacing is not None:
+                try:
+                    style_payload["line_spacing"] = float(line_spacing)
+                except (TypeError, ValueError):
+                    pass
+
         return normalized
 
     def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:

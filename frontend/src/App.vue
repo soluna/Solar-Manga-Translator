@@ -298,8 +298,8 @@ function createDefaultReviewWorkspacePrefs() {
     compare_sync_enabled: true,
     inspector_tab: 'inspector',
     show_debug: false,
-    page_rail_width: 144,
-    inspector_width: 340,
+    page_rail_width: 128,
+    inspector_width: 420,
     show_settings_panel: false,
     show_project_meta_panel: false,
     show_project_history_panel: false,
@@ -327,10 +327,10 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
       ? rawValue.show_debug
       : defaults.show_debug,
     page_rail_width: Number.isFinite(pageRailWidth)
-      ? Math.min(220, Math.max(108, Math.round(pageRailWidth)))
+      ? Math.min(180, Math.max(96, Math.round(pageRailWidth)))
       : defaults.page_rail_width,
     inspector_width: Number.isFinite(inspectorWidth)
-      ? Math.min(560, Math.max(240, Math.round(inspectorWidth)))
+      ? Math.min(920, Math.max(300, Math.round(inspectorWidth)))
       : defaults.inspector_width,
     show_settings_panel: typeof rawValue.show_settings_panel === 'boolean'
       ? rawValue.show_settings_panel
@@ -698,8 +698,8 @@ const reviewCanvasGridStyle = computed(() => {
   }
 })
 const reviewWorkspaceLayoutStyle = computed(() => ({
-  '--page-rail-width': `${Math.round(reviewWorkspacePrefs.value.page_rail_width || 144)}px`,
-  '--inspector-width': `${Math.round(reviewWorkspacePrefs.value.inspector_width || 360)}px`
+  '--page-rail-width': `${Math.round(reviewWorkspacePrefs.value.page_rail_width || 128)}px`,
+  '--inspector-width': `${Math.round(reviewWorkspacePrefs.value.inspector_width || 420)}px`
 }))
 const selectedEditPage = computed(() => {
   if (!mergedInspectionPages.value.length) {
@@ -2525,8 +2525,8 @@ function startWorkspaceSplitterDrag(kind, event) {
     pointerId: event.pointerId,
     shellLeft: rect.left,
     shellRight: rect.right,
-    originRailWidth: Number(reviewWorkspacePrefs.value.page_rail_width || 144),
-    originInspectorWidth: Number(reviewWorkspacePrefs.value.inspector_width || 360)
+    originRailWidth: Number(reviewWorkspacePrefs.value.page_rail_width || 128),
+    originInspectorWidth: Number(reviewWorkspacePrefs.value.inspector_width || 420)
   }
   event.preventDefault()
 }
@@ -2541,7 +2541,7 @@ function updateWorkspaceSplitterDrag(event) {
   }
 
   if (draft.kind === 'rail') {
-    const nextWidth = Math.min(220, Math.max(108, Math.round(event.clientX - draft.shellLeft)))
+    const nextWidth = Math.min(180, Math.max(96, Math.round(event.clientX - draft.shellLeft)))
     reviewWorkspacePrefs.value = {
       ...reviewWorkspacePrefs.value,
       page_rail_width: nextWidth
@@ -2550,7 +2550,7 @@ function updateWorkspaceSplitterDrag(event) {
   }
 
   if (draft.kind === 'inspector') {
-    const nextWidth = Math.min(560, Math.max(240, Math.round(draft.shellRight - event.clientX)))
+    const nextWidth = Math.min(920, Math.max(300, Math.round(draft.shellRight - event.clientX)))
     reviewWorkspacePrefs.value = {
       ...reviewWorkspacePrefs.value,
       inspector_width: nextWidth

@@ -841,7 +841,12 @@ h2 {
 
 .review-workspace-layout {
   display: grid;
-  grid-template-columns: var(--page-rail-width, 144px) 12px minmax(0, 1fr) 12px var(--inspector-width, 360px);
+  grid-template-columns:
+    minmax(96px, var(--page-rail-width, 128px))
+    12px
+    minmax(0, 1fr)
+    12px
+    minmax(300px, var(--inspector-width, 420px));
   gap: 18px;
   align-items: start;
 }
@@ -1088,6 +1093,10 @@ h2 {
   min-height: 960px;
   min-width: 0;
   overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .review-workspace-side-splitter {
@@ -1203,6 +1212,10 @@ h2 {
 .review-region-list {
   max-height: 880px;
   min-width: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .style-toolbar {
@@ -1532,10 +1545,10 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 10px;
-  border-radius: 16px;
-  background: rgba(255, 248, 241, 0.86);
-  border: 1px solid rgba(116, 88, 62, 0.12);
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(116, 88, 62, 0.1);
   cursor: pointer;
   transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
   min-width: 0;
@@ -1568,7 +1581,7 @@ h2 {
   flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 1 1 220px;
 }
 
 .style-region-texts {
@@ -1592,10 +1605,11 @@ h2 {
   gap: 4px;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: flex-end;
   min-width: 0;
-  width: 100%;
-  flex: 1 1 100%;
+  width: auto;
+  margin-left: auto;
+  flex: 0 1 auto;
 }
 
 .style-badge {
@@ -1789,11 +1803,12 @@ h2 {
 }
 
 .compact-select-wrap-font {
-  flex: 1 1 126px;
+  flex: 1 1 188px;
+  min-width: 168px;
 }
 
 .compact-number-wrap-font-size input {
-  width: 50px;
+  width: 56px;
 }
 
 .compact-select-wrap-direction select {

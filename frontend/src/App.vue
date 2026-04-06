@@ -292,7 +292,7 @@ function createDefaultReviewWorkspacePrefs() {
     inspector_tab: 'inspector',
     show_debug: false,
     page_rail_width: 144,
-    inspector_width: 360,
+    inspector_width: 340,
     show_settings_panel: false,
     show_project_meta_panel: false,
     show_project_history_panel: false,
@@ -323,7 +323,7 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
       ? Math.min(220, Math.max(108, Math.round(pageRailWidth)))
       : defaults.page_rail_width,
     inspector_width: Number.isFinite(inspectorWidth)
-      ? Math.min(560, Math.max(300, Math.round(inspectorWidth)))
+      ? Math.min(560, Math.max(240, Math.round(inspectorWidth)))
       : defaults.inspector_width,
     show_settings_panel: typeof rawValue.show_settings_panel === 'boolean'
       ? rawValue.show_settings_panel
@@ -2548,7 +2548,7 @@ function updateWorkspaceSplitterDrag(event) {
   }
 
   if (draft.kind === 'inspector') {
-    const nextWidth = Math.min(560, Math.max(300, Math.round(draft.shellRight - event.clientX)))
+    const nextWidth = Math.min(560, Math.max(240, Math.round(draft.shellRight - event.clientX)))
     reviewWorkspacePrefs.value = {
       ...reviewWorkspacePrefs.value,
       inspector_width: nextWidth

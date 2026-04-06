@@ -1087,6 +1087,7 @@ h2 {
   gap: 12px;
   min-height: 960px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .review-workspace-side-splitter {
@@ -1136,6 +1137,8 @@ h2 {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .review-selected-summary {
@@ -1184,6 +1187,7 @@ h2 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 120px;
   gap: 8px;
+  min-width: 0;
 }
 
 .review-region-list-toolbar select {
@@ -1198,6 +1202,7 @@ h2 {
 
 .review-region-list {
   max-height: 880px;
+  min-width: 0;
 }
 
 .style-toolbar {
@@ -1518,7 +1523,9 @@ h2 {
   flex-direction: column;
   gap: 8px;
   max-height: 920px;
-  overflow: auto;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .style-region-card {
@@ -1531,6 +1538,7 @@ h2 {
   border: 1px solid rgba(116, 88, 62, 0.12);
   cursor: pointer;
   transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+  min-width: 0;
 }
 
 .style-region-card.active {
@@ -1547,14 +1555,17 @@ h2 {
 
 .style-region-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .style-region-copy {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
   flex: 1 1 auto;
@@ -1579,10 +1590,12 @@ h2 {
 .style-region-inline-controls {
   display: flex;
   gap: 4px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  flex: 0 0 auto;
+  justify-content: flex-start;
+  min-width: 0;
+  width: 100%;
+  flex: 1 1 100%;
 }
 
 .style-badge {
@@ -1654,6 +1667,8 @@ h2 {
   color: #2b2118;
   font-size: 0.9rem;
   white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .region-inline-toggle input {
@@ -1664,11 +1679,14 @@ h2 {
 
 .compact-select-wrap {
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .compact-select-wrap select {
   width: auto;
   min-width: 96px;
+  max-width: 100%;
 }
 
 .compact-number-wrap {
@@ -1757,8 +1775,13 @@ h2 {
 }
 
 .compact-select-wrap-font select {
-  min-width: 88px;
-  max-width: 112px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.compact-select-wrap-font {
+  flex: 1 1 126px;
 }
 
 .compact-number-wrap-font-size input {

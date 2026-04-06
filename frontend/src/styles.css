@@ -1622,10 +1622,11 @@ h2 {
   color: #7a614d;
   margin: 0;
   font-size: 0.88rem;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.35;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: initial;
+  overflow-wrap: anywhere;
 }
 
 .style-source-meta {
@@ -1755,6 +1756,13 @@ h2 {
   padding: 4px 7px;
   color: #2b2118;
   line-height: 1.2;
+}
+
+.translation-review-textarea {
+  min-height: 64px;
+  padding-block: 8px;
+  resize: vertical;
+  white-space: pre-wrap;
 }
 
 .compact-select-field select,

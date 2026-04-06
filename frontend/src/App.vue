@@ -6259,18 +6259,17 @@ watch(
                       @click.stop
                       @mousedown.stop
                     >
-                      <input
-                        :class="['translation-review-input', isRegionSkipEnabled(region) ? 'disabled' : '']"
+                      <textarea
+                        :class="['translation-review-input', 'translation-review-textarea', isRegionSkipEnabled(region) ? 'disabled' : '']"
                         :value="getEditRegionText(region)"
                         :data-region-id="region.id"
-                        type="text"
+                        rows="2"
                         :disabled="isRegionSkipEnabled(region)"
                         @click.stop
                         @mousedown.stop
                         @input="handleRegionTextInput(region, $event.target.value)"
-                        @keydown.enter.prevent="commitRegionTextDraft(region)"
                         @blur="commitRegionTextDraft(region)"
-                      />
+                      ></textarea>
                     </label>
                   </div>
                 </article>

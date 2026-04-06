@@ -285,13 +285,15 @@ def _compose_render_canvas(
     clipped_box = temp_box[:clipped_height, :clipped_width]
 
     if render_horizontally:
-        offset_x = _alignment_offset(alignment, target_width - clipped_width)
-        offset_y = 0
+        # Match the review canvas default anchor:
+        # horizontal text stays left-aligned inside the box and vertically centered.
+        offset_x = 0
+        offset_y = max((target_height - clipped_height) // 2, 0)
     else:
-        # Keep vertical text columns anchored to the reading-side edge while
-        # letting alignment control the top/center/bottom placement.
-        offset_x = max(target_width - clipped_width, 0)
-        offset_y = _alignment_offset(alignment, target_height - clipped_height)
+        # Match the review canvas default anchor:
+        # vertical text stays top-aligned inside the box and horizontally centered.
+        offset_x = max((target_width - clipped_width) // 2, 0)
+        offset_y = 0
 
     canvas[offset_y:offset_y + clipped_height, offset_x:offset_x + clipped_width] = clipped_box
     return canvas

@@ -175,6 +175,10 @@ async function waitForRegionBBox(pageId, regionId, predicate, description) {
 }
 
 async function restoreFixtureProject(page) {
+  const historyToggle = page.getByRole('button', { name: /历史记录/ }).first()
+  if (await historyToggle.isVisible()) {
+    await historyToggle.click()
+  }
   const fixtureCard = page.locator('.project-history-item', { hasText: FIXTURE_PROJECT_TITLE }).first()
   await fixtureCard.waitFor({ state: 'visible', timeout: PLAYWRIGHT_TIMEOUT })
   await fixtureCard.getByRole('button', { name: '继续编辑' }).click()

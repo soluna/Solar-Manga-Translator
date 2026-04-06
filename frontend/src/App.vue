@@ -138,7 +138,7 @@ function createDefaultConfig() {
     render_alignment: 'left',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
-    default_review_mode: 'classic',
+    default_review_mode: 'canvas_beta',
     workspace_width_mode: 'fixed',
     pause_after_detection: false,
     mask_cleanup_strength: 'standard',
@@ -290,7 +290,13 @@ function createDefaultReviewWorkspacePrefs() {
     compare_pane_mode: 'saved',
     compare_sync_enabled: true,
     inspector_tab: 'inspector',
-    show_debug: false
+    show_debug: false,
+    page_rail_width: 144,
+    inspector_width: 360,
+    show_settings_panel: false,
+    show_project_meta_panel: false,
+    show_project_history_panel: false,
+    show_compare_gallery_panel: false
   }
 }
 
@@ -301,6 +307,8 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
   }
 
   const splitRatio = Number(rawValue.split_ratio)
+  const pageRailWidth = Number(rawValue.page_rail_width)
+  const inspectorWidth = Number(rawValue.inspector_width)
   return {
     split_ratio: Number.isFinite(splitRatio) ? Math.min(80, Math.max(50, Math.round(splitRatio))) : defaults.split_ratio,
     compare_pane_mode: isValidComparePaneMode(rawValue.compare_pane_mode) ? rawValue.compare_pane_mode : defaults.compare_pane_mode,
@@ -310,7 +318,25 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
     inspector_tab: isValidInspectorTab(rawValue.inspector_tab) ? rawValue.inspector_tab : defaults.inspector_tab,
     show_debug: typeof rawValue.show_debug === 'boolean'
       ? rawValue.show_debug
-      : defaults.show_debug
+      : defaults.show_debug,
+    page_rail_width: Number.isFinite(pageRailWidth)
+      ? Math.min(220, Math.max(108, Math.round(pageRailWidth)))
+      : defaults.page_rail_width,
+    inspector_width: Number.isFinite(inspectorWidth)
+      ? Math.min(560, Math.max(300, Math.round(inspectorWidth)))
+      : defaults.inspector_width,
+    show_settings_panel: typeof rawValue.show_settings_panel === 'boolean'
+      ? rawValue.show_settings_panel
+      : defaults.show_settings_panel,
+    show_project_meta_panel: typeof rawValue.show_project_meta_panel === 'boolean'
+      ? rawValue.show_project_meta_panel
+      : defaults.show_project_meta_panel,
+    show_project_history_panel: typeof rawValue.show_project_history_panel === 'boolean'
+      ? rawValue.show_project_history_panel
+      : defaults.show_project_history_panel,
+    show_compare_gallery_panel: typeof rawValue.show_compare_gallery_panel === 'boolean'
+      ? rawValue.show_compare_gallery_panel
+      : defaults.show_compare_gallery_panel
   }
 }
 
@@ -406,7 +432,6 @@ const mergeMode = ref(false)
 const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
 const selectedEditRegionKey = ref('')
-const showAdvancedSettings = ref(false)
 const workflowStage = ref('idle')
 const projectHistory = ref([])
 const projectSnapshots = ref({})
@@ -423,14 +448,27 @@ const exportingTranslationRequestDebug = ref(false)
 
 const config = ref(loadStoredConfig())
 const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
+const showAdvancedSettings = computed({
+  get() {
+    return Boolean(reviewWorkspacePrefs.value.show_settings_panel)
+  },
+  set(value) {
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      show_settings_panel: Boolean(value)
+    }
+  }
+})
 const perPageUiState = ref({})
 const regionListSearch = ref('')
 const regionListFilter = ref('all')
 const reviewCanvasZoneRef = ref(null)
+const reviewWorkspaceLayoutRef = ref(null)
 const mainCanvasShellRef = ref(null)
 const compareCanvasShellRef = ref(null)
 const viewportPanState = ref(null)
 const compareSplitterState = ref(null)
+const workspaceSplitterState = ref(null)
 const spacePanPressed = ref(false)
 
 let socket = null
@@ -652,6 +690,10 @@ const reviewCanvasGridStyle = computed(() => {
     gridTemplateColumns: `minmax(0, ${mainRatio}fr) 12px minmax(300px, ${100 - mainRatio}fr)`
   }
 })
+const reviewWorkspaceLayoutStyle = computed(() => ({
+  '--page-rail-width': `${Math.round(reviewWorkspacePrefs.value.page_rail_width || 144)}px`,
+  '--inspector-width': `${Math.round(reviewWorkspacePrefs.value.inspector_width || 360)}px`
+}))
 const selectedEditPage = computed(() => {
   if (!mergedInspectionPages.value.length) {
     return null
@@ -735,7 +777,6 @@ const pageRailItems = computed(() => (
     ...page,
     pageNumber: index + 1,
     thumbnailUrl: withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')),
-    translatedReady: Boolean(getSavedTranslatedImageUrl(page)),
     selected: page.stored_name === selectedEditPageKey.value
   }))
 ))
@@ -2455,6 +2496,71 @@ function toggleWorkspaceDebug() {
     ...reviewWorkspacePrefs.value,
     show_debug: !reviewWorkspacePrefs.value.show_debug
   }
+}
+
+function toggleWorkspacePanel(panelKey) {
+  if (!panelKey) {
+    return
+  }
+  const nextValue = !reviewWorkspacePrefs.value[panelKey]
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    [panelKey]: nextValue
+  }
+}
+
+function startWorkspaceSplitterDrag(kind, event) {
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+  const shell = reviewWorkspaceLayoutRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  workspaceSplitterState.value = {
+    kind,
+    pointerId: event.pointerId,
+    shellLeft: rect.left,
+    shellRight: rect.right,
+    originRailWidth: Number(reviewWorkspacePrefs.value.page_rail_width || 144),
+    originInspectorWidth: Number(reviewWorkspacePrefs.value.inspector_width || 360)
+  }
+  event.preventDefault()
+}
+
+function updateWorkspaceSplitterDrag(event) {
+  const draft = workspaceSplitterState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+
+  if (draft.kind === 'rail') {
+    const nextWidth = Math.min(220, Math.max(108, Math.round(event.clientX - draft.shellLeft)))
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      page_rail_width: nextWidth
+    }
+    return
+  }
+
+  if (draft.kind === 'inspector') {
+    const nextWidth = Math.min(560, Math.max(300, Math.round(draft.shellRight - event.clientX)))
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      inspector_width: nextWidth
+    }
+  }
+}
+
+function finishWorkspaceSplitterDrag() {
+  if (!workspaceSplitterState.value) {
+    return
+  }
+  workspaceSplitterState.value = null
 }
 
 function startCompareSplitterDrag(event) {
@@ -4688,6 +4794,9 @@ onMounted(() => {
   window.addEventListener('pointermove', updateCompareSplitterDrag)
   window.addEventListener('pointerup', finishCompareSplitterDrag)
   window.addEventListener('pointercancel', finishCompareSplitterDrag)
+  window.addEventListener('pointermove', updateWorkspaceSplitterDrag)
+  window.addEventListener('pointerup', finishWorkspaceSplitterDrag)
+  window.addEventListener('pointercancel', finishWorkspaceSplitterDrag)
   window.addEventListener('pointermove', updateCanvasRegionTransform)
   window.addEventListener('pointerup', finishCanvasRegionTransform)
   window.addEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -4706,6 +4815,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointermove', updateCompareSplitterDrag)
   window.removeEventListener('pointerup', finishCompareSplitterDrag)
   window.removeEventListener('pointercancel', finishCompareSplitterDrag)
+  window.removeEventListener('pointermove', updateWorkspaceSplitterDrag)
+  window.removeEventListener('pointerup', finishWorkspaceSplitterDrag)
+  window.removeEventListener('pointercancel', finishWorkspaceSplitterDrag)
   window.removeEventListener('pointermove', updateCanvasRegionTransform)
   window.removeEventListener('pointerup', finishCanvasRegionTransform)
   window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
@@ -4883,6 +4995,8 @@ watch(
   () => [
     config.value.workspace_width_mode,
     reviewWorkspacePrefs.value.split_ratio,
+    reviewWorkspacePrefs.value.page_rail_width,
+    reviewWorkspacePrefs.value.inspector_width,
     reviewWorkspacePrefs.value.compare_pane_mode,
     reviewWorkspacePrefs.value.compare_sync_enabled
   ],
@@ -5009,13 +5123,6 @@ watch(
           下载翻译结果
         </a>
 
-        <button
-          class="secondary-button settings-toggle-button"
-          type="button"
-          @click="showAdvancedSettings = !showAdvancedSettings"
-        >
-          {{ showAdvancedSettings ? '收起设置' : '展开设置' }}
-        </button>
       </div>
 
       <div class="settings-summary">
@@ -5426,233 +5533,41 @@ watch(
       <p v-if="sessionId" class="session-text">Session: {{ sessionId }}</p>
     </section>
 
-    <section v-if="currentProject" class="gallery-card project-meta-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Current Project</p>
-          <h2>当前项目</h2>
-        </div>
-        <div class="project-meta-badges">
-          <span class="project-badge">{{ workflowStageLabelMap[currentProject.workflow_stage] || currentProject.workflow_stage }}</span>
-          <span class="project-badge">{{ currentProject.page_count }} 页</span>
-        </div>
-      </div>
-
-      <div class="project-meta-grid">
-        <label class="field">
-          <span>项目名称</span>
-          <input
-            v-model="projectTitleDraft"
-            type="text"
-            placeholder="给这个项目起个名字"
-          />
-        </label>
-
-        <label class="field project-note-field">
-          <span>项目备注</span>
-          <textarea
-            v-model="projectNoteDraft"
-            rows="3"
-            placeholder="可选：记录这本漫画的说明、当前进度或注意事项"
-          ></textarea>
-        </label>
-      </div>
-
-      <div class="project-meta-actions">
+    <section class="gallery-card workspace-panel-strip-card">
+      <div class="workspace-panel-strip">
         <button
-          class="secondary-button"
           type="button"
-          :disabled="savingProjectMeta || !projectMetaDirty"
-          @click="saveProjectMetadata"
+          :class="['workspace-panel-chip', showAdvancedSettings ? 'active' : '']"
+          @click="showAdvancedSettings = !showAdvancedSettings"
         >
-          {{ savingProjectMeta ? '正在保存...' : '保存项目名称 / 备注' }}
+          {{ showAdvancedSettings ? '收起设置' : '展开设置' }}
         </button>
-        <span class="project-meta-hint">
-          历史翻译列表会显示这里的名称和备注，后续恢复项目时也会一起带回。
-        </span>
-      </div>
-    </section>
-
-    <section class="gallery-card project-history-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">History</p>
-          <h2>历史翻译</h2>
-        </div>
-        <div class="action-row">
-          <button
-            class="secondary-button"
-            type="button"
-            :disabled="historyLoading"
-            @click="loadProjectHistory"
-          >
-            {{ historyLoading ? '正在读取...' : '刷新历史列表' }}
-          </button>
-        </div>
-      </div>
-
-      <div v-if="!projectHistory.length && historyLoading" class="empty-state">
-        正在读取历史项目…
-      </div>
-
-      <div v-else-if="!projectHistory.length" class="empty-state">
-        还没有历史翻译项目。上传并完成一次识别或翻译后，这里会自动保存下来。
-      </div>
-
-      <div v-else class="project-history-list">
-        <article
-          v-for="project in projectHistory"
-          :key="project.project_id"
-          class="project-history-item"
+        <button
+          v-if="currentProject"
+          type="button"
+          :class="['workspace-panel-chip', reviewWorkspacePrefs.show_project_meta_panel ? 'active' : '']"
+          @click="toggleWorkspacePanel('show_project_meta_panel')"
         >
-          <div class="project-history-cover">
-            <img
-              v-if="project.cover_image"
-              :src="withCacheBust(project.cover_image)"
-              :alt="`${project.title} 封面`"
-            />
-            <div v-else class="project-history-cover-fallback">
-              {{ project.page_count }} 页
-            </div>
-          </div>
-
-          <div class="project-history-body">
-            <div class="project-history-head">
-              <strong>{{ project.title }}</strong>
-              <div class="project-history-meta">
-                <span>{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
-                <span v-if="isProjectBusy(project)">{{ getBusyActionLabel(project) }}</span>
-                <span>{{ project.page_count }} 页</span>
-              </div>
-            </div>
-
-            <p v-if="project.note" class="project-history-note">{{ project.note }}</p>
-            <p class="project-history-time">最近更新：{{ project.updated_at || project.created_at }}</p>
-
-            <div class="action-row">
-              <button
-                class="secondary-button"
-                type="button"
-                :disabled="!canRestoreHistoryProject(project)"
-                @click="restoreProject(project.project_id)"
-              >
-                {{
-                  translating
-                    ? '任务运行中'
-                    : restoringProjectId === project.project_id
-                      ? '正在恢复...'
-                      : isProjectBusy(project)
-                        ? '任务运行中'
-                        : '继续编辑'
-                }}
-              </button>
-
-              <button
-                class="secondary-button"
-                type="button"
-                :disabled="snapshotLoadingProjectId === project.project_id"
-                @click="toggleProjectSnapshots(project.project_id)"
-              >
-                {{
-                  expandedProjectId === project.project_id
-                    ? '收起快照'
-                    : `查看快照（${project.snapshot_count || 0}）`
-                }}
-              </button>
-
-              <a
-                v-if="sessionId === project.project_id && downloadUrl"
-                class="secondary-button"
-                :href="downloadUrl"
-              >
-                下载当前结果
-              </a>
-
-              <button
-                class="secondary-button danger-button"
-                type="button"
-                :disabled="!canDeleteHistoryProject(project)"
-                @click="deleteProject(project)"
-              >
-                {{
-                  deletingProjectId === project.project_id
-                    ? '正在删除...'
-                    : isProjectBusy(project)
-                      ? '任务运行中'
-                      : '删除项目'
-                }}
-              </button>
-            </div>
-
-            <div
-              v-if="expandedProjectId === project.project_id"
-              class="snapshot-panel"
-            >
-              <div
-                v-if="snapshotLoadingProjectId === project.project_id && !(projectSnapshots[project.project_id] || []).length"
-                class="snapshot-empty"
-              >
-                正在读取快照…
-              </div>
-
-              <div
-                v-else-if="!(projectSnapshots[project.project_id] || []).length"
-                class="snapshot-empty"
-              >
-                这个项目还没有可恢复的快照。
-              </div>
-
-              <div v-else class="snapshot-list">
-                <article
-                  v-for="snapshot in projectSnapshots[project.project_id]"
-                  :key="snapshot.snapshot_id"
-                  class="snapshot-item"
-                >
-                  <div class="snapshot-copy">
-                    <strong>{{ snapshot.summary || '未命名快照' }}</strong>
-                    <div class="snapshot-meta">
-                      <span>{{ snapshot.created_at }}</span>
-                      <span>{{ workflowStageLabelMap[snapshot.workflow_stage] || snapshot.workflow_stage }}</span>
-                      <span>{{ snapshot.kind }}</span>
-                      <span v-if="snapshot.pinned">已固定</span>
-                    </div>
-                  </div>
-
-                  <div class="snapshot-actions">
-                    <button
-                      class="secondary-button snapshot-button"
-                      type="button"
-                      @click="toggleSnapshotPin(project.project_id, snapshot)"
-                    >
-                      {{ snapshot.pinned ? '取消固定' : '固定快照' }}
-                    </button>
-
-                    <button
-                      class="secondary-button snapshot-button"
-                      type="button"
-                      :disabled="!canRestoreHistorySnapshot(project, snapshot)"
-                      @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
-                    >
-                      {{
-                        translating
-                          ? '任务运行中'
-                          : restoringSnapshotId === snapshot.snapshot_id
-                            ? '正在恢复...'
-                            : isProjectBusy(project)
-                              ? '任务运行中'
-                              : '恢复为新项目'
-                      }}
-                    </button>
-                  </div>
-                </article>
-              </div>
-            </div>
-          </div>
-        </article>
+          {{ reviewWorkspacePrefs.show_project_meta_panel ? '收起当前项目' : '当前项目' }}
+        </button>
+        <button
+          type="button"
+          :class="['workspace-panel-chip', reviewWorkspacePrefs.show_project_history_panel ? 'active' : '']"
+          @click="toggleWorkspacePanel('show_project_history_panel')"
+        >
+          {{ reviewWorkspacePrefs.show_project_history_panel ? '收起历史记录' : '历史记录' }}
+        </button>
+        <button
+          type="button"
+          :class="['workspace-panel-chip', reviewWorkspacePrefs.show_compare_gallery_panel ? 'active' : '']"
+          @click="toggleWorkspacePanel('show_compare_gallery_panel')"
+        >
+          {{ reviewWorkspacePrefs.show_compare_gallery_panel ? '收起结果对照' : '结果对照' }}
+        </button>
       </div>
     </section>
 
-    <section v-if="canInspectEditor" class="gallery-card">
+    <section v-if="canInspectEditor" class="gallery-card workspace-review-card">
       <div class="section-head">
         <div>
           <p class="eyebrow">Region Editor</p>
@@ -5836,7 +5751,7 @@ watch(
           <span><strong>当前层：</strong>{{ selectedRegionPreviewDebug.previewLayer || '（未知）' }}</span>
         </div>
 
-        <div class="review-workspace-layout">
+        <div ref="reviewWorkspaceLayoutRef" class="review-workspace-layout" :style="reviewWorkspaceLayoutStyle">
           <aside class="review-page-rail">
             <div class="review-page-rail-head">
               <label class="field style-page-field">
@@ -5891,17 +5806,18 @@ watch(
                     class="review-page-thumbnail"
                   />
                   <div v-else class="review-page-thumbnail-empty">暂无图像</div>
-                </div>
-                <div class="review-page-tile-meta">
-                  <div class="review-page-tile-title">
-                    <strong>{{ page.pageNumber }}</strong>
-                    <span>{{ page.name }}</span>
-                  </div>
-                  <small>{{ page.regions.length }} 个框 · {{ page.translatedReady ? '已嵌字' : '待检查' }}</small>
+                  <span class="review-page-thumbnail-number">{{ page.pageNumber }}</span>
                 </div>
               </button>
             </div>
           </aside>
+
+          <div
+            class="review-workspace-side-splitter"
+            role="separator"
+            aria-label="调节页轨宽度"
+            @pointerdown="startWorkspaceSplitterDrag('rail', $event)"
+          ></div>
 
           <div class="review-canvas-layout">
             <div class="review-canvas-topbar">
@@ -6100,6 +6016,13 @@ watch(
               </section>
             </div>
           </div>
+
+          <div
+            class="review-workspace-side-splitter review-workspace-side-splitter-right"
+            role="separator"
+            aria-label="调节右侧检查器宽度"
+            @pointerdown="startWorkspaceSplitterDrag('inspector', $event)"
+          ></div>
 
           <aside class="review-inspector-panel">
             <div class="review-inspector-tabs">
@@ -6312,6 +6235,15 @@ watch(
                         </select>
                       </label>
 
+                      <button
+                        type="button"
+                        class="compact-action-button"
+                        :disabled="!canApplyRegionFontToPage(region)"
+                        @click.stop="applyRegionFontToPage(region)"
+                      >
+                        整页
+                      </button>
+
                       <label class="compact-number-wrap compact-number-wrap-font-size" @click.stop @mousedown.stop>
                         <input
                           :value="getRegionFontSize(region)"
@@ -6366,7 +6298,233 @@ watch(
       </div>
     </section>
 
-    <section class="gallery-card">
+    <section v-if="currentProject && reviewWorkspacePrefs.show_project_meta_panel" class="gallery-card project-meta-card workspace-secondary-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Current Project</p>
+          <h2>当前项目</h2>
+        </div>
+        <div class="project-meta-badges">
+          <span class="project-badge">{{ workflowStageLabelMap[currentProject.workflow_stage] || currentProject.workflow_stage }}</span>
+          <span class="project-badge">{{ currentProject.page_count }} 页</span>
+        </div>
+      </div>
+
+      <div class="project-meta-grid">
+        <label class="field">
+          <span>项目名称</span>
+          <input
+            v-model="projectTitleDraft"
+            type="text"
+            placeholder="给这个项目起个名字"
+          />
+        </label>
+
+        <label class="field project-note-field">
+          <span>项目备注</span>
+          <textarea
+            v-model="projectNoteDraft"
+            rows="3"
+            placeholder="可选：记录这本漫画的说明、当前进度或注意事项"
+          ></textarea>
+        </label>
+      </div>
+
+      <div class="project-meta-actions">
+        <button
+          class="secondary-button"
+          type="button"
+          :disabled="savingProjectMeta || !projectMetaDirty"
+          @click="saveProjectMetadata"
+        >
+          {{ savingProjectMeta ? '正在保存...' : '保存项目名称 / 备注' }}
+        </button>
+        <span class="project-meta-hint">
+          历史翻译列表会显示这里的名称和备注，后续恢复项目时也会一起带回。
+        </span>
+      </div>
+    </section>
+
+    <section v-if="reviewWorkspacePrefs.show_project_history_panel" class="gallery-card project-history-card workspace-secondary-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>历史翻译</h2>
+        </div>
+        <div class="action-row">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="historyLoading"
+            @click="loadProjectHistory"
+          >
+            {{ historyLoading ? '正在读取...' : '刷新历史列表' }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!projectHistory.length && historyLoading" class="empty-state">
+        正在读取历史项目…
+      </div>
+
+      <div v-else-if="!projectHistory.length" class="empty-state">
+        还没有历史翻译项目。上传并完成一次识别或翻译后，这里会自动保存下来。
+      </div>
+
+      <div v-else class="project-history-list">
+        <article
+          v-for="project in projectHistory"
+          :key="project.project_id"
+          class="project-history-item"
+        >
+          <div class="project-history-cover">
+            <img
+              v-if="project.cover_image"
+              :src="withCacheBust(project.cover_image)"
+              :alt="`${project.title} 封面`"
+            />
+            <div v-else class="project-history-cover-fallback">
+              {{ project.page_count }} 页
+            </div>
+          </div>
+
+          <div class="project-history-body">
+            <div class="project-history-head">
+              <strong>{{ project.title }}</strong>
+              <div class="project-history-meta">
+                <span>{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
+                <span v-if="isProjectBusy(project)">{{ getBusyActionLabel(project) }}</span>
+                <span>{{ project.page_count }} 页</span>
+              </div>
+            </div>
+
+            <p v-if="project.note" class="project-history-note">{{ project.note }}</p>
+            <p class="project-history-time">最近更新：{{ project.updated_at || project.created_at }}</p>
+
+            <div class="action-row">
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="!canRestoreHistoryProject(project)"
+                @click="restoreProject(project.project_id)"
+              >
+                {{
+                  translating
+                    ? '任务运行中'
+                    : restoringProjectId === project.project_id
+                      ? '正在恢复...'
+                      : isProjectBusy(project)
+                        ? '任务运行中'
+                        : '继续编辑'
+                }}
+              </button>
+
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="snapshotLoadingProjectId === project.project_id"
+                @click="toggleProjectSnapshots(project.project_id)"
+              >
+                {{
+                  expandedProjectId === project.project_id
+                    ? '收起快照'
+                    : `查看快照（${project.snapshot_count || 0}）`
+                }}
+              </button>
+
+              <a
+                v-if="sessionId === project.project_id && downloadUrl"
+                class="secondary-button"
+                :href="downloadUrl"
+              >
+                下载当前结果
+              </a>
+
+              <button
+                class="secondary-button danger-button"
+                type="button"
+                :disabled="!canDeleteHistoryProject(project)"
+                @click="deleteProject(project)"
+              >
+                {{
+                  deletingProjectId === project.project_id
+                    ? '正在删除...'
+                    : isProjectBusy(project)
+                      ? '任务运行中'
+                      : '删除项目'
+                }}
+              </button>
+            </div>
+
+            <div
+              v-if="expandedProjectId === project.project_id"
+              class="snapshot-panel"
+            >
+              <div
+                v-if="snapshotLoadingProjectId === project.project_id && !(projectSnapshots[project.project_id] || []).length"
+                class="snapshot-empty"
+              >
+                正在读取快照…
+              </div>
+
+              <div
+                v-else-if="!(projectSnapshots[project.project_id] || []).length"
+                class="snapshot-empty"
+              >
+                这个项目还没有可恢复的快照。
+              </div>
+
+              <div v-else class="snapshot-list">
+                <article
+                  v-for="snapshot in projectSnapshots[project.project_id]"
+                  :key="snapshot.snapshot_id"
+                  class="snapshot-item"
+                >
+                  <div class="snapshot-copy">
+                    <strong>{{ snapshot.summary || '未命名快照' }}</strong>
+                    <div class="snapshot-meta">
+                      <span>{{ snapshot.created_at }}</span>
+                      <span>{{ workflowStageLabelMap[snapshot.workflow_stage] || snapshot.workflow_stage }}</span>
+                      <span>{{ snapshot.kind }}</span>
+                      <span v-if="snapshot.pinned">已固定</span>
+                    </div>
+                  </div>
+
+                  <div class="snapshot-actions">
+                    <button
+                      class="secondary-button snapshot-button"
+                      type="button"
+                      @click="toggleSnapshotPin(project.project_id, snapshot)"
+                    >
+                      {{ snapshot.pinned ? '取消固定' : '固定快照' }}
+                    </button>
+
+                    <button
+                      class="secondary-button snapshot-button"
+                      type="button"
+                      :disabled="!canRestoreHistorySnapshot(project, snapshot)"
+                      @click="restoreSnapshot(project.project_id, snapshot.snapshot_id)"
+                    >
+                      {{
+                        translating
+                          ? '任务运行中'
+                          : restoringSnapshotId === snapshot.snapshot_id
+                            ? '正在恢复...'
+                            : isProjectBusy(project)
+                              ? '任务运行中'
+                              : '恢复为新项目'
+                      }}
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section v-if="reviewWorkspacePrefs.show_compare_gallery_panel" class="gallery-card workspace-secondary-card">
       <div class="section-head">
         <div>
           <p class="eyebrow">Compare</p>

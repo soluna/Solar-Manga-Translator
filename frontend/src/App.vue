@@ -284,6 +284,13 @@ function saveStoredConfig(value) {
   }
 }
 
+function mergeProjectConfigWithLocalPreferences(projectConfig, localConfig) {
+  return normalizeStoredConfig({
+    ...(projectConfig && typeof projectConfig === 'object' ? projectConfig : {}),
+    ...(localConfig && typeof localConfig === 'object' ? localConfig : {})
+  })
+}
+
 function createDefaultReviewWorkspacePrefs() {
   return {
     split_ratio: 65,
@@ -1244,12 +1251,7 @@ function applySessionPayload(payload, options = {}) {
   }))
 
   const payloadConfig = payload?.config && typeof payload.config === 'object' ? payload.config : {}
-  config.value = normalizeStoredConfig({
-    ...config.value,
-    ...payloadConfig,
-    api_key: config.value.api_key,
-    image_cleanup_api_key: config.value.image_cleanup_api_key
-  })
+  config.value = mergeProjectConfigWithLocalPreferences(payloadConfig, config.value)
 
   const overrides = payload?.overrides || {}
   translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }

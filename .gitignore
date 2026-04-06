@@ -12,3 +12,4 @@ output_images/
 .superpowers/.worktrees/
 backend/manga-image-translator/
 frontend/test-artifacts/
+.runtime/

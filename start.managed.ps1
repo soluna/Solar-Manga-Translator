@@ -15,7 +15,12 @@ $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
 $backendUrl = "http://127.0.0.1:8000/api/status"
 $frontendUrl = "http://127.0.0.1:5173"
-$browserProfileDir = Join-Path $env:TEMP ("manga-translator-browser-" + [guid]::NewGuid().ToString("N"))
+$browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    Join-Path $env:LOCALAPPDATA "MangaTranslator"
+} else {
+    Join-Path $root ".runtime"
+}
+$browserProfileDir = Join-Path $browserProfileBase "browser-profile"
 
 $backendProcess = $null
 $frontendProcess = $null
@@ -145,7 +150,4 @@ try {
     Stop-ProcessTree -Process $frontendProcess
     Stop-ProcessTree -Process $backendProcess
 
-    if (Test-Path $browserProfileDir) {
-        Remove-Item -Path $browserProfileDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
 }

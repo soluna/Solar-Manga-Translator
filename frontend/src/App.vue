@@ -2758,25 +2758,16 @@ function getCanvasPreviewTextStyle(region) {
 }
 
 function getCanvasPreviewTextContainerStyle(region) {
-  const alignment = getResolvedRegionAlignment(region)
   if (isVerticalRegion(region)) {
     return {
-      justifyContent: 'flex-end',
-      alignItems: alignment === 'center'
-        ? 'center'
-        : alignment === 'right'
-          ? 'flex-end'
-          : 'flex-start'
+      justifyContent: 'center',
+      alignItems: 'flex-start'
     }
   }
 
   return {
-    justifyContent: alignment === 'center'
-      ? 'center'
-      : alignment === 'right'
-        ? 'flex-end'
-        : 'flex-start',
-    alignItems: 'flex-start'
+    justifyContent: 'flex-start',
+    alignItems: 'center'
   }
 }
 

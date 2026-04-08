@@ -936,6 +936,28 @@ const compactConfigSummary = computed(() => {
     : ''
   return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow} / 默认${reviewMode}`
 })
+const showTranslatorApiKeyField = computed(() => ['gemini', 'doubao-ark'].includes(config.value.translator))
+const translatorApiKeyLabel = computed(() => (
+  config.value.translator === 'doubao-ark'
+    ? 'Doubao Ark API Key'
+    : 'Gemini API Key'
+))
+const translatorApiKeyPlaceholder = computed(() => (
+  config.value.translator === 'doubao-ark'
+    ? '输入火山方舟 Ark API Key'
+    : '输入 Gemini API Key'
+))
+const showImageCleanupApiKeyField = computed(() => config.value.image_cleanup_mode !== 'off')
+const imageCleanupApiKeyLabel = computed(() => (
+  config.value.image_cleanup_mode === 'seedream-image'
+    ? 'Seedream / Ark API Key'
+    : 'Gemini Image API Key'
+))
+const imageCleanupApiKeyPlaceholder = computed(() => (
+  config.value.image_cleanup_mode === 'seedream-image'
+    ? '输入火山方舟 Ark API Key'
+    : '输入 Gemini Image API Key'
+))
 const v2HasProject = computed(() => Boolean(sessionId.value || currentProject.value))
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
@@ -6604,6 +6626,16 @@ watch(
               </select>
             </label>
 
+            <label v-if="showTranslatorApiKeyField" class="v2-field">
+              <span>{{ translatorApiKeyLabel }}</span>
+              <input
+                v-model="config.api_key"
+                :placeholder="translatorApiKeyPlaceholder"
+                type="password"
+                autocomplete="off"
+              />
+            </label>
+
             <label class="v2-inline-checkbox">
               <input v-model="config.pause_after_detection" type="checkbox" />
               <span>上传后先停在识别阶段，进入逐框审校</span>
@@ -6665,6 +6697,16 @@ watch(
                 <option value="clean">更干净</option>
                 <option value="aggressive">更激进</option>
               </select>
+            </label>
+
+            <label v-if="showImageCleanupApiKeyField" class="v2-field">
+              <span>{{ imageCleanupApiKeyLabel }}</span>
+              <input
+                v-model="config.image_cleanup_api_key"
+                :placeholder="imageCleanupApiKeyPlaceholder"
+                type="password"
+                autocomplete="off"
+              />
             </label>
 
             <label class="v2-inline-checkbox">

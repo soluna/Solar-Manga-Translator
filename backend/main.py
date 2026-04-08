@@ -157,6 +157,12 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
     return session
 
 
+def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str) -> str:
+    target_path = target_dir / filename
+    shutil.copy2(temp_path, target_path)
+    return str(target_path)
+
+
 @app.get("/api/status")
 async def get_status():
     return {"status": "running"}
@@ -206,6 +212,43 @@ async def restore_project(project_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     SESSIONS[project_id] = session
     return translator_engine.build_client_session_payload(project_id, session)
+
+
+@app.post("/api/projects/{project_id}/base-images")
+async def upload_project_base_images(project_id: str, file: UploadFile = File(...)):
+    session = get_or_restore_session(project_id)
+    if translator_engine.is_session_busy(project_id):
+        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再补充无字图。")
+
+    filename = Path(file.filename or "upload").name
+    if not filename.lower().endswith(ALLOWED_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Unsupported file format")
+
+    upload_token = str(uuid.uuid4())
+    file_path = TEMP_UPLOADS_DIR / f"{upload_token}_{filename}"
+    with file_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    extract_dir = TEMP_EXTRACTED_DIR / f"{project_id}_base_{upload_token}"
+    extract_dir.mkdir(exist_ok=True)
+
+    images = []
+    if filename.lower().endswith((".zip", ".cbz")):
+        images = extract_archive(str(file_path), str(extract_dir))
+    else:
+        images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+
+    try:
+        result = translator_engine.attach_base_images(project_id, session, images)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        **translator_engine.build_client_session_payload(project_id, session),
+        "base_image_upload": result,
+    }
 
 
 @app.get("/api/projects/{project_id}/snapshots")
@@ -482,7 +525,7 @@ async def upload_comic(
     if filename.lower().endswith((".zip", ".cbz")):
         images = extract_archive(str(file_path), str(extract_dir))
     else:
-        images = [str(file_path)]
+        images = [preserve_single_upload_name(file_path, extract_dir, filename)]
 
     source_dir, staged_images = prepare_session_images(session_id, images)
     translated_dir = OUTPUT_DIR / session_id / "translated"

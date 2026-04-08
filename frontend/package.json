@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:canvas-preview": "node scripts/test-canvas-preview.mjs",
     "test:review-workspace": "node scripts/test-review-workspace-e2e.mjs",
+    "test:v2-workspace": "node scripts/test-v2-workspace-e2e.mjs",
     "test:canvas-local": "npm run test:canvas-preview && npm run test:review-workspace"
   },
   "dependencies": {

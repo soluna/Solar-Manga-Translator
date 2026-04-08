@@ -1,0 +1,6680 @@
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import reviewJaPlaceholder from './assets/v2/review-ja.jpg'
+import reviewZhPlaceholder from './assets/v2/review-zh.png'
+import thumbAPlaceholder from './assets/v2/thumb-a.jpg'
+import thumbBPlaceholder from './assets/v2/thumb-b.jpg'
+
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const configStorageKey = 'manga-translator.ui-config'
+const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
+const doubaoModelOptions = [
+  { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
+  { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量通用文本 / OCR 漫画翻译实验)' },
+  { value: 'doubao-seed-2-0-lite-260215', label: 'doubao-seed-2-0-lite-260215 (轻量通用文本 / OCR 漫画翻译实验)' },
+  { value: 'doubao-seed-2-0-mini-260215', label: 'doubao-seed-2-0-mini-260215 (通用文本 / 多模态 / OCR 漫画翻译实验)' }
+]
+const translatorDefaultModels = {
+  'doubao-ark': 'doubao-seed-translation-250915'
+}
+const translatorAllowedModels = {
+  'doubao-ark': new Set(doubaoModelOptions.map((option) => option.value))
+}
+const imageCleanupDefaultModels = {
+  'gemini-image': 'gemini-2.5-flash-image',
+  'seedream-image': 'doubao-seedream-5-0-lite-260128'
+}
+const imageCleanupAllowedModels = {
+  'gemini-image': new Set([
+    'gemini-2.5-flash-image',
+    'gemini-3.1-flash-image-preview',
+    'gemini-3-pro-image-preview'
+  ]),
+  'seedream-image': new Set([
+    'doubao-seedream-5-0-lite-260128'
+  ])
+}
+const styleBucketOptions = [
+  { value: 'gothic', label: '黑体' },
+  { value: 'mincho', label: '宋体 / 明体' },
+  { value: 'rounded', label: '圆体' },
+  { value: 'cartoon', label: '卡通' },
+  { value: 'handwritten', label: '手写' },
+  { value: 'sfx', label: '拟声' }
+]
+const textDirectionOptions = [
+  { value: 'auto', label: '自动（中文默认竖排）' },
+  { value: 'vertical', label: '竖排' },
+  { value: 'horizontal', label: '横排' }
+]
+const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const maxCanvasHistoryEntries = 50
+const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
+const defaultStyleFontNameMap = {
+  gothic: ['華康儷中黑.ttf', '華康儷中黑'],
+  rounded: ['華康儷粗圓.ttf', '華康儷粗圓'],
+  mincho: ['華康儷粗宋.ttf', '華康儷粗宋'],
+  cartoon: ['華康布丁體.ttf', '華康布丁體'],
+  handwritten: ['華康竹風體.ttf', '華康竹風體'],
+  sfx: ['方正剪紙GBK.ttf', '方正剪紙GBK']
+}
+const previewFallbackFontNameMap = {
+  gothic: ['華康儷中黑.ttf', '華康儷粗黑.ttf', '華康粗黑體.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf', 'msyh.ttc'],
+  rounded: ['華康儷粗圓.ttf', 'SourceHanSansSC-Medium-2.otf', 'NotoSansSC-Bold.otf'],
+  mincho: ['華康儷粗宋.ttf', 'SourceHanSansSC-Regular-2.otf', 'Arial-Unicode-Regular.ttf'],
+  cartoon: ['華康儷粗圓.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf'],
+  handwritten: ['華康儷粗圓.ttf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
+  sfx: ['方正剪紙GBK.ttf', '華康超黑體(P).ttf', '華康儷粗黑.ttf', 'NotoSansSC-Bold.otf']
+}
+const styleFontConfigKeyMap = {
+  gothic: 'style_font_gothic_key',
+  mincho: 'style_font_mincho_key',
+  rounded: 'style_font_rounded_key',
+  cartoon: 'style_font_cartoon_key',
+  handwritten: 'style_font_handwritten_key',
+  sfx: 'style_font_sfx_key'
+}
+const v2PlaceholderThumbs = [
+  reviewJaPlaceholder,
+  reviewZhPlaceholder,
+  thumbAPlaceholder,
+  thumbBPlaceholder
+]
+
+function getDefaultImageCleanupModel(mode) {
+  return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
+}
+
+function getDefaultTranslatorModel(translator) {
+  return translatorDefaultModels[translator] || ''
+}
+
+function isValidTranslatorModel(translator, model) {
+  if (!translatorAllowedModels[translator]) {
+    return model === '' || model == null
+  }
+
+  return Boolean(translatorAllowedModels[translator]?.has(model))
+}
+
+function isValidImageCleanupModel(mode, model) {
+  return Boolean(imageCleanupAllowedModels[mode]?.has(model))
+}
+
+function isValidMaskCleanupStrength(value) {
+  return ['standard', 'clean', 'aggressive'].includes(value)
+}
+
+function isValidFontStyleMode(value) {
+  return ['single', 'auto-map'].includes(value)
+}
+
+function isValidRerenderOutputFormat(value) {
+  return ['png', 'source'].includes(value)
+}
+
+function isValidReviewMode(value) {
+  return ['classic', 'canvas_beta'].includes(value)
+}
+
+function isValidWorkspaceWidthMode(value) {
+  return ['auto', 'fixed'].includes(value)
+}
+
+function isValidComparePaneMode(value) {
+  return ['saved', 'preview', 'source'].includes(value)
+}
+
+function isValidInspectorTab(value) {
+  return ['inspector', 'regions'].includes(value)
+}
+
+function createDefaultConfig() {
+  return {
+    translator: 'gemini',
+    translator_model: '',
+    translator_model_custom: '',
+    target_lang: 'CHT',
+    use_gpu: true,
+    api_key: '',
+    font_key: '',
+    font_style_mode: 'single',
+    style_font_gothic_key: '',
+    style_font_mincho_key: '',
+    style_font_rounded_key: '',
+    style_font_cartoon_key: '',
+    style_font_handwritten_key: '',
+    style_font_sfx_key: '',
+    render_alignment: 'left',
+    render_letter_spacing: 1.08,
+    rerender_output_format: 'png',
+    default_review_mode: 'canvas_beta',
+    workspace_width_mode: 'fixed',
+    pause_after_detection: false,
+    mask_cleanup_strength: 'standard',
+    export_mask_debug: false,
+    advanced_text_repair: 'auto',
+    image_cleanup_mode: 'off',
+    image_cleanup_model: 'gemini-2.5-flash-image',
+    image_cleanup_api_key: ''
+  }
+}
+
+function normalizeStoredConfig(rawValue) {
+  const defaults = createDefaultConfig()
+  if (!rawValue || typeof rawValue !== 'object') {
+    return defaults
+  }
+
+  const rawTranslator = typeof rawValue.translator === 'string'
+    ? rawValue.translator
+    : defaults.translator
+  const translator = rawTranslator === 'custom_openai'
+    ? 'doubao-ark'
+    : rawTranslator
+  const storedTranslatorModel = typeof rawValue.translator_model === 'string'
+    ? rawValue.translator_model
+    : defaults.translator_model
+  const storedTranslatorModelCustom = typeof rawValue.translator_model_custom === 'string'
+    ? rawValue.translator_model_custom.trim()
+    : ''
+  const translatorModel = isValidTranslatorModel(translator, storedTranslatorModel)
+    ? storedTranslatorModel
+    : getDefaultTranslatorModel(translator)
+  const translatorModelCustom = translator === 'doubao-ark'
+    ? (
+        storedTranslatorModelCustom
+        || (!isValidTranslatorModel(translator, storedTranslatorModel) && storedTranslatorModel ? storedTranslatorModel : '')
+      )
+    : defaults.translator_model_custom
+  const imageCleanupMode = typeof rawValue.image_cleanup_mode === 'string'
+    ? rawValue.image_cleanup_mode
+    : defaults.image_cleanup_mode
+  const storedImageCleanupModel = typeof rawValue.image_cleanup_model === 'string'
+    ? rawValue.image_cleanup_model
+    : defaults.image_cleanup_model
+  const imageCleanupModel = isValidImageCleanupModel(imageCleanupMode, storedImageCleanupModel)
+    ? storedImageCleanupModel
+    : getDefaultImageCleanupModel(imageCleanupMode)
+  const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
+    ? rawValue.mask_cleanup_strength
+    : defaults.mask_cleanup_strength
+  const fontStyleMode = typeof rawValue.font_style_mode === 'string' && isValidFontStyleMode(rawValue.font_style_mode)
+    ? rawValue.font_style_mode
+    : defaults.font_style_mode
+  const rerenderOutputFormat = typeof rawValue.rerender_output_format === 'string' && isValidRerenderOutputFormat(rawValue.rerender_output_format)
+    ? rawValue.rerender_output_format
+    : defaults.rerender_output_format
+  const defaultReviewMode = typeof rawValue.default_review_mode === 'string' && isValidReviewMode(rawValue.default_review_mode)
+    ? rawValue.default_review_mode
+    : defaults.default_review_mode
+  const workspaceWidthMode = typeof rawValue.workspace_width_mode === 'string' && isValidWorkspaceWidthMode(rawValue.workspace_width_mode)
+    ? rawValue.workspace_width_mode
+    : defaults.workspace_width_mode
+
+  return {
+    translator,
+    translator_model: translatorModel,
+    translator_model_custom: translatorModelCustom,
+    target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
+    use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
+    api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
+    font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
+    font_style_mode: fontStyleMode,
+    // 黑体统一跟随主字体，避免“主字体改了但对白黑体不动”的混乱体验。
+    style_font_gothic_key: defaults.style_font_gothic_key,
+    style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
+      ? rawValue.style_font_mincho_key
+      : defaults.style_font_mincho_key,
+    style_font_rounded_key: typeof rawValue.style_font_rounded_key === 'string'
+      ? rawValue.style_font_rounded_key
+      : defaults.style_font_rounded_key,
+    style_font_cartoon_key: typeof rawValue.style_font_cartoon_key === 'string'
+      ? rawValue.style_font_cartoon_key
+      : defaults.style_font_cartoon_key,
+    style_font_handwritten_key: typeof rawValue.style_font_handwritten_key === 'string'
+      ? rawValue.style_font_handwritten_key
+      : defaults.style_font_handwritten_key,
+    style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
+      ? rawValue.style_font_sfx_key
+      : defaults.style_font_sfx_key,
+    render_alignment: typeof rawValue.render_alignment === 'string'
+      ? rawValue.render_alignment
+      : defaults.render_alignment,
+    render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
+      ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
+      : defaults.render_letter_spacing,
+    rerender_output_format: rerenderOutputFormat,
+    default_review_mode: defaultReviewMode,
+    workspace_width_mode: workspaceWidthMode,
+    pause_after_detection: typeof rawValue.pause_after_detection === 'boolean'
+      ? rawValue.pause_after_detection
+      : defaults.pause_after_detection,
+    mask_cleanup_strength: maskCleanupStrength,
+    export_mask_debug: typeof rawValue.export_mask_debug === 'boolean'
+      ? rawValue.export_mask_debug
+      : defaults.export_mask_debug,
+    advanced_text_repair: typeof rawValue.advanced_text_repair === 'string'
+      ? rawValue.advanced_text_repair
+      : defaults.advanced_text_repair,
+    image_cleanup_mode: imageCleanupMode,
+    image_cleanup_model: imageCleanupModel,
+    image_cleanup_api_key: typeof rawValue.image_cleanup_api_key === 'string'
+      ? rawValue.image_cleanup_api_key
+      : defaults.image_cleanup_api_key
+  }
+}
+
+function loadStoredConfig() {
+  if (typeof window === 'undefined') {
+    return createDefaultConfig()
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(configStorageKey)
+    if (!rawValue) {
+      return createDefaultConfig()
+    }
+
+    return normalizeStoredConfig(JSON.parse(rawValue))
+  } catch (error) {
+    return createDefaultConfig()
+  }
+}
+
+function saveStoredConfig(value) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(configStorageKey, JSON.stringify(normalizeStoredConfig(value)))
+  } catch (error) {
+    console.warn('Failed to persist UI config locally.', error)
+  }
+}
+
+function mergeProjectConfigWithLocalPreferences(projectConfig, localConfig) {
+  return normalizeStoredConfig({
+    ...(projectConfig && typeof projectConfig === 'object' ? projectConfig : {}),
+    ...(localConfig && typeof localConfig === 'object' ? localConfig : {})
+  })
+}
+
+function createDefaultReviewWorkspacePrefs() {
+  return {
+    split_ratio: 65,
+    compare_pane_mode: 'saved',
+    compare_sync_enabled: true,
+    inspector_tab: 'inspector',
+    show_debug: false,
+    page_rail_width: 128,
+    inspector_width: 420,
+    show_settings_panel: false,
+    show_project_meta_panel: false,
+    show_project_history_panel: false,
+    show_compare_gallery_panel: false
+  }
+}
+
+function normalizeStoredReviewWorkspacePrefs(rawValue) {
+  const defaults = createDefaultReviewWorkspacePrefs()
+  if (!rawValue || typeof rawValue !== 'object') {
+    return defaults
+  }
+
+  const splitRatio = Number(rawValue.split_ratio)
+  const pageRailWidth = Number(rawValue.page_rail_width)
+  const inspectorWidth = Number(rawValue.inspector_width)
+  return {
+    split_ratio: Number.isFinite(splitRatio) ? Math.min(80, Math.max(50, Math.round(splitRatio))) : defaults.split_ratio,
+    compare_pane_mode: isValidComparePaneMode(rawValue.compare_pane_mode) ? rawValue.compare_pane_mode : defaults.compare_pane_mode,
+    compare_sync_enabled: typeof rawValue.compare_sync_enabled === 'boolean'
+      ? rawValue.compare_sync_enabled
+      : defaults.compare_sync_enabled,
+    inspector_tab: isValidInspectorTab(rawValue.inspector_tab) ? rawValue.inspector_tab : defaults.inspector_tab,
+    show_debug: typeof rawValue.show_debug === 'boolean'
+      ? rawValue.show_debug
+      : defaults.show_debug,
+    page_rail_width: Number.isFinite(pageRailWidth)
+      ? Math.min(180, Math.max(96, Math.round(pageRailWidth)))
+      : defaults.page_rail_width,
+    inspector_width: Number.isFinite(inspectorWidth)
+      ? Math.min(920, Math.max(300, Math.round(inspectorWidth)))
+      : defaults.inspector_width,
+    show_settings_panel: typeof rawValue.show_settings_panel === 'boolean'
+      ? rawValue.show_settings_panel
+      : defaults.show_settings_panel,
+    show_project_meta_panel: typeof rawValue.show_project_meta_panel === 'boolean'
+      ? rawValue.show_project_meta_panel
+      : defaults.show_project_meta_panel,
+    show_project_history_panel: typeof rawValue.show_project_history_panel === 'boolean'
+      ? rawValue.show_project_history_panel
+      : defaults.show_project_history_panel,
+    show_compare_gallery_panel: typeof rawValue.show_compare_gallery_panel === 'boolean'
+      ? rawValue.show_compare_gallery_panel
+      : defaults.show_compare_gallery_panel
+  }
+}
+
+function loadStoredReviewWorkspacePrefs() {
+  if (typeof window === 'undefined') {
+    return createDefaultReviewWorkspacePrefs()
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(reviewWorkspaceStorageKey)
+    if (!rawValue) {
+      return createDefaultReviewWorkspacePrefs()
+    }
+    return normalizeStoredReviewWorkspacePrefs(JSON.parse(rawValue))
+  } catch (_error) {
+    return createDefaultReviewWorkspacePrefs()
+  }
+}
+
+function saveStoredReviewWorkspacePrefs(value) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(
+      reviewWorkspaceStorageKey,
+      JSON.stringify(normalizeStoredReviewWorkspacePrefs(value))
+    )
+  } catch (error) {
+    console.warn('Failed to persist review workspace prefs locally.', error)
+  }
+}
+
+function createDefaultPerPageUiState() {
+  return {
+    selectedRegionId: '',
+    main: {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+    },
+    compare: {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+    }
+  }
+}
+
+const selectedFile = ref(null)
+const status = ref('正在检查后端状态...')
+const backendOnline = ref(false)
+const uploading = ref(false)
+const translating = ref(false)
+const historyLoading = ref(false)
+const deletingProjectId = ref('')
+const restoringProjectId = ref('')
+const restoringSnapshotId = ref('')
+const savingProjectMeta = ref(false)
+const activeAction = ref('translate')
+const renderNonce = ref(Date.now())
+const sessionId = ref('')
+const originalImages = ref([])
+const translatedImages = ref([])
+const errorMessage = ref('')
+const downloadUrl = ref('')
+const downloadPath = ref('')
+const translatedDirPath = ref('')
+const maskDebugDirPath = ref('')
+const progress = ref({ current: 0, total: 0 })
+const availableFonts = ref([])
+const previewFontLoadState = ref({})
+const reviewInspectionPages = ref([])
+const reviewInspectionLoading = ref(false)
+const translationRegionOverrides = ref({})
+const translationRegionSkipOverrides = ref({})
+const translationRegionDisabledOverrides = ref({})
+const translationRegionLayoutOverrides = ref({})
+const translationInputDrafts = ref({})
+const fontSizeInputDrafts = ref({})
+const styleInspectionPages = ref([])
+const styleInspectionLoading = ref(false)
+const styleRegionOverrides = ref({})
+const pageEditHistory = ref({})
+const canvasPreviewDirtyPages = ref({})
+const creatingManualRegion = ref(false)
+const manualDrawMode = ref(false)
+const adjustingRegionId = ref('')
+const manualDrawDraft = ref(null)
+const canvasTransformState = ref(null)
+const mergeMode = ref(false)
+const mergeRegionSelection = ref({})
+const selectedEditPageKey = ref('')
+const selectedEditRegionKey = ref('')
+const workflowStage = ref('idle')
+const projectHistory = ref([])
+const projectSnapshots = ref({})
+const snapshotLoadingProjectId = ref('')
+const expandedProjectId = ref('')
+const currentProject = ref(null)
+const projectTitleDraft = ref('')
+const projectNoteDraft = ref('')
+const translatedPreviewCanvasRef = ref(null)
+const translatedPreviewScale = ref(1)
+const exportingOcrDebug = ref(false)
+const exportingTranslationInputDebug = ref(false)
+const exportingTranslationRequestDebug = ref(false)
+
+const config = ref(loadStoredConfig())
+const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
+const showAdvancedSettings = computed({
+  get() {
+    return Boolean(reviewWorkspacePrefs.value.show_settings_panel)
+  },
+  set(value) {
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      show_settings_panel: Boolean(value)
+    }
+  }
+})
+const perPageUiState = ref({})
+const regionListSearch = ref('')
+const regionListFilter = ref('all')
+const reviewCanvasZoneRef = ref(null)
+const reviewWorkspaceLayoutRef = ref(null)
+const mainCanvasShellRef = ref(null)
+const compareCanvasShellRef = ref(null)
+const viewportPanState = ref(null)
+const compareSplitterState = ref(null)
+const workspaceSplitterState = ref(null)
+const spacePanPressed = ref(false)
+const v2View = ref('home')
+const v2HistoryModalOpen = ref(false)
+const v2SettingsModalOpen = ref(false)
+const v2UploadDragOver = ref(false)
+const v2SupplementUploading = ref(false)
+const v2SourcePaneMode = ref('source')
+const v2PageSearch = ref('')
+const v2HistorySearch = ref('')
+const v2HistorySort = ref('recent')
+const v2UploadInputRef = ref(null)
+const v2SupplementInputRef = ref(null)
+
+let socket = null
+let pendingCanvasNudge = null
+let canvasNudgeCommitTimer = null
+let suppressCanvasRegionClickUntil = 0
+
+const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
+
+const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
+const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
+const canUseV2SupplementUpload = computed(() => (
+  Boolean(sessionId.value)
+  && !uploading.value
+  && !translating.value
+  && !v2SupplementUploading.value
+))
+const canContinueSegmentedTranslation = computed(
+  () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'detected'
+)
+const selectedEditPageHasTranslatedResult = computed(() => {
+  const storedName = String(selectedEditPage.value?.stored_name || '').trim()
+  if (!storedName) {
+    return false
+  }
+  return Boolean(latestTranslatedImageUrlByPage.value[storedName])
+})
+const canTranslateCurrentPage = computed(
+  () => Boolean(
+    sessionId.value
+    && selectedEditPage.value
+    && !translating.value
+    && (workflowStage.value === 'detected' || !selectedEditPageHasTranslatedResult.value)
+  )
+)
+const canRerender = computed(
+  () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
+)
+const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
+const canInspectEditor = computed(() => Boolean(sessionId.value))
+const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
+const activeReviewMode = computed(() => currentProject.value?.review_mode || config.value.default_review_mode || 'classic')
+const isCanvasReviewMode = computed(() => activeReviewMode.value === 'canvas_beta')
+const hasTranslationOverrides = computed(
+  () =>
+    Object.keys(translationRegionOverrides.value).length > 0
+    || Object.keys(translationRegionSkipOverrides.value).length > 0
+    || Object.keys(translationRegionDisabledOverrides.value).length > 0
+    || Object.keys(translationRegionLayoutOverrides.value).length > 0
+)
+const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
+const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
+const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
+const canvasInteractionLockReason = computed(() => {
+  if (!isCanvasReviewMode.value) {
+    return '当前不是画布审校模式'
+  }
+  if (!selectedEditPage.value) {
+    return '当前没有可编辑页面'
+  }
+  if (manualDrawMode.value) {
+    return '正在手动补框模式'
+  }
+  if (mergeMode.value) {
+    return '正在合并文本框模式'
+  }
+  if (isAdjustingRegionBBox.value) {
+    return '正在替换文本框范围'
+  }
+  return ''
+})
+const isCanvasInteractionLocked = computed(
+  () => Boolean(canvasInteractionLockReason.value)
+)
+const canDirectManipulateCanvas = computed(() => !isCanvasInteractionLocked.value)
+const pageShellWidthClass = computed(() => (
+  config.value.workspace_width_mode === 'auto'
+    ? 'page-shell-auto'
+    : 'page-shell-fixed'
+))
+const selectedPageHistoryState = computed(() => {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return { undo: [], redo: [] }
+  }
+  return pageEditHistory.value[pageId] || { undo: [], redo: [] }
+})
+const canUndoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.undo.length > 0 && !translating.value))
+const canRedoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.redo.length > 0 && !translating.value))
+const mergeSelectionCount = computed(() => Object.keys(mergeRegionSelection.value).length)
+const disabledRegionCountForSelectedPage = computed(() => {
+  const storedName = selectedEditPage.value?.stored_name
+  if (!storedName) {
+    return 0
+  }
+  return Object.keys(translationRegionDisabledOverrides.value).filter((regionId) => regionId.includes(storedName)).length
+})
+const latestTranslatedImageUrlByPage = computed(() => {
+  const mapping = {}
+  for (const image of translatedImages.value) {
+    const storedName = String(image?.stored_name || '').trim()
+    const url = String(image?.url || '').trim()
+    if (!storedName || !url) {
+      continue
+    }
+    mapping[storedName] = url
+  }
+  return mapping
+})
+const mergedInspectionPages = computed(() => {
+  const pageOrder = []
+  const pageMap = new Map()
+
+  const ensurePage = (page) => {
+    if (!page) {
+      return null
+    }
+
+    if (!pageMap.has(page.stored_name)) {
+      pageOrder.push(page.stored_name)
+      pageMap.set(page.stored_name, {
+        stored_name: page.stored_name,
+        name: page.name,
+        image_url: page.image_url,
+        source_image_url: page.source_image_url || '',
+        base_image_url: page.base_image_url || page.source_image_url || page.image_url,
+        translated_image_url: page.translated_image_url || page.image_url,
+        image_width: page.image_width,
+        image_height: page.image_height,
+        regions: new Map()
+      })
+    }
+
+    return pageMap.get(page.stored_name)
+  }
+
+  for (const page of reviewInspectionPages.value) {
+    const mergedPage = ensurePage(page)
+    for (const region of page.regions || []) {
+      mergedPage.regions.set(region.id, {
+        ...region
+      })
+    }
+  }
+
+  for (const page of styleInspectionPages.value) {
+    const mergedPage = ensurePage(page)
+    if (!mergedPage.image_url) {
+      mergedPage.image_url = page.image_url
+    }
+    if (!mergedPage.source_image_url && page.source_image_url) {
+      mergedPage.source_image_url = page.source_image_url
+    }
+    if (!mergedPage.base_image_url && page.base_image_url) {
+      mergedPage.base_image_url = page.base_image_url
+    }
+    if (!mergedPage.translated_image_url && page.translated_image_url) {
+      mergedPage.translated_image_url = page.translated_image_url
+    }
+    for (const region of page.regions || []) {
+      const existing = mergedPage.regions.get(region.id) || { id: region.id, index: region.index, bbox: region.bbox }
+      mergedPage.regions.set(region.id, {
+        ...existing,
+        ...region
+      })
+    }
+  }
+
+  for (const storedName of pageOrder) {
+    const mergedPage = pageMap.get(storedName)
+    const latestTranslatedUrl = latestTranslatedImageUrlByPage.value[storedName] || ''
+    if (!mergedPage || !latestTranslatedUrl) {
+      continue
+    }
+    mergedPage.image_url = latestTranslatedUrl
+    mergedPage.translated_image_url = latestTranslatedUrl
+  }
+
+  return pageOrder.map((storedName) => {
+    const page = pageMap.get(storedName)
+    return {
+      ...page,
+      regions: Array.from(page.regions.values()).sort((left, right) => left.index - right.index)
+    }
+  })
+})
+const comparisonImages = computed(() => {
+  const originalMap = new Map(
+    originalImages.value.map((image) => [String(image?.stored_name || image?.name || ''), image])
+  )
+  const translatedMap = new Map(
+    translatedImages.value.map((image) => [String(image?.stored_name || image?.name || ''), image])
+  )
+  const orderedKeys = []
+  const seen = new Set()
+
+  for (const image of originalImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    orderedKeys.push(key)
+  }
+
+  for (const image of translatedImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    orderedKeys.push(key)
+  }
+
+  return orderedKeys.map((key) => ({
+    key,
+    original: originalMap.get(key) || null,
+    translated: translatedMap.get(key) || null,
+    name: originalMap.get(key)?.name || translatedMap.get(key)?.name || key,
+  }))
+})
+const reviewCanvasGridStyle = computed(() => {
+  const mainRatio = Math.min(80, Math.max(50, Number(reviewWorkspacePrefs.value.split_ratio || 65)))
+  return {
+    gridTemplateColumns: `minmax(0, ${mainRatio}fr) 12px minmax(300px, ${100 - mainRatio}fr)`
+  }
+})
+const reviewWorkspaceLayoutStyle = computed(() => ({
+  '--page-rail-width': `${Math.round(reviewWorkspacePrefs.value.page_rail_width || 128)}px`,
+  '--inspector-width': `${Math.round(reviewWorkspacePrefs.value.inspector_width || 420)}px`
+}))
+const selectedEditPage = computed(() => {
+  if (!mergedInspectionPages.value.length) {
+    return null
+  }
+
+  return (
+    mergedInspectionPages.value.find((page) => page.stored_name === selectedEditPageKey.value)
+    || mergedInspectionPages.value[0]
+    || null
+  )
+})
+const selectedEditPageIndex = computed(() => {
+  if (!selectedEditPage.value) {
+    return -1
+  }
+  return mergedInspectionPages.value.findIndex((page) => page.stored_name === selectedEditPage.value?.stored_name)
+})
+const canSelectPreviousEditPage = computed(() => selectedEditPageIndex.value > 0)
+const canSelectNextEditPage = computed(() => {
+  return selectedEditPageIndex.value >= 0 && selectedEditPageIndex.value < mergedInspectionPages.value.length - 1
+})
+const v2SelectedPagePositionLabel = computed(() => {
+  if (selectedEditPageIndex.value < 0) {
+    return '未选择'
+  }
+  return `${selectedEditPageIndex.value + 1} / ${Math.max(v2PageEntries.value.length, mergedInspectionPages.value.length, 1)}`
+})
+const selectedEditPageSummary = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  const pageNumber = selectedEditPageIndex.value >= 0 ? selectedEditPageIndex.value + 1 : 1
+  return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页 · ${page.regions.length} 个文本框`
+})
+const selectedEditPageThumbnailUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  return withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || ''))
+})
+const selectedEditPageMainImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  return withCacheBust(toApiUrl(page.base_image_url || page.source_image_url || page.image_url || ''))
+})
+const selectedEditPageCompareImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
+    return withCacheBust(toApiUrl(page.source_image_url || page.image_url || ''))
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
+    return getCanvasPreviewImageUrl(page)
+  }
+  return getSavedTranslatedImageUrl(page) || getCanvasPreviewImageUrl(page)
+})
+const selectedEditPageCompareLabel = computed(() => {
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
+    return '原图对照'
+  }
+  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
+    return '当前译图'
+  }
+  return '已嵌字结果'
+})
+const selectedEditRegion = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return null
+  }
+  return page.regions.find((region) => region.id === selectedEditRegionKey.value) || null
+})
+const selectedEditRegionVisibleIndex = computed(() => (
+  filteredEditRegions.value.findIndex((region) => region.id === selectedEditRegionKey.value)
+))
+const canSelectPreviousEditRegion = computed(() => selectedEditRegionVisibleIndex.value > 0)
+const canSelectNextEditRegion = computed(() => (
+  selectedEditRegionVisibleIndex.value >= 0
+  && selectedEditRegionVisibleIndex.value < filteredEditRegions.value.length - 1
+))
+const selectedEditRegionIndexLabel = computed(() => {
+  if (!selectedEditRegion.value) {
+    return '未选中文本框'
+  }
+  return `#${selectedEditRegion.value.index + 1}`
+})
+const v2SelectedRegionSummary = computed(() => {
+  if (!selectedEditPage.value) {
+    return '先选择页面'
+  }
+  if (!filteredEditRegions.value.length) {
+    return '当前筛选下没有对白框'
+  }
+  if (selectedEditRegionVisibleIndex.value < 0) {
+    return `当前框不在筛选结果内 · 共 ${filteredEditRegions.value.length} 框`
+  }
+  return `第 ${selectedEditRegionVisibleIndex.value + 1} / ${filteredEditRegions.value.length} 框`
+})
+const pageRailItems = computed(() => (
+  mergedInspectionPages.value.map((page, index) => ({
+    ...page,
+    pageNumber: index + 1,
+    thumbnailUrl: withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')),
+    selected: page.stored_name === selectedEditPageKey.value
+  }))
+))
+const filteredEditRegions = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return []
+  }
+  const search = String(regionListSearch.value || '').trim().toLowerCase()
+  const filter = String(regionListFilter.value || 'all')
+
+  return page.regions.filter((region) => {
+    if (search) {
+      const haystack = [
+        region.source_text,
+        getEditRegionText(region),
+        getEffectiveRegionFontLabel(region),
+        region.index + 1
+      ]
+        .map((item) => String(item || '').toLowerCase())
+        .join(' ')
+      if (!haystack.includes(search)) {
+        return false
+      }
+    }
+
+    if (filter === 'manual') {
+      return isManualRegion(region)
+    }
+    if (filter === 'keep-original') {
+      return isRegionSkipEnabled(region)
+    }
+    if (filter === 'untranslated') {
+      return !String(getEditRegionText(region) || '').trim()
+    }
+    if (filter === 'font-override') {
+      return Boolean(getRegionFontOverrideId(region))
+    }
+    if (filter === 'warning') {
+      return hasRegionWarning(region)
+    }
+    return true
+  })
+})
+const selectedRegionPreviewDebug = ref({
+  regionId: '',
+  requestedFont: '',
+  requestedAlias: '',
+  computedFontFamily: '',
+  computedFontWeight: '',
+  previewLayer: '',
+})
+const progressPercent = computed(() => {
+  if (!progress.value.total) {
+    return 0
+  }
+
+  return Math.min(100, Math.round((progress.value.current / progress.value.total) * 100))
+})
+const translatorLabelMap = {
+  sugoi: 'sugoi',
+  gemini: 'Gemini',
+  'doubao-ark': 'Doubao',
+  chatgpt: 'ChatGPT',
+  youdao: '有道',
+  baidu: '百度',
+  offline: 'offline',
+  none: 'none'
+}
+const targetLangLabelMap = {
+  CHS: '简中',
+  CHT: '繁中',
+  ENG: '英语',
+  JPN: '日语',
+  KOR: '韩语'
+}
+const workflowStageLabelMap = {
+  idle: '未开始',
+  detecting: '识别中',
+  detected: '待校对',
+  translating: '翻译中',
+  translated: '已翻译'
+}
+const reviewModeLabelMap = {
+  classic: '经典审校',
+  canvas_beta: '画布审校（Beta）'
+}
+const compactConfigSummary = computed(() => {
+  const translator = translatorLabelMap[config.value.translator] || config.value.translator
+  const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
+  const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
+  const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
+  const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
+  const reviewMode = reviewModeLabelMap[config.value.default_review_mode] || config.value.default_review_mode
+  const translatorModel = config.value.translator === 'doubao-ark'
+    ? ` / ${getResolvedTranslatorModel(config.value)}`
+    : ''
+  return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow} / 默认${reviewMode}`
+})
+const v2HasProject = computed(() => Boolean(sessionId.value || currentProject.value))
+const v2ProjectTitle = computed(() => (
+  String(currentProject.value?.title || '').trim()
+  || String(sessionId.value || '').trim()
+  || '未命名项目'
+))
+const v2ProjectSubtitle = computed(() => {
+  const pageCount = v2PageEntries.value.length
+  const stage = workflowStageLabelMap[workflowStage.value] || workflowStage.value || '未开始'
+  return `${stage} · ${pageCount || 0} 页`
+})
+const v2SettingsOpen = computed({
+  get() {
+    return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
+  },
+  set(value) {
+    if (v2View.value === 'review') {
+      reviewWorkspacePrefs.value = {
+        ...reviewWorkspacePrefs.value,
+        show_settings_panel: Boolean(value)
+      }
+      return
+    }
+    v2SettingsModalOpen.value = Boolean(value)
+  }
+})
+const v2PageEntries = computed(() => {
+  const order = []
+  const seen = new Set()
+  const mapped = new Map()
+
+  const ensureEntry = (key, payload = {}) => {
+    const normalizedKey = String(key || '').trim()
+    if (!normalizedKey) {
+      return null
+    }
+    if (!mapped.has(normalizedKey)) {
+      order.push(normalizedKey)
+      mapped.set(normalizedKey, {
+        stored_name: normalizedKey,
+        name: payload.name || normalizedKey,
+        sourceUrl: payload.sourceUrl || '',
+        blankUrl: payload.blankUrl || '',
+        finalUrl: payload.finalUrl || '',
+        previewUrl: payload.previewUrl || '',
+        pageNumber: payload.pageNumber || order.length,
+        regionCount: Number(payload.regionCount || 0),
+        reviewReady: Boolean(payload.reviewReady)
+      })
+    }
+    const entry = mapped.get(normalizedKey)
+    Object.assign(entry, payload)
+    return entry
+  }
+
+  for (const image of originalImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    ensureEntry(key, {
+      name: image?.name || key,
+      sourceUrl: withCacheBust(image?.url || ''),
+      blankUrl: withCacheBust(image?.url || ''),
+      pageNumber: order.length + 1
+    })
+  }
+
+  for (const page of mergedInspectionPages.value) {
+    ensureEntry(page?.stored_name, {
+      name: page?.name || page?.stored_name || '未命名页面',
+      sourceUrl: withCacheBust(toApiUrl(page?.source_image_url || page?.image_url || page?.base_image_url || '')),
+      blankUrl: withCacheBust(toApiUrl(page?.base_image_url || page?.source_image_url || page?.image_url || '')),
+      finalUrl: getSavedTranslatedImageUrl(page) || withCacheBust(toApiUrl(page?.translated_image_url || page?.image_url || '')),
+      previewUrl: getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || withCacheBust(toApiUrl(page?.translated_image_url || page?.image_url || '')),
+      regionCount: Number(page?.regions?.length || 0),
+      reviewReady: true
+    })
+  }
+
+  for (const image of translatedImages.value) {
+    const key = String(image?.stored_name || image?.name || '').trim()
+    const entry = ensureEntry(key, {
+      name: image?.name || key,
+      finalUrl: withCacheBust(image?.url || ''),
+      previewUrl: withCacheBust(image?.url || '')
+    })
+    if (entry && !entry.blankUrl) {
+      entry.blankUrl = entry.sourceUrl || entry.finalUrl
+    }
+  }
+
+  return order.map((key) => {
+    const entry = mapped.get(key)
+    const fallback = entry?.sourceUrl || entry?.blankUrl || entry?.finalUrl || entry?.previewUrl || ''
+    const status = entry?.finalUrl
+      ? '已完成'
+      : entry?.reviewReady
+        ? '可审校'
+        : workflowStage.value === 'detecting' || workflowStage.value === 'translating'
+          ? '处理中'
+          : '待处理'
+    return {
+      ...entry,
+      coverUrl: fallback,
+      status,
+      selected: String(selectedEditPageKey.value || '').trim() === key
+    }
+  })
+})
+const v2FilteredPageEntries = computed(() => {
+  const search = String(v2PageSearch.value || '').trim().toLowerCase()
+  if (!search) {
+    return v2PageEntries.value
+  }
+  return v2PageEntries.value.filter((page) => (
+    [page.name, page.stored_name, page.status]
+      .map((item) => String(item || '').toLowerCase())
+      .join(' ')
+      .includes(search)
+  ))
+})
+const v2SelectedPageEntry = computed(() => {
+  const preferredKey = String(selectedEditPageKey.value || '').trim()
+  if (preferredKey) {
+    const matched = v2PageEntries.value.find((page) => page.stored_name === preferredKey)
+    if (matched) {
+      return matched
+    }
+  }
+  return v2PageEntries.value[0] || null
+})
+const v2SourcePaneImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  const entry = v2SelectedPageEntry.value
+  if (v2SourcePaneMode.value === 'final') {
+    return (
+      getSavedTranslatedImageUrl(page)
+      || entry?.finalUrl
+      || getCanvasPreviewImageUrl(page)
+      || entry?.previewUrl
+      || entry?.blankUrl
+      || entry?.sourceUrl
+      || ''
+    )
+  }
+  if (v2SourcePaneMode.value === 'blank') {
+    return entry?.blankUrl || selectedEditPageMainImageUrl.value || entry?.sourceUrl || ''
+  }
+  return entry?.sourceUrl || selectedEditPageThumbnailUrl.value || selectedEditPageMainImageUrl.value || ''
+})
+const v2ComparePaneImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  const entry = v2SelectedPageEntry.value
+  return (
+    getCanvasPreviewImageUrl(page)
+    || entry?.previewUrl
+    || getSavedTranslatedImageUrl(page)
+    || entry?.finalUrl
+    || entry?.blankUrl
+    || entry?.sourceUrl
+    || ''
+  )
+})
+const v2ReviewHeaderLabel = computed(() => {
+  if (v2SourcePaneMode.value === 'blank') {
+    return '空页'
+  }
+  if (v2SourcePaneMode.value === 'final') {
+    return '最终效果'
+  }
+  return '原图'
+})
+const v2SelectedPageSummary = computed(() => {
+  const entry = v2SelectedPageEntry.value
+  if (!entry) {
+    return '尚未选择页面'
+  }
+  return `第 ${entry.pageNumber} 页 · ${entry.regionCount || 0} 个文本框`
+})
+const v2ReviewPrimaryLabel = computed(() => {
+  if (translating.value) {
+    return '处理中…'
+  }
+  if (canContinueSegmentedTranslation.value) {
+    return '继续翻译'
+  }
+  if (canTranslateCurrentPage.value) {
+    return workflowStage.value === 'detected' ? '翻译本页' : '开始识别'
+  }
+  if (canRerender.value) {
+    return '保存并重渲染'
+  }
+  return '开始翻译'
+})
+const v2FilteredProjectHistory = computed(() => {
+  const search = String(v2HistorySearch.value || '').trim().toLowerCase()
+  const sorter = String(v2HistorySort.value || 'recent')
+  const filtered = projectHistory.value.filter((project) => {
+    if (!search) {
+      return true
+    }
+    return [
+      project.title,
+      project.project_id,
+      project.note,
+      workflowStageLabelMap[project.workflow_stage] || project.workflow_stage
+    ]
+      .map((item) => String(item || '').toLowerCase())
+      .join(' ')
+      .includes(search)
+  })
+
+  const ranked = [...filtered].sort((left, right) => {
+    if (sorter === 'title') {
+      return String(left.title || '').localeCompare(String(right.title || ''), 'zh-Hans-CN')
+    }
+    return Date.parse(right.updated_at || right.created_at || 0) - Date.parse(left.updated_at || left.created_at || 0)
+  })
+
+  return ranked
+})
+const v2HomePreviewPages = computed(() => {
+  if (v2PageEntries.value.length) {
+    return v2PageEntries.value.slice(0, 4)
+  }
+  return v2PlaceholderThumbs.map((coverUrl, index) => ({
+    stored_name: `placeholder-${index}`,
+    name: `示例 ${index + 1}`,
+    coverUrl,
+    status: index < 2 ? '审校示意' : '页面示意',
+    pageNumber: index + 1,
+    regionCount: index < 2 ? 8 + index : 0
+  }))
+})
+const projectMetaDirty = computed(() => {
+  const project = currentProject.value
+  if (!project) {
+    return false
+  }
+  return (
+    String(projectTitleDraft.value || '').trim() !== String(project.title || '').trim()
+    || String(projectNoteDraft.value || '').trim() !== String(project.note || '').trim()
+  )
+})
+const previewFontFaceCss = computed(() => {
+  const rules = []
+  for (const font of availableFonts.value) {
+    if (!font?.id || !font?.url) {
+      continue
+    }
+    const family = getPreviewFontAlias(font.id)
+    const formatHint = getPreviewFontFormatHint(font)
+    const srcValue = formatHint
+      ? `url('${toApiUrl(font.url)}') format('${formatHint}')`
+      : `url('${toApiUrl(font.url)}')`
+    rules.push(`@font-face{font-family:'${family}';src:${srcValue};font-style:normal;font-weight:400;font-display:swap;}`)
+  }
+  return rules.join('\n')
+})
+
+const primaryTranslateAction = computed(() => {
+  if (workflowStage.value === 'detected') {
+    return 'resume-translate'
+  }
+  return config.value.pause_after_detection ? 'detect' : 'translate'
+})
+
+const primaryTranslateLabel = computed(() => {
+  if (translating.value) {
+    if (activeAction.value === 'detect') {
+      return '识别进行中...'
+    }
+    if (activeAction.value === 'translate-page') {
+      return '本页翻译中...'
+    }
+    if (activeAction.value === 'resume-translate') {
+      return '翻译进行中...'
+    }
+    return '翻译进行中...'
+  }
+
+  if (workflowStage.value === 'detected') {
+    return '继续翻译并嵌字'
+  }
+  if (config.value.pause_after_detection) {
+    return workflowStage.value === 'translated' ? '重新识别并校对' : '先识别文本框'
+  }
+  return '开始翻译'
+})
+
+function toApiUrl(path) {
+  if (!path) {
+    return ''
+  }
+
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return path
+  }
+
+  return `${apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+function toWebSocketUrl(path) {
+  const url = new URL(toApiUrl(path))
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
+
+function withCacheBust(url) {
+  if (!url) {
+    return ''
+  }
+
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}t=${renderNonce.value}`
+}
+
+function markCanvasPreviewDirty(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return
+  }
+  canvasPreviewDirtyPages.value = {
+    ...canvasPreviewDirtyPages.value,
+    [normalizedPageId]: true
+  }
+}
+
+function clearCanvasPreviewDirty(pageId = '') {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    canvasPreviewDirtyPages.value = {}
+    return
+  }
+  const nextState = { ...canvasPreviewDirtyPages.value }
+  delete nextState[normalizedPageId]
+  canvasPreviewDirtyPages.value = nextState
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function formatOcrConfidence(value) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 'OCR 置信度未知'
+  }
+  return `OCR ${(numericValue * 100).toFixed(numericValue >= 0.995 ? 1 : 0)}%`
+}
+
+function getRegionDirectionLabel(region) {
+  const value = String(region?.direction || 'auto')
+  const option = textDirectionOptions.find((item) => item.value === value)
+  return option?.label || '自动'
+}
+
+async function exportCurrentPageOcrDebug() {
+  if (!sessionId.value || !selectedEditPage.value || exportingOcrDebug.value) {
+    return
+  }
+
+  exportingOcrDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/ocr-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出 OCR 调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedEditPage.value.stored_name.replace(/\.[^.]+$/, '') || 'page'}-ocr-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出当前页 OCR 调试 JSON，可以直接对照看原始识别文本。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '导出 OCR 调试信息失败'
+  } finally {
+    exportingOcrDebug.value = false
+  }
+}
+
+async function exportCurrentPageTranslationInputDebug() {
+  if (!sessionId.value || !selectedEditPage.value || exportingTranslationInputDebug.value) {
+    return
+  }
+
+  exportingTranslationInputDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/translation-input-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出翻译输入调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedEditPage.value.stored_name.replace(/\.[^.]+$/, '') || 'page'}-translation-input-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出当前页翻译输入调试 JSON，可以直接对照 OCR 结果看真正送翻译的文本。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '导出翻译输入调试信息失败'
+  } finally {
+    exportingTranslationInputDebug.value = false
+  }
+}
+
+async function exportCurrentProjectTranslationRequestDebug() {
+  if (!sessionId.value || exportingTranslationRequestDebug.value) {
+    return
+  }
+
+  exportingTranslationRequestDebug.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(
+      toApiUrl(`/api/projects/${sessionId.value}/translation-request-debug`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '导出翻译请求调试信息失败')
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${sessionId.value || 'project'}-translation-request-debug.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    status.value = '已导出本次翻译请求/响应调试 JSON，可以直接核对模型调用链路。'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '导出翻译请求调试信息失败'
+    errorMessage.value = message
+    status.value = message
+    if (typeof window !== 'undefined') {
+      window.alert(message)
+    }
+  } finally {
+    exportingTranslationRequestDebug.value = false
+  }
+}
+
+function closeSocket() {
+  if (socket) {
+    socket.close()
+    socket = null
+  }
+}
+
+function resetStyleInspector() {
+  styleInspectionPages.value = []
+  styleInspectionLoading.value = false
+  styleRegionOverrides.value = {}
+}
+
+function resetTranslationReview() {
+  reviewInspectionPages.value = []
+  reviewInspectionLoading.value = false
+  translationRegionOverrides.value = {}
+  translationRegionSkipOverrides.value = {}
+  translationRegionDisabledOverrides.value = {}
+  translationRegionLayoutOverrides.value = {}
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
+  adjustingRegionId.value = ''
+}
+
+function resetEditInspectorSelection() {
+  selectedEditPageKey.value = ''
+  selectedEditRegionKey.value = ''
+  manualDrawDraft.value = null
+  adjustingRegionId.value = ''
+  canvasTransformState.value = null
+  viewportPanState.value = null
+  compareSplitterState.value = null
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
+  translationInputDrafts.value = {}
+  fontSizeInputDrafts.value = {}
+  pageEditHistory.value = {}
+  perPageUiState.value = {}
+  regionListSearch.value = ''
+  regionListFilter.value = 'all'
+}
+
+function normalizeHistoryProject(project) {
+  return {
+    ...project,
+    cover_image: project?.cover_image ? toApiUrl(project.cover_image) : '',
+    updated_at: project?.updated_at || '',
+    created_at: project?.created_at || '',
+    title: project?.title || project?.project_id || '未命名项目',
+    note: project?.note || '',
+    review_mode: project?.review_mode || 'classic',
+    workflow_stage: project?.workflow_stage || 'idle',
+    page_count: Number(project?.page_count || 0),
+    is_busy: Boolean(project?.is_busy),
+    busy_action: project?.busy_action || ''
+  }
+}
+
+function normalizeSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    snapshot_id: snapshot?.snapshot_id || '',
+    created_at: snapshot?.created_at || '',
+    kind: snapshot?.kind || '',
+    summary: snapshot?.summary || '',
+    workflow_stage: snapshot?.workflow_stage || 'idle',
+    cover_image: snapshot?.cover_image ? toApiUrl(snapshot.cover_image) : '',
+    pinned: Boolean(snapshot?.pinned)
+  }
+}
+
+function getV2PlaceholderThumb(index = 0) {
+  const safeIndex = Math.abs(Number(index || 0)) % v2PlaceholderThumbs.length
+  return v2PlaceholderThumbs[safeIndex]
+}
+
+function getV2ProjectCover(project, index = 0) {
+  return String(project?.cover_image || '').trim() || getV2PlaceholderThumb(index)
+}
+
+function getV2PageCover(page, index = 0) {
+  return String(page?.coverUrl || '').trim() || getV2PlaceholderThumb(index)
+}
+
+function handleV2ImageError(event, index = 0) {
+  const target = event?.target
+  if (!target || typeof target.src !== 'string') {
+    return
+  }
+  const fallback = getV2PlaceholderThumb(index)
+  if (target.src !== fallback) {
+    target.src = fallback
+  }
+}
+
+function formatV2Timestamp(value) {
+  const timestamp = Date.parse(String(value || ''))
+  if (!Number.isFinite(timestamp)) {
+    return '刚刚更新'
+  }
+  const date = new Date(timestamp)
+  const delta = Date.now() - timestamp
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (delta < hour) {
+    return `${Math.max(1, Math.round(delta / minute))} 分钟前`
+  }
+  if (delta < day) {
+    return `${Math.max(1, Math.round(delta / hour))} 小时前`
+  }
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+  return formatter.format(date)
+}
+
+function isProjectBusy(project) {
+  const projectId = String(project?.project_id || '').trim()
+  if (!projectId) {
+    return false
+  }
+  return Boolean(project?.is_busy) || (Boolean(activeTaskProjectId.value) && activeTaskProjectId.value === projectId)
+}
+
+function getBusyActionLabel(project) {
+  const action = String(project?.busy_action || '').trim().toLowerCase()
+  if (action === 'detect') {
+    return '识别中'
+  }
+  if (action === 'rerender') {
+    return '重嵌中'
+  }
+  if (action === 'translate-page') {
+    return '本页翻译中'
+  }
+  if (action === 'resume-translate') {
+    return '继续翻译中'
+  }
+  return '翻译中'
+}
+
+function canRestoreHistoryProject(project) {
+  return !translating.value && !isProjectBusy(project) && (!restoringProjectId.value || restoringProjectId.value === project?.project_id)
+}
+
+function canDeleteHistoryProject(project) {
+  return !isProjectBusy(project) && (!deletingProjectId.value || deletingProjectId.value === project?.project_id)
+}
+
+function canRestoreHistorySnapshot(project, snapshot) {
+  return !translating.value && !isProjectBusy(project) && (!restoringSnapshotId.value || restoringSnapshotId.value === snapshot?.snapshot_id)
+}
+
+function applySessionPayload(payload, options = {}) {
+  const resetInspectors = Boolean(options.resetInspectors)
+  renderNonce.value = Date.now()
+  sessionId.value = payload?.session_id || ''
+  workflowStage.value = payload?.workflow_stage || 'idle'
+  downloadUrl.value = payload?.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
+  downloadPath.value = payload?.download_path || ''
+  translatedDirPath.value = payload?.translated_dir || ''
+  maskDebugDirPath.value = payload?.mask_debug_dir || ''
+  originalImages.value = (payload?.images || []).map((image, index) => ({
+    id: `${sessionId.value || 'session'}-source-${index}`,
+    name: image.name,
+    url: toApiUrl(image.url),
+    stored_name: image.stored_name
+  }))
+  translatedImages.value = (payload?.translated_images || []).map((image, index) => ({
+    id: image.id || `${sessionId.value || 'session'}-translated-${index}`,
+    name: image.name,
+    url: withCacheBust(toApiUrl(image.url)),
+    stored_name: image.stored_name
+  }))
+
+  const payloadConfig = payload?.config && typeof payload.config === 'object' ? payload.config : {}
+  config.value = mergeProjectConfigWithLocalPreferences(payloadConfig, config.value)
+
+  const overrides = payload?.overrides || {}
+  translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+  translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+  translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+  translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+  styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+  translationInputDrafts.value = {}
+  fontSizeInputDrafts.value = {}
+  pageEditHistory.value = {}
+  canvasPreviewDirtyPages.value = {}
+  perPageUiState.value = {}
+  regionListSearch.value = ''
+  regionListFilter.value = 'all'
+
+  currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
+  projectTitleDraft.value = currentProject.value?.title || ''
+  projectNoteDraft.value = currentProject.value?.note || ''
+
+  if (resetInspectors) {
+    resetTranslationReview()
+    resetStyleInspector()
+    resetEditInspectorSelection()
+  }
+}
+
+async function loadProjectHistory(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    historyLoading.value = true
+  }
+  try {
+    const response = await fetch(toApiUrl('/api/projects'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取历史翻译列表失败')
+    }
+    projectHistory.value = (payload.projects || []).map(normalizeHistoryProject)
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取历史翻译列表失败'
+    }
+  } finally {
+    if (!silent) {
+      historyLoading.value = false
+    }
+  }
+}
+
+async function loadProjectSnapshots(projectId, options = {}) {
+  if (!projectId) {
+    return
+  }
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    snapshotLoadingProjectId.value = projectId
+  }
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots`))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取项目快照失败')
+    }
+    projectSnapshots.value = {
+      ...projectSnapshots.value,
+      [projectId]: (payload.snapshots || []).map(normalizeSnapshot)
+    }
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取项目快照失败'
+    }
+  } finally {
+    if (!silent) {
+      snapshotLoadingProjectId.value = ''
+    }
+  }
+}
+
+async function toggleProjectSnapshots(projectId) {
+  if (!projectId) {
+    return
+  }
+  if (expandedProjectId.value === projectId) {
+    expandedProjectId.value = ''
+    return
+  }
+  expandedProjectId.value = projectId
+  if (!projectSnapshots.value[projectId]) {
+    await loadProjectSnapshots(projectId)
+  }
+}
+
+async function restoreProject(projectId) {
+  if (!projectId) {
+    return
+  }
+  if (translating.value) {
+    errorMessage.value = '当前有识别/翻译任务在运行，暂时不能切换到别的项目。'
+    status.value = '请等待当前任务完成后，再恢复历史项目。'
+    return
+  }
+  restoringProjectId.value = projectId
+  errorMessage.value = ''
+  closeSocket()
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/restore`), {
+      method: 'POST'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '恢复历史项目失败')
+    }
+    applySessionPayload(payload, { resetInspectors: true })
+    try {
+      await loadEditInspection({ silent: true })
+    } catch (inspectionError) {
+      console.warn('[HistoryRestore] review inspector preload failed', inspectionError)
+    }
+    await loadProjectHistory({ silent: true })
+    status.value = `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '恢复历史项目失败'
+  } finally {
+    restoringProjectId.value = ''
+  }
+}
+
+async function restoreSnapshot(projectId, snapshotId) {
+  if (!projectId || !snapshotId) {
+    return
+  }
+  if (translating.value) {
+    errorMessage.value = '当前有识别/翻译任务在运行，暂时不能恢复快照。'
+    status.value = '请等待当前任务完成后，再从快照恢复项目。'
+    return
+  }
+  restoringSnapshotId.value = snapshotId
+  errorMessage.value = ''
+  closeSocket()
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshotId}/restore`), {
+      method: 'POST'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '恢复历史快照失败')
+    }
+    applySessionPayload(payload, { resetInspectors: true })
+    try {
+      await loadEditInspection({ silent: true })
+    } catch (inspectionError) {
+      console.warn('[HistoryRestore] snapshot inspector preload failed', inspectionError)
+    }
+    await loadProjectHistory({ silent: true })
+    status.value = `已从历史快照恢复项目「${currentProject.value?.title || payload.session_id}」，可以继续编辑。`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '恢复历史快照失败'
+  } finally {
+    restoringSnapshotId.value = ''
+  }
+}
+
+async function toggleSnapshotPin(projectId, snapshot) {
+  if (!projectId || !snapshot?.snapshot_id) {
+    return
+  }
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshot.snapshot_id}/pin`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        pinned: !snapshot.pinned
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '更新快照固定状态失败')
+    }
+    projectSnapshots.value = {
+      ...projectSnapshots.value,
+      [projectId]: (payload.snapshots || []).map(normalizeSnapshot)
+    }
+    await loadProjectHistory({ silent: true })
+    status.value = snapshot.pinned ? '已取消固定这个快照。' : '已固定这个快照。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '更新快照固定状态失败'
+  }
+}
+
+async function deleteProject(project) {
+  if (!project?.project_id) {
+    return
+  }
+  if (isProjectBusy(project)) {
+    errorMessage.value = '该项目仍有任务在运行，暂时不能删除。'
+    status.value = '请等待当前识别/翻译任务完成后，再删除这个项目。'
+    return
+  }
+  const confirmed = typeof window === 'undefined'
+    ? true
+    : window.confirm(`确定要删除项目「${project.title}」吗？相关历史记录和输出文件会一起移除。`)
+  if (!confirmed) {
+    return
+  }
+
+  errorMessage.value = ''
+  deletingProjectId.value = project.project_id
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${project.project_id}`), {
+      method: 'DELETE'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '删除项目失败')
+    }
+
+    if (sessionId.value === project.project_id) {
+      closeSocket()
+      sessionId.value = ''
+      originalImages.value = []
+      translatedImages.value = []
+      downloadUrl.value = ''
+      downloadPath.value = ''
+      translatedDirPath.value = ''
+      maskDebugDirPath.value = ''
+      workflowStage.value = 'idle'
+      currentProject.value = null
+      projectTitleDraft.value = ''
+      projectNoteDraft.value = ''
+      resetTranslationReview()
+      resetStyleInspector()
+      resetEditInspectorSelection()
+    }
+
+    const nextSnapshots = { ...projectSnapshots.value }
+    delete nextSnapshots[project.project_id]
+    projectSnapshots.value = nextSnapshots
+    if (expandedProjectId.value === project.project_id) {
+      expandedProjectId.value = ''
+    }
+
+    await loadProjectHistory({ silent: true })
+    status.value = '已删除该历史项目。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除项目失败'
+  } finally {
+    deletingProjectId.value = ''
+  }
+}
+
+async function saveProjectMetadata() {
+  if (!sessionId.value || !currentProject.value || !projectMetaDirty.value) {
+    return
+  }
+  savingProjectMeta.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}`), {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: projectTitleDraft.value,
+        note: projectNoteDraft.value
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '保存项目名称或备注失败')
+    }
+    currentProject.value = normalizeHistoryProject(payload.project || {})
+    projectTitleDraft.value = currentProject.value?.title || ''
+    projectNoteDraft.value = currentProject.value?.note || ''
+    await loadProjectHistory({ silent: true })
+    status.value = '已保存项目名称和备注。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '保存项目名称或备注失败'
+  } finally {
+    savingProjectMeta.value = false
+  }
+}
+
+function buildRuntimeConfig() {
+  return {
+    ...config.value,
+    translator_model: getResolvedTranslatorModel(config.value),
+    style_region_overrides: { ...styleRegionOverrides.value },
+    translation_region_overrides: { ...translationRegionOverrides.value },
+    translation_region_skip_overrides: { ...translationRegionSkipOverrides.value },
+    translation_region_disabled_overrides: { ...translationRegionDisabledOverrides.value },
+    translation_region_layout_overrides: { ...translationRegionLayoutOverrides.value }
+  }
+}
+
+function getResolvedTranslatorModel(value = config.value) {
+  if (value.translator !== 'doubao-ark') {
+    return value.translator_model || ''
+  }
+
+  const customModel = String(value.translator_model_custom || '').trim()
+  if (customModel) {
+    return customModel
+  }
+
+  return value.translator_model || getDefaultTranslatorModel(value.translator)
+}
+
+function getStyleLabel(style) {
+  return styleBucketLabelMap[style] || '未分类'
+}
+
+function getResolvedRegionStyleLabel(region) {
+  const resolvedStyle = getResolvedStyle(region)
+  return resolvedStyle ? getStyleLabel(resolvedStyle) : '未分类'
+}
+
+function getRegionOverrideValue(region) {
+  return styleRegionOverrides.value[region.id] || ''
+}
+
+function getEditRegionText(region) {
+  if (Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)) {
+    return translationInputDrafts.value[region.id]
+  }
+  return translationRegionOverrides.value[region.id] || region.current_translation || region.machine_translation || ''
+}
+
+function isRegionSkipEnabled(region) {
+  return Boolean(translationRegionSkipOverrides.value[region.id] || region.override_skip)
+}
+
+function isRegionDisabled(region) {
+  return Boolean(translationRegionDisabledOverrides.value[region.id])
+}
+
+function getResolvedStyle(region) {
+  return styleRegionOverrides.value[region.id] || region.resolved_style || region.auto_style || ''
+}
+
+function normalizeFontFamilyName(value) {
+  return String(value || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.(ttf|ttc|otf)$/i, '')
+    .trim()
+}
+
+function hashPreviewFontKey(value) {
+  let hash = 2166136261
+  for (const char of String(value || '')) {
+    hash ^= char.codePointAt(0) || 0
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function getPreviewFontAlias(fontId) {
+  const normalized = String(fontId || '').trim()
+  if (!normalized) {
+    return 'codex-preview-font-default'
+  }
+  return `codex-preview-font-${hashPreviewFontKey(normalized)}`
+}
+
+function getConfiguredFontId() {
+  return String(config.value.font_key || '').trim()
+}
+
+function getConfiguredStyleFontId(styleBucket) {
+  if (styleBucket === 'gothic') {
+    return ''
+  }
+  const configKey = styleFontConfigKeyMap[styleBucket]
+  if (!configKey) {
+    return ''
+  }
+  return String(config.value[configKey] || '').trim()
+}
+
+function getFontById(fontId) {
+  return availableFonts.value.find((font) => font.id === fontId) || null
+}
+
+function getPreviewFontState(fontId) {
+  const normalizedFontId = String(fontId || '').trim()
+  if (!normalizedFontId) {
+    return { status: 'unknown', error: '' }
+  }
+  return previewFontLoadState.value[normalizedFontId] || { status: 'unknown', error: '' }
+}
+
+function isPreviewFontUnsupported(fontId) {
+  return getPreviewFontState(fontId).status === 'unsupported'
+}
+
+function findFontIdByFamily(fontFamily) {
+  const normalizedFamily = normalizeFontFamilyName(fontFamily).toLowerCase()
+  if (!normalizedFamily) {
+    return ''
+  }
+  for (const font of availableFonts.value) {
+    const candidates = [
+      font?.id,
+      font?.name,
+      font?.label,
+      font?.file_name,
+      font?.filename
+    ]
+      .map((item) => normalizeFontFamilyName(item).toLowerCase())
+      .filter(Boolean)
+    if (candidates.includes(normalizedFamily)) {
+      return String(font.id || '')
+    }
+  }
+  return ''
+}
+
+function getPreviewFontFormatHint(font) {
+  const explicitHint = String(font?.format_hint || '').trim().toLowerCase()
+  if (explicitHint) {
+    return explicitHint
+  }
+  const extension = String(font?.extension || font?.name || '')
+    .trim()
+    .toLowerCase()
+  if (extension.endsWith('.ttf')) {
+    return 'truetype'
+  }
+  if (extension.endsWith('.otf')) {
+    return 'opentype'
+  }
+  return ''
+}
+
+function getRegionFontOverrideId(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  return String(override?.font_key || region?.font_key_override || '').trim()
+}
+
+function getFollowRegionFontId(region) {
+  if (config.value.font_style_mode === 'auto-map') {
+    return getConfiguredStyleFontId(getResolvedStyle(region)) || getConfiguredFontId() || findFontIdByFamily(region?.font_family || '')
+  }
+  return getConfiguredFontId() || findFontIdByFamily(region?.font_family || '')
+}
+
+function getEffectiveRegionFontId(region) {
+  return getRegionFontOverrideId(region) || getFollowRegionFontId(region)
+}
+
+function getRegionFontPlaceholderLabel(_region) {
+  return config.value.font_style_mode === 'auto-map' ? '跟随识别结果' : '跟随主字体'
+}
+
+function pickPreviewFallbackFontId(region) {
+  const fallbackStyle = config.value.font_style_mode === 'auto-map'
+    ? (getResolvedStyle(region) || 'gothic')
+    : 'gothic'
+  const preferredNames = previewFallbackFontNameMap[fallbackStyle] || previewFallbackFontNameMap.gothic
+  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id))
+  const matchedFont = pickMappedStyleFont(compatibleFonts, preferredNames)
+  return matchedFont?.id || ''
+}
+
+function getResolvedPreviewFontId(region) {
+  const effectiveFontId = getEffectiveRegionFontId(region)
+  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId)) {
+    return effectiveFontId
+  }
+  return pickPreviewFallbackFontId(region)
+}
+
+function getEffectiveRegionFontLabel(region) {
+  const effectiveFontId = getEffectiveRegionFontId(region)
+  const effectiveFont = effectiveFontId ? getFontById(effectiveFontId) : null
+  const effectiveFontLabel = effectiveFont?.label || getFontById(config.value.font_key)?.label || '默认字体'
+  const previewFontId = getResolvedPreviewFontId(region)
+  const usesPreviewFallback = Boolean(
+    effectiveFontId
+    && previewFontId
+    && previewFontId !== effectiveFontId
+  )
+
+  if (config.value.font_style_mode === 'auto-map') {
+    return usesPreviewFallback
+      ? `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}（预览替代）`
+      : `${getResolvedRegionStyleLabel(region)} · ${effectiveFontLabel}`
+  }
+
+  return usesPreviewFallback
+    ? `${effectiveFontLabel}（预览替代）`
+    : effectiveFontLabel
+}
+
+function hasRegionWarning(region) {
+  const regionText = String(getEditRegionText(region) || '').trim()
+  const confidence = Number(region?.ocr_confidence || 0)
+  return Boolean(
+    (getEffectiveRegionFontId(region) && isPreviewFontUnsupported(getEffectiveRegionFontId(region)))
+    || !regionText
+    || (Number.isFinite(confidence) && confidence > 0 && confidence < 0.72)
+  )
+}
+
+function getPreviewFontOptionLabel(font) {
+  if (!font) {
+    return ''
+  }
+  return isPreviewFontUnsupported(font.id)
+    ? `${font.label}（仅最终重嵌）`
+    : font.label
+}
+
+async function refreshSelectedRegionPreviewDebug() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const region = selectedEditRegion.value
+  const page = selectedEditPage.value
+  if (!region || !page) {
+    selectedRegionPreviewDebug.value = {
+      regionId: '',
+      requestedFont: '',
+      requestedAlias: '',
+      computedFontFamily: '',
+      computedFontWeight: '',
+      previewLayer: '',
+    }
+    return
+  }
+
+  const requestedFontId = getEffectiveRegionFontId(region)
+  const requestedFont = requestedFontId ? getFontById(requestedFontId) : null
+  const previewFontId = getResolvedPreviewFontId(region)
+  const requestedAlias = previewFontId ? getPreviewFontAlias(previewFontId) : ''
+  const layer = shouldShowCanvasTextOverlay(region, page)
+    ? '实时叠字预览'
+    : shouldShowSourceCropPreview(region, page)
+      ? '原文裁切预览'
+      : '最终译图'
+
+  await nextTick()
+  await new Promise((resolve) => window.requestAnimationFrame(() => resolve()))
+
+  const overlay = translatedPreviewCanvasRef.value?.querySelector?.(
+    `.style-box-preview-text-content[data-region-id="${region.id}"]`
+  )
+  const computedStyle = overlay ? window.getComputedStyle(overlay) : null
+
+  selectedRegionPreviewDebug.value = {
+    regionId: region.id,
+    requestedFont: requestedFont?.label || getEffectiveRegionFontLabel(region),
+    requestedAlias,
+    computedFontFamily: computedStyle?.fontFamily || '(当前未走叠字预览层)',
+    computedFontWeight: computedStyle?.fontWeight || '',
+    previewLayer: layer,
+  }
+}
+
+function getRegionPreviewFontFamily(region) {
+  const fontId = getResolvedPreviewFontId(region)
+  if (fontId) {
+    return `"${getPreviewFontAlias(fontId)}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+  }
+
+  const fallbackFamily = normalizeFontFamilyName(region?.font_family || '')
+  if (!fallbackFamily) {
+    return '"Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif'
+  }
+  return `"${fallbackFamily}","Microsoft JhengHei","PingFang TC","Noto Sans CJK TC",sans-serif`
+}
+
+function getPageUiState(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return createDefaultPerPageUiState()
+  }
+  return perPageUiState.value[normalizedPageId] || createDefaultPerPageUiState()
+}
+
+function updatePageUiState(pageId, updater) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return
+  }
+  const current = getPageUiState(normalizedPageId)
+  const nextState = typeof updater === 'function'
+    ? updater({
+        selectedRegionId: current.selectedRegionId || '',
+        main: { ...current.main },
+        compare: { ...current.compare }
+      })
+    : updater
+  perPageUiState.value = {
+    ...perPageUiState.value,
+    [normalizedPageId]: nextState
+  }
+}
+
+function prunePerPageUiState(pages) {
+  const validPageIds = new Set((pages || []).map((page) => String(page?.stored_name || '').trim()).filter(Boolean))
+  const nextState = {}
+  for (const [pageId, value] of Object.entries(perPageUiState.value || {})) {
+    if (validPageIds.has(pageId)) {
+      nextState[pageId] = value
+    }
+  }
+  perPageUiState.value = nextState
+}
+
+function getViewportState(pageId, pane = 'main') {
+  const pageState = getPageUiState(pageId)
+  return pageState[pane] || createDefaultPerPageUiState()[pane]
+}
+
+function updateViewportState(pageId, pane, patch, options = {}) {
+  const normalizedPane = pane === 'compare' ? 'compare' : 'main'
+  updatePageUiState(pageId, (current) => {
+    const currentViewport = current[normalizedPane] || createDefaultPerPageUiState()[normalizedPane]
+    const nextViewport = {
+      zoom: Math.min(4, Math.max(1, Number(patch.zoom ?? currentViewport.zoom ?? 1))),
+      panX: Number(patch.panX ?? currentViewport.panX ?? 0),
+      panY: Number(patch.panY ?? currentViewport.panY ?? 0)
+    }
+    const nextState = {
+      ...current,
+      [normalizedPane]: nextViewport
+    }
+    if (
+      normalizedPane === 'main'
+      && reviewWorkspacePrefs.value.compare_sync_enabled
+      && options.syncCompare !== false
+    ) {
+      nextState.compare = { ...nextViewport }
+    }
+    return nextState
+  })
+}
+
+function resetViewportStateForPage(page) {
+  const pageId = String(page?.stored_name || '').trim()
+  if (!pageId) {
+    return
+  }
+  updatePageUiState(pageId, (current) => ({
+    ...current,
+    main: { zoom: 1, panX: 0, panY: 0 },
+    compare: reviewWorkspacePrefs.value.compare_sync_enabled
+      ? { zoom: 1, panX: 0, panY: 0 }
+      : { ...(current.compare || createDefaultPerPageUiState().compare), zoom: 1, panX: 0, panY: 0 }
+  }))
+}
+
+function focusSelectedRegionInViewport(page, pane = 'main') {
+  const region = selectedEditRegion.value
+  if (!page || !region) {
+    return
+  }
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  const safeWidth = Math.max(rect.width || 0, 1)
+  const safeHeight = Math.max(rect.height || 0, 1)
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const regionWidth = Math.max(8, x2 - x1)
+  const regionHeight = Math.max(8, y2 - y1)
+  const imageWidth = Math.max(page.image_width || 1, 1)
+  const imageHeight = Math.max(page.image_height || 1, 1)
+  const fitZoom = Math.min(
+    4,
+    Math.max(
+      1,
+      Math.min(
+        (safeWidth * 0.72) / ((regionWidth / imageWidth) * safeWidth),
+        (safeHeight * 0.72) / ((regionHeight / imageHeight) * safeHeight),
+      )
+    )
+  )
+  const centerX = (x1 + x2) / 2
+  const centerY = (y1 + y2) / 2
+  updateViewportState(page.stored_name, pane, {
+    zoom: fitZoom,
+    panX: (safeWidth / 2) - ((centerX / imageWidth) * safeWidth * fitZoom),
+    panY: (safeHeight / 2) - ((centerY / imageHeight) * safeHeight * fitZoom)
+  })
+}
+
+function getCanvasViewportStyle(page, pane = 'main') {
+  const pageId = String(page?.stored_name || '').trim()
+  const viewport = getViewportState(pageId, pane)
+  return {
+    transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.zoom})`,
+    transformOrigin: 'top left'
+  }
+}
+
+function isChineseTargetLanguage() {
+  const targetLang = String(config.value.target_lang || '').trim().toUpperCase()
+  return targetLang === 'CHS' || targetLang === 'CHT'
+}
+
+function normalizeDirectionValue(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'vertical' || normalized === 'v' || normalized === 'vertical-rl') {
+    return 'vertical'
+  }
+  if (normalized === 'horizontal' || normalized === 'h' || normalized === 'horizontal-tb') {
+    return 'horizontal'
+  }
+  return 'auto'
+}
+
+function getRegionDirectionOverride(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  return normalizeDirectionValue(override?.direction)
+}
+
+function getRegionDirectionValue(region) {
+  return getRegionDirectionOverride(region)
+}
+
+function getResolvedRegionDirection(region) {
+  const override = getRegionDirectionOverride(region)
+  if (override !== 'auto') {
+    return override
+  }
+  if (isChineseTargetLanguage()) {
+    return 'vertical'
+  }
+  return normalizeDirectionValue(region?.direction) === 'vertical' ? 'vertical' : 'horizontal'
+}
+
+function isVerticalRegion(region) {
+  return getResolvedRegionDirection(region) === 'vertical'
+}
+
+function getResolvedRegionAlignment(region) {
+  const normalized = String(region?.alignment || config.value.render_alignment || 'left')
+    .trim()
+    .toLowerCase()
+  if (normalized === 'center' || normalized === 'right' || normalized === 'left') {
+    return normalized
+  }
+  return 'left'
+}
+
+function getRegionFontSize(region) {
+  if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
+    return fontSizeInputDrafts.value[region.id]
+  }
+  const override = translationRegionLayoutOverrides.value[region.id]
+  if (override && typeof override.font_size === 'number') {
+    return override.font_size
+  }
+  return Number(region.font_size || 12)
+}
+
+function getPageHistoryState(pageId) {
+  return pageEditHistory.value[pageId] || { undo: [], redo: [] }
+}
+
+function replacePageHistoryState(pageId, nextState) {
+  pageEditHistory.value = {
+    ...pageEditHistory.value,
+    [pageId]: nextState
+  }
+}
+
+function pushCanvasHistory(pageId, entry) {
+  if (!pageId || !entry) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const nextUndo = [...current.undo, entry].slice(-maxCanvasHistoryEntries)
+  replacePageHistoryState(pageId, {
+    undo: nextUndo,
+    redo: []
+  })
+}
+
+function isEditableTextTarget(target) {
+  if (!target || !(target instanceof HTMLElement)) {
+    return false
+  }
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function isRegionSelectedForMerge(region) {
+  return Boolean(mergeRegionSelection.value[region.id])
+}
+
+function handleCanvasRegionClick(region) {
+  if (!region) {
+    return
+  }
+  if (Date.now() < suppressCanvasRegionClickUntil) {
+    return
+  }
+  if (mergeMode.value) {
+    toggleMergeSelection(region)
+    return
+  }
+  selectedEditRegionKey.value = region.id
+}
+
+function syncEditSelection() {
+  if (!mergedInspectionPages.value.length) {
+    resetEditInspectorSelection()
+    return
+  }
+
+  prunePerPageUiState(mergedInspectionPages.value)
+
+  if (!mergedInspectionPages.value.some((page) => page.stored_name === selectedEditPageKey.value)) {
+    selectedEditPageKey.value = mergedInspectionPages.value[0].stored_name
+  }
+
+  const currentPage = mergedInspectionPages.value.find((page) => page.stored_name === selectedEditPageKey.value)
+  if (!currentPage) {
+    selectedEditRegionKey.value = ''
+    return
+  }
+
+  const currentState = getPageUiState(currentPage.stored_name)
+  const hadStoredState = Boolean(perPageUiState.value[currentPage.stored_name])
+  let nextSelectedRegionId = String(currentState.selectedRegionId || '')
+  if (nextSelectedRegionId && !currentPage.regions.some((region) => region.id === nextSelectedRegionId)) {
+    nextSelectedRegionId = ''
+  }
+  if (!hadStoredState) {
+    nextSelectedRegionId = currentPage.regions[0]?.id || ''
+  }
+  updatePageUiState(currentPage.stored_name, (state) => ({
+    ...state,
+    selectedRegionId: nextSelectedRegionId
+  }))
+  selectedEditRegionKey.value = nextSelectedRegionId
+  reconcileCanvasInteractionState()
+}
+
+function reconcileCanvasInteractionState() {
+  const currentPage = selectedEditPage.value
+  const validRegionIds = new Set((currentPage?.regions || []).map((region) => String(region?.id || '')).filter(Boolean))
+
+  if (adjustingRegionId.value && !validRegionIds.has(adjustingRegionId.value)) {
+    adjustingRegionId.value = ''
+    manualDrawDraft.value = null
+  }
+
+  if (mergeMode.value) {
+    const nextSelection = {}
+    for (const regionId of Object.keys(mergeRegionSelection.value || {})) {
+      if (validRegionIds.has(regionId)) {
+        nextSelection[regionId] = true
+      }
+    }
+    mergeRegionSelection.value = nextSelection
+    if (!Object.keys(nextSelection).length) {
+      mergeMode.value = false
+    }
+  }
+
+  if (!manualDrawMode.value && !adjustingRegionId.value && manualDrawDraft.value) {
+    manualDrawDraft.value = null
+  }
+}
+
+function clearCanvasInteractionLocks() {
+  mergeMode.value = false
+  mergeRegionSelection.value = {}
+  clearManualDraft()
+  status.value = '已解除画布交互锁，可以继续拖框、缩框和方向键微调。'
+}
+
+function pruneRegionDraftMap(draftMap, pages) {
+  const validRegionIds = new Set()
+  for (const page of pages || []) {
+    for (const region of page?.regions || []) {
+      if (region?.id) {
+        validRegionIds.add(region.id)
+      }
+    }
+  }
+
+  const nextDrafts = {}
+  for (const [regionId, value] of Object.entries(draftMap || {})) {
+    if (validRegionIds.has(regionId)) {
+      nextDrafts[regionId] = value
+    }
+  }
+  return nextDrafts
+}
+
+function getEffectiveRegionBBox(region) {
+  const override = translationRegionLayoutOverrides.value[region?.id]
+  const bbox = Array.isArray(override?.bbox) && override.bbox.length === 4
+    ? override.bbox
+    : region?.bbox
+  return Array.isArray(bbox) && bbox.length === 4 ? bbox : [0, 0, 0, 0]
+}
+
+function getStyleRegionBoxStyle(region, page) {
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  const left = Math.max(0, (x1 / width) * 100)
+  const top = Math.max(0, (y1 / height) * 100)
+  const boxWidth = Math.max(0.6, ((x2 - x1) / width) * 100)
+  const boxHeight = Math.max(1, ((y2 - y1) / height) * 100)
+  return {
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${boxWidth}%`,
+    height: `${boxHeight}%`
+  }
+}
+
+function getStyleRegionLabelClass(region, page) {
+  const [x1, y1, x2] = getEffectiveRegionBBox(region)
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  const nearTop = (y1 / height) < 0.08
+  const nearRight = (x2 / width) > 0.84
+  return {
+    'label-below': nearTop,
+    'label-right': nearRight
+  }
+}
+
+function isManualRegion(region) {
+  return Boolean(region?.manual)
+}
+
+function getCanvasPoint(event, page) {
+  const canvas = resolveCanvasInteractionSurface(event.currentTarget) || event.currentTarget
+  const rect = canvas.getBoundingClientRect()
+  return getCanvasPointFromRect(rect, event.clientX, event.clientY, page, 'main')
+}
+
+function resolveCanvasInteractionSurface(target) {
+  if (!target || typeof target.closest !== 'function') {
+    return null
+  }
+  return (
+    target.closest('.review-canvas-shell')
+    || target.closest('.style-preview-canvas')
+    || target.closest('.review-canvas-stage')
+    || null
+  )
+}
+
+function getCanvasPointFromRect(rect, clientX, clientY, page, pane = 'main') {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const safeWidth = Math.max(rect?.width || 1, 1)
+  const safeHeight = Math.max(rect?.height || 1, 1)
+  const viewport = getViewportState(page?.stored_name || '', pane)
+  const zoom = Math.max(viewport.zoom || 1, 0.001)
+  const x = Math.min(
+    imageWidth,
+    Math.max(0, (((clientX - rect.left - viewport.panX) / (safeWidth * zoom)) * imageWidth))
+  )
+  const y = Math.min(
+    imageHeight,
+    Math.max(0, (((clientY - rect.top - viewport.panY) / (safeHeight * zoom)) * imageHeight))
+  )
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  }
+}
+
+function clampValue(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function normalizeBBoxToPage(bbox, page) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const minSize = 8
+
+  let [x1, y1, x2, y2] = (Array.isArray(bbox) ? bbox : [0, 0, 0, 0]).map((value) => Math.round(Number(value) || 0))
+  x1 = clampValue(x1, 0, imageWidth)
+  x2 = clampValue(x2, 0, imageWidth)
+  y1 = clampValue(y1, 0, imageHeight)
+  y2 = clampValue(y2, 0, imageHeight)
+
+  if (x2 < x1) {
+    [x1, x2] = [x2, x1]
+  }
+  if (y2 < y1) {
+    [y1, y2] = [y2, y1]
+  }
+
+  if (x2 - x1 < minSize) {
+    if (x1 + minSize <= imageWidth) {
+      x2 = x1 + minSize
+    } else {
+      x1 = Math.max(0, imageWidth - minSize)
+      x2 = imageWidth
+    }
+  }
+
+  if (y2 - y1 < minSize) {
+    if (y1 + minSize <= imageHeight) {
+      y2 = y1 + minSize
+    } else {
+      y1 = Math.max(0, imageHeight - minSize)
+      y2 = imageHeight
+    }
+  }
+
+  return [x1, y1, x2, y2]
+}
+
+function translateBBoxWithinPage(originBBox, deltaX, deltaY, page) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const width = Math.max(8, originBBox[2] - originBBox[0])
+  const height = Math.max(8, originBBox[3] - originBBox[1])
+  let x1 = originBBox[0] + deltaX
+  let y1 = originBBox[1] + deltaY
+  x1 = clampValue(x1, 0, Math.max(0, imageWidth - width))
+  y1 = clampValue(y1, 0, Math.max(0, imageHeight - height))
+  return [x1, y1, x1 + width, y1 + height].map((value) => Math.round(value))
+}
+
+function clearCanvasNudgeCommitTimer() {
+  if (canvasNudgeCommitTimer != null) {
+    window.clearTimeout(canvasNudgeCommitTimer)
+    canvasNudgeCommitTimer = null
+  }
+}
+
+function scheduleCanvasNudgeCommit() {
+  clearCanvasNudgeCommitTimer()
+  canvasNudgeCommitTimer = window.setTimeout(() => {
+    void flushPendingCanvasNudge()
+  }, 90)
+}
+
+async function flushPendingCanvasNudge() {
+  const pending = pendingCanvasNudge
+  if (!pending) {
+    return
+  }
+
+  pendingCanvasNudge = null
+  clearCanvasNudgeCommitTimer()
+
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === pending.pageId)
+  const region = page?.regions?.find((item) => item.id === pending.regionId)
+  const currentOverride = translationRegionLayoutOverrides.value[pending.regionId]
+  const nextBBox = Array.isArray(currentOverride?.bbox) && currentOverride.bbox.length === 4
+    ? currentOverride.bbox
+    : region
+      ? getEffectiveRegionBBox(region)
+      : null
+
+  if (!page || !nextBBox) {
+    return
+  }
+
+  const changed = nextBBox.some((value, index) => value !== pending.originBBox[index])
+  if (!changed) {
+    return
+  }
+
+  await runCanvasCommand(page, {
+    label: '微调文本框位置',
+    redoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: pending.regionId,
+        bbox: nextBBox
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: pending.regionId,
+        bbox: pending.originBBox
+      }
+    ],
+    focusRegionId: pending.regionId,
+    rollback: () => updateRegionLayoutOverride(pending.regionId, { bbox: pending.originBBox })
+  })
+}
+
+function nudgeSelectedRegion(deltaX, deltaY) {
+  const page = selectedEditPage.value
+  const region = selectedEditRegion.value
+  if (!page || !region || !canDirectManipulateCanvas.value) {
+    return
+  }
+
+  const hasPendingForSameRegion = Boolean(
+    pendingCanvasNudge
+    && pendingCanvasNudge.pageId === page.stored_name
+    && pendingCanvasNudge.regionId === region.id
+  )
+  if (pendingCanvasNudge && !hasPendingForSameRegion) {
+    void flushPendingCanvasNudge()
+  }
+
+  const currentBBox = getEffectiveRegionBBox(region)
+  const nextBBox = translateBBoxWithinPage(currentBBox, deltaX, deltaY, page)
+  const changed = nextBBox.some((value, index) => value !== currentBBox[index])
+  if (!changed) {
+    return
+  }
+
+  if (!hasPendingForSameRegion) {
+    pendingCanvasNudge = {
+      pageId: page.stored_name,
+      regionId: region.id,
+      originBBox: currentBBox
+    }
+  }
+
+  updateRegionLayoutOverride(region.id, { bbox: nextBBox })
+  selectedEditRegionKey.value = region.id
+  scheduleCanvasNudgeCommit()
+}
+
+function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page) {
+  let [x1, y1, x2, y2] = originBBox
+  if (handle.includes('n')) {
+    y1 += deltaY
+  }
+  if (handle.includes('s')) {
+    y2 += deltaY
+  }
+  if (handle.includes('w')) {
+    x1 += deltaX
+  }
+  if (handle.includes('e')) {
+    x2 += deltaX
+  }
+  return normalizeBBoxToPage([x1, y1, x2, y2], page)
+}
+
+function getCanvasHandleCursor(handle) {
+  const cursorMap = {
+    nw: 'nwse-resize',
+    se: 'nwse-resize',
+    ne: 'nesw-resize',
+    sw: 'nesw-resize',
+    n: 'ns-resize',
+    s: 'ns-resize',
+    e: 'ew-resize',
+    w: 'ew-resize'
+  }
+  return cursorMap[handle] || 'move'
+}
+
+function getCanvasPreviewImageUrl(page) {
+  const dirty = Boolean(page?.stored_name && canvasPreviewDirtyPages.value[page.stored_name])
+  if (isCanvasReviewMode.value && dirty) {
+    const baseImagePath = page?.base_image_url || page?.translated_image_url || page?.image_url || ''
+    return withCacheBust(toApiUrl(baseImagePath))
+  }
+
+  const latestTranslatedUrl = page?.stored_name
+    ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
+    : ''
+  if (latestTranslatedUrl) {
+    return latestTranslatedUrl
+  }
+
+  const imagePath = page?.translated_image_url || page?.image_url || page?.base_image_url || ''
+  return withCacheBust(toApiUrl(imagePath))
+}
+
+function getSavedTranslatedImageUrl(page) {
+  const latestTranslatedUrl = page?.stored_name
+    ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
+    : ''
+  if (latestTranslatedUrl) {
+    return latestTranslatedUrl
+  }
+
+  const translatedPath = String(page?.translated_image_url || '').trim()
+  if (translatedPath) {
+    return withCacheBust(toApiUrl(translatedPath))
+  }
+
+  return ''
+}
+
+function setComparePaneMode(mode) {
+  if (!isValidComparePaneMode(mode)) {
+    return
+  }
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    compare_pane_mode: mode
+  }
+}
+
+function setInspectorTab(tab) {
+  if (!isValidInspectorTab(tab)) {
+    return
+  }
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    inspector_tab: tab
+  }
+}
+
+function toggleCompareSync() {
+  const nextEnabled = !reviewWorkspacePrefs.value.compare_sync_enabled
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    compare_sync_enabled: nextEnabled
+  }
+  if (nextEnabled && selectedEditPage.value?.stored_name) {
+    const pageId = selectedEditPage.value.stored_name
+    const mainViewport = getViewportState(pageId, 'main')
+    updateViewportState(pageId, 'compare', mainViewport, { syncCompare: false })
+  }
+}
+
+function toggleWorkspaceDebug() {
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    show_debug: !reviewWorkspacePrefs.value.show_debug
+  }
+}
+
+function toggleWorkspacePanel(panelKey) {
+  if (!panelKey) {
+    return
+  }
+  const nextValue = !reviewWorkspacePrefs.value[panelKey]
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    [panelKey]: nextValue
+  }
+}
+
+function startWorkspaceSplitterDrag(kind, event) {
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+  const shell = reviewWorkspaceLayoutRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  workspaceSplitterState.value = {
+    kind,
+    pointerId: event.pointerId,
+    shellLeft: rect.left,
+    shellRight: rect.right,
+    originRailWidth: Number(reviewWorkspacePrefs.value.page_rail_width || 128),
+    originInspectorWidth: Number(reviewWorkspacePrefs.value.inspector_width || 420)
+  }
+  event.preventDefault()
+}
+
+function updateWorkspaceSplitterDrag(event) {
+  const draft = workspaceSplitterState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+
+  if (draft.kind === 'rail') {
+    const nextWidth = Math.min(180, Math.max(96, Math.round(event.clientX - draft.shellLeft)))
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      page_rail_width: nextWidth
+    }
+    return
+  }
+
+  if (draft.kind === 'inspector') {
+    const nextWidth = Math.min(920, Math.max(300, Math.round(draft.shellRight - event.clientX)))
+    reviewWorkspacePrefs.value = {
+      ...reviewWorkspacePrefs.value,
+      inspector_width: nextWidth
+    }
+  }
+}
+
+function finishWorkspaceSplitterDrag() {
+  if (!workspaceSplitterState.value) {
+    return
+  }
+  workspaceSplitterState.value = null
+}
+
+function startCompareSplitterDrag(event) {
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+  const zone = reviewCanvasZoneRef.value
+  if (!zone) {
+    return
+  }
+  const rect = zone.getBoundingClientRect()
+  compareSplitterState.value = {
+    pointerId: event.pointerId,
+    zoneLeft: rect.left,
+    zoneWidth: Math.max(rect.width, 1),
+    originRatio: reviewWorkspacePrefs.value.split_ratio
+  }
+  event.preventDefault()
+}
+
+function updateCompareSplitterDrag(event) {
+  const draft = compareSplitterState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  const relative = ((event.clientX - draft.zoneLeft) / draft.zoneWidth) * 100
+  reviewWorkspacePrefs.value = {
+    ...reviewWorkspacePrefs.value,
+    split_ratio: Math.min(80, Math.max(50, Math.round(relative)))
+  }
+}
+
+function finishCompareSplitterDrag() {
+  if (!compareSplitterState.value) {
+    return
+  }
+  compareSplitterState.value = null
+}
+
+function startCanvasViewportPan(event, page, pane = 'main') {
+  if (!page || manualDrawMode.value || mergeMode.value || isAdjustingRegionBBox.value) {
+    return
+  }
+  const isMiddleMouse = event.button === 1
+  const allowPan = spacePanPressed.value || isMiddleMouse
+  if (!allowPan) {
+    return
+  }
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const viewport = getViewportState(page.stored_name, pane)
+  viewportPanState.value = {
+    pointerId: event.pointerId,
+    pageId: page.stored_name,
+    pane,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    originPanX: viewport.panX,
+    originPanY: viewport.panY
+  }
+  event.preventDefault()
+}
+
+function updateCanvasViewportPan(event) {
+  const draft = viewportPanState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  updateViewportState(draft.pageId, draft.pane, {
+    panX: draft.originPanX + (event.clientX - draft.startClientX),
+    panY: draft.originPanY + (event.clientY - draft.startClientY)
+  })
+}
+
+function finishCanvasViewportPan() {
+  viewportPanState.value = null
+}
+
+function cancelCanvasViewportPan() {
+  viewportPanState.value = null
+}
+
+function handleCanvasWheel(event, page, pane = 'main') {
+  if (!page) {
+    return
+  }
+  event.preventDefault()
+  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  if (!shell) {
+    return
+  }
+  const rect = shell.getBoundingClientRect()
+  const viewport = getViewportState(page.stored_name, pane)
+  const pointerX = event.clientX - rect.left
+  const pointerY = event.clientY - rect.top
+  const delta = event.deltaY < 0 ? 1.1 : 0.92
+  const nextZoom = Math.min(4, Math.max(1, Number((viewport.zoom * delta).toFixed(3))))
+  const ratio = nextZoom / Math.max(viewport.zoom || 1, 0.001)
+  updateViewportState(page.stored_name, pane, {
+    zoom: nextZoom,
+    panX: pointerX - ((pointerX - viewport.panX) * ratio),
+    panY: pointerY - ((pointerY - viewport.panY) * ratio)
+  })
+}
+
+function selectAdjacentEditPage(offset) {
+  if (!mergedInspectionPages.value.length || selectedEditPageIndex.value < 0) {
+    return
+  }
+  const nextIndex = Math.min(
+    mergedInspectionPages.value.length - 1,
+    Math.max(0, selectedEditPageIndex.value + offset),
+  )
+  const nextPage = mergedInspectionPages.value[nextIndex]
+  if (nextPage?.stored_name) {
+    selectedEditPageKey.value = nextPage.stored_name
+  }
+}
+
+function selectAdjacentEditRegion(offset) {
+  if (!filteredEditRegions.value.length) {
+    return
+  }
+
+  const currentIndex = selectedEditRegionVisibleIndex.value
+  if (currentIndex < 0) {
+    const fallbackIndex = offset >= 0 ? 0 : filteredEditRegions.value.length - 1
+    selectedEditRegionKey.value = filteredEditRegions.value[fallbackIndex]?.id || ''
+    return
+  }
+
+  const nextIndex = Math.min(
+    filteredEditRegions.value.length - 1,
+    Math.max(0, currentIndex + offset),
+  )
+  selectedEditRegionKey.value = filteredEditRegions.value[nextIndex]?.id || selectedEditRegionKey.value
+}
+
+function getCanvasPreviewText(region) {
+  if (isRegionSkipEnabled(region) || isRegionDisabled(region)) {
+    return ''
+  }
+  const draft = Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)
+    ? String(translationInputDrafts.value[region.id] || '')
+    : ''
+  return draft || getEditRegionText(region) || region.preview_text || ''
+}
+
+function shouldShowSourceCropPreview(region, page) {
+  return Boolean(
+    isCanvasReviewMode.value
+    && page?.stored_name
+    && canvasPreviewDirtyPages.value[page.stored_name]
+    && (isRegionSkipEnabled(region) || isRegionDisabled(region))
+  )
+}
+
+function shouldShowCanvasTextOverlay(region, page) {
+  return Boolean(
+    isCanvasReviewMode.value
+    && page?.stored_name
+    && canvasPreviewDirtyPages.value[page.stored_name]
+    && !isRegionSkipEnabled(region)
+    && !isRegionDisabled(region)
+    && getCanvasPreviewText(region)
+  )
+}
+
+function getSourceCropImageStyle(region, page) {
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const regionWidth = Math.max(1, x2 - x1)
+  const regionHeight = Math.max(1, y2 - y1)
+  const pageWidth = Math.max(page?.image_width || 1, 1)
+  const pageHeight = Math.max(page?.image_height || 1, 1)
+  return {
+    width: `${(pageWidth / regionWidth) * 100}%`,
+    height: `${(pageHeight / regionHeight) * 100}%`,
+    left: `-${(x1 / regionWidth) * 100}%`,
+    top: `-${(y1 / regionHeight) * 100}%`
+  }
+}
+
+function getCanvasPreviewTextStyle(region) {
+  const rawFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
+  const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
+  const spacingMultiplier = Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)
+  const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
+  const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize * 0.2)
+  const lineHeight = Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
+  return {
+    fontFamily: getRegionPreviewFontFamily(region),
+    fontSize: `${scaledFontSize}px`,
+    letterSpacing: `${letterSpacing.toFixed(2)}px`,
+    lineHeight: String(lineHeight),
+    fontSynthesis: 'none',
+    writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
+    textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
+    textAlign: isVerticalRegion(region)
+      ? 'start'
+      : getResolvedRegionAlignment(region) === 'center'
+        ? 'center'
+        : getResolvedRegionAlignment(region) === 'right'
+          ? 'right'
+          : 'left'
+  }
+}
+
+function getCanvasPreviewTextContainerStyle(region) {
+  if (isVerticalRegion(region)) {
+    return {
+      justifyContent: 'center',
+      alignItems: 'flex-start'
+    }
+  }
+
+  return {
+    justifyContent: 'flex-start',
+    alignItems: 'center'
+  }
+}
+
+function refreshTranslatedPreviewScale() {
+  const page = selectedEditPage.value
+  const canvasElement = translatedPreviewCanvasRef.value
+  if (!page?.image_width || !canvasElement) {
+    translatedPreviewScale.value = 1
+    return
+  }
+  const safeWidth = Math.max(canvasElement.clientWidth || 0, 1)
+  const zoom = getViewportState(page.stored_name, 'main').zoom || 1
+  translatedPreviewScale.value = (safeWidth / Math.max(page.image_width || 1, 1)) * zoom
+}
+
+function getManualDraftBBox(page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return null
+  }
+
+  const x1 = Math.min(draft.startX, draft.currentX)
+  const y1 = Math.min(draft.startY, draft.currentY)
+  const x2 = Math.max(draft.startX, draft.currentX)
+  const y2 = Math.max(draft.startY, draft.currentY)
+  if (x2 - x1 < 2 || y2 - y1 < 2) {
+    return null
+  }
+  return [x1, y1, x2, y2]
+}
+
+function getManualDraftStyle(page) {
+  const bbox = getManualDraftBBox(page)
+  if (!bbox) {
+    return {}
+  }
+  return getStyleRegionBoxStyle({ bbox }, page)
+}
+
+function clearManualDraft(options = {}) {
+  manualDrawDraft.value = null
+  if (!options.keepMode) {
+    manualDrawMode.value = false
+    adjustingRegionId.value = ''
+  }
+}
+
+async function submitManualDraw(page, bbox) {
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    if (isCanvasReviewMode.value) {
+      await runCanvasStructuredAction(page, {
+        kind: 'create_region',
+        bbox
+      })
+      return
+    }
+
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'create',
+        stored_name: page.stored_name,
+        bbox,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '新增补漏框失败')
+    }
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
+    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '新增补漏框失败'
+  } finally {
+    creatingManualRegion.value = false
+  }
+}
+
+function startRegionBBoxAdjustment(region) {
+  if (!region) {
+    return
+  }
+  manualDrawMode.value = false
+  mergeMode.value = false
+  mergeRegionSelection.value = {}
+  adjustingRegionId.value = region.id
+  manualDrawDraft.value = null
+  selectedEditRegionKey.value = region.id
+  status.value = '请在原图上拖一个新框，替换当前文本框范围。'
+}
+
+function startManualDraw(event, page) {
+  if ((!manualDrawMode.value && !adjustingRegionId.value) || !canCreateManualRegion.value || !page) {
+    return
+  }
+  if (event.button !== 0) {
+    return
+  }
+
+  const point = getCanvasPoint(event, page)
+  const existingDraft = manualDrawDraft.value
+  if (existingDraft && existingDraft.stored_name === page.stored_name) {
+    existingDraft.currentX = point.x
+    existingDraft.currentY = point.y
+    existingDraft.awaitingSecondPoint = false
+    finishManualDraw(event, page, { commit: true })
+    event.preventDefault()
+    return
+  }
+
+  manualDrawDraft.value = {
+    action: adjustingRegionId.value ? 'adjust' : 'create',
+    regionId: adjustingRegionId.value || '',
+    stored_name: page.stored_name,
+    startX: point.x,
+    startY: point.y,
+    currentX: point.x,
+    currentY: point.y,
+    pointerId: event.pointerId,
+    awaitingSecondPoint: true,
+    moved: false
+  }
+  selectedEditPageKey.value = page.stored_name
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+
+function updateManualDraw(event, page) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  if (Math.abs(draft.currentX - draft.startX) >= 4 || Math.abs(draft.currentY - draft.startY) >= 4) {
+    draft.awaitingSecondPoint = false
+    draft.moved = true
+  }
+}
+
+async function finishManualDraw(event, page, options = {}) {
+  const draft = manualDrawDraft.value
+  if (!draft || !page || draft.stored_name !== page.stored_name) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  if (event.currentTarget.hasPointerCapture?.(draft.pointerId)) {
+    event.currentTarget.releasePointerCapture?.(draft.pointerId)
+  }
+
+  if (!options.commit && draft.awaitingSecondPoint && !draft.moved) {
+    event.preventDefault()
+    return
+  }
+
+  const bbox = getManualDraftBBox(page)
+  if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
+    clearManualDraft({ keepMode: true })
+    status.value = adjustingRegionId.value ? '调整后的框太小了，拖大一点会更稳。' : '补漏框太小了，拖大一点会更稳。'
+    return
+  }
+
+  const draftAction = draft.action
+  const draftRegionId = draft.regionId
+  clearManualDraft({ keepMode: true })
+  if (draftAction === 'adjust' && draftRegionId) {
+    updateRegionLayoutOverride(draftRegionId, { bbox })
+    status.value = '已更新这个文本框的范围，重新嵌字时会按新框计算。'
+    adjustingRegionId.value = ''
+    return
+  }
+  await submitManualDraw(page, bbox)
+}
+
+async function deleteManualRegion(region) {
+  if (!sessionId.value || !region?.id || !isManualRegion(region)) {
+    return
+  }
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    if (isCanvasReviewMode.value && selectedEditPage.value) {
+      await runCanvasStructuredAction(selectedEditPage.value, {
+        kind: 'delete_manual_region',
+        regionIds: [region.id]
+      })
+      return
+    }
+
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'delete',
+        region_id: region.id
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '删除补漏框失败')
+    }
+
+    const nextTranslationOverrides = { ...translationRegionOverrides.value }
+    delete nextTranslationOverrides[region.id]
+    translationRegionOverrides.value = nextTranslationOverrides
+
+    const nextSkipOverrides = { ...translationRegionSkipOverrides.value }
+    delete nextSkipOverrides[region.id]
+    translationRegionSkipOverrides.value = nextSkipOverrides
+
+    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    delete nextDisabledOverrides[region.id]
+    translationRegionDisabledOverrides.value = nextDisabledOverrides
+
+    const nextLayoutOverrides = { ...translationRegionLayoutOverrides.value }
+    delete nextLayoutOverrides[region.id]
+    translationRegionLayoutOverrides.value = nextLayoutOverrides
+
+    const nextStyleOverrides = { ...styleRegionOverrides.value }
+    delete nextStyleOverrides[region.id]
+    styleRegionOverrides.value = nextStyleOverrides
+
+    const nextMergeSelection = { ...mergeRegionSelection.value }
+    delete nextMergeSelection[region.id]
+    mergeRegionSelection.value = nextMergeSelection
+
+    await loadEditInspection({ silent: true })
+    status.value = '已删除这个手动补漏框。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除补漏框失败'
+  } finally {
+    creatingManualRegion.value = false
+  }
+}
+
+function applyReviewInspectionPayload(payload) {
+  reviewInspectionPages.value = payload.pages || []
+  if (payload.workflow_stage) {
+    workflowStage.value = payload.workflow_stage
+  }
+  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
+    ? payload.overrides
+    : {}
+  const nextOverrides = { ...(sessionOverrides.translation_region_overrides || {}) }
+  const nextSkipOverrides = { ...(sessionOverrides.translation_region_skip_overrides || {}) }
+  const nextDisabledOverrides = { ...(sessionOverrides.translation_region_disabled_overrides || {}) }
+  const nextLayoutOverrides = { ...(sessionOverrides.translation_region_layout_overrides || {}) }
+  for (const page of reviewInspectionPages.value) {
+    for (const region of page.regions || []) {
+      if (region.override_translation) {
+        nextOverrides[region.id] = region.override_translation
+      }
+      if (region.override_skip) {
+        nextSkipOverrides[region.id] = true
+      }
+    }
+  }
+  translationRegionOverrides.value = nextOverrides
+  translationRegionSkipOverrides.value = nextSkipOverrides
+  translationRegionDisabledOverrides.value = nextDisabledOverrides
+  translationRegionLayoutOverrides.value = nextLayoutOverrides
+}
+
+function applyStyleInspectionPayload(payload) {
+  styleInspectionPages.value = payload.pages || []
+  if (payload.workflow_stage) {
+    workflowStage.value = payload.workflow_stage
+  }
+  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
+    ? payload.overrides
+    : {}
+  styleRegionOverrides.value = { ...(sessionOverrides.style_region_overrides || styleRegionOverrides.value) }
+}
+
+function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
+  let changed = false
+  const nextPages = pages.map((page) => {
+    if (page.stored_name !== storedName) {
+      return page
+    }
+    changed = true
+    return {
+      ...page,
+      image_url: nextImageUrl,
+      translated_image_url: nextImageUrl
+    }
+  })
+  return changed ? nextPages : pages
+}
+
+function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
+  const targetStoredName = payload.stored_name || ''
+  const targetName = payload.name || ''
+  const nextImage = {
+    id: `${sessionIdValue}-translated-${targetStoredName || payload.current}`,
+    name: targetName || `第 ${payload.current} 张`,
+    url: nextImageUrl,
+    stored_name: targetStoredName
+  }
+
+  let changed = false
+  const nextImages = images.map((image) => {
+    const sameStoredName = targetStoredName && image.stored_name === targetStoredName
+    const sameName = targetName && image.name === targetName
+    if (!sameStoredName && !sameName) {
+      return image
+    }
+    changed = true
+    return {
+      ...image,
+      ...nextImage,
+      id: image.id || nextImage.id,
+    }
+  })
+
+  if (changed) {
+    return nextImages
+  }
+
+  return [...images, nextImage]
+}
+
+async function loadReviewInspection(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!sessionId.value) {
+    reviewInspectionPages.value = []
+    syncEditSelection()
+    return
+  }
+
+  if (!silent) {
+    reviewInspectionLoading.value = true
+  }
+  try {
+    const response = await fetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ config: buildRuntimeConfig() })
+    })
+
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取翻译审校结果失败')
+    }
+
+    applyReviewInspectionPayload(payload)
+    syncEditSelection()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取翻译审校结果失败'
+  } finally {
+    if (!silent) {
+      reviewInspectionLoading.value = false
+    }
+  }
+}
+
+async function loadStyleInspection(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
+    styleInspectionPages.value = []
+    syncEditSelection()
+    return
+  }
+
+  if (!silent) {
+    styleInspectionLoading.value = true
+  }
+  try {
+    const response = await fetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ config: buildRuntimeConfig() })
+    })
+
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取字体样式识别结果失败')
+    }
+
+    applyStyleInspectionPayload(payload)
+    syncEditSelection()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取字体样式识别结果失败'
+  } finally {
+    if (!silent) {
+      styleInspectionLoading.value = false
+    }
+  }
+}
+
+async function loadEditInspection(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!sessionId.value) {
+    resetTranslationReview()
+    resetStyleInspector()
+    resetEditInspectorSelection()
+    return
+  }
+
+  const tasks = [loadReviewInspection({ silent })]
+  if (config.value.font_style_mode === 'auto-map') {
+    tasks.push(loadStyleInspection({ silent }))
+  } else {
+    resetStyleInspector()
+  }
+
+  await Promise.all(tasks)
+  translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
+  fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
+  syncEditSelection()
+}
+
+async function ensureEditInspectionReadyAfterDetect() {
+  if (workflowStage.value !== 'detected') {
+    return
+  }
+
+  const retryDelays = [180, 360, 700]
+  for (const delay of retryDelays) {
+    if (mergedInspectionPages.value.length > 0) {
+      return
+    }
+    status.value = '文本框识别已完成，正在等待逐框校对数据就绪…'
+    await sleep(delay)
+    await loadEditInspection({ silent: true })
+  }
+}
+
+function updateStyleOverride(region, nextStyle) {
+  const normalizedStyle = styleBucketOptions.some((option) => option.value === nextStyle) ? nextStyle : ''
+  const previousOverride = getRegionOverrideValue(region)
+  const page = selectedEditPage.value
+  const nextOverrides = { ...styleRegionOverrides.value }
+  if (!normalizedStyle || normalizedStyle === region.auto_style) {
+    delete nextOverrides[region.id]
+  } else {
+    nextOverrides[region.id] = normalizedStyle
+  }
+  styleRegionOverrides.value = nextOverrides
+  selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !page || normalizedStyle === previousOverride) {
+    return
+  }
+
+  void runCanvasCommand(page, {
+    label: '修改字体样式',
+    redoCommands: [
+      {
+        type: 'update_font_style',
+        region_id: region.id,
+        style: normalizedStyle
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_font_style',
+        region_id: region.id,
+        style: previousOverride
+      }
+    ],
+    successMessage: '已更新文本框字体样式。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...styleRegionOverrides.value }
+      if (previousOverride) {
+        rollbackOverrides[region.id] = previousOverride
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      styleRegionOverrides.value = rollbackOverrides
+    }
+  })
+}
+
+function updateTranslationOverride(region, nextTranslation) {
+  const normalizedTranslation = String(nextTranslation || '').trim()
+  const machineTranslation = String(region.machine_translation || '').trim()
+  const nextOverrides = { ...translationRegionOverrides.value }
+
+  if (!normalizedTranslation || normalizedTranslation === machineTranslation) {
+    delete nextOverrides[region.id]
+  } else {
+    nextOverrides[region.id] = normalizedTranslation
+  }
+
+  translationRegionOverrides.value = nextOverrides
+  selectedEditRegionKey.value = region.id
+}
+
+function updateTranslationSkipOverride(region, enabled) {
+  const previousValue = isRegionSkipEnabled(region)
+  const nextOverrides = { ...translationRegionSkipOverrides.value }
+  if (enabled) {
+    nextOverrides[region.id] = true
+  } else {
+    delete nextOverrides[region.id]
+  }
+  translationRegionSkipOverrides.value = nextOverrides
+  selectedEditRegionKey.value = region.id
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: enabled ? '保留原文' : '取消保留原文',
+    redoCommands: [
+      {
+        type: 'set_keep_original',
+        region_id: region.id,
+        enabled
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'set_keep_original',
+        region_id: region.id,
+        enabled: previousValue
+      }
+    ],
+    successMessage: enabled ? '这个文本框已设置为保留原文。' : '这个文本框已恢复可翻译状态。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionSkipOverrides.value }
+      if (previousValue) {
+        rollbackOverrides[region.id] = true
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      translationRegionSkipOverrides.value = rollbackOverrides
+    }
+  })
+}
+
+function updateRegionDisabledOverride(region, enabled) {
+  const previousValue = isRegionDisabled(region)
+  const nextOverrides = { ...translationRegionDisabledOverrides.value }
+  if (enabled) {
+    nextOverrides[region.id] = true
+  } else {
+    delete nextOverrides[region.id]
+  }
+  translationRegionDisabledOverrides.value = nextOverrides
+
+  const nextStyleOverrides = { ...styleRegionOverrides.value }
+  delete nextStyleOverrides[region.id]
+  styleRegionOverrides.value = nextStyleOverrides
+
+  const nextTranslationOverrides = { ...translationRegionOverrides.value }
+  delete nextTranslationOverrides[region.id]
+  translationRegionOverrides.value = nextTranslationOverrides
+
+  const nextSkipOverrides = { ...translationRegionSkipOverrides.value }
+  delete nextSkipOverrides[region.id]
+  translationRegionSkipOverrides.value = nextSkipOverrides
+
+  const nextLayoutOverrides = { ...translationRegionLayoutOverrides.value }
+  delete nextLayoutOverrides[region.id]
+  translationRegionLayoutOverrides.value = nextLayoutOverrides
+
+  const nextMergeSelection = { ...mergeRegionSelection.value }
+  delete nextMergeSelection[region.id]
+  mergeRegionSelection.value = nextMergeSelection
+
+  if (selectedEditRegionKey.value === region.id) {
+    selectedEditRegionKey.value = ''
+  }
+  selectedEditPageKey.value = selectedEditPage.value?.stored_name || selectedEditPageKey.value
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || enabled === previousValue) {
+    void loadEditInspection({ silent: true })
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: enabled ? '禁用文本框' : '恢复文本框',
+    redoCommands: [
+      enabled
+        ? { type: 'disable_region', region_id: region.id }
+        : { type: 'restore_region', region_id: region.id }
+    ],
+    undoCommands: [
+      previousValue
+        ? { type: 'disable_region', region_id: region.id }
+        : { type: 'restore_region', region_id: region.id }
+    ],
+    successMessage: enabled ? '已禁用这个自动识别框。' : '已恢复这个自动识别框。',
+    focusRegionId: region.id,
+    rollback: () => {
+      void loadEditInspection({ silent: true })
+    }
+  })
+}
+
+function updateRegionLayoutOverride(regionId, patch) {
+  const nextOverrides = { ...translationRegionLayoutOverrides.value }
+  const currentOverride = nextOverrides[regionId] ? { ...nextOverrides[regionId] } : {}
+  if (patch.bbox) {
+    currentOverride.bbox = patch.bbox
+  }
+  if (typeof patch.font_size === 'number' && !Number.isNaN(patch.font_size)) {
+    currentOverride.font_size = Math.max(8, Math.min(240, Math.round(patch.font_size)))
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'direction')) {
+    const normalizedDirection = normalizeDirectionValue(patch.direction)
+    if (normalizedDirection === 'auto') {
+      delete currentOverride.direction
+    } else {
+      currentOverride.direction = normalizedDirection
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'font_key')) {
+    const normalizedFontKey = String(patch.font_key || '').trim()
+    if (!normalizedFontKey) {
+      delete currentOverride.font_key
+    } else {
+      currentOverride.font_key = normalizedFontKey
+    }
+  }
+  if (!Object.keys(currentOverride).length) {
+    delete nextOverrides[regionId]
+  } else {
+    nextOverrides[regionId] = currentOverride
+  }
+  translationRegionLayoutOverrides.value = nextOverrides
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
+}
+
+async function applyPageCommands(pageId, commands) {
+  if (!sessionId.value || !pageId || !Array.isArray(commands) || !commands.length) {
+    return null
+  }
+  const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/commands`), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      config: buildRuntimeConfig(),
+      commands
+    })
+  })
+  const payload = await response.json()
+  if (!response.ok) {
+    throw new Error(payload.detail || '更新页面编辑状态失败')
+  }
+  return payload
+}
+
+async function runCanvasCommand(page, options) {
+  if (!page?.stored_name) {
+    return
+  }
+  const redoCommands = options?.redoCommands || []
+  const undoCommands = options?.undoCommands || []
+  if (!redoCommands.length) {
+    return
+  }
+
+  try {
+    await applyPageCommands(page.stored_name, redoCommands)
+    if (undoCommands.length) {
+      pushCanvasHistory(page.stored_name, {
+        label: String(options?.label || '编辑文本框'),
+        undoCommands,
+        redoCommands
+      })
+    }
+    if (options?.successMessage) {
+      status.value = options.successMessage
+    }
+    await loadEditInspection({ silent: true })
+    if (options?.focusRegionId) {
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = options.focusRegionId
+    }
+  } catch (error) {
+    if (typeof options?.rollback === 'function') {
+      options.rollback()
+    }
+    errorMessage.value = error instanceof Error ? error.message : '更新页面编辑状态失败'
+  }
+}
+
+async function undoCanvasEdit() {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const entry = current.undo[current.undo.length - 1]
+  if (!entry) {
+    return
+  }
+
+  try {
+    if (entry.kind === 'create_region') {
+      const createdRegionId = String(entry.createdRegionId || '')
+      await applyPageCommands(pageId, [{ type: 'delete_manual_region', region_id: createdRegionId }])
+    } else if (entry.kind === 'merge_regions') {
+      const createdRegionId = String(entry.createdRegionId || '')
+      const undoCommands = []
+      if (createdRegionId) {
+        undoCommands.push({ type: 'delete_manual_region', region_id: createdRegionId })
+      }
+      for (const sourceRegionId of entry.regionIds || []) {
+        undoCommands.push({ type: 'restore_region', region_id: sourceRegionId })
+      }
+      await applyPageCommands(pageId, undoCommands)
+    } else if (entry.kind === 'delete_manual_region') {
+      const restoreCommands = [
+        {
+          type: 'restore_manual_region',
+          payload: entry.deletedPayload || {}
+        }
+      ]
+      const restoredRegionId = String(entry.deletedPayload?.id || '')
+      const overrides = entry.regionOverrides || {}
+      if (overrides.translation) {
+        restoreCommands.push({
+          type: 'update_translation',
+          region_id: restoredRegionId,
+          text: overrides.translation
+        })
+      }
+      if (overrides.keepOriginal) {
+        restoreCommands.push({
+          type: 'set_keep_original',
+          region_id: restoredRegionId,
+          enabled: true
+        })
+      }
+      if (overrides.disabled) {
+        restoreCommands.push({
+          type: 'disable_region',
+          region_id: restoredRegionId
+        })
+      }
+      if (overrides.style) {
+        restoreCommands.push({
+          type: 'update_font_style',
+          region_id: restoredRegionId,
+          style: overrides.style
+        })
+      }
+      if (overrides.layout?.bbox) {
+        restoreCommands.push({
+          type: 'update_region_bbox',
+          region_id: restoredRegionId,
+          bbox: overrides.layout.bbox
+        })
+      }
+      if (typeof overrides.layout?.font_size === 'number') {
+        restoreCommands.push({
+          type: 'update_font_size',
+          region_id: restoredRegionId,
+          font_size: overrides.layout.font_size
+        })
+      }
+      if (typeof overrides.layout?.font_key === 'string') {
+        restoreCommands.push({
+          type: 'update_region_font',
+          region_id: restoredRegionId,
+          font_key: overrides.layout.font_key
+        })
+      }
+      if (typeof overrides.layout?.direction === 'string') {
+        restoreCommands.push({
+          type: 'update_text_direction',
+          region_id: restoredRegionId,
+          direction: overrides.layout.direction
+        })
+      }
+      await applyPageCommands(pageId, restoreCommands)
+    } else {
+      await applyPageCommands(pageId, entry.undoCommands)
+    }
+    replacePageHistoryState(pageId, {
+      undo: current.undo.slice(0, -1),
+      redo: [...current.redo, entry].slice(-maxCanvasHistoryEntries)
+    })
+    status.value = `已撤销：${entry.label}`
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = pageId
+    if (entry.kind === 'merge_regions' && Array.isArray(entry.regionIds) && entry.regionIds.length) {
+      selectedEditRegionKey.value = entry.regionIds[0]
+    } else if (entry.kind === 'delete_manual_region') {
+      selectedEditRegionKey.value = String(entry.deletedPayload?.id || '')
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '撤销失败'
+  }
+}
+
+async function redoCanvasEdit() {
+  const pageId = selectedEditPage.value?.stored_name || ''
+  if (!pageId) {
+    return
+  }
+  const current = getPageHistoryState(pageId)
+  const entry = current.redo[current.redo.length - 1]
+  if (!entry) {
+    return
+  }
+
+  try {
+    if (entry.kind === 'create_region') {
+      const result = await applyPageCommands(pageId, [{ type: 'create_region', bbox: entry.bbox }])
+      const refreshedEntry = {
+        ...entry,
+        createdRegionId: String(result?.created_region_id || '')
+      }
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+      selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else if (entry.kind === 'merge_regions') {
+      const result = await applyPageCommands(pageId, [{ type: 'merge_regions', region_ids: entry.regionIds || [] }])
+      const refreshedEntry = {
+        ...entry,
+        createdRegionId: String(result?.created_region_id || '')
+      }
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+      selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else if (entry.kind === 'delete_manual_region') {
+      await applyPageCommands(pageId, [{ type: 'delete_manual_region', region_id: String(entry.deletedPayload?.id || '') }])
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+    } else {
+      await applyPageCommands(pageId, entry.redoCommands)
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, entry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+    }
+    status.value = `已重做：${entry.label}`
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = pageId
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '重做失败'
+  }
+}
+
+async function runCanvasStructuredAction(page, options) {
+  if (!page?.stored_name || !options?.kind) {
+    return
+  }
+
+  const kind = String(options.kind)
+  const regionIds = Array.isArray(options.regionIds) ? options.regionIds.map((item) => String(item || '')).filter(Boolean) : []
+  const bbox = Array.isArray(options.bbox) ? options.bbox : null
+  let result = null
+
+  if (kind === 'create_region' && bbox) {
+    markCanvasPreviewDirty(page.stored_name)
+    result = await applyPageCommands(page.stored_name, [{ type: 'create_region', bbox }])
+    const createdRegionId = String(result?.created_region_id || '')
+    const historyEntry = {
+      kind: 'create_region',
+      label: '新增补漏框',
+      pageId: page.stored_name,
+      bbox,
+      createdRegionId
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    return
+  }
+
+  if (kind === 'merge_regions' && regionIds.length >= 2) {
+    markCanvasPreviewDirty(page.stored_name)
+    result = await applyPageCommands(page.stored_name, [{ type: 'merge_regions', region_ids: regionIds }])
+    const createdRegionId = String(result?.created_region_id || '')
+    const historyEntry = {
+      kind: 'merge_regions',
+      label: '合并文本框',
+      pageId: page.stored_name,
+      regionIds,
+      createdRegionId
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    return
+  }
+
+  if (kind === 'delete_manual_region' && regionIds.length === 1) {
+    const targetRegionId = regionIds[0]
+    markCanvasPreviewDirty(page.stored_name)
+    const result = await applyPageCommands(page.stored_name, [{ type: 'delete_manual_region', region_id: targetRegionId }])
+    const deletedPayload = result?.deleted_region_payload || {}
+    const historyEntry = {
+      kind: 'delete_manual_region',
+      label: '删除补漏框',
+      pageId: page.stored_name,
+      regionIds,
+      deletedPayload,
+      regionOverrides: {
+        translation: translationRegionOverrides.value[targetRegionId] || '',
+        keepOriginal: Boolean(translationRegionSkipOverrides.value[targetRegionId]),
+        disabled: Boolean(translationRegionDisabledOverrides.value[targetRegionId]),
+        layout: translationRegionLayoutOverrides.value[targetRegionId]
+          ? { ...translationRegionLayoutOverrides.value[targetRegionId] }
+          : null,
+        style: styleRegionOverrides.value[targetRegionId] || ''
+      }
+    }
+    pushCanvasHistory(page.stored_name, historyEntry)
+    status.value = '已删除这个手动补漏框。'
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    return
+  }
+}
+
+function startCanvasRegionTransform(event, region, page, mode = 'move', handle = '') {
+  if (!region || !page) {
+    return
+  }
+  if (mergeMode.value) {
+    toggleMergeSelection(region)
+    return
+  }
+
+  selectedEditRegionKey.value = region.id
+
+  if (!canDirectManipulateCanvas.value) {
+    return
+  }
+
+  if (event.button != null && event.button !== 0) {
+    return
+  }
+
+  const canvas = resolveCanvasInteractionSurface(event.currentTarget)
+  if (!canvas) {
+    return
+  }
+
+  const rect = canvas.getBoundingClientRect()
+  const captureTarget = event.currentTarget instanceof Element ? event.currentTarget : null
+  const point = getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
+  canvasTransformState.value = {
+    pointerId: event.pointerId,
+    captureTarget,
+    regionId: region.id,
+    pageId: page.stored_name,
+    mode,
+    handle,
+    rect,
+    startPoint: point,
+    originBBox: getEffectiveRegionBBox(region),
+    currentBBox: getEffectiveRegionBBox(region),
+    moved: false,
+    startedAt: Date.now()
+  }
+
+  if (captureTarget?.setPointerCapture && event.pointerId != null) {
+    try {
+      captureTarget.setPointerCapture(event.pointerId)
+    } catch (_error) {
+      // Ignore browsers/elements that don't support explicit pointer capture here.
+    }
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function updateCanvasRegionTransform(event) {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === draft.pageId)
+  if (!page) {
+    canvasTransformState.value = null
+    return
+  }
+
+  const point = getCanvasPointFromRect(draft.rect, event.clientX, event.clientY, page)
+  const deltaX = point.x - draft.startPoint.x
+  const deltaY = point.y - draft.startPoint.y
+  let nextBBox = draft.originBBox
+
+  if (draft.mode === 'move') {
+    nextBBox = translateBBoxWithinPage(draft.originBBox, deltaX, deltaY, page)
+  } else {
+    nextBBox = resizeBBoxWithinPage(draft.originBBox, draft.handle, deltaX, deltaY, page)
+  }
+
+  const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
+  draft.moved = draft.moved || changed
+  draft.currentBBox = nextBBox
+  updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
+}
+
+async function finishCanvasRegionTransform(event) {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  if (event?.pointerId != null && draft.pointerId != null && event.pointerId !== draft.pointerId) {
+    return
+  }
+
+  canvasTransformState.value = null
+  if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
+    try {
+      draft.captureTarget.releasePointerCapture(draft.pointerId)
+    } catch (_error) {
+      // Ignore if capture has already been released.
+    }
+  }
+  if (!draft.moved) {
+    return
+  }
+
+  suppressCanvasRegionClickUntil = Date.now() + 180
+  const page = mergedInspectionPages.value.find((item) => item.stored_name === draft.pageId)
+  const nextBBox = Array.isArray(draft.currentBBox) ? draft.currentBBox : null
+  if (!page || !nextBBox) {
+    return
+  }
+
+  await runCanvasCommand(page, {
+    label: draft.mode === 'move' ? '移动文本框' : '调整文本框大小',
+    redoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: draft.regionId,
+        bbox: nextBBox
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_bbox',
+        region_id: draft.regionId,
+        bbox: draft.originBBox
+      }
+    ],
+    successMessage: draft.mode === 'move'
+      ? '已移动文本框位置，重新嵌字时会按新位置计算。'
+      : '已更新文本框大小，重新嵌字时会按新框重新排版。',
+    focusRegionId: draft.regionId,
+    rollback: () => updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+  })
+}
+
+function cancelCanvasRegionTransform() {
+  const draft = canvasTransformState.value
+  if (!draft) {
+    return
+  }
+  if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
+    try {
+      draft.captureTarget.releasePointerCapture(draft.pointerId)
+    } catch (_error) {
+      // Ignore if capture has already been released.
+    }
+  }
+  updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+  canvasTransformState.value = null
+}
+
+function updateRegionFontSize(region, nextValue) {
+  const parsed = Number(nextValue)
+  if (Number.isNaN(parsed)) {
+    return
+  }
+  updateRegionLayoutOverride(region.id, { font_size: parsed })
+  selectedEditRegionKey.value = region.id
+}
+
+function updateRegionFontOverride(region, nextFontId) {
+  const normalizedFontId = getFontById(nextFontId) ? String(nextFontId || '').trim() : ''
+  const previousFontId = getRegionFontOverrideId(region)
+  updateRegionLayoutOverride(region.id, { font_key: normalizedFontId })
+  selectedEditRegionKey.value = region.id
+  void warmPreviewFonts()
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || normalizedFontId === previousFontId) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '修改字体',
+    redoCommands: [
+      {
+        type: 'update_region_font',
+        region_id: region.id,
+        font_key: normalizedFontId
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_font',
+        region_id: region.id,
+        font_key: previousFontId
+      }
+    ],
+    successMessage: normalizedFontId ? '已更新这个文本框的字体。' : '已恢复跟随默认字体。',
+    focusRegionId: region.id,
+    rollback: () => {
+      updateRegionLayoutOverride(region.id, { font_key: previousFontId })
+      void warmPreviewFonts()
+    }
+  })
+}
+
+function canApplyRegionFontToPage(region) {
+  return Boolean(
+    selectedEditPage.value
+    && getEffectiveRegionFontId(region)
+    && selectedEditPage.value.regions?.length
+  )
+}
+
+function applyRegionFontToPage(region) {
+  const page = selectedEditPage.value
+  const targetFontId = getEffectiveRegionFontId(region)
+  if (!page || !targetFontId) {
+    return
+  }
+
+  const redoCommands = []
+  const undoCommands = []
+  const rollbackOverrides = { ...translationRegionLayoutOverrides.value }
+  let hasChanges = false
+
+  for (const targetRegion of page.regions || []) {
+    const previousFontId = getRegionFontOverrideId(targetRegion)
+    if (previousFontId === targetFontId) {
+      continue
+    }
+    hasChanges = true
+    updateRegionLayoutOverride(targetRegion.id, { font_key: targetFontId })
+    redoCommands.push({
+      type: 'update_region_font',
+      region_id: targetRegion.id,
+      font_key: targetFontId
+    })
+    undoCommands.push({
+      type: 'update_region_font',
+      region_id: targetRegion.id,
+      font_key: previousFontId
+    })
+  }
+
+  if (!hasChanges) {
+    status.value = '本页文本框已经都是这个字体了。'
+    return
+  }
+
+  selectedEditRegionKey.value = region.id
+  void warmPreviewFonts()
+
+  void runCanvasCommand(page, {
+    label: '整页统一字体',
+    redoCommands,
+    undoCommands,
+    successMessage: '已将本页所有文本框设为当前字体。',
+    focusRegionId: region.id,
+    rollback: () => {
+      translationRegionLayoutOverrides.value = rollbackOverrides
+      if (selectedEditPage.value?.stored_name) {
+        markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+      }
+      void warmPreviewFonts()
+    }
+  })
+}
+
+function canApplyRegionFontSizeToPage(region) {
+  return Boolean(
+    selectedEditPage.value
+    && Number.isFinite(Number(getRegionFontSize(region)))
+    && selectedEditPage.value.regions?.length
+  )
+}
+
+function applyRegionFontSizeToPage(region) {
+  const page = selectedEditPage.value
+  const targetFontSize = Math.max(8, Math.min(240, Math.round(Number(getRegionFontSize(region) || 0))))
+  if (!page || !Number.isFinite(targetFontSize)) {
+    return
+  }
+
+  const redoCommands = []
+  const undoCommands = []
+  const rollbackOverrides = { ...translationRegionLayoutOverrides.value }
+  let hasChanges = false
+
+  for (const targetRegion of page.regions || []) {
+    const currentOverride = translationRegionLayoutOverrides.value[targetRegion.id] || {}
+    const previousExplicit = typeof currentOverride.font_size === 'number' ? currentOverride.font_size : null
+    if (previousExplicit === targetFontSize) {
+      continue
+    }
+    hasChanges = true
+    updateRegionLayoutOverride(targetRegion.id, { font_size: targetFontSize })
+    redoCommands.push({
+      type: 'update_font_size',
+      region_id: targetRegion.id,
+      font_size: targetFontSize
+    })
+    undoCommands.push(
+      previousExplicit == null
+        ? {
+            type: 'update_font_size',
+            region_id: targetRegion.id
+          }
+        : {
+            type: 'update_font_size',
+            region_id: targetRegion.id,
+            font_size: previousExplicit
+          }
+    )
+  }
+
+  if (!hasChanges) {
+    status.value = '本页文本框已经都是这个字号了。'
+    return
+  }
+
+  selectedEditRegionKey.value = region.id
+  void runCanvasCommand(page, {
+    label: '整页统一字号',
+    redoCommands,
+    undoCommands,
+    successMessage: '已将本页所有文本框设为当前字号。',
+    focusRegionId: region.id,
+    rollback: () => {
+      translationRegionLayoutOverrides.value = rollbackOverrides
+      if (selectedEditPage.value?.stored_name) {
+        markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+      }
+    }
+  })
+}
+
+function updateRegionTextDirection(region, nextDirection) {
+  const normalizedDirection = normalizeDirectionValue(nextDirection)
+  const previousDirection = getRegionDirectionValue(region)
+  updateRegionLayoutOverride(region.id, { direction: normalizedDirection })
+  selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value || normalizedDirection === previousDirection) {
+    return
+  }
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '调整文本方向',
+    redoCommands: [
+      {
+        type: 'update_text_direction',
+        region_id: region.id,
+        direction: normalizedDirection
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_text_direction',
+        region_id: region.id,
+        direction: previousDirection
+      }
+    ],
+    successMessage: normalizedDirection === 'horizontal'
+      ? '已切换为横排预览。'
+      : normalizedDirection === 'vertical'
+        ? '已切换为竖排预览。'
+        : '已恢复自动文本方向。',
+    focusRegionId: region.id,
+    rollback: () => {
+      updateRegionLayoutOverride(region.id, { direction: previousDirection })
+    }
+  })
+}
+
+function handleRegionTextInput(region, nextValue) {
+  selectedEditRegionKey.value = region.id
+  if (isCanvasReviewMode.value) {
+    translationInputDrafts.value = {
+      ...translationInputDrafts.value,
+      [region.id]: String(nextValue ?? '')
+    }
+    if (selectedEditPage.value?.stored_name) {
+      markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+    }
+    return
+  }
+  updateTranslationOverride(region, nextValue)
+}
+
+function commitRegionTextDraft(region) {
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    return
+  }
+  const hasDraft = Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)
+  if (!hasDraft) {
+    return
+  }
+  const draftValue = String(translationInputDrafts.value[region.id] ?? getEditRegionText(region))
+  const normalizedTranslation = draftValue.trim()
+  const previousOverride = String(translationRegionOverrides.value[region.id] || '')
+  if (normalizedTranslation === previousOverride) {
+    const nextDrafts = { ...translationInputDrafts.value }
+    delete nextDrafts[region.id]
+    translationInputDrafts.value = nextDrafts
+    return
+  }
+
+  const nextOverrides = { ...translationRegionOverrides.value }
+  if (!normalizedTranslation || normalizedTranslation === String(region.machine_translation || '').trim()) {
+    delete nextOverrides[region.id]
+  } else {
+    nextOverrides[region.id] = normalizedTranslation
+  }
+  translationRegionOverrides.value = nextOverrides
+  const nextDrafts = { ...translationInputDrafts.value }
+  delete nextDrafts[region.id]
+  translationInputDrafts.value = nextDrafts
+
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '修改译文',
+    redoCommands: [
+      {
+        type: 'update_translation',
+        region_id: region.id,
+        text: normalizedTranslation
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_translation',
+        region_id: region.id,
+        text: previousOverride
+      }
+    ],
+    successMessage: '已更新这个文本框的译文。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionOverrides.value }
+      if (previousOverride) {
+        rollbackOverrides[region.id] = previousOverride
+      } else {
+        delete rollbackOverrides[region.id]
+      }
+      translationRegionOverrides.value = rollbackOverrides
+      translationInputDrafts.value = {
+        ...translationInputDrafts.value,
+        [region.id]: draftValue
+      }
+    }
+  })
+}
+
+function handleRegionFontSizeInput(region, nextValue) {
+  selectedEditRegionKey.value = region.id
+  const rawValue = String(nextValue ?? '')
+  if (isCanvasReviewMode.value) {
+    fontSizeInputDrafts.value = {
+      ...fontSizeInputDrafts.value,
+      [region.id]: rawValue
+    }
+    const parsed = Number(rawValue)
+    if (!rawValue.trim() || Number.isNaN(parsed)) {
+      return
+    }
+    updateRegionLayoutOverride(region.id, { font_size: parsed })
+    return
+  }
+  fontSizeInputDrafts.value = {
+    ...fontSizeInputDrafts.value,
+    [region.id]: rawValue
+  }
+  const parsed = Number(rawValue)
+  if (!rawValue.trim() || Number.isNaN(parsed)) {
+    return
+  }
+  updateRegionFontSize(region, parsed)
+}
+
+function commitRegionFontSize(region) {
+  const hasDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+  if (!hasDraft) {
+    return
+  }
+  const rawDraft = String(fontSizeInputDrafts.value[region.id] ?? '')
+  const nextValue = rawDraft.trim() === ''
+    ? 8
+    : Number(rawDraft)
+
+  const nextDrafts = { ...fontSizeInputDrafts.value }
+  delete nextDrafts[region.id]
+  fontSizeInputDrafts.value = nextDrafts
+
+  if (Number.isNaN(nextValue)) {
+    return
+  }
+  const normalizedValue = Math.max(8, Math.min(240, Math.round(nextValue)))
+
+  if (!isCanvasReviewMode.value || !selectedEditPage.value) {
+    updateRegionFontSize(region, normalizedValue)
+    return
+  }
+
+  const currentOverride = translationRegionLayoutOverrides.value[region.id] || {}
+  const previousExplicit = typeof currentOverride.font_size === 'number' ? currentOverride.font_size : null
+
+  updateRegionLayoutOverride(region.id, { font_size: normalizedValue })
+  void runCanvasCommand(selectedEditPage.value, {
+    label: '调整字号',
+    redoCommands: [
+      {
+        type: 'update_font_size',
+        region_id: region.id,
+        font_size: normalizedValue
+      }
+    ],
+    undoCommands: [
+      previousExplicit == null
+        ? {
+            type: 'update_font_size',
+            region_id: region.id
+          }
+        : {
+            type: 'update_font_size',
+            region_id: region.id,
+            font_size: previousExplicit
+          }
+    ],
+    successMessage: '已更新这个文本框的字号。',
+    focusRegionId: region.id,
+    rollback: () => {
+      const rollbackOverrides = { ...translationRegionLayoutOverrides.value }
+      const current = { ...(rollbackOverrides[region.id] || {}) }
+      if (previousExplicit == null) {
+        delete current.font_size
+      } else {
+        current.font_size = previousExplicit
+      }
+      rollbackOverrides[region.id] = current
+      translationRegionLayoutOverrides.value = rollbackOverrides
+    }
+  })
+}
+
+function toggleMergeMode() {
+  mergeMode.value = !mergeMode.value
+  mergeRegionSelection.value = {}
+  if (mergeMode.value) {
+    manualDrawMode.value = false
+    adjustingRegionId.value = ''
+    status.value = '请在当前页选中至少两个文本框，然后点击“合并选中框”。'
+  }
+}
+
+function toggleMergeSelection(region) {
+  const nextSelection = { ...mergeRegionSelection.value }
+  if (nextSelection[region.id]) {
+    delete nextSelection[region.id]
+  } else {
+    nextSelection[region.id] = true
+  }
+  mergeRegionSelection.value = nextSelection
+  selectedEditRegionKey.value = region.id
+}
+
+async function mergeSelectedRegions() {
+  const page = selectedEditPage.value
+  const regionIds = Object.keys(mergeRegionSelection.value)
+  if (!sessionId.value || !page || regionIds.length < 2) {
+    return
+  }
+  creatingManualRegion.value = true
+  errorMessage.value = ''
+  try {
+    if (isCanvasReviewMode.value) {
+      await runCanvasStructuredAction(page, {
+        kind: 'merge_regions',
+        regionIds
+      })
+      mergeRegionSelection.value = {}
+      mergeMode.value = false
+      return
+    }
+
+    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'merge',
+        stored_name: page.stored_name,
+        region_ids: regionIds,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '合并文本框失败')
+    }
+
+    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    for (const regionId of regionIds) {
+      nextDisabledOverrides[regionId] = true
+    }
+    translationRegionDisabledOverrides.value = nextDisabledOverrides
+    mergeRegionSelection.value = {}
+    mergeMode.value = false
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
+    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '合并文本框失败'
+  } finally {
+    creatingManualRegion.value = false
+  }
+}
+
+function restoreDisabledRegionsForPage(page) {
+  if (!page?.stored_name) {
+    return
+  }
+  const nextOverrides = { ...translationRegionDisabledOverrides.value }
+  let changed = false
+  for (const regionId of Object.keys(nextOverrides)) {
+    if (!regionId.includes(page.stored_name)) {
+      continue
+    }
+    delete nextOverrides[regionId]
+    changed = true
+  }
+  if (!changed) {
+    return
+  }
+  translationRegionDisabledOverrides.value = nextOverrides
+  status.value = '已恢复当前页被禁用的自动识别框。'
+  void loadEditInspection({ silent: true })
+}
+
+function clearTranslationOverrides() {
+  translationRegionOverrides.value = {}
+  translationRegionSkipOverrides.value = {}
+  translationRegionDisabledOverrides.value = {}
+  translationRegionLayoutOverrides.value = {}
+  mergeRegionSelection.value = {}
+  mergeMode.value = false
+  adjustingRegionId.value = ''
+  status.value = '已清空当前会话里的译文、保留原文、禁用框和框体调整设置。'
+  void loadEditInspection({ silent: true })
+}
+
+function clearStyleOverrides() {
+  styleRegionOverrides.value = {}
+  status.value = '已清空当前会话里的手动样式覆盖。'
+  void loadEditInspection({ silent: true })
+}
+
+function clearStoredApiKey() {
+  config.value.api_key = ''
+  saveStoredConfig(config.value)
+  status.value = '已清除本机浏览器里保存的 API Key。'
+}
+
+function clearStoredImageApiKey() {
+  config.value.image_cleanup_api_key = ''
+  saveStoredConfig(config.value)
+  status.value = '已清除本机浏览器里保存的图像去字 API Key。'
+}
+
+async function scrollSelectedRegionCardIntoView() {
+  if (!selectedEditRegionKey.value) {
+    return
+  }
+  await nextTick()
+  const card = document.querySelector(`.style-region-card[data-region-id="${selectedEditRegionKey.value}"]`)
+  if (card instanceof HTMLElement) {
+    card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+}
+
+async function scrollSelectedPageRailItemIntoView() {
+  if (!selectedEditPageKey.value) {
+    return
+  }
+  await nextTick()
+  const pageButton = document.querySelector(`.v2-page-rail-item[data-page-key="${selectedEditPageKey.value}"]`)
+  if (pageButton instanceof HTMLElement) {
+    pageButton.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+}
+
+async function syncTranslatedPreviewScale() {
+  await nextTick()
+  refreshTranslatedPreviewScale()
+}
+
+function handleGlobalCanvasKeydown(event) {
+  if (v2View.value !== 'review' || !selectedEditPage.value) {
+    return
+  }
+  if (isCanvasReviewMode.value && event.code === 'Space') {
+    spacePanPressed.value = true
+    event.preventDefault()
+  }
+  if (isEditableTextTarget(event.target)) {
+    return
+  }
+  const isUndo = (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z'
+  const isRedo = (
+    (event.metaKey || event.ctrlKey) &&
+    ((event.shiftKey && event.key.toLowerCase() === 'z') || event.key.toLowerCase() === 'y')
+  )
+  if (isUndo && canUndoCanvasEdit.value) {
+    event.preventDefault()
+    void undoCanvasEdit()
+  } else if (isRedo && canRedoCanvasEdit.value) {
+    event.preventDefault()
+    void redoCanvasEdit()
+  } else if (event.key === 'PageUp' || event.key === '[') {
+    event.preventDefault()
+    selectAdjacentEditPage(-1)
+  } else if (event.key === 'PageDown' || event.key === ']') {
+    event.preventDefault()
+    selectAdjacentEditPage(1)
+  } else if ((event.altKey || event.shiftKey) && event.key === 'ArrowUp') {
+    event.preventDefault()
+    selectAdjacentEditRegion(-1)
+  } else if ((event.altKey || event.shiftKey) && event.key === 'ArrowDown') {
+    event.preventDefault()
+    selectAdjacentEditRegion(1)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    selectedEditRegionKey.value = ''
+    updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
+      ...state,
+      selectedRegionId: ''
+    }))
+  } else if (event.shiftKey && event.code === 'Digit1') {
+    event.preventDefault()
+    resetViewportStateForPage(selectedEditPage.value)
+  } else if (event.shiftKey && event.code === 'Digit2' && selectedEditRegion.value) {
+    event.preventDefault()
+    focusSelectedRegionInViewport(selectedEditPage.value, 'main')
+  } else if (event.key === 'Enter' && selectedEditRegion.value) {
+    event.preventDefault()
+    const input = document.querySelector(
+      `.translation-review-input[data-region-id="${selectedEditRegion.value.id}"]`
+    )
+    if (input instanceof HTMLElement) {
+      input.focus()
+    }
+  } else if (isCanvasReviewMode.value && canDirectManipulateCanvas.value && selectedEditRegion.value) {
+    const nudgeMap = {
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0]
+    }
+    const delta = nudgeMap[event.key]
+    if (!delta) {
+      return
+    }
+    event.preventDefault()
+    const step = event.ctrlKey ? 5 : 1
+    nudgeSelectedRegion(delta[0] * step, delta[1] * step)
+  }
+}
+
+function handleGlobalCanvasKeyup(event) {
+  if (event.code === 'Space') {
+    spacePanPressed.value = false
+  }
+  if (!pendingCanvasNudge) {
+    return
+  }
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    return
+  }
+  void flushPendingCanvasNudge()
+}
+
+async function copyText(text, successMessage) {
+  if (!text) {
+    return
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'absolute'
+      textarea.style.left = '-9999px'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+    status.value = successMessage
+  } catch (error) {
+    errorMessage.value = '复制失败，请手动复制下方路径。'
+  }
+}
+
+async function checkBackendStatus() {
+  try {
+    const response = await fetch(toApiUrl('/api/status'))
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const payload = await response.json()
+    backendOnline.value = payload.status === 'running'
+    status.value = backendOnline.value ? '后端在线，可以开始上传。' : '后端未就绪。'
+  } catch (error) {
+    backendOnline.value = false
+    status.value = '无法连接后端，请先启动 FastAPI 服务。'
+  }
+}
+
+function pickRecommendedFont(fonts, targetLang) {
+  const preferredNames = targetLang === 'JPN'
+    ? ['msgothic.ttc', 'NotoSansMonoCJK-VF.ttf.ttc']
+    : ['msyh.ttc', 'Arial-Unicode-Regular.ttf', 'NotoSansMonoCJK-VF.ttf.ttc']
+
+  return fonts.find((font) => preferredNames.includes(font.name)) || fonts[0] || null
+}
+
+function normalizeFontLookupValue(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.(ttf|ttc|otf)$/i, '')
+    .replace(/\s+/g, '')
+}
+
+function pickMappedStyleFont(fonts, preferredNames) {
+  const normalizedPreferred = preferredNames.map((name) => normalizeFontLookupValue(name))
+  return (
+    fonts.find((font) => {
+      const candidates = [
+        font.name,
+        font.label,
+        font.id
+      ].map((item) => normalizeFontLookupValue(item))
+      return normalizedPreferred.some((preferred) => candidates.some((candidate) => candidate.includes(preferred)))
+    })
+    || null
+  )
+}
+
+function applyDefaultStyleFontMappings(fonts) {
+  let changed = false
+  for (const [styleKey, preferredNames] of Object.entries(defaultStyleFontNameMap)) {
+    if (styleKey === 'gothic') {
+      continue
+    }
+    const configKey = `style_font_${styleKey}_key`
+    if (config.value[configKey]) {
+      continue
+    }
+
+    const matchedFont = pickMappedStyleFont(fonts, preferredNames)
+    if (!matchedFont) {
+      continue
+    }
+
+    config.value[configKey] = matchedFont.id
+    changed = true
+  }
+  return changed
+}
+
+async function loadFonts() {
+  try {
+    const response = await fetch(toApiUrl('/api/fonts'))
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const payload = await response.json()
+    availableFonts.value = payload.fonts || []
+
+    if (!config.value.font_key) {
+      const recommended = pickRecommendedFont(availableFonts.value, config.value.target_lang)
+      if (recommended) {
+        config.value.font_key = recommended.id
+      }
+    }
+
+    if (applyDefaultStyleFontMappings(availableFonts.value)) {
+      saveStoredConfig(config.value)
+      status.value = '已按你预设的字体样式映射自动带出默认字体。'
+    }
+  } catch (error) {
+    availableFonts.value = []
+  }
+}
+
+function onFileChange(event) {
+  const [file] = event.target.files || []
+  selectedFile.value = file || null
+  errorMessage.value = ''
+}
+
+function triggerV2UploadPicker() {
+  v2UploadInputRef.value?.click()
+}
+
+function triggerV2SupplementPicker() {
+  if (!sessionId.value) {
+    status.value = '请先上传原图或恢复一个历史项目，再补充对应文件名的无字图。'
+    return
+  }
+  if (!canUseV2SupplementUpload.value) {
+    return
+  }
+  v2SupplementInputRef.value?.click()
+}
+
+function openV2HistoryModal() {
+  v2HistoryModalOpen.value = true
+  if (!projectHistory.value.length) {
+    void loadProjectHistory()
+  }
+}
+
+function closeV2HistoryModal() {
+  v2HistoryModalOpen.value = false
+}
+
+function openV2Settings() {
+  v2SettingsOpen.value = true
+}
+
+function closeV2Settings() {
+  v2SettingsOpen.value = false
+}
+
+function goToV2Home() {
+  v2View.value = 'home'
+  closeV2HistoryModal()
+  closeV2Settings()
+}
+
+function goToV2Picker() {
+  if (!v2HasProject.value) {
+    v2View.value = 'home'
+    return
+  }
+  v2View.value = 'picker'
+  closeV2HistoryModal()
+  closeV2Settings()
+}
+
+async function submitFileV2() {
+  await submitFile()
+  if (sessionId.value) {
+    v2View.value = 'picker'
+    closeV2HistoryModal()
+    v2SettingsModalOpen.value = false
+    v2UploadDragOver.value = false
+  }
+}
+
+async function handleV2FileChange(event) {
+  onFileChange(event)
+  if (selectedFile.value) {
+    await submitFileV2()
+  }
+  if (event?.target) {
+    event.target.value = ''
+  }
+}
+
+async function submitV2SupplementFile(file) {
+  if (!file) {
+    return
+  }
+  if (!sessionId.value) {
+    status.value = '请先上传原图或恢复一个历史项目，再补充对应文件名的无字图。'
+    return
+  }
+
+  v2SupplementUploading.value = true
+  errorMessage.value = ''
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/base-images`), {
+      method: 'POST',
+      body: formData
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '补充无字图失败')
+    }
+
+    applySessionPayload(payload)
+    await loadProjectHistory({ silent: true })
+    if (sessionId.value) {
+      await loadEditInspection({ silent: true })
+    }
+
+    const result = payload.base_image_upload || {}
+    const matchedCount = Number(result.matched_count || 0)
+    const unmatchedCount = Number(result.unmatched_count || 0)
+    status.value = matchedCount > 0
+      ? `已补充 ${matchedCount} 页无字图${unmatchedCount ? `，另有 ${unmatchedCount} 个文件未匹配到页面。` : '。'}`
+      : '没有找到可匹配的页面文件名。'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '补充无字图失败'
+    errorMessage.value = message
+    status.value = message
+  } finally {
+    v2SupplementUploading.value = false
+  }
+}
+
+async function handleV2SupplementFileChange(event) {
+  const [file] = event?.target?.files || []
+  if (file) {
+    await submitV2SupplementFile(file)
+  }
+  if (event?.target) {
+    event.target.value = ''
+  }
+}
+
+function handleV2DragOver(event) {
+  event.preventDefault()
+  v2UploadDragOver.value = true
+}
+
+function handleV2DragLeave(event) {
+  if (event?.currentTarget && event?.relatedTarget && event.currentTarget.contains(event.relatedTarget)) {
+    return
+  }
+  v2UploadDragOver.value = false
+}
+
+async function handleV2Drop(event) {
+  event.preventDefault()
+  v2UploadDragOver.value = false
+  const [file] = event.dataTransfer?.files || []
+  if (!file) {
+    return
+  }
+  selectedFile.value = file
+  errorMessage.value = ''
+  await submitFileV2()
+}
+
+async function restoreProjectV2(projectId) {
+  await restoreProject(projectId)
+  if (sessionId.value) {
+    closeV2HistoryModal()
+    v2View.value = 'picker'
+  }
+}
+
+async function restoreSnapshotV2(projectId, snapshotId) {
+  await restoreSnapshot(projectId, snapshotId)
+  if (sessionId.value) {
+    closeV2HistoryModal()
+    v2View.value = 'picker'
+  }
+}
+
+async function openV2ReviewPage(pageKey = '') {
+  const targetKey = String(pageKey || selectedEditPageKey.value || v2PageEntries.value[0]?.stored_name || '').trim()
+  if (!targetKey) {
+    return
+  }
+  selectedEditPageKey.value = targetKey
+  try {
+    await loadEditInspection({ silent: true })
+  } catch (_error) {
+    // Picker should still open even when the review payload is not ready yet.
+  }
+  if (!selectedEditRegionKey.value && selectedEditPage.value?.regions?.length) {
+    selectedEditRegionKey.value = selectedEditPage.value.regions[0].id
+  }
+  v2View.value = 'review'
+}
+
+function runV2ReviewPrimaryAction() {
+  if (translating.value) {
+    return
+  }
+  if (canContinueSegmentedTranslation.value) {
+    startTranslation('resume-translate')
+    return
+  }
+  if (canTranslateCurrentPage.value) {
+    startTranslation(workflowStage.value === 'detected' ? 'translate-page' : 'detect')
+    return
+  }
+  if (canRerender.value) {
+    startTranslation('rerender')
+    return
+  }
+  startTranslation('translate')
+}
+
+function toggleRegionEnabledV2(region) {
+  updateRegionDisabledOverride(region, !isRegionDisabled(region))
+}
+
+function toggleRegionDirectionV2(region) {
+  updateRegionTextDirection(region, isVerticalRegion(region) ? 'horizontal' : 'vertical')
+}
+
+function adjustRegionFontSizeV2(region, delta) {
+  const currentValue = Number(getRegionFontSize(region) || 0)
+  const nextValue = Math.max(8, Math.min(240, Math.round(currentValue + delta)))
+  handleRegionFontSizeInput(region, String(nextValue))
+  commitRegionFontSize(region)
+}
+
+async function submitFile() {
+  if (!selectedFile.value) {
+    errorMessage.value = '请先选择一个 zip/cbz 或单张图片文件。'
+    return
+  }
+
+  uploading.value = true
+  errorMessage.value = ''
+  originalImages.value = []
+  translatedImages.value = []
+  sessionId.value = ''
+  currentProject.value = null
+  projectTitleDraft.value = ''
+  projectNoteDraft.value = ''
+  downloadUrl.value = ''
+  downloadPath.value = ''
+  translatedDirPath.value = ''
+  maskDebugDirPath.value = ''
+  workflowStage.value = 'idle'
+  progress.value = { current: 0, total: 0 }
+  resetTranslationReview()
+  resetStyleInspector()
+  closeSocket()
+
+  try {
+    const formData = new FormData()
+    formData.append('file', selectedFile.value)
+    formData.append('review_mode', config.value.default_review_mode)
+
+    const response = await fetch(toApiUrl('/api/upload'), {
+      method: 'POST',
+      body: formData
+    })
+
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '上传失败')
+    }
+
+    applySessionPayload(payload, { resetInspectors: true })
+    await loadProjectHistory({ silent: true })
+    status.value = config.value.pause_after_detection
+      ? `上传完成，共解析 ${payload.total_images} 张图片。现在可以先识别文本框，再逐框确认。`
+      : `上传完成，共解析 ${payload.total_images} 张图片。现在可以开始翻译。`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '上传失败'
+    status.value = '上传未完成。'
+  } finally {
+    uploading.value = false
+  }
+}
+
+function startTranslation(action = 'translate') {
+  if (!sessionId.value || translating.value) {
+    return
+  }
+
+  activeAction.value = action
+  const pageTargetStoredName = (action === 'rerender' || action === 'translate-page')
+    ? (selectedEditPage.value?.stored_name || '')
+    : ''
+  manualDrawDraft.value = null
+  renderNonce.value = Date.now()
+  if (action === 'translate' || action === 'detect') {
+    translatedImages.value = []
+    downloadUrl.value = ''
+    downloadPath.value = ''
+    translatedDirPath.value = ''
+    maskDebugDirPath.value = ''
+  }
+  errorMessage.value = ''
+  translating.value = true
+  progress.value = { current: 0, total: 0 }
+  status.value = action === 'rerender'
+    ? (pageTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
+    : action === 'detect'
+      ? '正在启动文本框识别任务...'
+      : action === 'translate-page'
+        ? '正在启动当前页翻译任务...'
+      : action === 'resume-translate'
+        ? '正在继续翻译并嵌字...'
+        : '正在启动翻译任务...'
+  closeSocket()
+
+  socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
+
+  socket.onopen = () => {
+    socket.send(JSON.stringify({
+      action,
+      config: buildRuntimeConfig(),
+      target_stored_name: pageTargetStoredName || undefined
+    }))
+  }
+
+  socket.onmessage = async (event) => {
+    const payload = JSON.parse(event.data)
+
+    if (payload.event === 'start') {
+      progress.value = { current: 0, total: payload.total_pages }
+      status.value = activeAction.value === 'rerender'
+        ? (pageTargetStoredName
+          ? `当前页重嵌字已开始。`
+          : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
+        : activeAction.value === 'detect'
+          ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译已开始。'
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
+        : `翻译已开始，共 ${payload.total_pages} 张图片。`
+      return
+    }
+
+    if (payload.event === 'progress') {
+      progress.value = {
+        current: payload.current,
+        total: payload.total
+      }
+      const nextImageUrl = withCacheBust(toApiUrl(payload.image_url))
+      translatedImages.value = upsertTranslatedImage(
+        translatedImages.value,
+        payload,
+        nextImageUrl,
+        sessionId.value,
+      )
+      if (payload.stored_name) {
+        reviewInspectionPages.value = updatePagePreviewUrl(
+          reviewInspectionPages.value,
+          payload.stored_name,
+          payload.image_url,
+        )
+        styleInspectionPages.value = updatePagePreviewUrl(
+          styleInspectionPages.value,
+          payload.stored_name,
+          payload.image_url,
+        )
+      }
+      status.value = activeAction.value === 'rerender'
+        ? (pageTargetStoredName
+          ? `当前页重嵌字进行中…`
+          : `重嵌字进行中：${payload.current} / ${payload.total}`)
+        : activeAction.value === 'detect'
+          ? `正在识别并准备校对：${payload.current} / ${payload.total}`
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译进行中…'
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译进行中：${payload.current} / ${payload.total}`
+        : `翻译进行中：${payload.current} / ${payload.total}`
+      return
+    }
+
+    if (payload.event === 'status') {
+      status.value = payload.message || '正在进行复杂页增强修复...'
+      return
+    }
+
+    if (payload.event === 'completed') {
+      translating.value = false
+      applySessionPayload(payload)
+      const completedAction = activeAction.value
+      if (completedAction === 'rerender') {
+        if (pageTargetStoredName) {
+          clearCanvasPreviewDirty(pageTargetStoredName)
+        } else {
+          clearCanvasPreviewDirty()
+        }
+      } else if (completedAction === 'translate-page') {
+        if (pageTargetStoredName) {
+          clearCanvasPreviewDirty(pageTargetStoredName)
+        }
+      } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
+        clearCanvasPreviewDirty()
+      }
+      status.value = completedAction === 'detect'
+        ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
+        : completedAction === 'translate-page'
+          ? '当前页翻译完成，结果已回填到工作台。'
+        : completedAction === 'resume-translate'
+          ? `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+          : completedAction === 'rerender'
+            ? (pageTargetStoredName
+              ? '当前页重嵌字完成。'
+              : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
+            : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      await loadEditInspection({ silent: completedAction !== 'detect' })
+      if (completedAction === 'detect' && !mergedInspectionPages.value.length) {
+        await ensureEditInspectionReadyAfterDetect()
+      }
+      if (config.value.font_style_mode === 'auto-map') {
+        await loadStyleInspection({ silent: true })
+      }
+      void loadProjectHistory({ silent: true })
+      closeSocket()
+      return
+    }
+
+    if (payload.event === 'error') {
+      translating.value = false
+      errorMessage.value = payload.message || '翻译失败'
+      status.value = activeAction.value === 'rerender'
+        ? '重嵌字失败。'
+        : activeAction.value === 'detect'
+          ? '文本框识别失败。'
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译失败。'
+          : activeAction.value === 'resume-translate'
+            ? '继续翻译失败。'
+            : '翻译失败。'
+      closeSocket()
+    }
+  }
+
+  socket.onerror = () => {
+    errorMessage.value = '翻译连接中断，请查看后端控制台日志。'
+    status.value = activeAction.value === 'rerender'
+      ? '重嵌字连接中断。'
+      : activeAction.value === 'detect'
+        ? '识别连接中断。'
+        : activeAction.value === 'translate-page'
+          ? '当前页翻译连接中断。'
+        : activeAction.value === 'resume-translate'
+          ? '继续翻译连接中断。'
+          : '翻译连接中断。'
+    translating.value = false
+    closeSocket()
+  }
+
+  socket.onclose = () => {
+    if (translating.value) {
+      errorMessage.value = '翻译任务意外断开，请查看后端日志。'
+      status.value = activeAction.value === 'rerender'
+        ? '重嵌字未完成。'
+        : activeAction.value === 'detect'
+          ? '识别未完成。'
+          : activeAction.value === 'translate-page'
+            ? '当前页翻译未完成。'
+          : activeAction.value === 'resume-translate'
+            ? '继续翻译未完成。'
+            : '翻译未完成。'
+      translating.value = false
+    }
+  }
+}
+
+onMounted(() => {
+  checkBackendStatus()
+  loadFonts()
+  loadProjectHistory()
+  window.addEventListener('resize', refreshTranslatedPreviewScale)
+  window.addEventListener('pointermove', updateCanvasViewportPan)
+  window.addEventListener('pointerup', finishCanvasViewportPan)
+  window.addEventListener('pointercancel', cancelCanvasViewportPan)
+  window.addEventListener('pointermove', updateCompareSplitterDrag)
+  window.addEventListener('pointerup', finishCompareSplitterDrag)
+  window.addEventListener('pointercancel', finishCompareSplitterDrag)
+  window.addEventListener('pointermove', updateWorkspaceSplitterDrag)
+  window.addEventListener('pointerup', finishWorkspaceSplitterDrag)
+  window.addEventListener('pointercancel', finishWorkspaceSplitterDrag)
+  window.addEventListener('pointermove', updateCanvasRegionTransform)
+  window.addEventListener('pointerup', finishCanvasRegionTransform)
+  window.addEventListener('pointercancel', cancelCanvasRegionTransform)
+  window.addEventListener('keydown', handleGlobalCanvasKeydown)
+  window.addEventListener('keyup', handleGlobalCanvasKeyup)
+})
+
+onBeforeUnmount(() => {
+  closeSocket()
+  void flushPendingCanvasNudge()
+  clearCanvasNudgeCommitTimer()
+  window.removeEventListener('resize', refreshTranslatedPreviewScale)
+  window.removeEventListener('pointermove', updateCanvasViewportPan)
+  window.removeEventListener('pointerup', finishCanvasViewportPan)
+  window.removeEventListener('pointercancel', cancelCanvasViewportPan)
+  window.removeEventListener('pointermove', updateCompareSplitterDrag)
+  window.removeEventListener('pointerup', finishCompareSplitterDrag)
+  window.removeEventListener('pointercancel', finishCompareSplitterDrag)
+  window.removeEventListener('pointermove', updateWorkspaceSplitterDrag)
+  window.removeEventListener('pointerup', finishWorkspaceSplitterDrag)
+  window.removeEventListener('pointercancel', finishWorkspaceSplitterDrag)
+  window.removeEventListener('pointermove', updateCanvasRegionTransform)
+  window.removeEventListener('pointerup', finishCanvasRegionTransform)
+  window.removeEventListener('pointercancel', cancelCanvasRegionTransform)
+  window.removeEventListener('keydown', handleGlobalCanvasKeydown)
+  window.removeEventListener('keyup', handleGlobalCanvasKeyup)
+})
+
+async function warmPreviewFonts() {
+  if (typeof document === 'undefined' || !document.fonts) {
+    return
+  }
+
+  const fontIds = new Set()
+  for (const font of availableFonts.value) {
+    if (font?.id) {
+      fontIds.add(String(font.id))
+    }
+  }
+  if (config.value.font_key) {
+    fontIds.add(String(config.value.font_key))
+  }
+  for (const styleBucket of styleBucketOptions.map((option) => option.value)) {
+    const fontId = getConfiguredStyleFontId(styleBucket)
+    if (fontId) {
+      fontIds.add(fontId)
+    }
+  }
+  for (const override of Object.values(translationRegionLayoutOverrides.value || {})) {
+    const fontId = String(override?.font_key || '').trim()
+    if (fontId) {
+      fontIds.add(fontId)
+    }
+  }
+
+  const nextState = { ...previewFontLoadState.value }
+  await Promise.all(
+    Array.from(fontIds).map(async (fontId) => {
+      try {
+        await document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
+        const loaded = document.fonts.check(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
+        nextState[fontId] = {
+          status: loaded ? 'loaded' : 'unsupported',
+          error: loaded ? '' : 'document.fonts.check returned false'
+        }
+      } catch (error) {
+        nextState[fontId] = {
+          status: 'unsupported',
+          error: error instanceof Error ? error.message : String(error || '')
+        }
+      }
+    })
+  )
+  previewFontLoadState.value = nextState
+  renderNonce.value = Date.now()
+}
+
+watch(
+  config,
+  (nextValue) => {
+    saveStoredConfig(nextValue)
+  },
+  { deep: true }
+)
+
+watch(
+  reviewWorkspacePrefs,
+  (nextValue) => {
+    saveStoredReviewWorkspacePrefs(nextValue)
+  },
+  { deep: true }
+)
+
+watch(
+  [
+    previewFontFaceCss,
+    () => availableFonts.value.length,
+    () => config.value.font_key,
+    () => config.value.font_style_mode,
+    () => config.value.style_font_gothic_key,
+    () => config.value.style_font_mincho_key,
+    () => config.value.style_font_rounded_key,
+    () => config.value.style_font_cartoon_key,
+    () => config.value.style_font_handwritten_key,
+    () => config.value.style_font_sfx_key,
+    () => JSON.stringify(translationRegionLayoutOverrides.value)
+  ],
+  () => {
+    void warmPreviewFonts()
+  },
+  { immediate: true }
+)
+
+watch(
+  () => config.value.translator,
+  (nextTranslator) => {
+    if (!isValidTranslatorModel(nextTranslator, config.value.translator_model)) {
+      config.value.translator_model = getDefaultTranslatorModel(nextTranslator)
+    }
+    if (nextTranslator !== 'doubao-ark') {
+      config.value.translator_model_custom = ''
+    }
+  }
+)
+
+watch(
+  () => config.value.image_cleanup_mode,
+  (nextMode) => {
+    if (!isValidImageCleanupModel(nextMode, config.value.image_cleanup_model)) {
+      config.value.image_cleanup_model = getDefaultImageCleanupModel(nextMode)
+    }
+  }
+)
+
+watch(
+  () => config.value.font_style_mode,
+  () => {
+    if (sessionId.value && (downloadUrl.value || translatedImages.value.length)) {
+      void loadEditInspection({ silent: true })
+      return
+    }
+    syncEditSelection()
+  }
+)
+
+watch(selectedEditRegionKey, () => {
+  if (selectedEditPage.value?.stored_name) {
+    updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
+      ...state,
+      selectedRegionId: selectedEditRegionKey.value || ''
+    }))
+  }
+  if (selectedEditRegionKey.value) {
+    void scrollSelectedRegionCardIntoView()
+  }
+  void refreshSelectedRegionPreviewDebug()
+})
+
+watch(
+  () => selectedEditPageKey.value,
+  (nextPageId) => {
+    const normalizedPageId = String(nextPageId || '').trim()
+    if (!normalizedPageId) {
+      return
+    }
+    const nextPage = mergedInspectionPages.value.find((page) => page.stored_name === normalizedPageId)
+    if (!nextPage) {
+      return
+    }
+    if (!perPageUiState.value[normalizedPageId]) {
+      updatePageUiState(normalizedPageId, {
+        ...createDefaultPerPageUiState(),
+        selectedRegionId: nextPage.regions[0]?.id || ''
+      })
+    }
+    selectedEditRegionKey.value = String(getPageUiState(normalizedPageId).selectedRegionId || '')
+    reconcileCanvasInteractionState()
+    void scrollSelectedPageRailItemIntoView()
+  }
+)
+
+watch(
+  () => [
+    selectedEditPage.value?.stored_name || '',
+    selectedEditPage.value?.translated_image_url || '',
+    selectedEditPage.value?.base_image_url || '',
+    isCanvasReviewMode.value,
+    getViewportState(selectedEditPage.value?.stored_name || '', 'main').zoom
+  ],
+  () => {
+    void syncTranslatedPreviewScale()
+    void refreshSelectedRegionPreviewDebug()
+  }
+)
+
+watch(
+  () => [
+    config.value.workspace_width_mode,
+    reviewWorkspacePrefs.value.split_ratio,
+    reviewWorkspacePrefs.value.page_rail_width,
+    reviewWorkspacePrefs.value.inspector_width,
+    reviewWorkspacePrefs.value.compare_pane_mode,
+    reviewWorkspacePrefs.value.compare_sync_enabled
+  ],
+  () => {
+    void nextTick(() => {
+      if (selectedEditPage.value?.stored_name) {
+        updateViewportState(
+          selectedEditPage.value.stored_name,
+          'compare',
+          { zoom: 1, panX: 0, panY: 0 },
+          { syncCompare: false }
+        )
+      }
+      void syncTranslatedPreviewScale()
+      void refreshSelectedRegionPreviewDebug()
+    })
+  }
+)
+
+watch(
+  () => [
+    selectedEditRegion.value?.id || '',
+    JSON.stringify(translationRegionLayoutOverrides.value),
+    JSON.stringify(translationRegionSkipOverrides.value),
+    JSON.stringify(translationRegionDisabledOverrides.value),
+    JSON.stringify(styleRegionOverrides.value),
+    previewFontFaceCss.value,
+    renderNonce.value,
+  ],
+  () => {
+    void refreshSelectedRegionPreviewDebug()
+  },
+  { deep: false }
+)
+
+watch(
+  () => mergedInspectionPages.value,
+  () => {
+    reconcileCanvasInteractionState()
+  },
+  { deep: false }
+)
+
+watch(
+  () => sessionId.value,
+  (nextSessionId) => {
+    if (!nextSessionId) {
+      v2View.value = 'home'
+      v2HistoryModalOpen.value = false
+      v2SettingsModalOpen.value = false
+      return
+    }
+    if (v2View.value === 'home') {
+      v2View.value = 'picker'
+    }
+  }
+)
+
+watch(
+  () => v2PageEntries.value.map((page) => page.stored_name).join('|'),
+  () => {
+    if (!v2PageEntries.value.length) {
+      return
+    }
+    const hasCurrent = v2PageEntries.value.some((page) => page.stored_name === selectedEditPageKey.value)
+    if (!hasCurrent) {
+      selectedEditPageKey.value = v2PageEntries.value[0].stored_name
+    }
+  },
+  { immediate: true }
+)
+</script>
+
+<template>
+  <component :is="'style'">{{ previewFontFaceCss }}</component>
+
+  <div :class="['v2-app', v2View === 'review' ? 'is-review' : '']">
+    <input
+      ref="v2UploadInputRef"
+      class="v2-hidden-input"
+      :accept="acceptValue"
+      type="file"
+      @change="handleV2FileChange"
+    />
+    <input
+      ref="v2SupplementInputRef"
+      class="v2-hidden-input"
+      :accept="acceptValue"
+      type="file"
+      @change="handleV2SupplementFileChange"
+    />
+
+    <header class="v2-topbar">
+      <div class="v2-topbar-brand">
+        <div class="v2-brand-mark">M</div>
+        <div>
+          <p class="v2-brand-kicker">Manga Translator V2.0</p>
+          <h1 class="v2-brand-title">
+            {{ v2View === 'review' ? v2ProjectTitle : '漫画翻译工作台' }}
+          </h1>
+        </div>
+      </div>
+
+      <div class="v2-topbar-actions">
+        <div class="v2-connection-chip">
+          <span :class="['v2-connection-dot', backendOnline ? 'online' : 'offline']"></span>
+          <span>{{ backendOnline ? '后端在线' : '后端离线' }}</span>
+        </div>
+
+        <button
+          type="button"
+          class="v2-topbar-button"
+          @click="openV2HistoryModal"
+        >
+          历史项目
+        </button>
+
+        <button
+          v-if="v2HasProject"
+          type="button"
+          class="v2-topbar-button"
+          :disabled="!canUseV2SupplementUpload"
+          :title="sessionId ? '上传与原图同名的无字图，用作当前项目底图' : '请先上传原图或恢复项目'"
+          @click="triggerV2SupplementPicker"
+        >
+          {{ v2SupplementUploading ? '补充中…' : '补充无字图' }}
+        </button>
+
+        <button
+          type="button"
+          class="v2-icon-button"
+          aria-label="打开设置"
+          @click="openV2Settings"
+        >
+          ⚙
+        </button>
+      </div>
+    </header>
+
+    <div class="v2-statusbar">
+      <div class="v2-status-copy">
+        <strong>{{ errorMessage ? '出现问题' : '状态' }}</strong>
+        <span>{{ errorMessage || status }}</span>
+      </div>
+
+      <div v-if="translating && progress.total" class="v2-progress">
+        <div class="v2-progress-track">
+          <div class="v2-progress-fill" :style="{ width: `${progressPercent}%` }"></div>
+        </div>
+        <span>{{ progress.current }} / {{ progress.total }}</span>
+      </div>
+    </div>
+
+    <main class="v2-main">
+      <section v-if="v2View === 'home'" class="v2-home-view" data-testid="v2-home-view">
+        <div class="v2-home-hero">
+          <div class="v2-home-copy">
+            <p class="v2-section-kicker">上传即进入工作台</p>
+            <h2 class="v2-home-title">以图片包为入口，把选页、审校和设置整理到一条更短的路径里。</h2>
+            <p class="v2-home-description">
+              主入口只保留上传，历史恢复和设置作为次级动作。进入项目后先选页，再进入针对单页的高密度审校工作台。
+            </p>
+
+            <div class="v2-home-meta">
+              <div class="v2-home-meta-item">
+                <strong>{{ compactConfigSummary }}</strong>
+                <span>当前默认配置</span>
+              </div>
+              <div class="v2-home-meta-item">
+                <strong>{{ projectHistory.length }}</strong>
+                <span>历史项目</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="v2-home-gallery">
+            <article
+              v-for="(page, index) in v2HomePreviewPages"
+              :key="page.stored_name"
+              class="v2-home-gallery-card"
+            >
+              <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
+              <div class="v2-home-gallery-info">
+                <span>{{ page.status }}</span>
+                <strong>{{ page.name }}</strong>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <section
+          :class="['v2-upload-card', v2UploadDragOver ? 'is-dragover' : '']"
+          data-testid="v2-upload-card"
+          @dragover="handleV2DragOver"
+          @dragenter.prevent="v2UploadDragOver = true"
+          @dragleave="handleV2DragLeave"
+          @drop="handleV2Drop"
+        >
+          <button type="button" class="v2-upload-surface" @click="triggerV2UploadPicker">
+            <span class="v2-upload-icon">⬆</span>
+            <strong>{{ uploading ? '正在导入素材…' : '上传图片 / 图片包' }}</strong>
+            <p>{{ selectedFile ? selectedFile.name : '支持 zip、cbz 和单张图片；点击或拖拽到这里后会直接开始导入。' }}</p>
+          </button>
+
+          <div class="v2-secondary-actions">
+            <button type="button" class="v2-secondary-button" @click="openV2HistoryModal">历史项目</button>
+            <button
+              type="button"
+              class="v2-secondary-button"
+              :disabled="uploading || translating || v2SupplementUploading"
+              :title="sessionId ? '上传与原图同名的无字图，用作当前项目底图' : '请先上传原图或恢复项目'"
+              @click="triggerV2SupplementPicker"
+            >
+              {{ v2SupplementUploading ? '补充中…' : '补充无字图' }}
+            </button>
+          </div>
+        </section>
+      </section>
+
+      <section v-else-if="v2View === 'picker'" class="v2-picker-view" data-testid="v2-picker-view">
+        <div class="v2-section-head">
+          <div>
+            <p class="v2-section-kicker">项目图片列表</p>
+            <h2 class="v2-section-title">{{ v2ProjectTitle }}</h2>
+            <p class="v2-section-subtitle">{{ v2ProjectSubtitle }}</p>
+          </div>
+
+          <div class="v2-section-actions">
+            <button
+              type="button"
+              class="v2-secondary-button"
+              :disabled="!v2PageEntries.length"
+              @click="openV2ReviewPage(v2SelectedPageEntry?.stored_name || '')"
+            >
+              进入审校
+            </button>
+          </div>
+        </div>
+
+        <div class="v2-picker-toolbar">
+          <input
+            v-model="v2PageSearch"
+            class="v2-search-input"
+            type="search"
+            placeholder="搜索页名 / 状态"
+          />
+          <div class="v2-picker-toolbar-copy">
+            <span>{{ v2FilteredPageEntries.length }} / {{ v2PageEntries.length }} 页</span>
+            <span>{{ workflowStageLabelMap[workflowStage] || workflowStage }}</span>
+          </div>
+        </div>
+
+        <div class="v2-page-grid">
+          <button
+            v-for="(page, index) in v2FilteredPageEntries"
+            :key="page.stored_name"
+            type="button"
+            :class="['v2-page-card', page.selected ? 'is-selected' : '']"
+            @click="openV2ReviewPage(page.stored_name)"
+          >
+            <div class="v2-page-card-media">
+              <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
+              <span class="v2-page-card-number">P{{ page.pageNumber }}</span>
+            </div>
+            <div class="v2-page-card-body">
+              <div class="v2-page-card-head">
+                <strong>{{ page.name }}</strong>
+                <span class="v2-page-status">{{ page.status }}</span>
+              </div>
+              <div class="v2-page-card-meta">
+                <span>{{ page.regionCount || 0 }} 个框</span>
+                <span>{{ page.finalUrl ? '已生成结果' : '等待处理' }}</span>
+              </div>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <section v-else class="v2-review-view" data-testid="v2-review-view">
+        <div class="v2-review-toolbar">
+          <div class="v2-review-toolbar-left">
+            <button type="button" class="v2-icon-button" aria-label="返回图片列表" @click="goToV2Picker">←</button>
+            <div>
+              <p class="v2-section-kicker">审校页面</p>
+              <h2 class="v2-review-title">{{ v2ProjectTitle }}</h2>
+              <p class="v2-review-subtitle">{{ v2SelectedPageSummary }}</p>
+            </div>
+          </div>
+
+          <div class="v2-review-toolbar-center">
+            <div class="v2-mode-switch">
+              <button
+                type="button"
+                :class="['v2-mode-switch-button', v2SourcePaneMode === 'source' ? 'active' : '']"
+                @click="v2SourcePaneMode = 'source'"
+              >
+                原图
+              </button>
+              <button
+                type="button"
+                :class="['v2-mode-switch-button', v2SourcePaneMode === 'blank' ? 'active' : '']"
+                @click="v2SourcePaneMode = 'blank'"
+              >
+                空页
+              </button>
+              <button
+                type="button"
+                :class="['v2-mode-switch-button', v2SourcePaneMode === 'final' ? 'active' : '']"
+                @click="v2SourcePaneMode = 'final'"
+              >
+                最终效果
+              </button>
+            </div>
+          </div>
+
+          <div class="v2-review-toolbar-right">
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canSelectPreviousEditPage"
+              @click="selectAdjacentEditPage(-1)"
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canSelectNextEditPage"
+              @click="selectAdjacentEditPage(1)"
+            >
+              下一页
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!selectedEditPage || !getPageHistoryState(selectedEditPage.stored_name).undo.length"
+              @click="undoCanvasEdit"
+            >
+              撤销
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!selectedEditPage || !getPageHistoryState(selectedEditPage.stored_name).redo.length"
+              @click="redoCanvasEdit"
+            >
+              重做
+            </button>
+            <button
+              type="button"
+              class="v2-primary-button"
+              :disabled="translating || !sessionId"
+              @click="runV2ReviewPrimaryAction"
+            >
+              {{ v2ReviewPrimaryLabel }}
+            </button>
+            <button type="button" class="v2-icon-button" aria-label="打开设置" @click="openV2Settings">⚙</button>
+          </div>
+        </div>
+
+        <div class="v2-review-layout">
+          <aside class="v2-page-rail">
+            <div class="v2-page-rail-head">
+              <div class="v2-page-rail-summary">
+                <strong>{{ v2SelectedPagePositionLabel }}</strong>
+                <span>当前页</span>
+              </div>
+            </div>
+
+            <div class="v2-page-rail-list">
+              <button
+                v-for="(page, index) in v2FilteredPageEntries"
+                :key="page.stored_name"
+                :data-page-key="page.stored_name"
+                type="button"
+                :class="['v2-page-rail-item', page.stored_name === (v2SelectedPageEntry?.stored_name || '') ? 'active' : '']"
+                @click="selectedEditPageKey = page.stored_name"
+              >
+                <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
+                <div class="v2-page-rail-copy">
+                  <strong>{{ page.pageNumber }}</strong>
+                  <span>{{ page.status }}</span>
+                </div>
+              </button>
+            </div>
+          </aside>
+
+          <section class="v2-review-stage">
+            <div class="v2-pane-strip">
+              <article class="v2-pane-card">
+                <header class="v2-pane-head">
+                  <div>
+                    <span class="v2-pane-label">{{ v2ReviewHeaderLabel }}</span>
+                    <strong>{{ v2SelectedPageEntry?.name || '未选择页面' }}</strong>
+                  </div>
+                  <div class="v2-pane-actions">
+                    <button
+                      v-if="selectedEditPage"
+                      type="button"
+                      class="v2-ghost-button"
+                      @click="resetViewportStateForPage(selectedEditPage)"
+                    >
+                      重置视图
+                    </button>
+                  </div>
+                </header>
+
+                <div
+                  ref="translatedPreviewCanvasRef"
+                  class="v2-canvas-shell"
+                  :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
+                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'main')"
+                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'main')"
+                >
+                  <div
+                    :class="['v2-canvas-stage', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
+                    :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'main') : null"
+                    @pointerdown="selectedEditPage && startManualDraw($event, selectedEditPage)"
+                    @pointermove="selectedEditPage && updateManualDraw($event, selectedEditPage)"
+                    @pointerup="selectedEditPage && finishManualDraw($event, selectedEditPage)"
+                    @pointercancel="clearManualDraft({ keepMode: true })"
+                  >
+                    <img
+                      v-if="v2SourcePaneImageUrl"
+                      :alt="`${v2SelectedPageEntry?.name || '页面'} ${v2ReviewHeaderLabel}`"
+                      :src="v2SourcePaneImageUrl"
+                      @load="refreshTranslatedPreviewScale"
+                    />
+                    <div v-else class="v2-canvas-empty">
+                      当前没有可展示的页面图像
+                    </div>
+
+                    <template v-if="selectedEditPage">
+                      <button
+                        v-for="region in selectedEditPage.regions"
+                        :key="`main-${region.id}`"
+                        type="button"
+                        :class="[
+                          'style-box',
+                          isManualRegion(region) ? 'manual' : '',
+                          mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
+                          selectedEditRegionKey === region.id ? 'active' : '',
+                          canDirectManipulateCanvas ? 'canvas-editable' : '',
+                          getStyleRegionLabelClass(region, selectedEditPage)
+                        ]"
+                        :style="getStyleRegionBoxStyle(region, selectedEditPage)"
+                        @click="handleCanvasRegionClick(region)"
+                        @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
+                      >
+                        <span class="style-box-label">{{ region.index + 1 }}</span>
+                        <span
+                          v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
+                          class="style-box-source-crop"
+                        >
+                          <img
+                            :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
+                            :style="getSourceCropImageStyle(region, selectedEditPage)"
+                            alt=""
+                          />
+                        </span>
+                        <span
+                          v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
+                          class="style-box-preview-text"
+                          :class="{ vertical: isVerticalRegion(region) }"
+                          :style="getCanvasPreviewTextContainerStyle(region)"
+                        >
+                          <span
+                            class="style-box-preview-text-content"
+                            :class="{ vertical: isVerticalRegion(region) }"
+                            :data-region-id="region.id"
+                            :style="getCanvasPreviewTextStyle(region)"
+                          >
+                            {{ getCanvasPreviewText(region) }}
+                          </span>
+                        </span>
+                        <span
+                          v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
+                          v-for="handle in canvasHandleOptions"
+                          :key="`main-${region.id}-${handle}`"
+                          :class="['style-box-handle', `handle-${handle}`]"
+                          :style="{ cursor: getCanvasHandleCursor(handle) }"
+                          @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
+                        ></span>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </article>
+
+              <article class="v2-pane-card v2-pane-card-compare">
+                <header class="v2-pane-head">
+                  <div>
+                    <span class="v2-pane-label">实时预览稿</span>
+                    <strong>当前译图</strong>
+                  </div>
+                  <div class="v2-pane-actions">
+                    <button
+                      v-if="selectedEditPage && selectedEditRegion"
+                      type="button"
+                      class="v2-ghost-button"
+                      @click="focusSelectedRegionInViewport(selectedEditPage, 'compare')"
+                    >
+                      定位当前框
+                    </button>
+                  </div>
+                </header>
+
+                <div
+                  ref="compareCanvasShellRef"
+                  class="v2-canvas-shell v2-canvas-shell-compare"
+                  :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
+                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
+                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
+                >
+                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'compare') : null">
+                    <img
+                      v-if="v2ComparePaneImageUrl"
+                      :alt="`${v2SelectedPageEntry?.name || '页面'} 对照图`"
+                      :src="v2ComparePaneImageUrl"
+                    />
+                    <div v-else class="v2-canvas-empty">
+                      这里会显示当前页的实时预览稿
+                    </div>
+
+                    <div
+                      v-if="selectedEditPage && selectedEditRegion"
+                      class="v2-compare-focus"
+                      :style="getStyleRegionBoxStyle(selectedEditRegion, selectedEditPage)"
+                    >
+                      <span class="style-box-label">{{ selectedEditRegion.index + 1 }}</span>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <aside class="v2-region-sidebar">
+            <div class="v2-region-sidebar-head">
+              <div class="v2-region-sidebar-tools">
+                <div class="v2-region-sidebar-summary">
+                  <strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
+                  <span>{{ v2SelectedRegionSummary }}</span>
+                </div>
+
+                <div class="v2-region-sidebar-nav">
+                  <button
+                    type="button"
+                    class="v2-icon-button"
+                    aria-label="上一个对白框"
+                    :disabled="!canSelectPreviousEditRegion"
+                    @click="selectAdjacentEditRegion(-1)"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    class="v2-ghost-button"
+                    :disabled="!selectedEditPage || !selectedEditRegion"
+                    @click="selectedEditPage && focusSelectedRegionInViewport(selectedEditPage, 'main')"
+                  >
+                    定位
+                  </button>
+                  <button
+                    type="button"
+                    class="v2-icon-button"
+                    aria-label="下一个对白框"
+                    :disabled="!canSelectNextEditRegion"
+                    @click="selectAdjacentEditRegion(1)"
+                  >
+                    ↓
+                  </button>
+                </div>
+              </div>
+
+              <input
+                v-model="regionListSearch"
+                class="v2-search-input translation-review-input"
+                type="search"
+                placeholder="搜索对白框"
+              />
+              <select v-model="regionListFilter" class="v2-filter-select">
+                <option value="all">全部</option>
+                <option value="manual">手动补框</option>
+                <option value="keep-original">保留原文</option>
+                <option value="untranslated">未翻译</option>
+                <option value="font-override">有字体覆盖</option>
+                <option value="warning">需留意</option>
+              </select>
+            </div>
+
+            <div v-if="selectedEditPage && filteredEditRegions.length" class="v2-region-list">
+              <article
+                v-for="region in filteredEditRegions"
+                :key="region.id"
+                :data-region-id="region.id"
+                :class="['style-region-card', 'v2-region-card', selectedEditRegionKey === region.id ? 'active' : '']"
+                @click="selectedEditRegionKey = region.id"
+              >
+                <header class="v2-region-card-head">
+                  <div class="v2-region-card-title">
+                    <strong>#{{ region.index + 1 }}</strong>
+                    <span v-if="hasRegionWarning(region)" class="v2-inline-badge warning">需留意</span>
+                    <span v-if="isManualRegion(region)" class="v2-inline-badge">手动补框</span>
+                  </div>
+
+                  <div class="v2-region-card-toggles" @click.stop @mousedown.stop>
+                    <button
+                      type="button"
+                      :class="['v2-toggle-chip', !isRegionDisabled(region) ? 'active' : '']"
+                      @click.stop="toggleRegionEnabledV2(region)"
+                    >
+                      {{ isRegionDisabled(region) ? '已停用' : '已启用' }}
+                    </button>
+                    <button
+                      type="button"
+                      :class="['v2-toggle-chip', isVerticalRegion(region) ? 'active' : '']"
+                      @click.stop="toggleRegionDirectionV2(region)"
+                    >
+                      {{ isVerticalRegion(region) ? '纵排' : '横排' }}
+                    </button>
+                  </div>
+                </header>
+
+                <div class="v2-region-card-preview">
+                  <p class="v2-region-source">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                  <p class="v2-region-translation">{{ getEditRegionText(region) || '未填写译文' }}</p>
+                </div>
+
+                <div v-if="selectedEditRegionKey === region.id" class="v2-region-card-body" @click.stop @mousedown.stop>
+                  <label class="v2-field">
+                    <span>译文</span>
+                    <textarea
+                      :class="['translation-review-input', 'translation-review-textarea', isRegionSkipEnabled(region) ? 'disabled' : '']"
+                      :value="getEditRegionText(region)"
+                      :data-region-id="region.id"
+                      rows="4"
+                      :disabled="isRegionSkipEnabled(region)"
+                      @input="handleRegionTextInput(region, $event.target.value)"
+                      @keydown.enter.meta.prevent="commitRegionTextDraft(region)"
+                      @keydown.enter.ctrl.prevent="commitRegionTextDraft(region)"
+                      @blur="commitRegionTextDraft(region)"
+                    ></textarea>
+                  </label>
+
+                  <div class="v2-region-field-row">
+                    <label class="v2-field v2-field-grow">
+                      <span>字体</span>
+                      <select
+                        :value="getRegionFontOverrideId(region)"
+                        @change="updateRegionFontOverride(region, $event.target.value)"
+                      >
+                        <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
+                        <option
+                          v-for="font in availableFonts"
+                          :key="`${region.id}-${font.id}`"
+                          :value="font.id"
+                        >
+                          {{ getPreviewFontOptionLabel(font) }}
+                        </option>
+                      </select>
+                    </label>
+
+                    <button
+                      type="button"
+                      class="v2-secondary-button"
+                      :disabled="!canApplyRegionFontToPage(region)"
+                      @click="applyRegionFontToPage(region)"
+                    >
+                      应用全部
+                    </button>
+                  </div>
+
+                  <div class="v2-region-field-row">
+                    <label class="v2-field v2-field-grow">
+                      <span>字号</span>
+                      <div class="v2-stepper">
+                        <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, -1)">−</button>
+                        <input
+                          :value="getRegionFontSize(region)"
+                          type="number"
+                          min="8"
+                          max="240"
+                          step="1"
+                          inputmode="numeric"
+                          @input="handleRegionFontSizeInput(region, $event.target.value)"
+                          @keydown.enter.prevent="commitRegionFontSize(region)"
+                          @blur="commitRegionFontSize(region)"
+                        />
+                        <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, 1)">＋</button>
+                      </div>
+                    </label>
+
+                    <button
+                      type="button"
+                      class="v2-secondary-button"
+                      :disabled="!canApplyRegionFontSizeToPage(region)"
+                      @click="applyRegionFontSizeToPage(region)"
+                    >
+                      应用全部
+                    </button>
+                  </div>
+
+                  <div class="v2-region-card-footer">
+                    <label class="v2-inline-checkbox">
+                      <input
+                        :checked="isRegionSkipEnabled(region)"
+                        type="checkbox"
+                        @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                      />
+                      <span>保留原文</span>
+                    </label>
+
+                    <button
+                      v-if="isManualRegion(region)"
+                      type="button"
+                      class="v2-danger-link"
+                      @click="deleteManualRegion(region)"
+                    >
+                      删除补框
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <div v-else class="v2-empty-panel">
+              <strong>{{ selectedEditPage ? '这一页暂时还没有可编辑的对白框' : '先从左侧选择一页' }}</strong>
+              <p>如果刚上传项目，可以先执行一次识别或翻译，让文本框数据进入审校工作台。</p>
+              <button
+                type="button"
+                class="v2-primary-button"
+                :disabled="translating || !sessionId"
+                @click="runV2ReviewPrimaryAction"
+              >
+                {{ v2ReviewPrimaryLabel }}
+              </button>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <div v-if="v2HistoryModalOpen" class="v2-overlay" @click.self="closeV2HistoryModal">
+      <section class="v2-modal v2-history-modal" data-testid="v2-history-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">历史项目</p>
+            <h2 class="v2-section-title">恢复之前的工作区</h2>
+          </div>
+
+          <button type="button" class="v2-icon-button" aria-label="关闭历史项目" @click="closeV2HistoryModal">✕</button>
+        </header>
+
+        <div class="v2-modal-toolbar">
+          <input
+            v-model="v2HistorySearch"
+            class="v2-search-input"
+            type="search"
+            placeholder="搜索项目名称 / 备注 / 状态"
+          />
+          <select v-model="v2HistorySort" class="v2-filter-select">
+            <option value="recent">最近更新</option>
+            <option value="title">按标题</option>
+          </select>
+          <button type="button" class="v2-secondary-button" :disabled="historyLoading" @click="loadProjectHistory">
+            {{ historyLoading ? '刷新中…' : '刷新' }}
+          </button>
+        </div>
+
+        <div v-if="v2FilteredProjectHistory.length" class="v2-history-grid">
+          <article
+            v-for="(project, index) in v2FilteredProjectHistory"
+            :key="project.project_id"
+            class="v2-history-card"
+          >
+            <div class="v2-history-card-cover">
+              <img :src="getV2ProjectCover(project, index)" :alt="project.title" @error="handleV2ImageError($event, index)" />
+            </div>
+
+            <div class="v2-history-card-body">
+              <div class="v2-history-card-head">
+                <strong>{{ project.title }}</strong>
+                <span class="v2-inline-badge">{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
+              </div>
+
+              <div class="v2-history-card-meta">
+                <span>{{ project.page_count }} 页</span>
+                <span>{{ formatV2Timestamp(project.updated_at || project.created_at) }}</span>
+              </div>
+
+              <p class="v2-history-card-note">{{ project.note || '没有备注' }}</p>
+
+              <div class="v2-history-card-actions">
+                <button
+                  type="button"
+                  class="v2-primary-button"
+                  :disabled="!canRestoreHistoryProject(project)"
+                  @click="restoreProjectV2(project.project_id)"
+                >
+                  {{ restoringProjectId === project.project_id ? '恢复中…' : '恢复项目' }}
+                </button>
+                <button
+                  type="button"
+                  class="v2-ghost-button"
+                  @click="toggleProjectSnapshots(project.project_id)"
+                >
+                  {{ expandedProjectId === project.project_id ? '收起快照' : '查看快照' }}
+                </button>
+                <button
+                  type="button"
+                  class="v2-danger-link"
+                  :disabled="!canDeleteHistoryProject(project)"
+                  @click="deleteProject(project)"
+                >
+                  删除
+                </button>
+              </div>
+
+              <div v-if="expandedProjectId === project.project_id" class="v2-snapshot-list">
+                <div
+                  v-if="snapshotLoadingProjectId === project.project_id && !(projectSnapshots[project.project_id] || []).length"
+                  class="v2-snapshot-empty"
+                >
+                  正在加载快照…
+                </div>
+                <template v-else>
+                  <article
+                    v-for="snapshot in projectSnapshots[project.project_id] || []"
+                    :key="snapshot.snapshot_id"
+                    class="v2-snapshot-card"
+                  >
+                    <div class="v2-snapshot-copy">
+                      <strong>{{ snapshot.summary || snapshot.kind || '项目快照' }}</strong>
+                      <span>{{ formatV2Timestamp(snapshot.created_at) }}</span>
+                    </div>
+                    <div class="v2-snapshot-actions">
+                      <button
+                        type="button"
+                        class="v2-ghost-button"
+                        :disabled="!canRestoreHistorySnapshot(project, snapshot)"
+                        @click="restoreSnapshotV2(project.project_id, snapshot.snapshot_id)"
+                      >
+                        {{ restoringSnapshotId === snapshot.snapshot_id ? '恢复中…' : '恢复此快照' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="v2-icon-button"
+                        :aria-label="snapshot.pinned ? '取消固定快照' : '固定快照'"
+                        @click="toggleSnapshotPin(project.project_id, snapshot)"
+                      >
+                        {{ snapshot.pinned ? '★' : '☆' }}
+                      </button>
+                    </div>
+                  </article>
+                  <div v-if="!(projectSnapshots[project.project_id] || []).length" class="v2-snapshot-empty">
+                    这个项目目前还没有快照。
+                  </div>
+                </template>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div v-else class="v2-empty-panel">
+          <strong>{{ historyLoading ? '正在读取历史项目…' : '暂时没有历史项目' }}</strong>
+          <p>先上传一组漫画素材，系统就会开始为你建立可恢复的项目记录。</p>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="v2SettingsOpen" :class="['v2-settings-layer', v2View === 'review' ? 'as-drawer' : 'as-modal']">
+      <div class="v2-settings-scrim" @click="closeV2Settings"></div>
+      <section class="v2-settings-panel" data-testid="v2-settings-panel" @click.stop>
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">设置</p>
+            <h2 class="v2-section-title">{{ v2View === 'review' ? '当前项目与工作流' : '默认工作流设置' }}</h2>
+          </div>
+
+          <button type="button" class="v2-icon-button" aria-label="关闭设置" @click="closeV2Settings">✕</button>
+        </header>
+
+        <div class="v2-settings-content">
+          <section v-if="currentProject" class="v2-settings-group">
+            <header>
+              <strong>项目信息</strong>
+              <span>给当前工作区一个更清晰的名字</span>
+            </header>
+
+            <label class="v2-field">
+              <span>项目名称</span>
+              <input v-model="projectTitleDraft" type="text" placeholder="未命名项目" />
+            </label>
+
+            <label class="v2-field">
+              <span>备注</span>
+              <textarea v-model="projectNoteDraft" rows="3" placeholder="记录这组素材的来源、进度或注意事项"></textarea>
+            </label>
+
+            <button
+              type="button"
+              class="v2-secondary-button"
+              :disabled="!projectMetaDirty || savingProjectMeta"
+              @click="saveProjectMetadata"
+            >
+              {{ savingProjectMeta ? '保存中…' : '保存项目资料' }}
+            </button>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>翻译流程</strong>
+              <span>控制识别、翻译与审校的默认方式</span>
+            </header>
+
+            <label class="v2-field">
+              <span>翻译引擎</span>
+              <select v-model="config.translator">
+                <option value="gemini">Gemini</option>
+                <option value="doubao-ark">Doubao</option>
+                <option value="sugoi">SUGOI</option>
+                <option value="chatgpt">ChatGPT</option>
+                <option value="youdao">有道</option>
+                <option value="baidu">百度</option>
+                <option value="offline">Offline</option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>目标语言</span>
+              <select v-model="config.target_lang">
+                <option value="CHS">简体中文</option>
+                <option value="CHT">繁体中文</option>
+                <option value="ENG">英语</option>
+                <option value="JPN">日语</option>
+                <option value="KOR">韩语</option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>默认审校模式</span>
+              <select v-model="config.default_review_mode">
+                <option value="canvas_beta">画布审校（Beta）</option>
+                <option value="classic">经典审校</option>
+              </select>
+            </label>
+
+            <label v-if="config.translator === 'doubao-ark'" class="v2-field">
+              <span>Doubao 模型</span>
+              <select v-model="config.translator_model">
+                <option
+                  v-for="model in doubaoModelOptions"
+                  :key="model.value"
+                  :value="model.value"
+                >
+                  {{ model.label }}
+                </option>
+              </select>
+            </label>
+
+            <label class="v2-inline-checkbox">
+              <input v-model="config.pause_after_detection" type="checkbox" />
+              <span>上传后先停在识别阶段，进入逐框审校</span>
+            </label>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>字体与渲染</strong>
+              <span>设定默认字体策略与输出形态</span>
+            </header>
+
+            <label class="v2-field">
+              <span>主字体</span>
+              <select v-model="config.font_key">
+                <option value="">自动推荐</option>
+                <option v-for="font in availableFonts" :key="font.id" :value="font.id">
+                  {{ font.label }}
+                </option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>字体策略</span>
+              <select v-model="config.font_style_mode">
+                <option value="single">单字体</option>
+                <option value="auto-map">自动映射</option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>结果输出</span>
+              <select v-model="config.rerender_output_format">
+                <option value="png">独立 PNG</option>
+                <option value="source">沿用原格式</option>
+              </select>
+            </label>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>图像处理</strong>
+              <span>擦字与底图生成相关能力</span>
+            </header>
+
+            <label class="v2-field">
+              <span>擦字模式</span>
+              <select v-model="config.image_cleanup_mode">
+                <option value="off">稳定流程</option>
+                <option value="gemini-image">Gemini Image</option>
+                <option value="seedream-image">Seedream Image</option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>擦字强度</span>
+              <select v-model="config.mask_cleanup_strength">
+                <option value="standard">标准</option>
+                <option value="clean">更干净</option>
+                <option value="aggressive">更激进</option>
+              </select>
+            </label>
+
+            <label class="v2-inline-checkbox">
+              <input v-model="config.export_mask_debug" type="checkbox" />
+              <span>输出擦字调试目录</span>
+            </label>
+          </section>
+        </div>
+      </section>
+    </div>
+  </div>
+
+</template>

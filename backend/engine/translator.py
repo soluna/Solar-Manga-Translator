@@ -541,6 +541,92 @@ class TranslatorEngine:
         session["project_updated_at"] = now
         self.persist_project_state(project_id, session, persist_page_documents=True)
 
+    def attach_base_images(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        image_paths: list[str],
+    ) -> dict[str, Any]:
+        source_images = list(session.get("source_images") or [])
+        if not source_images:
+            raise ValueError("当前项目还没有原始页面，无法补充无字图。")
+        if not image_paths:
+            raise ValueError("没有收到可用的无字图文件。")
+
+        exact_name_map: dict[str, dict[str, Any]] = {}
+        stem_name_map: dict[str, list[dict[str, Any]]] = {}
+        for image in source_images:
+            display_name = str(image.get("name") or image.get("stored_name") or "").strip()
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not display_name or not stored_name:
+                continue
+            exact_name_map[display_name.lower()] = image
+            stem_name_map.setdefault(Path(display_name).stem.lower(), []).append(image)
+
+        matched_pages: list[dict[str, str]] = []
+        matched_page_ids: list[str] = []
+        unmatched_files: list[str] = []
+        invalid_files: list[str] = []
+
+        for raw_image_path in image_paths:
+            image_path = Path(raw_image_path)
+            upload_name = image_path.name
+            matched_image = exact_name_map.get(upload_name.lower())
+            if matched_image is None:
+                candidates = stem_name_map.get(image_path.stem.lower(), [])
+                if len(candidates) == 1:
+                    matched_image = candidates[0]
+            if matched_image is None:
+                unmatched_files.append(upload_name)
+                continue
+
+            image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image_bgr is None:
+                invalid_files.append(upload_name)
+                continue
+
+            stored_name = str(matched_image.get("stored_name") or "").strip()
+            if not stored_name:
+                unmatched_files.append(upload_name)
+                continue
+
+            page_cache_dir = self._session_page_cache_dir(session, project_id, stored_name)
+            page_cache_dir.mkdir(parents=True, exist_ok=True)
+            inpainted_path = page_cache_dir / "inpainted.png"
+            cv2.imwrite(str(inpainted_path), image_bgr)
+
+            matched_page_ids.append(stored_name)
+            matched_pages.append(
+                {
+                    "stored_name": stored_name,
+                    "page_name": str(matched_image.get("name") or stored_name),
+                    "uploaded_name": upload_name,
+                }
+            )
+
+        if not matched_page_ids:
+            raise ValueError("没有找到可匹配的页面文件名。请确保无字图与原图文件名一致。")
+
+        unique_page_ids = list(dict.fromkeys(matched_page_ids))
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="base_images_uploaded",
+            snapshot_summary=f"补充无字图 {len(unique_page_ids)} 页",
+            persist_page_documents=True,
+            page_ids=unique_page_ids,
+        )
+
+        return {
+            "matched_count": len(matched_pages),
+            "matched_pages": matched_pages,
+            "updated_page_ids": unique_page_ids,
+            "unmatched_count": len(unmatched_files),
+            "unmatched_files": unmatched_files,
+            "invalid_count": len(invalid_files),
+            "invalid_files": invalid_files,
+        }
+
     def capture_session_config(self, session: dict[str, Any], raw_config: dict[str, Any] | None) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
         session["last_config"] = config

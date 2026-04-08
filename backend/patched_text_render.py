@@ -293,7 +293,11 @@ def get_char_border(cdpt: str, font_size: int, direction: int):
 #         print("VR", face.has_kerning)
 #         return face.get_kerning(face.get_char_index(prev), face.get_char_index(cdpt))
 
-def calc_vertical(font_size: int, text: str, max_height: int):
+def _normalize_manual_line_breaks(text: str) -> str:
+    return str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _calc_vertical_wrapped(font_size: int, text: str, max_height: int):
     line_text_list = []
     # line_width_list = []
     line_height_list = []
@@ -334,6 +338,23 @@ def calc_vertical(font_size: int, text: str, max_height: int):
 
     # box_calc_x = sum(line_width_list) + (len(line_width_list) - 1) * spacing_x
     # box_calc_y = max(line_height_list)
+    return line_text_list, line_height_list
+
+
+def calc_vertical(font_size: int, text: str, max_height: int):
+    normalized_text = _normalize_manual_line_breaks(text)
+    forced_segments = normalized_text.split('\n')
+    line_text_list = []
+    line_height_list = []
+
+    for segment in forced_segments:
+        if segment:
+            segment_lines, segment_heights = _calc_vertical_wrapped(font_size, segment, max_height)
+        else:
+            segment_lines, segment_heights = [''], [0]
+        line_text_list.extend(segment_lines or [''])
+        line_height_list.extend(segment_heights or [0])
+
     return line_text_list, line_height_list
 
 def put_char_vertical(font_size: int, cdpt: str, pen_l: Tuple[int, int], canvas_text: np.ndarray, canvas_border: np.ndarray, border_size: int):  
@@ -612,7 +633,7 @@ def get_char_offset_x(font_size: int, cdpt: str):
 def get_string_width(font_size: int, text: str):
     return sum([get_char_offset_x(font_size, c) for c in text])
 
-def calc_horizontal(font_size: int, text: str, max_width: int, max_height: int, language: str = 'en_US', hyphenate: bool = True) -> Tuple[List[str], List[int]]:
+def _calc_horizontal_wrapped(font_size: int, text: str, max_width: int, max_height: int, language: str = 'en_US', hyphenate: bool = True) -> Tuple[List[str], List[int]]:
     """
     Splits up a string of text into lines. Returns list of lines and their widths.
     Will go over max_height if too much text is present.
@@ -879,6 +900,29 @@ def calc_horizontal(font_size: int, text: str, max_width: int, max_height: int, 
         # Shouldn't be needed but there is apparently still a bug somewhere (See #458)
         line_width_list[i] = get_string_width(font_size, line_text)
         line_text_list.append(line_text)
+
+    return line_text_list, line_width_list
+
+
+def calc_horizontal(font_size: int, text: str, max_width: int, max_height: int, language: str = 'en_US', hyphenate: bool = True) -> Tuple[List[str], List[int]]:
+    """
+    Splits up a string of text into lines. Returns list of lines and their widths.
+    Explicit newlines are preserved as forced line breaks before any auto-wrapping.
+    """
+    normalized_text = _normalize_manual_line_breaks(text)
+    forced_segments = normalized_text.split('\n')
+    line_text_list: List[str] = []
+    line_width_list: List[int] = []
+
+    for segment in forced_segments:
+        if segment:
+            segment_lines, segment_widths = _calc_horizontal_wrapped(
+                font_size, segment, max_width, max_height, language, hyphenate
+            )
+        else:
+            segment_lines, segment_widths = [''], [0]
+        line_text_list.extend(segment_lines or [''])
+        line_width_list.extend(segment_widths or [0])
 
     return line_text_list, line_width_list
 

@@ -1329,6 +1329,11 @@ img {
   font-size: 0.86rem;
 }
 
+.v2-region-source,
+.v2-region-translation {
+  white-space: pre-wrap;
+}
+
 .v2-region-card-body {
   margin-top: 10px;
   padding-top: 10px;

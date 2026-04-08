@@ -3683,8 +3683,8 @@ function updateStyleOverride(region, nextStyle) {
 }
 
 function updateTranslationOverride(region, nextTranslation) {
-  const normalizedTranslation = String(nextTranslation || '').trim()
-  const machineTranslation = String(region.machine_translation || '').trim()
+  const normalizedTranslation = normalizeRegionTranslationOverride(nextTranslation)
+  const machineTranslation = normalizeRegionTranslationOverride(region.machine_translation)
   const nextOverrides = { ...translationRegionOverrides.value }
 
   if (!normalizedTranslation || normalizedTranslation === machineTranslation) {
@@ -3695,6 +3695,14 @@ function updateTranslationOverride(region, nextTranslation) {
 
   translationRegionOverrides.value = nextOverrides
   selectedEditRegionKey.value = region.id
+}
+
+function normalizeRegionTranslationDraft(nextValue) {
+  return String(nextValue ?? '').replace(/\r\n?/g, '\n')
+}
+
+function normalizeRegionTranslationOverride(nextValue) {
+  return normalizeRegionTranslationDraft(nextValue).trim()
 }
 
 function updateTranslationSkipOverride(region, enabled) {
@@ -4512,10 +4520,11 @@ function updateRegionTextDirection(region, nextDirection) {
 
 function handleRegionTextInput(region, nextValue) {
   selectedEditRegionKey.value = region.id
+  const normalizedDraftValue = normalizeRegionTranslationDraft(nextValue)
   if (isCanvasReviewMode.value) {
     translationInputDrafts.value = {
       ...translationInputDrafts.value,
-      [region.id]: String(nextValue ?? '')
+      [region.id]: normalizedDraftValue
     }
     if (selectedEditPage.value?.stored_name) {
       markCanvasPreviewDirty(selectedEditPage.value.stored_name)
@@ -4533,9 +4542,11 @@ function commitRegionTextDraft(region) {
   if (!hasDraft) {
     return
   }
-  const draftValue = String(translationInputDrafts.value[region.id] ?? getEditRegionText(region))
-  const normalizedTranslation = draftValue.trim()
-  const previousOverride = String(translationRegionOverrides.value[region.id] || '')
+  const draftValue = normalizeRegionTranslationDraft(
+    translationInputDrafts.value[region.id] ?? getEditRegionText(region)
+  )
+  const normalizedTranslation = normalizeRegionTranslationOverride(draftValue)
+  const previousOverride = normalizeRegionTranslationOverride(translationRegionOverrides.value[region.id] || '')
   if (normalizedTranslation === previousOverride) {
     const nextDrafts = { ...translationInputDrafts.value }
     delete nextDrafts[region.id]
@@ -4544,7 +4555,7 @@ function commitRegionTextDraft(region) {
   }
 
   const nextOverrides = { ...translationRegionOverrides.value }
-  if (!normalizedTranslation || normalizedTranslation === String(region.machine_translation || '').trim()) {
+  if (!normalizedTranslation || normalizedTranslation === normalizeRegionTranslationOverride(region.machine_translation)) {
     delete nextOverrides[region.id]
   } else {
     nextOverrides[region.id] = normalizedTranslation

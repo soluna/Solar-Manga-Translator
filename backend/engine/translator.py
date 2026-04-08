@@ -1855,7 +1855,7 @@ class TranslatorEngine:
 
     def _set_region_translation_override_value(self, session: dict[str, Any], region_id: str, text: str) -> None:
         overrides = dict(session.get("translation_region_overrides") or {})
-        normalized_text = str(text or "").strip()
+        normalized_text = self._normalize_translation_override_text(text)
         if normalized_text:
             overrides[region_id] = normalized_text
         else:
@@ -2954,10 +2954,13 @@ class TranslatorEngine:
         for key, value in raw_value.items():
             if not isinstance(key, str):
                 continue
-            text = str(value or "").strip()
+            text = self._normalize_translation_override_text(value)
             if text:
                 normalized[key] = text
         return normalized
+
+    def _normalize_translation_override_text(self, value: Any) -> str:
+        return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
     def _normalize_translation_region_skip_overrides(self, raw_value: Any) -> dict[str, bool]:
         if not isinstance(raw_value, dict):

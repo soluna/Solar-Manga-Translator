@@ -536,6 +536,23 @@ const canTranslateCurrentPage = computed(
 const canRerender = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
 )
+const v2ExportArchiveUrl = computed(() => {
+  const activeSessionId = String(sessionId.value || '').trim()
+  if (!activeSessionId) {
+    return ''
+  }
+  const currentDownloadUrl = String(downloadUrl.value || '').trim()
+  if (currentDownloadUrl) {
+    return currentDownloadUrl
+  }
+  if (workflowStage.value === 'translated' || translatedImages.value.length) {
+    return withCacheBust(toApiUrl(`/api/download/${activeSessionId}`))
+  }
+  return ''
+})
+const canExportTranslatedResults = computed(
+  () => Boolean(v2ExportArchiveUrl.value) && !translating.value
+)
 const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
@@ -4953,6 +4970,21 @@ async function copyText(text, successMessage) {
   }
 }
 
+function downloadV2TranslatedResults() {
+  if (!canExportTranslatedResults.value || !v2ExportArchiveUrl.value) {
+    status.value = '当前还没有可导出的翻译结果。'
+    return
+  }
+
+  const link = document.createElement('a')
+  link.href = v2ExportArchiveUrl.value
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  status.value = '已开始导出翻译结果压缩包。'
+}
+
 async function checkBackendStatus() {
   try {
     const response = await fetch(toApiUrl('/api/status'))
@@ -5863,10 +5895,10 @@ watch(
           <button
             type="button"
             class="v2-topbar-button"
-            :disabled="!canRerender"
-            @click="runV2RerenderAction"
+            :disabled="!canExportTranslatedResults"
+            @click="downloadV2TranslatedResults"
           >
-            重新嵌字
+            导出结果
           </button>
           <button
             type="button"
@@ -5926,6 +5958,16 @@ watch(
             @click="startV2NewProject"
           >
             新建项目
+          </button>
+
+          <button
+            v-if="v2HasProject"
+            type="button"
+            class="v2-topbar-button"
+            :disabled="!canExportTranslatedResults"
+            @click="downloadV2TranslatedResults"
+          >
+            导出结果
           </button>
 
           <button
@@ -6098,6 +6140,14 @@ watch(
               @click="selectedEditPage && resetViewportStateForPage(selectedEditPage)"
             >
               重置视图
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canRerender"
+              @click="runV2RerenderAction"
+            >
+              重新嵌字
             </button>
             <button
               type="button"

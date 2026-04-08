@@ -180,6 +180,10 @@ async function main() {
 
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle' })
     await page.getByTestId('v2-home-view').waitFor({ state: 'visible', timeout: 20000 })
+    const homeGalleryCount = await page.locator('.v2-home-gallery-card').count()
+    if (homeGalleryCount !== 0) {
+      throw new Error(`首页仍然保留了示例卡片：${homeGalleryCount}`)
+    }
     const homeShot = await saveScreenshot(page, 'v2-home.png')
 
     await page.getByRole('banner').getByRole('button', { name: '历史项目' }).click()
@@ -192,6 +196,7 @@ async function main() {
 
     await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
     await assertText(page.locator('.v2-section-title').first(), FIXTURE_PROJECT_TITLE, '选页页项目标题不正确')
+    await page.getByRole('banner').getByRole('button', { name: '新建项目' }).waitFor({ state: 'visible', timeout: 20000 })
     const pickerShot = await saveScreenshot(page, 'v2-picker.png')
 
     const pageCards = page.locator('.v2-page-card')
@@ -202,6 +207,7 @@ async function main() {
     await pageCards.first().click()
 
     await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByRole('banner').getByRole('button', { name: '重新嵌字' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.locator('.v2-region-card').first().click()
     const reviewShot = await saveScreenshot(page, 'v2-review.png')
 

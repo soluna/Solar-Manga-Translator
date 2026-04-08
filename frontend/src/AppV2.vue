@@ -514,6 +514,7 @@ const canUseV2SupplementUpload = computed(() => (
   && !translating.value
   && !v2SupplementUploading.value
 ))
+const canStartNewProject = computed(() => !uploading.value && !translating.value && !v2SupplementUploading.value)
 const canContinueSegmentedTranslation = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'detected'
 )
@@ -832,6 +833,7 @@ const v2SelectedRegionSummary = computed(() => {
   }
   return `第 ${selectedEditRegionVisibleIndex.value + 1} / ${filteredEditRegions.value.length} 框`
 })
+const v2RegionSidebarCompact = computed(() => filteredEditRegions.value.length <= 4)
 const pageRailItems = computed(() => (
   mergedInspectionPages.value.map((page, index) => ({
     ...page,
@@ -5043,6 +5045,17 @@ function triggerV2UploadPicker() {
   v2UploadInputRef.value?.click()
 }
 
+async function startV2NewProject() {
+  if (!canStartNewProject.value) {
+    return
+  }
+  closeV2HistoryModal()
+  closeV2Settings()
+  status.value = '选择一组新的图片或图片包后，会创建一个新的项目。'
+  await nextTick()
+  triggerV2UploadPicker()
+}
+
 function triggerV2SupplementPicker() {
   if (!sessionId.value) {
     status.value = '请先上传原图或恢复一个历史项目，再补充对应文件名的无字图。'
@@ -5237,6 +5250,13 @@ function runV2ReviewPrimaryAction() {
     return
   }
   startTranslation('translate')
+}
+
+function runV2RerenderAction() {
+  if (!canRerender.value || translating.value) {
+    return
+  }
+  startTranslation('rerender')
 }
 
 function toggleRegionEnabledV2(region) {
@@ -5829,6 +5849,14 @@ watch(
           <span class="v2-saved-indicator">{{ v2ReviewSavedLabel }}</span>
           <button
             type="button"
+            class="v2-topbar-button"
+            :disabled="!canRerender"
+            @click="runV2RerenderAction"
+          >
+            重新嵌字
+          </button>
+          <button
+            type="button"
             class="v2-primary-button"
             :disabled="translating || !sessionId"
             @click="runV2ReviewPrimaryAction"
@@ -5878,6 +5906,16 @@ watch(
           </button>
 
           <button
+            v-if="v2View === 'picker'"
+            type="button"
+            class="v2-topbar-button"
+            :disabled="!canStartNewProject"
+            @click="startV2NewProject"
+          >
+            新建项目
+          </button>
+
+          <button
             v-if="v2HasProject"
             type="button"
             class="v2-topbar-button"
@@ -5916,67 +5954,19 @@ watch(
 
     <main class="v2-main">
       <section v-if="v2View === 'home'" class="v2-home-view" data-testid="v2-home-view">
-        <div class="v2-home-hero">
-          <div class="v2-home-copy">
-            <p class="v2-section-kicker">上传即进入工作台</p>
-            <h2 class="v2-home-title">以图片包为入口，把选页、审校和设置整理到一条更短的路径里。</h2>
-            <p class="v2-home-description">
-              主入口只保留上传，历史恢复和设置作为次级动作。进入项目后先选页，再进入针对单页的高密度审校工作台。
-            </p>
-
-            <div class="v2-home-meta">
-              <div class="v2-home-meta-item">
-                <strong>{{ compactConfigSummary }}</strong>
-                <span>当前默认配置</span>
-              </div>
-              <div class="v2-home-meta-item">
-                <strong>{{ projectHistory.length }}</strong>
-                <span>历史项目</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="v2-home-gallery">
-            <article
-              v-for="(page, index) in v2HomePreviewPages"
-              :key="page.stored_name"
-              class="v2-home-gallery-card"
-            >
-              <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
-              <div class="v2-home-gallery-info">
-                <span>{{ page.status }}</span>
-                <strong>{{ page.name }}</strong>
-              </div>
-            </article>
-          </div>
-        </div>
-
         <section
-          :class="['v2-upload-card', v2UploadDragOver ? 'is-dragover' : '']"
+          :class="['v2-upload-card', 'v2-home-upload-card', v2UploadDragOver ? 'is-dragover' : '']"
           data-testid="v2-upload-card"
           @dragover="handleV2DragOver"
           @dragenter.prevent="v2UploadDragOver = true"
           @dragleave="handleV2DragLeave"
           @drop="handleV2Drop"
         >
-          <button type="button" class="v2-upload-surface" @click="triggerV2UploadPicker">
+          <button type="button" class="v2-upload-surface v2-upload-surface-home" @click="triggerV2UploadPicker">
             <span class="v2-upload-icon">⬆</span>
             <strong>{{ uploading ? '正在导入素材…' : '上传图片 / 图片包' }}</strong>
-            <p>{{ selectedFile ? selectedFile.name : '支持 zip、cbz 和单张图片；点击或拖拽到这里后会直接开始导入。' }}</p>
+            <p>{{ selectedFile ? selectedFile.name : '支持 zip、cbz 和单张图片；点击或拖拽到这里后会直接创建新的项目。' }}</p>
           </button>
-
-          <div class="v2-secondary-actions">
-            <button type="button" class="v2-secondary-button" @click="openV2HistoryModal">历史项目</button>
-            <button
-              type="button"
-              class="v2-secondary-button"
-              :disabled="uploading || translating || v2SupplementUploading"
-              :title="sessionId ? '上传与原图同名的无字图，用作当前项目底图' : '请先上传原图或恢复项目'"
-              @click="triggerV2SupplementPicker"
-            >
-              {{ v2SupplementUploading ? '补充中…' : '补充无字图' }}
-            </button>
-          </div>
         </section>
       </section>
 
@@ -6293,7 +6283,7 @@ watch(
             </div>
           </section>
 
-          <aside class="v2-region-sidebar">
+          <aside :class="['v2-region-sidebar', v2RegionSidebarCompact ? 'is-compact' : '']">
             <div class="v2-region-sidebar-head">
               <div class="v2-region-sidebar-top">
                 <div class="v2-region-sidebar-label">

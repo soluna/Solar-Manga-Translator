@@ -375,8 +375,10 @@ img {
 }
 
 .v2-home-view {
-  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.92fr);
-  align-content: start;
+  width: min(1240px, 100%);
+  min-height: 100%;
+  align-content: center;
+  padding-block: 12px;
 }
 
 .v2-home-hero {
@@ -514,9 +516,13 @@ img {
 }
 
 .v2-upload-card {
-  grid-column: 2;
-  grid-row: 1;
   padding: 20px;
+}
+
+.v2-home-upload-card {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+  padding: 24px;
 }
 
 .v2-upload-card.is-dragover {
@@ -538,6 +544,11 @@ img {
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 250, 255, 0.92));
   color: var(--v2-text);
   text-align: center;
+}
+
+.v2-upload-surface-home {
+  min-height: 540px;
+  gap: 14px;
 }
 
 .v2-upload-icon {
@@ -1183,6 +1194,16 @@ img {
   gap: 10px;
 }
 
+.v2-region-sidebar.is-compact {
+  align-self: start;
+  grid-template-rows: auto auto;
+}
+
+.v2-region-sidebar.is-compact .v2-region-list {
+  min-height: auto;
+  overflow: visible;
+}
+
 .v2-region-sidebar-head {
   display: grid;
   gap: 10px;
@@ -1624,17 +1645,11 @@ img {
   }
 
   .v2-home-view {
-    grid-template-columns: 1fr;
+    width: min(1120px, 100%);
   }
 
-  .v2-home-hero {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-
-  .v2-upload-card {
-    grid-column: auto;
-    grid-row: auto;
+  .v2-home-upload-card {
+    width: 100%;
   }
 
   .v2-home-gallery {

@@ -5151,12 +5151,10 @@ class TranslatorEngine:
         disabled_overrides = config.get("translation_region_disabled_overrides") or {}
         layout_overrides = config.get("translation_region_layout_overrides") or {}
 
-        visible_regions: list[Any] = []
+        prepared_regions: list[Any] = []
         for region in regions:
             region_key = str(getattr(region, "translation_region_key", "") or "")
             region.disabled_region = bool(disabled_overrides.get(region_key))
-            if region.disabled_region:
-                continue
 
             layout_override = layout_overrides.get(region_key) or {}
             bbox = layout_override.get("bbox")
@@ -5180,9 +5178,9 @@ class TranslatorEngine:
                 ),
             )
 
-            visible_regions.append(region)
+            prepared_regions.append(region)
 
-        return visible_regions
+        return prepared_regions
 
     def _deserialize_text_region(self, payload: dict[str, Any]) -> Any:
         self._ensure_vendor_import_path()
@@ -5644,12 +5642,21 @@ class TranslatorEngine:
             )
         )
         skipped_regions = [region for region in regions if bool(getattr(region, "skip_translation", False))]
+        disabled_regions = [region for region in regions if bool(getattr(region, "disabled_region", False))]
         manual_render_regions = [
             region for region in regions
-            if bool(getattr(region, "manual_region", False)) and not bool(getattr(region, "skip_translation", False))
+            if (
+                bool(getattr(region, "manual_region", False))
+                and not bool(getattr(region, "skip_translation", False))
+                and not bool(getattr(region, "disabled_region", False))
+            )
         ]
-        render_regions = [region for region in regions if not bool(getattr(region, "skip_translation", False))]
-        for region in skipped_regions:
+        render_regions = [
+            region for region in regions
+            if not bool(getattr(region, "skip_translation", False))
+            and not bool(getattr(region, "disabled_region", False))
+        ]
+        for region in [*skipped_regions, *disabled_regions]:
             self._restore_original_region_pixels(source_rgb, inpainted_rgb, region)
         for region in manual_render_regions:
             self._erase_manual_region_pixels(inpainted_rgb, region)

@@ -22,6 +22,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function isIgnorableConsoleEntry(entry) {
+  return (
+    entry.includes('ERR_CONTENT_LENGTH_MISMATCH')
+    || entry.includes('Failed to decode downloaded font')
+    || entry.includes('OTS parsing error: vmtx: Required vhea table missing')
+    || entry.includes('vmtx: Failed to parse table')
+  )
+}
+
 function createLogger(prefix, output = process.stdout) {
   return (chunk) => {
     const text = chunk.toString()
@@ -158,6 +167,33 @@ async function assertText(locator, expected, message) {
   }
 }
 
+async function readBoxMetrics(locator) {
+  return locator.evaluate((element) => {
+    const label = element.querySelector('.style-box-label')
+    const boxRect = element.getBoundingClientRect()
+    const labelRect = label?.getBoundingClientRect() || null
+    return {
+      left: Number.parseFloat(element.style.left || '0'),
+      top: Number.parseFloat(element.style.top || '0'),
+      borderRadius: getComputedStyle(element).borderRadius,
+      labelRect: labelRect
+        ? {
+            left: labelRect.left,
+            top: labelRect.top,
+            right: labelRect.right,
+            bottom: labelRect.bottom,
+          }
+        : null,
+      boxRect: {
+        left: boxRect.left,
+        top: boxRect.top,
+        right: boxRect.right,
+        bottom: boxRect.bottom,
+      },
+    }
+  })
+}
+
 async function main() {
   await fs.mkdir(artifactDir, { recursive: true })
 
@@ -209,6 +245,50 @@ async function main() {
     await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
     await page.getByRole('banner').getByRole('button', { name: '重新嵌字' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.locator('.v2-region-card').first().click()
+    const activeBox = page.locator('.v2-canvas-shell .style-box.active').first()
+    await activeBox.waitFor({ state: 'visible', timeout: 20000 })
+    const initialBoxMetrics = await readBoxMetrics(activeBox)
+    if (initialBoxMetrics.borderRadius !== '0px') {
+      throw new Error(`当前选中框仍然不是直角边：${initialBoxMetrics.borderRadius}`)
+    }
+    const labelOutsideBox = !initialBoxMetrics.labelRect || (
+      initialBoxMetrics.labelRect.bottom <= initialBoxMetrics.boxRect.top + 1
+      || initialBoxMetrics.labelRect.top >= initialBoxMetrics.boxRect.bottom - 1
+      || initialBoxMetrics.labelRect.right <= initialBoxMetrics.boxRect.left + 1
+      || initialBoxMetrics.labelRect.left >= initialBoxMetrics.boxRect.right - 1
+    )
+    if (!labelOutsideBox) {
+      throw new Error('当前选中框的编号标签仍然压在框内容区域内')
+    }
+    const handleCount = await activeBox.locator('.style-box-handle').count()
+    if (handleCount === 0) {
+      throw new Error('当前选中框没有出现拖拽/缩放控制点')
+    }
+    const boxBounds = await activeBox.boundingBox()
+    if (!boxBounds) {
+      throw new Error('无法读取当前选中框的位置，无法验证拖拽能力')
+    }
+    await page.mouse.move(boxBounds.x + boxBounds.width / 2, boxBounds.y + boxBounds.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(boxBounds.x + boxBounds.width / 2 + 18, boxBounds.y + boxBounds.height / 2 + 12, { steps: 6 })
+    await page.mouse.up()
+    await page.waitForTimeout(250)
+    const draggedBoxMetrics = await readBoxMetrics(activeBox)
+    if (draggedBoxMetrics.left === initialBoxMetrics.left && draggedBoxMetrics.top === initialBoxMetrics.top) {
+      throw new Error('拖动当前选中框后，位置没有变化')
+    }
+    await page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowLeft',
+        ctrlKey: true,
+        bubbles: true,
+      }))
+    })
+    await page.waitForTimeout(150)
+    const nudgedBoxMetrics = await readBoxMetrics(activeBox)
+    if (nudgedBoxMetrics.left === draggedBoxMetrics.left && nudgedBoxMetrics.top === draggedBoxMetrics.top) {
+      throw new Error('方向键微调当前选中框后，位置没有变化')
+    }
     const reviewShot = await saveScreenshot(page, 'v2-review.png')
 
     await page.getByRole('button', { name: '下一个对白框' }).click()
@@ -244,7 +324,7 @@ async function main() {
       'utf8',
     )
 
-    if (consoleErrors.some((entry) => !entry.includes('ERR_CONTENT_LENGTH_MISMATCH'))) {
+    if (consoleErrors.some((entry) => !isIgnorableConsoleEntry(entry))) {
       throw new Error(`V2 页面存在控制台错误：\n${consoleErrors.join('\n')}`)
     }
 

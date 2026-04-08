@@ -1012,7 +1012,7 @@ img {
   position: relative;
   min-height: 0;
   overflow: hidden;
-  padding: 8px;
+  padding: 24px 12px 12px;
   background:
     linear-gradient(180deg, rgba(245, 247, 251, 0.96), rgba(238, 242, 247, 0.98));
 }
@@ -1021,7 +1021,7 @@ img {
   position: relative;
   width: 100%;
   aspect-ratio: var(--page-aspect);
-  overflow: hidden;
+  overflow: visible;
   border-radius: 16px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(249, 251, 254, 0.96));
@@ -1062,11 +1062,15 @@ img {
 .style-box,
 .v2-compare-focus {
   border: 2px solid rgba(255, 140, 0, 0.92);
-  border-radius: 14px;
+  border-radius: 0;
 }
 
 .style-box.manual {
   border-style: dashed;
+}
+
+.style-box.canvas-editable {
+  cursor: move;
 }
 
 .style-box.active,
@@ -1081,8 +1085,8 @@ img {
 
 .style-box-label {
   position: absolute;
-  top: -12px;
-  left: 12px;
+  top: -28px;
+  left: -2px;
   min-width: 26px;
   height: 26px;
   display: grid;
@@ -1093,16 +1097,17 @@ img {
   color: white;
   font-size: 0.78rem;
   font-weight: 700;
+  pointer-events: none;
 }
 
 .style-box.label-below .style-box-label {
   top: auto;
-  bottom: -12px;
+  bottom: -28px;
 }
 
 .style-box.label-right .style-box-label {
   left: auto;
-  right: -10px;
+  right: -2px;
 }
 
 .style-box-source-crop,
@@ -1110,7 +1115,8 @@ img {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  border-radius: inherit;
+  border-radius: 0;
+  pointer-events: none;
 }
 
 .style-box-source-crop img {
@@ -1135,6 +1141,7 @@ img {
   display: block;
   white-space: pre-wrap;
   word-break: break-word;
+  pointer-events: none;
 }
 
 .style-box-preview-text-content.vertical {

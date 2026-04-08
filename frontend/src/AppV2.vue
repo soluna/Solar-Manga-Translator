@@ -539,7 +539,10 @@ const canRerender = computed(
 const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
-const activeReviewMode = computed(() => currentProject.value?.review_mode || config.value.default_review_mode || 'classic')
+const activeReviewMode = computed(() => {
+  const mode = currentProject.value?.review_mode || config.value.default_review_mode || 'canvas_beta'
+  return mode === 'classic' ? 'canvas_beta' : mode
+})
 const isCanvasReviewMode = computed(() => activeReviewMode.value === 'canvas_beta')
 const hasTranslationOverrides = computed(
   () =>
@@ -1490,7 +1493,7 @@ function normalizeHistoryProject(project) {
     created_at: project?.created_at || '',
     title: project?.title || project?.project_id || '未命名项目',
     note: project?.note || '',
-    review_mode: project?.review_mode || 'classic',
+    review_mode: 'canvas_beta',
     workflow_stage: project?.workflow_stage || 'idle',
     page_count: Number(project?.page_count || 0),
     is_busy: Boolean(project?.is_busy),
@@ -2583,7 +2586,9 @@ function resolveCanvasInteractionSurface(target) {
     return null
   }
   return (
-    target.closest('.review-canvas-shell')
+    target.closest('.v2-canvas-shell')
+    || target.closest('.v2-canvas-stage')
+    || target.closest('.review-canvas-shell')
     || target.closest('.style-preview-canvas')
     || target.closest('.review-canvas-stage')
     || null

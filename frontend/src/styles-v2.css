@@ -1297,6 +1297,24 @@ img {
   gap: 4px;
 }
 
+.v2-region-card-preview.is-expanded {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.v2-region-card-preview-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.v2-region-preview-toggle {
+  align-self: start;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .v2-region-source,
 .v2-region-translation {
   margin: 0;
@@ -1319,25 +1337,26 @@ img {
   gap: 10px;
 }
 
-.v2-region-inline-settings {
+.v2-region-setting-stack {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
-.v2-inline-setting-group {
+.v2-region-setting-row {
   display: grid;
-  gap: 5px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
-.v2-inline-setting-label {
+.v2-region-setting-label {
   color: var(--v2-text-soft);
   font-size: 0.74rem;
   font-weight: 700;
 }
 
-.v2-inline-setting-controls {
+.v2-region-setting-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1345,7 +1364,11 @@ img {
   min-width: 0;
 }
 
-.v2-inline-setting-controls select {
+.v2-region-setting-controls > * {
+  min-width: 0;
+}
+
+.v2-region-setting-controls select {
   min-width: 0;
 }
 
@@ -1479,24 +1502,24 @@ img {
   font-size: 0.74rem;
 }
 
-.v2-region-sidebar .v2-region-inline-settings {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.v2-region-sidebar .v2-region-setting-stack {
+  gap: 5px;
+}
+
+.v2-region-sidebar .v2-region-setting-row {
+  grid-template-columns: 24px minmax(0, 1fr);
   gap: 6px;
 }
 
-.v2-region-sidebar .v2-inline-setting-group {
-  gap: 4px;
-}
-
-.v2-region-sidebar .v2-inline-setting-label {
+.v2-region-sidebar .v2-region-setting-label {
   font-size: 0.7rem;
 }
 
-.v2-region-sidebar .v2-inline-setting-controls {
+.v2-region-sidebar .v2-region-setting-controls {
   gap: 4px;
 }
 
-.v2-region-sidebar .v2-inline-setting-controls select {
+.v2-region-sidebar .v2-region-setting-controls select {
   min-height: 32px;
   padding: 0 8px;
   border-radius: 10px;

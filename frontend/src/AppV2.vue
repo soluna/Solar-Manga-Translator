@@ -6370,9 +6370,23 @@ watch(
                   </div>
                 </header>
 
-                <div class="v2-region-card-preview">
-                  <p class="v2-region-source">{{ region.source_text || '（没有识别到可用原文）' }}</p>
-                  <p class="v2-region-translation">{{ getEditRegionText(region) || '未填写译文' }}</p>
+                <div :class="['v2-region-card-preview', selectedEditRegionKey === region.id ? 'is-expanded' : '']">
+                  <div class="v2-region-card-preview-copy">
+                    <p class="v2-region-source">{{ region.source_text || '（没有识别到可用原文）' }}</p>
+                    <p class="v2-region-translation">{{ getEditRegionText(region) || '未填写译文' }}</p>
+                  </div>
+
+                  <label
+                    v-if="selectedEditRegionKey === region.id"
+                    class="v2-inline-checkbox v2-region-preview-toggle"
+                  >
+                    <input
+                      :checked="isRegionSkipEnabled(region)"
+                      type="checkbox"
+                      @change="updateTranslationSkipOverride(region, $event.target.checked)"
+                    />
+                    <span>保留原文</span>
+                  </label>
                 </div>
 
                 <div v-if="selectedEditRegionKey === region.id" class="v2-region-card-body" @click.stop @mousedown.stop>
@@ -6391,10 +6405,10 @@ watch(
                     ></textarea>
                   </label>
 
-                  <div class="v2-region-inline-settings">
-                    <div class="v2-inline-setting-group">
-                      <span class="v2-inline-setting-label">字体</span>
-                      <div class="v2-inline-setting-controls">
+                  <div class="v2-region-setting-stack">
+                    <div class="v2-region-setting-row">
+                      <span class="v2-region-setting-label">字体</span>
+                      <div class="v2-region-setting-controls">
                         <select
                           :value="getRegionFontOverrideId(region)"
                           @change="updateRegionFontOverride(region, $event.target.value)"
@@ -6419,9 +6433,9 @@ watch(
                       </div>
                     </div>
 
-                    <div class="v2-inline-setting-group">
-                      <span class="v2-inline-setting-label">字号</span>
-                      <div class="v2-inline-setting-controls">
+                    <div class="v2-region-setting-row">
+                      <span class="v2-region-setting-label">字号</span>
+                      <div class="v2-region-setting-controls">
                         <div class="v2-stepper">
                           <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, -1)">−</button>
                           <input
@@ -6449,18 +6463,8 @@ watch(
                     </div>
                   </div>
 
-                  <div class="v2-region-card-footer">
-                    <label class="v2-inline-checkbox">
-                      <input
-                        :checked="isRegionSkipEnabled(region)"
-                        type="checkbox"
-                        @change="updateTranslationSkipOverride(region, $event.target.checked)"
-                      />
-                      <span>保留原文</span>
-                    </label>
-
+                  <div v-if="isManualRegion(region)" class="v2-region-card-footer">
                     <button
-                      v-if="isManualRegion(region)"
                       type="button"
                       class="v2-danger-link"
                       @click="deleteManualRegion(region)"

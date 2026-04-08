@@ -988,7 +988,7 @@ img {
 }
 
 .v2-pane-card-compare {
-  border-left: 1px solid var(--v2-line);
+  border-right: 1px solid var(--v2-line);
 }
 
 .v2-pane-head {
@@ -1319,6 +1319,36 @@ img {
   gap: 10px;
 }
 
+.v2-region-inline-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.v2-inline-setting-group {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.v2-inline-setting-label {
+  color: var(--v2-text-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.v2-inline-setting-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.v2-inline-setting-controls select {
+  min-width: 0;
+}
+
 .v2-field {
   display: grid;
   gap: 6px;
@@ -1447,6 +1477,30 @@ img {
 
 .v2-region-sidebar .v2-field span {
   font-size: 0.74rem;
+}
+
+.v2-region-sidebar .v2-region-inline-settings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.v2-region-sidebar .v2-inline-setting-group {
+  gap: 4px;
+}
+
+.v2-region-sidebar .v2-inline-setting-label {
+  font-size: 0.7rem;
+}
+
+.v2-region-sidebar .v2-inline-setting-controls {
+  gap: 4px;
+}
+
+.v2-region-sidebar .v2-inline-setting-controls select {
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 0.76rem;
 }
 
 .v2-region-sidebar .v2-region-sidebar-meta,

@@ -765,7 +765,7 @@ const selectedEditPageSummary = computed(() => {
     return ''
   }
   const pageNumber = selectedEditPageIndex.value >= 0 ? selectedEditPageIndex.value + 1 : 1
-  return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页 · ${page.regions.length} 个文本框`
+  return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页`
 })
 const selectedEditPageThumbnailUrl = computed(() => {
   const page = selectedEditPage.value
@@ -1122,16 +1122,13 @@ const v2SourcePaneImageUrl = computed(() => {
   }
   return entry?.sourceUrl || selectedEditPageThumbnailUrl.value || selectedEditPageMainImageUrl.value || ''
 })
-const v2ComparePaneImageUrl = computed(() => {
-  const page = selectedEditPage.value
+const v2EditorPaneImageUrl = computed(() => {
   const entry = v2SelectedPageEntry.value
   return (
-    getCanvasPreviewImageUrl(page)
-    || entry?.previewUrl
-    || getSavedTranslatedImageUrl(page)
-    || entry?.finalUrl
+    entry?.sourceUrl
+    || selectedEditPageThumbnailUrl.value
+    || selectedEditPageMainImageUrl.value
     || entry?.blankUrl
-    || entry?.sourceUrl
     || ''
   )
 })
@@ -1149,7 +1146,7 @@ const v2SelectedPageSummary = computed(() => {
   if (!entry) {
     return '尚未选择页面'
   }
-  return `第 ${entry.pageNumber} 页 · ${entry.regionCount || 0} 个文本框`
+  return `第 ${entry.pageNumber} 页`
 })
 const v2ReviewPrimaryLabel = computed(() => {
   if (translating.value) {
@@ -6117,7 +6114,7 @@ watch(
                 <span class="v2-pane-label">页面</span>
                 <strong>{{ v2PageEntries.length }}</strong>
               </div>
-              <span class="v2-page-rail-meta">当前 {{ v2SelectedPagePositionLabel }}</span>
+              <span class="v2-page-rail-meta">{{ v2SelectedPagePositionLabel }}</span>
             </div>
 
             <div class="v2-page-rail-list">
@@ -6140,10 +6137,38 @@ watch(
 
           <section class="v2-review-stage">
             <div class="v2-pane-strip">
-              <article class="v2-pane-card">
+              <article class="v2-pane-card v2-pane-card-compare">
                 <header class="v2-pane-head">
                   <div>
                     <span class="v2-pane-label">{{ v2ReviewHeaderLabel }}</span>
+                    <strong>{{ v2SelectedPageEntry?.name || '未选择页面' }}</strong>
+                  </div>
+                </header>
+
+                <div
+                  ref="compareCanvasShellRef"
+                  class="v2-canvas-shell v2-canvas-shell-compare"
+                  :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
+                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
+                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
+                >
+                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'compare') : null">
+                    <img
+                      v-if="v2SourcePaneImageUrl"
+                      :alt="`${v2SelectedPageEntry?.name || '页面'} ${v2ReviewHeaderLabel}`"
+                      :src="v2SourcePaneImageUrl"
+                    />
+                    <div v-else class="v2-canvas-empty">
+                      当前没有可展示的页面图像
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article class="v2-pane-card">
+                <header class="v2-pane-head">
+                  <div>
+                    <span class="v2-pane-label">框选调整</span>
                     <strong>{{ v2SelectedPageEntry?.name || '未选择页面' }}</strong>
                   </div>
                   <div class="v2-pane-actions">
@@ -6154,6 +6179,14 @@ watch(
                       @click="resetViewportStateForPage(selectedEditPage)"
                     >
                       重置视图
+                    </button>
+                    <button
+                      v-if="selectedEditPage && selectedEditRegion"
+                      type="button"
+                      class="v2-ghost-button"
+                      @click="focusSelectedRegionInViewport(selectedEditPage, 'main')"
+                    >
+                      定位当前框
                     </button>
                   </div>
                 </header>
@@ -6174,9 +6207,9 @@ watch(
                     @pointercancel="clearManualDraft({ keepMode: true })"
                   >
                     <img
-                      v-if="v2SourcePaneImageUrl"
-                      :alt="`${v2SelectedPageEntry?.name || '页面'} ${v2ReviewHeaderLabel}`"
-                      :src="v2SourcePaneImageUrl"
+                      v-if="v2EditorPaneImageUrl"
+                      :alt="`${v2SelectedPageEntry?.name || '页面'} 带框调整图`"
+                      :src="v2EditorPaneImageUrl"
                       @load="refreshTranslatedPreviewScale"
                     />
                     <div v-else class="v2-canvas-empty">
@@ -6239,52 +6272,6 @@ watch(
                   </div>
                 </div>
               </article>
-
-              <article class="v2-pane-card v2-pane-card-compare">
-                <header class="v2-pane-head">
-                  <div>
-                    <span class="v2-pane-label">实时预览稿</span>
-                    <strong>当前译图</strong>
-                  </div>
-                  <div class="v2-pane-actions">
-                    <button
-                      v-if="selectedEditPage && selectedEditRegion"
-                      type="button"
-                      class="v2-ghost-button"
-                      @click="focusSelectedRegionInViewport(selectedEditPage, 'compare')"
-                    >
-                      定位当前框
-                    </button>
-                  </div>
-                </header>
-
-                <div
-                  ref="compareCanvasShellRef"
-                  class="v2-canvas-shell v2-canvas-shell-compare"
-                  :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
-                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
-                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
-                >
-                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'compare') : null">
-                    <img
-                      v-if="v2ComparePaneImageUrl"
-                      :alt="`${v2SelectedPageEntry?.name || '页面'} 对照图`"
-                      :src="v2ComparePaneImageUrl"
-                    />
-                    <div v-else class="v2-canvas-empty">
-                      这里会显示当前页的实时预览稿
-                    </div>
-
-                    <div
-                      v-if="selectedEditPage && selectedEditRegion"
-                      class="v2-compare-focus"
-                      :style="getStyleRegionBoxStyle(selectedEditRegion, selectedEditPage)"
-                    >
-                      <span class="style-box-label">{{ selectedEditRegion.index + 1 }}</span>
-                    </div>
-                  </div>
-                </div>
-              </article>
             </div>
           </section>
 
@@ -6294,7 +6281,7 @@ watch(
                 <div class="v2-region-sidebar-label">
                   <div class="v2-region-sidebar-summary">
                     <span class="v2-pane-label">文本框</span>
-                    <strong>当前 {{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
+                    <strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
                   </div>
                   <span class="v2-page-rail-count">{{ filteredEditRegions.length }}</span>
                 </div>
@@ -6404,62 +6391,62 @@ watch(
                     ></textarea>
                   </label>
 
-                  <div class="v2-region-field-row">
-                    <label class="v2-field v2-field-grow">
-                      <span>字体</span>
-                      <select
-                        :value="getRegionFontOverrideId(region)"
-                        @change="updateRegionFontOverride(region, $event.target.value)"
-                      >
-                        <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
-                        <option
-                          v-for="font in availableFonts"
-                          :key="`${region.id}-${font.id}`"
-                          :value="font.id"
+                  <div class="v2-region-inline-settings">
+                    <div class="v2-inline-setting-group">
+                      <span class="v2-inline-setting-label">字体</span>
+                      <div class="v2-inline-setting-controls">
+                        <select
+                          :value="getRegionFontOverrideId(region)"
+                          @change="updateRegionFontOverride(region, $event.target.value)"
                         >
-                          {{ getPreviewFontOptionLabel(font) }}
-                        </option>
-                      </select>
-                    </label>
-
-                    <button
-                      type="button"
-                      class="v2-secondary-button"
-                      :disabled="!canApplyRegionFontToPage(region)"
-                      @click="applyRegionFontToPage(region)"
-                    >
-                      应用全部
-                    </button>
-                  </div>
-
-                  <div class="v2-region-field-row">
-                    <label class="v2-field v2-field-grow">
-                      <span>字号</span>
-                      <div class="v2-stepper">
-                        <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, -1)">−</button>
-                        <input
-                          :value="getRegionFontSize(region)"
-                          type="number"
-                          min="8"
-                          max="240"
-                          step="1"
-                          inputmode="numeric"
-                          @input="handleRegionFontSizeInput(region, $event.target.value)"
-                          @keydown.enter.prevent="commitRegionFontSize(region)"
-                          @blur="commitRegionFontSize(region)"
-                        />
-                        <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, 1)">＋</button>
+                          <option value="">{{ getEffectiveRegionFontLabel(region) }}</option>
+                          <option
+                            v-for="font in availableFonts"
+                            :key="`${region.id}-${font.id}`"
+                            :value="font.id"
+                          >
+                            {{ getPreviewFontOptionLabel(font) }}
+                          </option>
+                        </select>
+                        <button
+                          type="button"
+                          class="v2-secondary-button"
+                          :disabled="!canApplyRegionFontToPage(region)"
+                          @click="applyRegionFontToPage(region)"
+                        >
+                          应用全部
+                        </button>
                       </div>
-                    </label>
+                    </div>
 
-                    <button
-                      type="button"
-                      class="v2-secondary-button"
-                      :disabled="!canApplyRegionFontSizeToPage(region)"
-                      @click="applyRegionFontSizeToPage(region)"
-                    >
-                      应用全部
-                    </button>
+                    <div class="v2-inline-setting-group">
+                      <span class="v2-inline-setting-label">字号</span>
+                      <div class="v2-inline-setting-controls">
+                        <div class="v2-stepper">
+                          <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, -1)">−</button>
+                          <input
+                            :value="getRegionFontSize(region)"
+                            type="number"
+                            min="8"
+                            max="240"
+                            step="1"
+                            inputmode="numeric"
+                            @input="handleRegionFontSizeInput(region, $event.target.value)"
+                            @keydown.enter.prevent="commitRegionFontSize(region)"
+                            @blur="commitRegionFontSize(region)"
+                          />
+                          <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, 1)">＋</button>
+                        </div>
+                        <button
+                          type="button"
+                          class="v2-secondary-button"
+                          :disabled="!canApplyRegionFontSizeToPage(region)"
+                          @click="applyRegionFontSizeToPage(region)"
+                        >
+                          应用全部
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   <div class="v2-region-card-footer">

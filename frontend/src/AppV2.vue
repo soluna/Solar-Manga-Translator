@@ -969,6 +969,13 @@ const v2ProjectSubtitle = computed(() => {
   const stage = workflowStageLabelMap[workflowStage.value] || workflowStage.value || '未开始'
   return `${stage} · ${pageCount || 0} 页`
 })
+const v2ReviewSavedLabel = computed(() => {
+  const updatedAt = currentProject.value?.updated_at || currentProject.value?.created_at || ''
+  return `已保存 ${formatV2TimeOnly(updatedAt)}`
+})
+const v2ReviewSaveLabel = computed(() => (
+  translating.value ? '处理中…' : '保存'
+))
 const v2SettingsOpen = computed({
   get() {
     return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
@@ -1549,6 +1556,17 @@ function formatV2Timestamp(value) {
     minute: '2-digit'
   })
   return formatter.format(date)
+}
+
+function formatV2TimeOnly(value) {
+  const timestamp = Date.parse(String(value || ''))
+  if (!Number.isFinite(timestamp)) {
+    return '刚刚'
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(new Date(timestamp))
 }
 
 function isProjectBusy(project) {
@@ -3022,6 +3040,36 @@ function handleCanvasWheel(event, page, pane = 'main') {
     zoom: nextZoom,
     panX: pointerX - ((pointerX - viewport.panX) * ratio),
     panY: pointerY - ((pointerY - viewport.panY) * ratio)
+  })
+}
+
+function stepCurrentPageZoom(step) {
+  const page = selectedEditPage.value
+  if (!page) {
+    return
+  }
+
+  const panes = [
+    { key: 'main', shell: translatedPreviewCanvasRef.value },
+    { key: 'compare', shell: compareCanvasShellRef.value }
+  ]
+  const delta = step > 0 ? 1.12 : 0.9
+
+  panes.forEach(({ key, shell }) => {
+    if (!shell) {
+      return
+    }
+    const rect = shell.getBoundingClientRect()
+    const viewport = getViewportState(page.stored_name, key)
+    const pointerX = Math.max((rect.width || 0) / 2, 1)
+    const pointerY = Math.max((rect.height || 0) / 2, 1)
+    const nextZoom = Math.min(4, Math.max(1, Number((viewport.zoom * delta).toFixed(3))))
+    const ratio = nextZoom / Math.max(viewport.zoom || 1, 0.001)
+    updateViewportState(page.stored_name, key, {
+      zoom: nextZoom,
+      panX: pointerX - ((pointerX - viewport.panX) * ratio),
+      panY: pointerY - ((pointerY - viewport.panY) * ratio)
+    }, { syncCompare: false })
   })
 }
 
@@ -5757,54 +5805,102 @@ watch(
       @change="handleV2SupplementFileChange"
     />
 
-    <header class="v2-topbar">
+    <header :class="['v2-topbar', v2View === 'review' ? 'is-review' : '']">
       <div class="v2-topbar-brand">
         <div class="v2-brand-mark">M</div>
         <div>
-          <p class="v2-brand-kicker">Manga Translator V2.0</p>
-          <h1 class="v2-brand-title">
-            {{ v2View === 'review' ? v2ProjectTitle : '漫画翻译工作台' }}
-          </h1>
+          <p class="v2-brand-kicker">MANGAFLOW</p>
+          <h1 class="v2-brand-title">{{ v2View === 'review' ? '审校工作台' : '漫画翻译工作台' }}</h1>
+        </div>
+      </div>
+
+      <div v-if="v2View === 'review'" class="v2-topbar-project">
+        <button type="button" class="v2-topbar-button v2-back-button" @click="goToV2Picker">
+          ← 返回
+        </button>
+        <div class="v2-topbar-project-copy">
+          <strong>{{ v2ProjectTitle }}</strong>
+          <span>{{ v2SelectedPageSummary }}</span>
         </div>
       </div>
 
       <div class="v2-topbar-actions">
-        <div class="v2-connection-chip">
-          <span :class="['v2-connection-dot', backendOnline ? 'online' : 'offline']"></span>
-          <span>{{ backendOnline ? '后端在线' : '后端离线' }}</span>
-        </div>
+        <template v-if="v2View === 'review'">
+          <span class="v2-saved-indicator">{{ v2ReviewSavedLabel }}</span>
+          <button
+            type="button"
+            class="v2-primary-button"
+            :disabled="translating || !sessionId"
+            @click="runV2ReviewPrimaryAction"
+          >
+            {{ v2ReviewSaveLabel }}
+          </button>
+          <button
+            type="button"
+            class="v2-icon-button"
+            aria-label="缩小画布"
+            :disabled="!selectedEditPage"
+            @click="stepCurrentPageZoom(-1)"
+          >
+            －
+          </button>
+          <button
+            type="button"
+            class="v2-icon-button"
+            aria-label="放大画布"
+            :disabled="!selectedEditPage"
+            @click="stepCurrentPageZoom(1)"
+          >
+            ＋
+          </button>
+          <button
+            type="button"
+            class="v2-topbar-button"
+            aria-label="打开设置"
+            @click="openV2Settings"
+          >
+            设置
+          </button>
+        </template>
 
-        <button
-          type="button"
-          class="v2-topbar-button"
-          @click="openV2HistoryModal"
-        >
-          历史项目
-        </button>
+        <template v-else>
+          <div class="v2-connection-chip">
+            <span :class="['v2-connection-dot', backendOnline ? 'online' : 'offline']"></span>
+            <span>{{ backendOnline ? '后端在线' : '后端离线' }}</span>
+          </div>
 
-        <button
-          v-if="v2HasProject"
-          type="button"
-          class="v2-topbar-button"
-          :disabled="!canUseV2SupplementUpload"
-          :title="sessionId ? '上传与原图同名的无字图，用作当前项目底图' : '请先上传原图或恢复项目'"
-          @click="triggerV2SupplementPicker"
-        >
-          {{ v2SupplementUploading ? '补充中…' : '补充无字图' }}
-        </button>
+          <button
+            type="button"
+            class="v2-topbar-button"
+            @click="openV2HistoryModal"
+          >
+            历史项目
+          </button>
 
-        <button
-          type="button"
-          class="v2-icon-button"
-          aria-label="打开设置"
-          @click="openV2Settings"
-        >
-          ⚙
-        </button>
+          <button
+            v-if="v2HasProject"
+            type="button"
+            class="v2-topbar-button"
+            :disabled="!canUseV2SupplementUpload"
+            :title="sessionId ? '上传与原图同名的无字图，用作当前项目底图' : '请先上传原图或恢复项目'"
+            @click="triggerV2SupplementPicker"
+          >
+            {{ v2SupplementUploading ? '补充中…' : '补充无字图' }}
+          </button>
+
+          <button
+            type="button"
+            class="v2-icon-button"
+            aria-label="打开设置"
+            @click="openV2Settings"
+          >
+            ⚙
+          </button>
+        </template>
       </div>
     </header>
 
-    <div class="v2-statusbar">
+    <div v-if="v2View !== 'review'" class="v2-statusbar">
       <div class="v2-status-copy">
         <strong>{{ errorMessage ? '出现问题' : '状态' }}</strong>
         <span>{{ errorMessage || status }}</span>
@@ -5946,12 +6042,7 @@ watch(
       <section v-else class="v2-review-view" data-testid="v2-review-view">
         <div class="v2-review-toolbar">
           <div class="v2-review-toolbar-left">
-            <button type="button" class="v2-icon-button" aria-label="返回图片列表" @click="goToV2Picker">←</button>
-            <div>
-              <p class="v2-section-kicker">审校页面</p>
-              <h2 class="v2-review-title">{{ v2ProjectTitle }}</h2>
-              <p class="v2-review-subtitle">{{ v2SelectedPageSummary }}</p>
-            </div>
+            <span class="v2-review-toolbar-page">{{ v2SelectedPageEntry?.name || '未选择页面' }}</span>
           </div>
 
           <div class="v2-review-toolbar-center">
@@ -6000,6 +6091,14 @@ watch(
             <button
               type="button"
               class="v2-ghost-button"
+              :disabled="!selectedEditPage"
+              @click="selectedEditPage && resetViewportStateForPage(selectedEditPage)"
+            >
+              重置视图
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
               :disabled="!selectedEditPage || !getPageHistoryState(selectedEditPage.stored_name).undo.length"
               @click="undoCanvasEdit"
             >
@@ -6013,25 +6112,17 @@ watch(
             >
               重做
             </button>
-            <button
-              type="button"
-              class="v2-primary-button"
-              :disabled="translating || !sessionId"
-              @click="runV2ReviewPrimaryAction"
-            >
-              {{ v2ReviewPrimaryLabel }}
-            </button>
-            <button type="button" class="v2-icon-button" aria-label="打开设置" @click="openV2Settings">⚙</button>
           </div>
         </div>
 
         <div class="v2-review-layout">
           <aside class="v2-page-rail">
             <div class="v2-page-rail-head">
-              <div class="v2-page-rail-summary">
-                <strong>{{ v2SelectedPagePositionLabel }}</strong>
-                <span>当前页</span>
+              <div class="v2-page-rail-headline">
+                <span class="v2-pane-label">页面</span>
+                <strong>{{ v2PageEntries.length }}</strong>
               </div>
+              <span class="v2-page-rail-meta">当前 {{ v2SelectedPagePositionLabel }}</span>
             </div>
 
             <div class="v2-page-rail-list">
@@ -6046,8 +6137,8 @@ watch(
                 <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
                 <div class="v2-page-rail-copy">
                   <strong>{{ page.pageNumber }}</strong>
-                  <span>{{ page.status }}</span>
                 </div>
+                <span class="v2-page-rail-status">{{ page.status }}</span>
               </button>
             </div>
           </aside>
@@ -6204,10 +6295,13 @@ watch(
 
           <aside class="v2-region-sidebar">
             <div class="v2-region-sidebar-head">
-              <div class="v2-region-sidebar-tools">
-                <div class="v2-region-sidebar-summary">
-                  <strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
-                  <span>{{ v2SelectedRegionSummary }}</span>
+              <div class="v2-region-sidebar-top">
+                <div class="v2-region-sidebar-label">
+                  <div class="v2-region-sidebar-summary">
+                    <span class="v2-pane-label">文本框</span>
+                    <strong>当前 {{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
+                  </div>
+                  <span class="v2-page-rail-count">{{ filteredEditRegions.length }}</span>
                 </div>
 
                 <div class="v2-region-sidebar-nav">
@@ -6240,6 +6334,10 @@ watch(
                 </div>
               </div>
 
+              <div class="v2-region-sidebar-meta">
+                {{ v2SelectedRegionSummary }}
+              </div>
+
               <input
                 v-model="regionListSearch"
                 class="v2-search-input translation-review-input"
@@ -6267,6 +6365,7 @@ watch(
                 <header class="v2-region-card-head">
                   <div class="v2-region-card-title">
                     <strong>#{{ region.index + 1 }}</strong>
+                    <span class="v2-inline-badge style">{{ getResolvedRegionStyleLabel(region) }}</span>
                     <span v-if="hasRegionWarning(region)" class="v2-inline-badge warning">需留意</span>
                     <span v-if="isManualRegion(region)" class="v2-inline-badge">手动补框</span>
                   </div>

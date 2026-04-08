@@ -206,20 +206,19 @@ async function main() {
     const reviewShot = await saveScreenshot(page, 'v2-review.png')
 
     await page.getByRole('button', { name: '下一个对白框' }).click()
-    await assertText(page.locator('.v2-region-sidebar-summary'), '#2', '框导航没有切换到下一个对白框')
+    await assertText(page.locator('.v2-region-sidebar-summary strong'), '#2', '框导航没有切换到下一个对白框')
 
     await page.getByRole('button', { name: '下一页' }).click()
-    await assertText(page.locator('.v2-review-subtitle'), '第 2 页', '页导航没有切换到下一页')
+    await assertText(page.locator('.v2-topbar-project-copy span'), '第 2 页', '页导航没有切换到下一页')
 
     const supplementImage = await createSupplementFixture()
+    const supplementUpload = page.waitForResponse((response) => (
+      response.url().includes(`/api/projects/${FIXTURE_PROJECT_ID}/base-images`)
+      && response.request().method() === 'POST'
+      && response.ok()
+    ))
     await page.locator('input.v2-hidden-input').nth(1).setInputFiles(supplementImage)
-    await page.waitForFunction(
-      () => {
-        const statusText = document.querySelector('.v2-status-copy span')?.textContent || ''
-        return statusText.includes('已补充 1 页无字图')
-      },
-      { timeout: 20000 }
-    )
+    await supplementUpload
 
     await page.getByRole('button', { name: '打开设置' }).last().click()
     await page.getByTestId('v2-settings-panel').waitFor({ state: 'visible', timeout: 20000 })

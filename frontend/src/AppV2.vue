@@ -998,6 +998,9 @@ const v2ReviewSavedLabel = computed(() => {
 const v2ReviewSaveLabel = computed(() => (
   translating.value ? '处理中…' : '保存'
 ))
+const canRunProjectPrimaryAction = computed(
+  () => Boolean(sessionId.value) && !translating.value
+)
 const v2SettingsOpen = computed({
   get() {
     return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
@@ -1268,10 +1271,10 @@ const primaryTranslateLabel = computed(() => {
   }
 
   if (workflowStage.value === 'detected') {
-    return '继续翻译并嵌字'
+    return '继续翻译'
   }
   if (config.value.pause_after_detection) {
-    return workflowStage.value === 'translated' ? '重新识别并校对' : '先识别文本框'
+    return workflowStage.value === 'translated' ? '重新识别' : '开始识别'
   }
   return '开始翻译'
 })
@@ -5297,6 +5300,13 @@ function runV2ReviewPrimaryAction() {
   startTranslation('translate')
 }
 
+function runV2ProjectPrimaryAction() {
+  if (!canRunProjectPrimaryAction.value) {
+    return
+  }
+  startTranslation(primaryTranslateAction.value)
+}
+
 function runV2RerenderAction() {
   if (!canRerender.value || translating.value) {
     return
@@ -6034,6 +6044,14 @@ watch(
           </div>
 
           <div class="v2-section-actions">
+            <button
+              type="button"
+              class="v2-primary-button"
+              :disabled="!canRunProjectPrimaryAction"
+              @click="runV2ProjectPrimaryAction"
+            >
+              {{ primaryTranslateLabel }}
+            </button>
             <button
               type="button"
               class="v2-secondary-button"

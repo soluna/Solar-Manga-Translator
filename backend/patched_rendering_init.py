@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import numpy as np
 from typing import List
@@ -184,9 +185,27 @@ def _get_candidate_text(region: TextBlock, direction: str) -> str:
     original_direction = getattr(region, '_direction', 'auto')
     try:
         region._direction = direction
-        return _convert_text_for_rendering(region, region.get_translation_for_rendering())
+        text = _convert_text_for_rendering(region, region.get_translation_for_rendering())
     finally:
         region._direction = original_direction
+
+    if not direction.startswith('h'):
+        return text
+
+    normalized_text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    if '\n' not in normalized_text:
+        return normalized_text
+
+    manual_override = str(getattr(region, 'translation_override', '') or '').strip()
+    if manual_override:
+        return normalized_text
+
+    target_lang = str(getattr(region, 'target_lang', '') or '').upper()
+    joiner = '' if target_lang in {'CHS', 'CHT', 'JPN', 'JA', 'JP', 'ZH'} else ' '
+    collapsed_text = re.sub(r'[ \t]*\n+[ \t]*', joiner, normalized_text)
+    if joiner:
+        collapsed_text = re.sub(r' {2,}', ' ', collapsed_text)
+    return collapsed_text.strip()
 
 
 def _get_candidate_directions(region: TextBlock) -> List[str]:
@@ -385,7 +404,12 @@ def resize_regions_to_font_size(img: np.ndarray, text_regions: List['TextBlock']
         if font_size_fixed is not None:
             target_font_size = font_size_fixed
         else:
-            target_font_size = original_region_font_size + font_size_offset
+            preserve_requested_size = bool(
+                getattr(region, 'font_size_override_active', False)
+                or getattr(region, 'direction_override_active', False)
+            )
+            effective_font_size_offset = 0 if preserve_requested_size else font_size_offset
+            target_font_size = original_region_font_size + effective_font_size_offset
         target_font_size = max(target_font_size, font_size_minimum, 1)
 
         box_width = max(int(round(region.unrotated_size[0])), 1)

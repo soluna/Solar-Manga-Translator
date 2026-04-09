@@ -1158,15 +1158,17 @@ def put_text_horizontal(font_size: int, text: str, width: int, height: int, alig
     bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0
     spacing_y = int(font_size * (line_spacing or 0.01))
     letter_spacing = max(float(letter_spacing or 1.0), 0.85)
+    compact_line_ratio = 0.88 if str(lang or '').upper() in {'CHS', 'CHT', 'JPN', 'JA', 'JP', 'ZH'} else 1.0
 
     # calc
     # print(width)
     line_text_list, line_width_list = calc_horizontal(font_size, text, width, height, lang, hyphenate)
     # print(line_text_list, line_width_list)
+    line_advance = max(int(round(font_size * compact_line_ratio)), 1) + spacing_y
 
     # make large canvas
     canvas_w = int(max(line_width_list) * max(letter_spacing, 1.0)) + (font_size + bg_size) * 2
-    canvas_h = font_size * len(line_width_list) + spacing_y * (len(line_width_list) - 1) + (font_size + bg_size) * 2
+    canvas_h = font_size + line_advance * (len(line_width_list) - 1) + (font_size + bg_size) * 2
     canvas_text = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
     canvas_border = canvas_text.copy()
 
@@ -1200,7 +1202,7 @@ def put_text_horizontal(font_size: int, text: str, width: int, height: int, alig
             offset_x = put_char_horizontal(font_size, c, pen_line, canvas_text, canvas_border, border_size=bg_size)
             if not reversed_direction:
                 pen_line[0] += max(1, int(round(offset_x * letter_spacing)))
-        pen_orig[1] += spacing_y + font_size
+        pen_orig[1] += line_advance
 
     # colorize
     canvas_border = np.clip(canvas_border, 0, 255)

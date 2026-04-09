@@ -5160,6 +5160,8 @@ class TranslatorEngine:
             region.disabled_region = bool(disabled_overrides.get(region_key))
 
             layout_override = layout_overrides.get(region_key) or {}
+            region.font_size_override_active = False
+            region.direction_override_active = False
             bbox = layout_override.get("bbox")
             if isinstance(bbox, list) and len(bbox) == 4:
                 self._set_region_bbox(region, bbox)
@@ -5168,17 +5170,21 @@ class TranslatorEngine:
             if font_size is not None:
                 try:
                     region.font_size = max(8, int(round(float(font_size))))
+                    region.font_size_override_active = True
                 except (TypeError, ValueError):
                     pass
 
+            resolved_direction = self._resolve_region_direction(
+                self._region_bbox(region),
+                getattr(region, "direction", ""),
+                config.get("target_lang"),
+                layout_override=layout_override,
+            )
+            if self._normalize_direction_override(layout_override.get("direction")) != "auto":
+                region.direction_override_active = True
             self._assign_region_direction(
                 region,
-                self._resolve_region_direction(
-                    self._region_bbox(region),
-                    getattr(region, "direction", ""),
-                    config.get("target_lang"),
-                    layout_override=layout_override,
-                ),
+                resolved_direction,
             )
 
             prepared_regions.append(region)

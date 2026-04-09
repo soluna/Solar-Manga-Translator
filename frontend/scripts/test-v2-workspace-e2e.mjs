@@ -233,6 +233,7 @@ async function main() {
     await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
     await assertText(page.locator('.v2-section-title').first(), FIXTURE_PROJECT_TITLE, '选页页项目标题不正确')
     await page.getByRole('banner').getByRole('button', { name: '新建项目' }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.locator('.v2-picker-view .v2-section-actions .v2-primary-button').waitFor({ state: 'visible', timeout: 20000 })
     const pickerShot = await saveScreenshot(page, 'v2-picker.png')
 
     const pageCards = page.locator('.v2-page-card')
@@ -243,7 +244,7 @@ async function main() {
     await pageCards.first().click()
 
     await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
-    await page.getByRole('banner').getByRole('button', { name: '重新嵌字' }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.locator('.v2-review-toolbar').waitFor({ state: 'visible', timeout: 20000 })
     await page.locator('.v2-region-card').first().click()
     const activeBox = page.locator('.v2-canvas-shell .style-box.active').first()
     await activeBox.waitFor({ state: 'visible', timeout: 20000 })

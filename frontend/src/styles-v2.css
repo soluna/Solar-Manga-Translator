@@ -296,6 +296,13 @@ img {
   color: var(--v2-text);
 }
 
+.v2-ghost-button.active {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(37, 99, 235, 0.18);
+  color: var(--v2-accent-strong);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
+}
+
 .v2-primary-button {
   background: linear-gradient(180deg, #2f7cff 0%, #1f5ce0 100%);
   color: white;
@@ -1025,10 +1032,24 @@ img {
   border-bottom: 1px solid var(--v2-line);
 }
 
+.v2-pane-head-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .v2-pane-head strong {
   display: block;
   margin-top: 4px;
   font-size: 1rem;
+}
+
+.v2-pane-subtle {
+  color: var(--v2-text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .v2-pane-actions {
@@ -1052,6 +1073,10 @@ img {
   border-radius: 16px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(249, 251, 254, 0.96));
+}
+
+.v2-canvas-stage.draw-mode {
+  cursor: crosshair;
 }
 
 .v2-canvas-stage img {
@@ -1222,6 +1247,11 @@ img {
 .style-box-handle.handle-w {
   top: calc(50% - 6px);
   left: -6px;
+}
+
+.v2-canvas-stage.draw-mode .style-box,
+.v2-canvas-stage.draw-mode .style-box-handle {
+  pointer-events: none;
 }
 
 .v2-region-sidebar {

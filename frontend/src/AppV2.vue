@@ -462,6 +462,11 @@ const translatedPreviewScale = ref(1)
 const exportingOcrDebug = ref(false)
 const exportingTranslationInputDebug = ref(false)
 const exportingTranslationRequestDebug = ref(false)
+const topbarTaskProgress = ref({
+  label: '',
+  current: 0,
+  total: 0
+})
 
 const config = ref(loadStoredConfig())
 const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
@@ -503,6 +508,7 @@ let socket = null
 let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
 let suppressCanvasRegionClickUntil = 0
+let topbarTaskProgressTimer = null
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
@@ -556,6 +562,7 @@ const canExportTranslatedResults = computed(
 const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
+const canActivateManualDraw = computed(() => Boolean(selectedEditPage.value) && canCreateManualRegion.value)
 const activeReviewMode = computed(() => {
   const mode = currentProject.value?.review_mode || config.value.default_review_mode || 'canvas_beta'
   return mode === 'classic' ? 'canvas_beta' : mode
@@ -579,7 +586,7 @@ const canvasInteractionLockReason = computed(() => {
     return '当前没有可编辑页面'
   }
   if (manualDrawMode.value) {
-    return '正在手动补框模式'
+    return '正在手动添加框模式'
   }
   if (mergeMode.value) {
     return '正在合并文本框模式'
@@ -906,6 +913,18 @@ const progressPercent = computed(() => {
 
   return Math.min(100, Math.round((progress.value.current / progress.value.total) * 100))
 })
+const topbarTaskProgressActive = computed(() => (
+  Number(topbarTaskProgress.value.total) > 0
+  && Number(topbarTaskProgress.value.current) > 0
+))
+const topbarTaskProgressPercent = computed(() => {
+  if (!topbarTaskProgressActive.value) {
+    return 0
+  }
+  const total = Math.max(Number(topbarTaskProgress.value.total) || 0, 1)
+  const current = Math.max(Number(topbarTaskProgress.value.current) || 0, 0)
+  return Math.min(100, Math.round((current / total) * 100))
+})
 const translatorLabelMap = {
   sugoi: 'sugoi',
   gemini: 'Gemini',
@@ -986,13 +1005,30 @@ const v2ReviewSavedLabel = computed(() => {
 const v2ReviewSaveLabel = computed(() => (
   translating.value ? '处理中…' : '保存'
 ))
-const v2TopbarStatusText = computed(() => String(errorMessage.value || status.value || '').trim())
+const v2TopbarStatusText = computed(() => (
+  String(errorMessage.value || topbarTaskProgress.value.label || status.value || '').trim()
+))
 const v2TopbarStatusVisible = computed(
   () => v2View.value !== 'home' && Boolean(v2TopbarStatusText.value)
 )
 const v2TopbarProgressVisible = computed(
-  () => translating.value && progress.value.total > 0
+  () => (translating.value && progress.value.total > 0) || topbarTaskProgressActive.value
 )
+const v2TopbarProgressCurrent = computed(() => (
+  translating.value && progress.value.total > 0
+    ? Number(progress.value.current || 0)
+    : Number(topbarTaskProgress.value.current || 0)
+))
+const v2TopbarProgressTotal = computed(() => (
+  translating.value && progress.value.total > 0
+    ? Number(progress.value.total || 0)
+    : Number(topbarTaskProgress.value.total || 0)
+))
+const v2TopbarProgressPercent = computed(() => (
+  translating.value && progress.value.total > 0
+    ? progressPercent.value
+    : topbarTaskProgressPercent.value
+))
 const canRunProjectPrimaryAction = computed(
   () => Boolean(sessionId.value) && !translating.value
 )
@@ -3244,6 +3280,50 @@ function getManualDraftStyle(page) {
   return getStyleRegionBoxStyle({ bbox }, page)
 }
 
+function clearTopbarTaskProgress() {
+  if (topbarTaskProgressTimer != null) {
+    window.clearTimeout(topbarTaskProgressTimer)
+    topbarTaskProgressTimer = null
+  }
+  topbarTaskProgress.value = {
+    label: '',
+    current: 0,
+    total: 0
+  }
+}
+
+function setTopbarTaskProgress(label, current, total) {
+  if (topbarTaskProgressTimer != null) {
+    window.clearTimeout(topbarTaskProgressTimer)
+    topbarTaskProgressTimer = null
+  }
+  topbarTaskProgress.value = {
+    label: String(label || '').trim(),
+    current: Math.max(0, Number(current) || 0),
+    total: Math.max(0, Number(total) || 0)
+  }
+}
+
+function scheduleClearTopbarTaskProgress(delay = 900) {
+  if (typeof window === 'undefined') {
+    clearTopbarTaskProgress()
+    return
+  }
+  if (topbarTaskProgressTimer != null) {
+    window.clearTimeout(topbarTaskProgressTimer)
+  }
+  topbarTaskProgressTimer = window.setTimeout(() => {
+    clearTopbarTaskProgress()
+  }, delay)
+}
+
+async function flushUiFrame() {
+  await nextTick()
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    await new Promise((resolve) => window.requestAnimationFrame(() => resolve()))
+  }
+}
+
 function clearManualDraft(options = {}) {
   manualDrawDraft.value = null
   if (!options.keepMode) {
@@ -3256,39 +3336,61 @@ async function submitManualDraw(page, bbox) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
+    setTopbarTaskProgress('已完成画框，正在准备手动框…', 1, 3)
+    await flushUiFrame()
+    setTopbarTaskProgress('正在识别新框内的文字…', 2, 3)
     if (isCanvasReviewMode.value) {
       await runCanvasStructuredAction(page, {
         kind: 'create_region',
         bbox
       })
-      return
+    } else {
+      const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'create',
+          stored_name: page.stored_name,
+          bbox,
+          config: buildRuntimeConfig()
+        })
+      })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.detail || '新增手动框失败')
+      }
+      await loadEditInspection({ silent: true })
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
+      status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
     }
 
-    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        action: 'create',
-        stored_name: page.stored_name,
-        bbox,
-        config: buildRuntimeConfig()
-      })
-    })
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '新增补漏框失败')
-    }
-    await loadEditInspection({ silent: true })
-    selectedEditPageKey.value = page.stored_name
-    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
-    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+    setTopbarTaskProgress('正在生成新的可编辑文本框…', 3, 3)
+    await flushUiFrame()
+    scheduleClearTopbarTaskProgress()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '新增补漏框失败'
+    clearTopbarTaskProgress()
+    errorMessage.value = error instanceof Error ? error.message : '新增手动框失败'
   } finally {
     creatingManualRegion.value = false
   }
+}
+
+function toggleManualDrawMode() {
+  if (!selectedEditPage.value || !canCreateManualRegion.value) {
+    return
+  }
+  const nextEnabled = !manualDrawMode.value
+  clearManualDraft({ keepMode: true })
+  mergeMode.value = false
+  mergeRegionSelection.value = {}
+  adjustingRegionId.value = ''
+  manualDrawMode.value = nextEnabled
+  status.value = nextEnabled
+    ? '请在右侧带框页上拖出一个新框，松手后会自动识别并生成文本框。'
+    : '已退出手动添加框。'
 }
 
 function startRegionBBoxAdjustment(region) {
@@ -3313,16 +3415,6 @@ function startManualDraw(event, page) {
   }
 
   const point = getCanvasPoint(event, page)
-  const existingDraft = manualDrawDraft.value
-  if (existingDraft && existingDraft.stored_name === page.stored_name) {
-    existingDraft.currentX = point.x
-    existingDraft.currentY = point.y
-    existingDraft.awaitingSecondPoint = false
-    finishManualDraw(event, page, { commit: true })
-    event.preventDefault()
-    return
-  }
-
   manualDrawDraft.value = {
     action: adjustingRegionId.value ? 'adjust' : 'create',
     regionId: adjustingRegionId.value || '',
@@ -3367,6 +3459,9 @@ async function finishManualDraw(event, page, options = {}) {
   }
 
   if (!options.commit && draft.awaitingSecondPoint && !draft.moved) {
+    status.value = draft.action === 'adjust'
+      ? '请继续拖出新的框范围，松手后会自动替换当前文本框。'
+      : '请拖出一个足够大的新框，松手后会自动补充并识别。'
     event.preventDefault()
     return
   }
@@ -3374,13 +3469,13 @@ async function finishManualDraw(event, page, options = {}) {
   const bbox = getManualDraftBBox(page)
   if (!bbox || bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
     clearManualDraft({ keepMode: true })
-    status.value = adjustingRegionId.value ? '调整后的框太小了，拖大一点会更稳。' : '补漏框太小了，拖大一点会更稳。'
+    status.value = adjustingRegionId.value ? '调整后的框太小了，拖大一点会更稳。' : '手动框太小了，拖大一点会更稳。'
     return
   }
 
   const draftAction = draft.action
   const draftRegionId = draft.regionId
-  clearManualDraft({ keepMode: true })
+  clearManualDraft({ keepMode: draftAction === 'adjust' })
   if (draftAction === 'adjust' && draftRegionId) {
     updateRegionLayoutOverride(draftRegionId, { bbox })
     status.value = '已更新这个文本框的范围，重新嵌字时会按新框计算。'
@@ -3417,7 +3512,7 @@ async function deleteManualRegion(region) {
     })
     const payload = await response.json()
     if (!response.ok) {
-      throw new Error(payload.detail || '删除补漏框失败')
+      throw new Error(payload.detail || '删除手动框失败')
     }
 
     const nextTranslationOverrides = { ...translationRegionOverrides.value }
@@ -3445,9 +3540,9 @@ async function deleteManualRegion(region) {
     mergeRegionSelection.value = nextMergeSelection
 
     await loadEditInspection({ silent: true })
-    status.value = '已删除这个手动补漏框。'
+    status.value = '已删除这个手动框。'
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '删除补漏框失败'
+    errorMessage.value = error instanceof Error ? error.message : '删除手动框失败'
   } finally {
     creatingManualRegion.value = false
   }
@@ -4104,13 +4199,13 @@ async function runCanvasStructuredAction(page, options) {
     const createdRegionId = String(result?.created_region_id || '')
     const historyEntry = {
       kind: 'create_region',
-      label: '新增补漏框',
+      label: '新增手动框',
       pageId: page.stored_name,
       bbox,
       createdRegionId
     }
     pushCanvasHistory(page.stored_name, historyEntry)
-    status.value = '已新增补漏框，并自动尝试 OCR / 翻译。'
+    status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
     await loadEditInspection({ silent: true })
     selectedEditPageKey.value = page.stored_name
     selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
@@ -4143,7 +4238,7 @@ async function runCanvasStructuredAction(page, options) {
     const deletedPayload = result?.deleted_region_payload || {}
     const historyEntry = {
       kind: 'delete_manual_region',
-      label: '删除补漏框',
+      label: '删除手动框',
       pageId: page.stored_name,
       regionIds,
       deletedPayload,
@@ -4158,7 +4253,7 @@ async function runCanvasStructuredAction(page, options) {
       }
     }
     pushCanvasHistory(page.stored_name, historyEntry)
-    status.value = '已删除这个手动补漏框。'
+    status.value = '已删除这个手动框。'
     await loadEditInspection({ silent: true })
     selectedEditPageKey.value = page.stored_name
     return
@@ -5498,7 +5593,7 @@ function startTranslation(action = 'translate') {
         clearCanvasPreviewDirty()
       }
       status.value = completedAction === 'detect'
-        ? '文本框识别完成。现在可以先逐框确认、补框或保留原文，确认后再继续翻译。'
+        ? '文本框识别完成。现在可以先逐框确认、手动加框或保留原文，确认后再继续翻译。'
         : completedAction === 'translate-page'
           ? '当前页翻译完成，结果已回填到工作台。'
         : completedAction === 'resume-translate'
@@ -5593,6 +5688,7 @@ onBeforeUnmount(() => {
   closeSocket()
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()
+  clearTopbarTaskProgress()
   window.removeEventListener('resize', refreshTranslatedPreviewScale)
   window.removeEventListener('pointermove', updateCanvasViewportPan)
   window.removeEventListener('pointerup', finishCanvasViewportPan)
@@ -5907,9 +6003,9 @@ watch(
             </div>
             <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
               <div class="v2-topbar-status-track">
-                <div class="v2-topbar-status-fill" :style="{ width: `${progressPercent}%` }"></div>
+                <div class="v2-topbar-status-fill" :style="{ width: `${v2TopbarProgressPercent}%` }"></div>
               </div>
-              <span>{{ progress.current }} / {{ progress.total }}</span>
+              <span>{{ v2TopbarProgressCurrent }} / {{ v2TopbarProgressTotal }}</span>
             </div>
           </div>
           <button
@@ -5971,9 +6067,9 @@ watch(
             </div>
             <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
               <div class="v2-topbar-status-track">
-                <div class="v2-topbar-status-fill" :style="{ width: `${progressPercent}%` }"></div>
+                <div class="v2-topbar-status-fill" :style="{ width: `${v2TopbarProgressPercent}%` }"></div>
               </div>
-              <span>{{ progress.current }} / {{ progress.total }}</span>
+              <span>{{ v2TopbarProgressCurrent }} / {{ v2TopbarProgressTotal }}</span>
             </div>
           </div>
 
@@ -6252,8 +6348,20 @@ watch(
 
               <article class="v2-pane-card">
                 <header class="v2-pane-head">
-                  <span class="v2-pane-label">框选调整</span>
+                  <div class="v2-pane-head-copy">
+                    <span class="v2-pane-label">框选调整</span>
+                    <span class="v2-pane-subtle">拖框后自动识别生成</span>
+                  </div>
                   <div class="v2-pane-actions">
+                    <button
+                      v-if="selectedEditPage"
+                      type="button"
+                      :class="['v2-ghost-button', manualDrawMode ? 'active' : '']"
+                      :disabled="!canActivateManualDraw"
+                      @click="toggleManualDrawMode"
+                    >
+                      {{ manualDrawMode ? '正在画框…' : '手动添加框' }}
+                    </button>
                     <button
                       v-if="selectedEditPage"
                       type="button"
@@ -6406,7 +6514,7 @@ watch(
               />
               <select v-model="regionListFilter" class="v2-filter-select">
                 <option value="all">全部</option>
-                <option value="manual">手动补框</option>
+                <option value="manual">手动框</option>
                 <option value="keep-original">保留原文</option>
                 <option value="untranslated">未翻译</option>
                 <option value="font-override">有字体覆盖</option>
@@ -6427,7 +6535,7 @@ watch(
                     <strong>#{{ region.index + 1 }}</strong>
                     <span class="v2-inline-badge style">{{ getResolvedRegionStyleLabel(region) }}</span>
                     <span v-if="hasRegionWarning(region)" class="v2-inline-badge warning">需留意</span>
-                    <span v-if="isManualRegion(region)" class="v2-inline-badge">手动补框</span>
+                    <span v-if="isManualRegion(region)" class="v2-inline-badge">手动框</span>
                   </div>
 
                   <div class="v2-region-card-toggles" @click.stop @mousedown.stop>
@@ -6547,7 +6655,7 @@ watch(
                       class="v2-danger-link"
                       @click="deleteManualRegion(region)"
                     >
-                      删除补框
+                      删除手动框
                     </button>
                   </div>
                 </div>

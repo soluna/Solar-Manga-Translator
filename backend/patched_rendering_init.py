@@ -294,43 +294,100 @@ def _compose_render_canvas(
     alignment: str,
     render_horizontally: bool,
 ) -> np.ndarray:
-    canvas = np.zeros((target_height, target_width, 4), dtype=np.uint8)
+    canvas_width = max(int(target_width), 1)
+    canvas_height = max(int(target_height), 1)
+    canvas = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)
     if temp_box is None or temp_box.size == 0:
         return canvas
 
     box_height, box_width = temp_box.shape[:2]
-    clipped_width = min(box_width, target_width)
-    clipped_height = min(box_height, target_height)
-    clipped_box = temp_box[:clipped_height, :clipped_width]
+    canvas_width = max(canvas_width, int(box_width))
+    canvas_height = max(canvas_height, int(box_height))
+    canvas = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)
 
     if render_horizontally:
-        # Match the review canvas default anchor:
-        # horizontal text stays left-aligned inside the box and vertically centered.
+        # Horizontal review mode anchors text to the left edge of the detected
+        # region and vertically centers it. If the rendered text is larger than
+        # the detected box we keep the same anchor and allow the canvas to grow.
         offset_x = 0
-        offset_y = max((target_height - clipped_height) // 2, 0)
+        offset_y = max((canvas_height - box_height) // 2, 0)
     else:
-        # Match the review canvas default anchor:
-        # vertical text stays top-aligned inside the box and horizontally centered.
-        offset_x = max((target_width - clipped_width) // 2, 0)
+        # Vertical review mode anchors text to the top edge of the detected
+        # region and horizontally centers it. Wider/taller content can extend
+        # beyond the original box through the larger canvas.
+        offset_x = max((canvas_width - box_width) // 2, 0)
         offset_y = 0
 
-    canvas[offset_y:offset_y + clipped_height, offset_x:offset_x + clipped_width] = clipped_box
+    canvas[offset_y:offset_y + box_height, offset_x:offset_x + box_width] = temp_box
     return canvas
+
+
+def _expand_destination_quad(
+    dst_points: np.ndarray,
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+    render_horizontally: bool,
+) -> np.ndarray:
+    expanded = np.array(dst_points, dtype=np.float32, copy=True)
+    restore_singleton_axis = False
+    if expanded.shape == (1, 4, 2):
+        expanded = expanded[0]
+        restore_singleton_axis = True
+    if expanded.shape != (4, 2):
+        return np.array(dst_points, dtype=np.float32, copy=True)
+
+    width_scale = max(float(source_width) / max(float(target_width), 1.0), 1.0)
+    height_scale = max(float(source_height) / max(float(target_height), 1.0), 1.0)
+    if np.isclose(width_scale, 1.0) and np.isclose(height_scale, 1.0):
+        if restore_singleton_axis:
+            return expanded[np.newaxis, ...]
+        return expanded
+
+    top_vec = expanded[1] - expanded[0]
+    bottom_vec = expanded[2] - expanded[3]
+    left_vec = expanded[3] - expanded[0]
+    right_vec = expanded[2] - expanded[1]
+
+    if width_scale > 1.0:
+        extra_top = top_vec * (width_scale - 1.0)
+        extra_bottom = bottom_vec * (width_scale - 1.0)
+        if render_horizontally:
+            expanded[1] += extra_top
+            expanded[2] += extra_bottom
+        else:
+            half_top = extra_top * 0.5
+            half_bottom = extra_bottom * 0.5
+            expanded[0] -= half_top
+            expanded[1] += half_top
+            expanded[3] -= half_bottom
+            expanded[2] += half_bottom
+
+    if height_scale > 1.0:
+        extra_left = left_vec * (height_scale - 1.0)
+        extra_right = right_vec * (height_scale - 1.0)
+        if render_horizontally:
+            half_left = extra_left * 0.5
+            half_right = extra_right * 0.5
+            expanded[0] -= half_left
+            expanded[3] += half_left
+            expanded[1] -= half_right
+            expanded[2] += half_right
+        else:
+            expanded[3] += extra_left
+            expanded[2] += extra_right
+
+    if restore_singleton_axis:
+        return expanded[np.newaxis, ...]
+    return expanded
 
 
 def _select_region_layout(region: TextBlock, target_font_size: int, font_size_minimum: int, font_size_fixed: int,
                           box_width: int, box_height: int, hyphenate: bool, line_spacing: int,
                           default_font_path: str):
     candidate_directions = _get_candidate_directions(region)
-    if font_size_fixed is not None:
-        search_sizes = [target_font_size]
-    else:
-        growth_allowance = max(4, int(round(target_font_size * 0.3)))
-        upper_font_size = max(
-            target_font_size,
-            min(max(box_width, box_height), target_font_size + growth_allowance),
-        )
-        search_sizes = list(range(upper_font_size, font_size_minimum - 1, -1))
+    search_sizes = [max(int(target_font_size), max(int(font_size_minimum), 1))]
 
     best_fit = None
     best_fallback = None
@@ -531,15 +588,35 @@ def render(
         region.alignment,
         render_horizontally,
     )
-
+    expanded_dst_points = _expand_destination_quad(
+        np.array(dst_points, dtype=np.float32),
+        int(box.shape[1]),
+        int(box.shape[0]),
+        target_width,
+        target_height,
+        render_horizontally,
+    )
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 
-    M, _ = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
+    M, _ = cv2.findHomography(src_points, expanded_dst_points, cv2.RANSAC, 5.0)
     rgba_region = cv2.warpPerspective(box, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    x, y, w, h = cv2.boundingRect(dst_points.astype(np.int32))
-    canvas_region = rgba_region[y:y+h, x:x+w, :3]
-    mask_region = rgba_region[y:y+h, x:x+w, 3:4].astype(np.float32) / 255.0
-    img[y:y+h, x:x+w] = np.clip((img[y:y+h, x:x+w].astype(np.float32) * (1 - mask_region) + canvas_region.astype(np.float32) * mask_region), 0, 255).astype(np.uint8)
+    x, y, w, h = cv2.boundingRect(expanded_dst_points.astype(np.int32))
+    x0 = max(int(x), 0)
+    y0 = max(int(y), 0)
+    x1 = min(int(x + w), img.shape[1])
+    y1 = min(int(y + h), img.shape[0])
+    if x1 <= x0 or y1 <= y0:
+        return img
+    canvas_region = rgba_region[y0:y1, x0:x1, :3]
+    mask_region = rgba_region[y0:y1, x0:x1, 3:4].astype(np.float32) / 255.0
+    img[y0:y1, x0:x1] = np.clip(
+        (
+            img[y0:y1, x0:x1].astype(np.float32) * (1 - mask_region)
+            + canvas_region.astype(np.float32) * mask_region
+        ),
+        0,
+        255,
+    ).astype(np.uint8)
     return img
 
 

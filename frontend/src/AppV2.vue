@@ -841,18 +841,6 @@ const selectedEditRegionIndexLabel = computed(() => {
   }
   return `#${selectedEditRegion.value.index + 1}`
 })
-const v2SelectedRegionSummary = computed(() => {
-  if (!selectedEditPage.value) {
-    return '先选择页面'
-  }
-  if (!filteredEditRegions.value.length) {
-    return '当前筛选下没有对白框'
-  }
-  if (selectedEditRegionVisibleIndex.value < 0) {
-    return `当前框不在筛选结果内 · 共 ${filteredEditRegions.value.length} 框`
-  }
-  return `第 ${selectedEditRegionVisibleIndex.value + 1} / ${filteredEditRegions.value.length} 框`
-})
 const v2RegionSidebarCompact = computed(() => filteredEditRegions.value.length <= 4)
 const pageRailItems = computed(() => (
   mergedInspectionPages.value.map((page, index) => ({
@@ -998,6 +986,13 @@ const v2ReviewSavedLabel = computed(() => {
 const v2ReviewSaveLabel = computed(() => (
   translating.value ? '处理中…' : '保存'
 ))
+const v2TopbarStatusText = computed(() => String(errorMessage.value || status.value || '').trim())
+const v2TopbarStatusVisible = computed(
+  () => v2View.value !== 'home' && Boolean(v2TopbarStatusText.value)
+)
+const v2TopbarProgressVisible = computed(
+  () => translating.value && progress.value.total > 0
+)
 const canRunProjectPrimaryAction = computed(
   () => Boolean(sessionId.value) && !translating.value
 )
@@ -5902,6 +5897,21 @@ watch(
       <div class="v2-topbar-actions">
         <template v-if="v2View === 'review'">
           <span class="v2-saved-indicator">{{ v2ReviewSavedLabel }}</span>
+          <div
+            v-if="v2TopbarStatusVisible"
+            :class="['v2-topbar-status', errorMessage ? 'is-error' : '', v2TopbarProgressVisible ? 'is-busy' : '']"
+          >
+            <div class="v2-topbar-status-copy">
+              <span class="v2-topbar-status-dot"></span>
+              <span>{{ v2TopbarStatusText }}</span>
+            </div>
+            <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
+              <div class="v2-topbar-status-track">
+                <div class="v2-topbar-status-fill" :style="{ width: `${progressPercent}%` }"></div>
+              </div>
+              <span>{{ progress.current }} / {{ progress.total }}</span>
+            </div>
+          </div>
           <button
             type="button"
             class="v2-topbar-button"
@@ -5950,6 +5960,21 @@ watch(
           <div class="v2-connection-chip">
             <span :class="['v2-connection-dot', backendOnline ? 'online' : 'offline']"></span>
             <span>{{ backendOnline ? '后端在线' : '后端离线' }}</span>
+          </div>
+          <div
+            v-if="v2TopbarStatusVisible"
+            :class="['v2-topbar-status', errorMessage ? 'is-error' : '', v2TopbarProgressVisible ? 'is-busy' : '']"
+          >
+            <div class="v2-topbar-status-copy">
+              <span class="v2-topbar-status-dot"></span>
+              <span>{{ v2TopbarStatusText }}</span>
+            </div>
+            <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
+              <div class="v2-topbar-status-track">
+                <div class="v2-topbar-status-fill" :style="{ width: `${progressPercent}%` }"></div>
+              </div>
+              <span>{{ progress.current }} / {{ progress.total }}</span>
+            </div>
           </div>
 
           <button
@@ -6002,20 +6027,6 @@ watch(
         </template>
       </div>
     </header>
-
-    <div v-if="v2View !== 'review'" class="v2-statusbar">
-      <div class="v2-status-copy">
-        <strong>{{ errorMessage ? '出现问题' : '状态' }}</strong>
-        <span>{{ errorMessage || status }}</span>
-      </div>
-
-      <div v-if="translating && progress.total" class="v2-progress">
-        <div class="v2-progress-track">
-          <div class="v2-progress-fill" :style="{ width: `${progressPercent}%` }"></div>
-        </div>
-        <span>{{ progress.current }} / {{ progress.total }}</span>
-      </div>
-    </div>
 
     <main class="v2-main">
       <section v-if="v2View === 'home'" class="v2-home-view" data-testid="v2-home-view">
@@ -6104,9 +6115,7 @@ watch(
 
       <section v-else class="v2-review-view" data-testid="v2-review-view">
         <div class="v2-review-toolbar">
-          <div class="v2-review-toolbar-left">
-            <span class="v2-review-toolbar-page">{{ v2SelectedPageEntry?.name || '未选择页面' }}</span>
-          </div>
+          <div class="v2-review-toolbar-left v2-review-toolbar-spacer" aria-hidden="true"></div>
 
           <div class="v2-review-toolbar-center">
             <div class="v2-mode-switch">
@@ -6218,10 +6227,7 @@ watch(
             <div class="v2-pane-strip">
               <article class="v2-pane-card v2-pane-card-compare">
                 <header class="v2-pane-head">
-                  <div>
-                    <span class="v2-pane-label">{{ v2ReviewHeaderLabel }}</span>
-                    <strong>{{ v2SelectedPageEntry?.name || '未选择页面' }}</strong>
-                  </div>
+                  <span class="v2-pane-label">{{ v2ReviewHeaderLabel }}</span>
                 </header>
 
                 <div
@@ -6246,10 +6252,7 @@ watch(
 
               <article class="v2-pane-card">
                 <header class="v2-pane-head">
-                  <div>
-                    <span class="v2-pane-label">框选调整</span>
-                    <strong>{{ v2SelectedPageEntry?.name || '未选择页面' }}</strong>
-                  </div>
+                  <span class="v2-pane-label">框选调整</span>
                   <div class="v2-pane-actions">
                     <button
                       v-if="selectedEditPage"
@@ -6393,10 +6396,6 @@ watch(
                     ↓
                   </button>
                 </div>
-              </div>
-
-              <div class="v2-region-sidebar-meta">
-                {{ v2SelectedRegionSummary }}
               </div>
 
               <input

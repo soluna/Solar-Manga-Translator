@@ -517,6 +517,7 @@ const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
 const pageEditHistory = ref({})
+const pageCommandRevisions = ref({})
 const canvasPreviewDirtyPages = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
@@ -595,6 +596,9 @@ let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
 let suppressCanvasRegionClickUntil = 0
 let topbarTaskProgressTimer = null
+let reviewInspectionRequestToken = 0
+let styleInspectionRequestToken = 0
+const pageCommandExecutionQueue = new Map()
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 
@@ -2731,6 +2735,101 @@ function replacePageHistoryState(pageId, nextState) {
   }
 }
 
+function getPageCommandRevision(pageId) {
+  return Number(pageCommandRevisions.value[pageId] || 0)
+}
+
+function bumpPageCommandRevision(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return 0
+  }
+  const nextRevision = getPageCommandRevision(normalizedPageId) + 1
+  pageCommandRevisions.value = {
+    ...pageCommandRevisions.value,
+    [normalizedPageId]: nextRevision
+  }
+  return nextRevision
+}
+
+function replaceInspectionPage(pages, nextPage) {
+  if (!nextPage?.stored_name) {
+    return pages
+  }
+  let found = false
+  const nextPages = (pages || []).map((page) => {
+    if (page?.stored_name !== nextPage.stored_name) {
+      return page
+    }
+    found = true
+    return {
+      ...nextPage
+    }
+  })
+  if (found) {
+    return nextPages
+  }
+  return [...nextPages, { ...nextPage }]
+}
+
+function applyInspectionOverrides(overrides) {
+  if (!overrides || typeof overrides !== 'object') {
+    return
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_overrides')) {
+    translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_skip_overrides')) {
+    translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_disabled_overrides')) {
+    translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_layout_overrides')) {
+    translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, 'style_region_overrides')) {
+    styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+  }
+}
+
+function applyPageCommandPayload(payload) {
+  if (payload?.translation_page) {
+    reviewInspectionPages.value = replaceInspectionPage(reviewInspectionPages.value, payload.translation_page)
+  }
+  if (payload?.style_page) {
+    styleInspectionPages.value = replaceInspectionPage(styleInspectionPages.value, payload.style_page)
+  }
+  applyInspectionOverrides(payload?.overrides)
+  translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
+  fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
+  syncEditSelection()
+}
+
+function queuePageCommandExecution(pageId, executor) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return Promise.resolve(null)
+  }
+  const previous = pageCommandExecutionQueue.get(normalizedPageId) || Promise.resolve()
+  let trackedPromise = null
+  trackedPromise = previous
+    .catch(() => {})
+    .then(executor)
+    .finally(() => {
+      if (pageCommandExecutionQueue.get(normalizedPageId) === trackedPromise) {
+        pageCommandExecutionQueue.delete(normalizedPageId)
+      }
+    })
+  pageCommandExecutionQueue.set(normalizedPageId, trackedPromise)
+  return trackedPromise
+}
+
+function invalidateInspectionRequests() {
+  reviewInspectionRequestToken += 1
+  styleInspectionRequestToken += 1
+}
+
 function pushCanvasHistory(pageId, entry) {
   if (!pageId || !entry) {
     return
@@ -3826,9 +3925,7 @@ function applyReviewInspectionPayload(payload) {
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
-  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
-    ? payload.overrides
-    : {}
+  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object' ? payload.overrides : {}
   const nextOverrides = { ...(sessionOverrides.translation_region_overrides || {}) }
   const nextSkipOverrides = { ...(sessionOverrides.translation_region_skip_overrides || {}) }
   const nextDisabledOverrides = { ...(sessionOverrides.translation_region_disabled_overrides || {}) }
@@ -3854,10 +3951,7 @@ function applyStyleInspectionPayload(payload) {
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
-  const sessionOverrides = payload?.overrides && typeof payload.overrides === 'object'
-    ? payload.overrides
-    : {}
-  styleRegionOverrides.value = { ...(sessionOverrides.style_region_overrides || styleRegionOverrides.value) }
+  applyInspectionOverrides(payload?.overrides)
 }
 
 function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
@@ -3911,11 +4005,13 @@ function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
 async function loadReviewInspection(options = {}) {
   const silent = Boolean(options.silent)
   if (!sessionId.value) {
+    reviewInspectionRequestToken += 1
     reviewInspectionPages.value = []
     syncEditSelection()
     return
   }
 
+  const requestToken = ++reviewInspectionRequestToken
   if (!silent) {
     reviewInspectionLoading.value = true
   }
@@ -3933,12 +4029,18 @@ async function loadReviewInspection(options = {}) {
       throw new Error(payload.detail || '读取翻译审校结果失败')
     }
 
+    if (requestToken !== reviewInspectionRequestToken) {
+      return
+    }
     applyReviewInspectionPayload(payload)
     syncEditSelection()
   } catch (error) {
+    if (requestToken !== reviewInspectionRequestToken) {
+      return
+    }
     errorMessage.value = error instanceof Error ? error.message : '读取翻译审校结果失败'
   } finally {
-    if (!silent) {
+    if (!silent && requestToken === reviewInspectionRequestToken) {
       reviewInspectionLoading.value = false
     }
   }
@@ -3947,11 +4049,13 @@ async function loadReviewInspection(options = {}) {
 async function loadStyleInspection(options = {}) {
   const silent = Boolean(options.silent)
   if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
+    styleInspectionRequestToken += 1
     styleInspectionPages.value = []
     syncEditSelection()
     return
   }
 
+  const requestToken = ++styleInspectionRequestToken
   if (!silent) {
     styleInspectionLoading.value = true
   }
@@ -3969,12 +4073,18 @@ async function loadStyleInspection(options = {}) {
       throw new Error(payload.detail || '读取字体样式识别结果失败')
     }
 
+    if (requestToken !== styleInspectionRequestToken) {
+      return
+    }
     applyStyleInspectionPayload(payload)
     syncEditSelection()
   } catch (error) {
+    if (requestToken !== styleInspectionRequestToken) {
+      return
+    }
     errorMessage.value = error instanceof Error ? error.message : '读取字体样式识别结果失败'
   } finally {
-    if (!silent) {
+    if (!silent && requestToken === styleInspectionRequestToken) {
       styleInspectionLoading.value = false
     }
   }
@@ -4235,7 +4345,7 @@ function updateRegionLayoutOverride(regionId, patch) {
   }
 }
 
-async function applyPageCommands(pageId, commands) {
+async function requestPageCommands(pageId, commands, runtimeConfig) {
   if (!sessionId.value || !pageId || !Array.isArray(commands) || !commands.length) {
     return null
   }
@@ -4245,7 +4355,7 @@ async function applyPageCommands(pageId, commands) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      config: buildRuntimeConfig(),
+      config: runtimeConfig || buildRuntimeConfig(),
       commands
     })
   })
@@ -4254,6 +4364,27 @@ async function applyPageCommands(pageId, commands) {
     throw new Error(payload.detail || '更新页面编辑状态失败')
   }
   return payload
+}
+
+async function applyPageCommands(pageId, commands, options = {}) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId || !Array.isArray(commands) || !commands.length) {
+    return { payload: null, isLatest: true, revision: 0 }
+  }
+  invalidateInspectionRequests()
+  const revision = Number(options.revision) || bumpPageCommandRevision(normalizedPageId)
+  return queuePageCommandExecution(normalizedPageId, async () => {
+    const payload = await requestPageCommands(normalizedPageId, commands, buildRuntimeConfig())
+    const isLatest = revision === getPageCommandRevision(normalizedPageId)
+    if (options.syncPayload !== false && isLatest) {
+      applyPageCommandPayload(payload)
+    }
+    return {
+      payload,
+      isLatest,
+      revision,
+    }
+  })
 }
 
 async function runCanvasCommand(page, options) {
@@ -4267,7 +4398,7 @@ async function runCanvasCommand(page, options) {
   }
 
   try {
-    await applyPageCommands(page.stored_name, redoCommands)
+    const result = await applyPageCommands(page.stored_name, redoCommands)
     if (undoCommands.length) {
       pushCanvasHistory(page.stored_name, {
         label: String(options?.label || '编辑文本框'),
@@ -4275,10 +4406,9 @@ async function runCanvasCommand(page, options) {
         redoCommands
       })
     }
-    if (options?.successMessage) {
+    if (options?.successMessage && result?.isLatest !== false) {
       status.value = options.successMessage
     }
-    await loadEditInspection({ silent: true })
     if (options?.focusRegionId) {
       selectedEditPageKey.value = page.stored_name
       selectedEditRegionKey.value = options.focusRegionId
@@ -4389,7 +4519,6 @@ async function undoCanvasEdit() {
       redo: [...current.redo, entry].slice(-maxCanvasHistoryEntries)
     })
     status.value = `已撤销：${entry.label}`
-    await loadEditInspection({ silent: true })
     selectedEditPageKey.value = pageId
     if (entry.kind === 'merge_regions' && Array.isArray(entry.regionIds) && entry.regionIds.length) {
       selectedEditRegionKey.value = entry.regionIds[0]
@@ -4414,10 +4543,10 @@ async function redoCanvasEdit() {
 
   try {
     if (entry.kind === 'create_region') {
-      const result = await applyPageCommands(pageId, [{ type: 'create_region', bbox: entry.bbox }])
+      const commandResult = await applyPageCommands(pageId, [{ type: 'create_region', bbox: entry.bbox }])
       const refreshedEntry = {
         ...entry,
-        createdRegionId: String(result?.created_region_id || '')
+        createdRegionId: String(commandResult?.payload?.created_region_id || '')
       }
       replacePageHistoryState(pageId, {
         undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
@@ -4425,10 +4554,10 @@ async function redoCanvasEdit() {
       })
       selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
     } else if (entry.kind === 'merge_regions') {
-      const result = await applyPageCommands(pageId, [{ type: 'merge_regions', region_ids: entry.regionIds || [] }])
+      const commandResult = await applyPageCommands(pageId, [{ type: 'merge_regions', region_ids: entry.regionIds || [] }])
       const refreshedEntry = {
         ...entry,
-        createdRegionId: String(result?.created_region_id || '')
+        createdRegionId: String(commandResult?.payload?.created_region_id || '')
       }
       replacePageHistoryState(pageId, {
         undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
@@ -4449,7 +4578,6 @@ async function redoCanvasEdit() {
       })
     }
     status.value = `已重做：${entry.label}`
-    await loadEditInspection({ silent: true })
     selectedEditPageKey.value = pageId
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '重做失败'
@@ -4469,7 +4597,7 @@ async function runCanvasStructuredAction(page, options) {
   if (kind === 'create_region' && bbox) {
     markCanvasPreviewDirty(page.stored_name)
     result = await applyPageCommands(page.stored_name, [{ type: 'create_region', bbox }])
-    const createdRegionId = String(result?.created_region_id || '')
+    const createdRegionId = String(result?.payload?.created_region_id || '')
     const historyEntry = {
       kind: 'create_region',
       label: '新增手动框',
@@ -4478,17 +4606,29 @@ async function runCanvasStructuredAction(page, options) {
       createdRegionId
     }
     pushCanvasHistory(page.stored_name, historyEntry)
-    status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
-    await loadEditInspection({ silent: true })
-    selectedEditPageKey.value = page.stored_name
-    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    if (result?.isLatest !== false) {
+      status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    }
     return
   }
 
   if (kind === 'merge_regions' && regionIds.length >= 2) {
+    const rollbackDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
+    for (const regionId of regionIds) {
+      nextDisabledOverrides[regionId] = true
+    }
+    translationRegionDisabledOverrides.value = nextDisabledOverrides
     markCanvasPreviewDirty(page.stored_name)
-    result = await applyPageCommands(page.stored_name, [{ type: 'merge_regions', region_ids: regionIds }])
-    const createdRegionId = String(result?.created_region_id || '')
+    try {
+      result = await applyPageCommands(page.stored_name, [{ type: 'merge_regions', region_ids: regionIds }])
+    } catch (error) {
+      translationRegionDisabledOverrides.value = rollbackDisabledOverrides
+      throw error
+    }
+    const createdRegionId = String(result?.payload?.created_region_id || '')
     const historyEntry = {
       kind: 'merge_regions',
       label: '合并文本框',
@@ -4497,10 +4637,11 @@ async function runCanvasStructuredAction(page, options) {
       createdRegionId
     }
     pushCanvasHistory(page.stored_name, historyEntry)
-    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
-    await loadEditInspection({ silent: true })
-    selectedEditPageKey.value = page.stored_name
-    selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    if (result?.isLatest !== false) {
+      status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    }
     return
   }
 
@@ -4508,7 +4649,7 @@ async function runCanvasStructuredAction(page, options) {
     const targetRegionId = regionIds[0]
     markCanvasPreviewDirty(page.stored_name)
     const result = await applyPageCommands(page.stored_name, [{ type: 'delete_manual_region', region_id: targetRegionId }])
-    const deletedPayload = result?.deleted_region_payload || {}
+    const deletedPayload = result?.payload?.deleted_region_payload || {}
     const historyEntry = {
       kind: 'delete_manual_region',
       label: '删除手动框',
@@ -4526,9 +4667,10 @@ async function runCanvasStructuredAction(page, options) {
       }
     }
     pushCanvasHistory(page.stored_name, historyEntry)
-    status.value = '已删除这个手动框。'
-    await loadEditInspection({ silent: true })
-    selectedEditPageKey.value = page.stored_name
+    if (result?.isLatest !== false) {
+      status.value = '已删除这个手动框。'
+      selectedEditPageKey.value = page.stored_name
+    }
     return
   }
 }

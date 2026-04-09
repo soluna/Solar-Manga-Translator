@@ -692,6 +692,20 @@ class TranslatorEngine:
         session["translation_region_layout_overrides"] = dict(config.get("translation_region_layout_overrides") or {})
         return config
 
+    def capture_page_command_config(
+        self,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        config["style_region_overrides"] = dict(session.get("style_region_overrides") or {})
+        config["translation_region_overrides"] = dict(session.get("translation_region_overrides") or {})
+        config["translation_region_skip_overrides"] = dict(session.get("translation_region_skip_overrides") or {})
+        config["translation_region_disabled_overrides"] = dict(session.get("translation_region_disabled_overrides") or {})
+        config["translation_region_layout_overrides"] = dict(session.get("translation_region_layout_overrides") or {})
+        session["last_config"] = config
+        return config
+
     def persist_project_state(
         self,
         project_id: str,
@@ -1957,7 +1971,7 @@ class TranslatorEngine:
         if not isinstance(commands, list) or not commands:
             raise ValueError("至少需要一条页面命令。")
 
-        config = self.capture_session_config(session, raw_config)
+        config = self.capture_page_command_config(session, raw_config)
         updated_region_ids: list[str] = []
         snapshot_hints: list[str] = []
         created_region_id = ""
@@ -2104,6 +2118,7 @@ class TranslatorEngine:
             page_ids=[page_id],
         )
         document = self.get_page_document(project_id, session, page_id)
+        page_name = self._page_display_name(session, page_id)
         return {
             "page_id": page_id,
             "document": document,
@@ -2114,6 +2129,15 @@ class TranslatorEngine:
             "deleted_region_payload": deleted_region_payload or {},
             "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
             "executed_commands": [str(command.get("type") or "") for command in commands if isinstance(command, dict)],
+            "translation_page": self._page_document_to_translation_page(document, page_name),
+            "style_page": self._page_document_to_style_page(document, page_name),
+            "overrides": {
+                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            },
         }
 
     async def translate_session(

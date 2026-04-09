@@ -1,23 +1,27 @@
 from pathlib import Path
 from typing import Any
+import os
 import shutil
+import sys
 import uuid
 from urllib.parse import quote
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from engine.translator import TranslatorEngine
+from runtime_paths import resolve_app_paths
 from utils.file_handler import extract_archive
 
 app = FastAPI(title="Manga Translator API")
 
-BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = BASE_DIR / "output_images"
-TEMP_UPLOADS_DIR = BASE_DIR / "temp_uploads"
-TEMP_EXTRACTED_DIR = BASE_DIR / "temp_extracted"
+BASE_DIR = Path(os.getenv("APP_CODE_DIR") or Path(__file__).resolve().parent).resolve()
+APP_PATHS = resolve_app_paths(BASE_DIR)
+OUTPUT_DIR = APP_PATHS.output_dir
+TEMP_UPLOADS_DIR = APP_PATHS.cache_uploads_dir
+TEMP_EXTRACTED_DIR = APP_PATHS.cache_extracted_dir
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
 FONT_DIRECTORIES = {
@@ -43,7 +47,7 @@ def iter_font_directories(source: str) -> list[Path]:
         directories.append(directory)
     return directories
 SESSIONS: dict[str, dict[str, Any]] = {}
-translator_engine = TranslatorEngine(BASE_DIR)
+translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,9 +58,7 @@ app.add_middleware(
 )
 
 # 确保输出和临时目录存在并挂载静态文件
-OUTPUT_DIR.mkdir(exist_ok=True)
-TEMP_UPLOADS_DIR.mkdir(exist_ok=True)
-TEMP_EXTRACTED_DIR.mkdir(exist_ok=True)
+APP_PATHS.ensure_directories()
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
 
@@ -163,9 +165,129 @@ def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str
     return str(target_path)
 
 
+def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
+    base_url = ""
+    if request is not None:
+        base_url = str(request.base_url).rstrip("/")
+    migration = APP_PATHS.legacy_status()
+    return {
+        "desktop_mode": os.getenv("APP_DESKTOP_MODE") == "1",
+        "app_version": os.getenv("APP_VERSION") or "dev",
+        "backend_base_url": base_url,
+        "data_dir": str(APP_PATHS.app_data_dir),
+        "models_dir": str(APP_PATHS.models_dir),
+        "output_dir": str(APP_PATHS.output_dir),
+        "logs_dir": str(APP_PATHS.logs_dir),
+        "settings_path": str(APP_PATHS.settings_path),
+        "settings_exists": APP_PATHS.settings_path.exists(),
+        "migration": migration,
+    }
+
+
+def build_runtime_diagnostics() -> dict[str, Any]:
+    disk_total, disk_used, disk_free = shutil.disk_usage(APP_PATHS.app_data_dir)
+    gpu = {
+        "available": False,
+        "device_count": 0,
+        "devices": [],
+        "cuda_version": "",
+    }
+    try:
+        import torch  # type: ignore
+
+        gpu["available"] = bool(torch.cuda.is_available())
+        gpu["device_count"] = int(torch.cuda.device_count()) if gpu["available"] else 0
+        gpu["cuda_version"] = str(getattr(torch.version, "cuda", "") or "")
+        if gpu["available"]:
+            gpu["devices"] = [
+                {
+                    "index": index,
+                    "name": str(torch.cuda.get_device_name(index)),
+                }
+                for index in range(gpu["device_count"])
+            ]
+    except Exception as exc:
+        gpu["error"] = str(exc)
+
+    return {
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0],
+        "disk": {
+            "total_bytes": disk_total,
+            "used_bytes": disk_used,
+            "free_bytes": disk_free,
+        },
+        "gpu": gpu,
+        "paths": {
+            "data_dir": str(APP_PATHS.app_data_dir),
+            "models_dir": str(APP_PATHS.models_dir),
+            "output_dir": str(APP_PATHS.output_dir),
+            "logs_dir": str(APP_PATHS.logs_dir),
+        },
+    }
+
+
+def read_log_tail(path: Path, max_lines: int = 200) -> list[str]:
+    if not path.exists() or not path.is_file():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return lines[-max(1, min(max_lines, 2000)):]
+
+
 @app.get("/api/status")
-async def get_status():
-    return {"status": "running"}
+async def get_status(request: Request):
+    runtime = build_runtime_payload(request)
+    return {"status": "running", "runtime": runtime}
+
+
+@app.get("/api/app/runtime")
+async def get_app_runtime(request: Request):
+    return {"runtime": build_runtime_payload(request)}
+
+
+@app.get("/api/app/diagnostics")
+async def get_app_diagnostics():
+    return {"diagnostics": build_runtime_diagnostics()}
+
+
+@app.get("/api/app/settings")
+async def get_app_settings():
+    settings = translator_engine.load_persisted_settings()
+    return {"settings": settings}
+
+
+@app.patch("/api/app/settings")
+async def patch_app_settings(payload: dict[str, Any] | None = None):
+    settings = translator_engine.save_persisted_settings(payload or {})
+    return {"settings": settings}
+
+
+@app.post("/api/app/settings/validate")
+async def validate_app_settings(payload: dict[str, Any] | None = None):
+    return await translator_engine.validate_user_config(payload or {})
+
+
+@app.get("/api/app/migration-status")
+async def get_app_migration_status():
+    return {"migration": APP_PATHS.legacy_status()}
+
+
+@app.post("/api/app/migrate-legacy")
+async def migrate_legacy_data(payload: dict[str, Any] | None = None):
+    action = str((payload or {}).get("action") or "skip").strip().lower()
+    try:
+        migration = APP_PATHS.migrate_legacy(action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"migration": migration}
+
+
+@app.get("/api/app/logs/tail")
+async def get_app_logs_tail(lines: int = 200):
+    return {
+        "path": str(APP_PATHS.backend_log_path),
+        "lines": read_log_tail(APP_PATHS.backend_log_path, max_lines=lines),
+    }
 
 
 @app.get("/api/fonts")
@@ -554,9 +676,7 @@ async def upload_comic(
 
 @app.get("/api/download/{session_id}")
 async def download_translated_archive(session_id: str):
-    session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Translated archive not found")
+    session = get_or_restore_session(session_id)
 
     download_path = Path(
         translator_engine.build_session_archive(
@@ -656,4 +776,6 @@ async def translate_session(websocket: WebSocket, session_id: str):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    host = os.getenv("APP_BACKEND_HOST") or "127.0.0.1"
+    port = int(os.getenv("APP_BACKEND_PORT") or "8000")
+    uvicorn.run("main:app", host=host, port=port, reload=False)

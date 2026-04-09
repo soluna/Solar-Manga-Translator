@@ -1,0 +1,58 @@
+{
+  "name": "manga-translator-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "stage-runtime": "node ./scripts/stage-runtime.mjs",
+    "dist:win": "node ./scripts/package-win.mjs",
+    "dist:win:dir": "node ./scripts/package-win.mjs --dir"
+  },
+  "devDependencies": {
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.sol.mangatranslator",
+    "productName": "Manga Translator",
+    "files": [
+      "main.mjs",
+      "preload.mjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources-staging/frontend-dist",
+        "to": "frontend-dist"
+      },
+      {
+        "from": "resources-staging/backend-source",
+        "to": "backend-source"
+      },
+      {
+        "from": "resources-staging/fonts",
+        "to": "fonts"
+      },
+      {
+        "from": "resources-staging/python-runtime",
+        "to": "python-runtime"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "MangaTranslator-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

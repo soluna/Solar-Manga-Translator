@@ -79,6 +79,7 @@ bash ./scripts/sync_obsidian_docs.sh
 - 当前基线：[<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-baseline-v1.md)
 - 当前正式评估：[<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md](<repo>/docs/evals/records/2026-04-03-core-flow-current-formal-eval-v1.md)
 - 本地画布回归：[<repo>/docs/evals/local-canvas-regression.md](<repo>/docs/evals/local-canvas-regression.md)
+- Windows 桌面分享版发布说明：[<repo>/docs/windows-desktop-release.md](<repo>/docs/windows-desktop-release.md)
 
 如果要开始新一轮评分卡记录，可以直接运行：
 
@@ -89,6 +90,26 @@ python3 ./scripts/create_eval_record.py --slug core-flow-iteration
 
 ## 安装与启动 (一键运行)
 为了方便在 Windows 上使用，我们提供了一键启动脚本 `start.bat`。
+
+## Windows 桌面分享版（新）
+
+如果目标是把应用分享给其他人双击使用，现在仓库里已经新增了桌面壳骨架：
+
+- Electron 壳目录：[<repo>/desktop](<repo>/desktop)
+- 发布文档：[<repo>/docs/windows-desktop-release.md](<repo>/docs/windows-desktop-release.md)
+
+这套新结构已经做了这些准备：
+
+- 用户数据与应用目录分离
+- 设置持久化迁移到用户配置文件
+- 旧版项目数据迁移提示
+- 桌面壳动态注入本地后端地址
+- Windows 打包脚本骨架
+
+当前仍建议：
+
+- 开发与本机使用继续走 `start.bat` / `start.mac.sh`
+- 真正对外发布时，按桌面版文档在 Windows 机器上构建安装包
 
 ### Windows (RTX GPU 推荐)
 在资源管理器中双击运行 `start.bat`。脚本会自动执行：

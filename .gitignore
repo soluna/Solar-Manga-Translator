@@ -13,3 +13,6 @@ output_images/
 backend/manga-image-translator/
 frontend/test-artifacts/
 .runtime/
+desktop/node_modules/
+desktop/dist/
+desktop/resources-staging/

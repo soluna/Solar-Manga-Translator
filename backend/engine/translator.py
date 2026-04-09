@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from patch_pydensecrf import patch_mask_refinement
+from runtime_paths import AppPaths, resolve_app_paths
 from .image_cleanup import DEFAULT_IMAGE_CLEANUP_PROMPT, create_image_cleanup_client
 
 
@@ -46,17 +47,22 @@ class TranslatorEngine:
         "doubao-seed-2-0-mini-260215",
     }
 
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, app_paths: AppPaths | None = None):
         self.base_dir = Path(base_dir)
-        self.temp_dir = self.base_dir / "temp_uploads"
-        self.model_dir = self.base_dir / "models"
+        self.paths = app_paths or resolve_app_paths(self.base_dir)
+        self.temp_dir = self.paths.cache_dir
+        self.model_dir = self.paths.models_dir
         self.rerender_cache_root = self.temp_dir / "rerender_cache"
-        self.projects_root = self.temp_dir / "projects"
-        self.project_index_path = self.temp_dir / "project_index.json"
+        self.projects_root = self.paths.projects_dir
+        self.project_index_path = self.paths.project_index_path
+        self.output_root = self.paths.output_dir
+        self.logs_dir = self.paths.logs_dir
+        self.config_dir = self.paths.config_dir
         self.project_font_dir = self.base_dir.parent / "fonts"
         self.project_font_legacy_dir = self.base_dir.parent / "font"
         self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
-        self.model_dir.mkdir(exist_ok=True)
+        self.paths.ensure_directories()
+        self.model_dir.mkdir(parents=True, exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
@@ -74,7 +80,7 @@ class TranslatorEngine:
         return self._project_dir(project_id) / "session.json"
 
     def _project_output_dir(self, project_id: str) -> Path:
-        return self.base_dir / "output_images" / project_id
+        return self.output_root / project_id
 
     def _project_source_dir(self, project_id: str) -> Path:
         return self._project_output_dir(project_id) / "source"
@@ -96,6 +102,55 @@ class TranslatorEngine:
 
     def _translation_request_debug_path(self, project_id: str) -> Path:
         return self.temp_dir / f"{project_id}_translation-request-debug.jsonl"
+
+    def load_persisted_settings(self) -> dict[str, Any]:
+        return self._normalize_config(self.paths.load_settings())
+
+    def save_persisted_settings(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
+        normalized = self._normalize_config(raw_config)
+        self.paths.save_settings(normalized)
+        return normalized
+
+    def normalize_user_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
+        return self._normalize_config(raw_config)
+
+    async def validate_user_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        selected_translator = str(config.get("selected_translator") or "").strip()
+        if selected_translator not in {"gemini", "doubao-ark"}:
+            return {
+                "ok": False,
+                "message": f"当前只支持校验 Gemini / Doubao，暂不支持 {selected_translator or '当前引擎'}。",
+                "translator": selected_translator,
+            }
+
+        if not str(config.get("api_key") or "").strip():
+            return {
+                "ok": False,
+                "message": "缺少 API Key。",
+                "translator": selected_translator,
+            }
+
+        try:
+            translated = await self._translate_text_batch(
+                ["テスト"],
+                config,
+                session_id=f"settings-validation-{uuid.uuid4().hex[:8]}",
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": str(exc),
+                "translator": selected_translator,
+            }
+
+        preview = str(translated[0] or "").strip() if translated else ""
+        return {
+            "ok": bool(preview),
+            "message": "连接正常。" if preview else "服务已响应，但没有返回翻译结果。",
+            "translator": selected_translator,
+            "preview": preview,
+        }
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
@@ -859,7 +914,7 @@ class TranslatorEngine:
         source_cache_dir = self._rerender_cache_dir(project_id)
 
         new_project_id = str(uuid.uuid4())
-        new_output_root = self.base_dir / "output_images" / new_project_id
+        new_output_root = self.output_root / new_project_id
         new_source_dir = new_output_root / "source"
         new_translated_dir = new_output_root / "translated"
         new_output_root.mkdir(parents=True, exist_ok=True)
@@ -925,7 +980,7 @@ class TranslatorEngine:
         if self.is_session_busy(project_id):
             raise RuntimeError("该项目仍有任务在运行，请等待识别/翻译完成后再删除。")
         project_dir = self._project_dir(project_id)
-        output_dir = self.base_dir / "output_images" / project_id
+        output_dir = self.output_root / project_id
         rerender_cache_dir = self._rerender_cache_dir(project_id)
         mask_debug_dir = self._mask_debug_dir(project_id)
         style_debug_dir = self._style_rerender_debug_dir(project_id)

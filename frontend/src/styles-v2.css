@@ -1770,6 +1770,32 @@ img {
   font-size: 0.9rem;
 }
 
+.v2-onboarding-modal {
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.v2-onboarding-copy,
+.v2-settings-inline-note {
+  margin: 0;
+  color: var(--v2-text-soft);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.v2-onboarding-copy.is-error,
+.v2-settings-inline-note.is-error {
+  color: var(--v2-danger);
+}
+
+.v2-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .translation-review-input.disabled {
   opacity: 0.6;
 }

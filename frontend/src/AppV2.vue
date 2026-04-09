@@ -5,9 +5,39 @@ import reviewZhPlaceholder from './assets/v2/review-zh.png'
 import thumbAPlaceholder from './assets/v2/thumb-a.jpg'
 import thumbBPlaceholder from './assets/v2/thumb-b.jpg'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
+  ? window.mangaDesktop
+  : null
+const runtimeApiBaseUrl = String(desktopBridge?.runtime?.apiBaseUrl || '').trim()
+const apiBaseUrl = (runtimeApiBaseUrl || import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
 const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
+const browserConfigKeys = [
+  'translator',
+  'translator_model',
+  'translator_model_custom',
+  'target_lang',
+  'use_gpu',
+  'font_key',
+  'font_style_mode',
+  'style_font_gothic_key',
+  'style_font_mincho_key',
+  'style_font_rounded_key',
+  'style_font_cartoon_key',
+  'style_font_handwritten_key',
+  'style_font_sfx_key',
+  'render_alignment',
+  'render_letter_spacing',
+  'rerender_output_format',
+  'default_review_mode',
+  'workspace_width_mode',
+  'pause_after_detection',
+  'mask_cleanup_strength',
+  'export_mask_debug',
+  'advanced_text_repair',
+  'image_cleanup_mode',
+  'image_cleanup_model'
+]
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
   { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量通用文本 / OCR 漫画翻译实验)' },
@@ -80,6 +110,38 @@ const v2PlaceholderThumbs = [
   thumbAPlaceholder,
   thumbBPlaceholder
 ]
+const emptyRuntimeInfo = {
+  desktop_mode: false,
+  app_version: 'web',
+  backend_base_url: apiBaseUrl,
+  data_dir: '',
+  models_dir: '',
+  output_dir: '',
+  logs_dir: '',
+  settings_path: '',
+  settings_exists: false,
+  migration: {
+    needed: false,
+    status: 'pending',
+    target: {},
+    summary: {}
+  }
+}
+const emptyDiagnosticsInfo = {
+  platform: '',
+  python_version: '',
+  disk: {
+    total_bytes: 0,
+    used_bytes: 0,
+    free_bytes: 0
+  },
+  gpu: {
+    available: false,
+    device_count: 0,
+    devices: [],
+    cuda_version: ''
+  }
+}
 
 function getDefaultImageCleanupModel(mode) {
   return imageCleanupDefaultModels[mode] || imageCleanupDefaultModels['gemini-image']
@@ -282,13 +344,29 @@ function loadStoredConfig() {
   }
 }
 
+function pickConfigKeys(value, keys) {
+  return Object.fromEntries(
+    keys
+      .filter((key) => Object.prototype.hasOwnProperty.call(value || {}, key))
+      .map((key) => [key, value[key]])
+  )
+}
+
+function createBrowserConfigCache(value) {
+  const normalized = normalizeStoredConfig(value)
+  return pickConfigKeys(normalized, browserConfigKeys)
+}
+
 function saveStoredConfig(value) {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
-    window.localStorage.setItem(configStorageKey, JSON.stringify(normalizeStoredConfig(value)))
+    const nextValue = isDesktopRuntime.value
+      ? createBrowserConfigCache(value)
+      : normalizeStoredConfig(value)
+    window.localStorage.setItem(configStorageKey, JSON.stringify(nextValue))
   } catch (error) {
     console.warn('Failed to persist UI config locally.', error)
   }
@@ -458,6 +536,14 @@ const currentProject = ref(null)
 const projectTitleDraft = ref('')
 const projectNoteDraft = ref('')
 const translatedPreviewCanvasRef = ref(null)
+const appRuntime = ref({ ...emptyRuntimeInfo, ...(desktopBridge?.runtime || {}) })
+const appDiagnostics = ref({ ...emptyDiagnosticsInfo })
+const appSettingsLoading = ref(false)
+const appSettingsSaving = ref(false)
+const appSettingsLoaded = ref(false)
+const appSettingsValidation = ref({ ok: null, message: '', preview: '' })
+const onboardingOpen = ref(false)
+const migrationModalOpen = ref(false)
 const translatedPreviewScale = ref(1)
 const exportingOcrDebug = ref(false)
 const exportingTranslationInputDebug = ref(false)
@@ -988,6 +1074,32 @@ const imageCleanupApiKeyPlaceholder = computed(() => (
     : '输入 Gemini Image API Key'
 ))
 const v2HasProject = computed(() => Boolean(sessionId.value || currentProject.value))
+const isDesktopRuntime = computed(() => Boolean(appRuntime.value?.desktop_mode))
+const settingsStatusLabel = computed(() => {
+  if (appSettingsLoading.value) {
+    return '正在读取设置…'
+  }
+  if (appSettingsSaving.value) {
+    return '正在保存设置…'
+  }
+  if (appSettingsValidation.value.ok === true) {
+    return '连接已验证'
+  }
+  if (appSettingsValidation.value.ok === false) {
+    return '连接待修复'
+  }
+  return appSettingsLoaded.value ? '设置已载入' : '尚未完成初始化'
+})
+const appRuntimeGpuLabel = computed(() => {
+  const gpu = appDiagnostics.value?.gpu || {}
+  if (!gpu.available) {
+    return gpu.error ? `未启用 (${gpu.error})` : '未检测到可用 GPU'
+  }
+  const devices = Array.isArray(gpu.devices) ? gpu.devices : []
+  const primary = devices[0]?.name || `${gpu.device_count || 1} 块设备`
+  return gpu.cuda_version ? `${primary} / CUDA ${gpu.cuda_version}` : primary
+})
+const appRuntimeDiskLabel = computed(() => formatBytes(appDiagnostics.value?.disk?.free_bytes || 0))
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
   || String(sessionId.value || '').trim()
@@ -1337,6 +1449,156 @@ function withCacheBust(url) {
   return `${url}${separator}t=${renderNonce.value}`
 }
 
+async function loadAppRuntime() {
+  try {
+    const response = await fetch(toApiUrl('/api/app/runtime'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取应用运行时信息失败')
+    }
+    appRuntime.value = {
+      ...emptyRuntimeInfo,
+      ...(desktopBridge?.runtime || {}),
+      ...(payload.runtime || {})
+    }
+    migrationModalOpen.value = Boolean(appRuntime.value?.migration?.needed)
+  } catch (error) {
+    console.warn('Failed to load app runtime.', error)
+  }
+}
+
+async function loadAppDiagnostics() {
+  try {
+    const response = await fetch(toApiUrl('/api/app/diagnostics'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取运行时诊断失败')
+    }
+    appDiagnostics.value = {
+      ...emptyDiagnosticsInfo,
+      ...(payload.diagnostics || {})
+    }
+  } catch (error) {
+    console.warn('Failed to load app diagnostics.', error)
+  }
+}
+
+async function loadPersistedAppSettings() {
+  appSettingsLoading.value = true
+  try {
+    const response = await fetch(toApiUrl('/api/app/settings'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取设置失败')
+    }
+    const nextSettings = payload.settings || {}
+    config.value = mergeProjectConfigWithLocalPreferences(nextSettings, config.value)
+    appSettingsLoaded.value = true
+    const translatorNeedsKey = ['gemini', 'doubao-ark'].includes(String(nextSettings?.translator || config.value.translator || ''))
+    const hasPrimaryKey = Boolean(String(nextSettings?.api_key || config.value.api_key || '').trim())
+    onboardingOpen.value = isDesktopRuntime.value && (
+      !Boolean(appRuntime.value?.settings_exists)
+      || (translatorNeedsKey && !hasPrimaryKey)
+    )
+  } catch (error) {
+    console.warn('Failed to load persisted settings.', error)
+  } finally {
+    appSettingsLoading.value = false
+  }
+}
+
+let persistAppSettingsTimer = null
+async function persistAppSettings(value) {
+  try {
+    const response = await fetch(toApiUrl('/api/app/settings'), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value)
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '保存设置失败')
+    }
+    appRuntime.value = {
+      ...appRuntime.value,
+      settings_exists: true
+    }
+    appSettingsLoaded.value = true
+  } catch (error) {
+    console.warn('Failed to persist app settings.', error)
+  }
+}
+
+function queuePersistAppSettings(value) {
+  if (!appSettingsLoaded.value) {
+    return
+  }
+  if (persistAppSettingsTimer) {
+    window.clearTimeout(persistAppSettingsTimer)
+  }
+  appSettingsSaving.value = true
+  persistAppSettingsTimer = window.setTimeout(async () => {
+    persistAppSettingsTimer = null
+    await persistAppSettings(normalizeStoredConfig(value))
+    appSettingsSaving.value = false
+  }, 250)
+}
+
+async function validateCurrentSettings() {
+  appSettingsValidation.value = { ok: null, message: '正在验证…', preview: '' }
+  try {
+    const response = await fetch(toApiUrl('/api/app/settings/validate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config.value)
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || payload.message || '验证失败')
+    }
+    appSettingsValidation.value = {
+      ok: Boolean(payload.ok),
+      message: String(payload.message || (payload.ok ? '连接正常。' : '验证失败')),
+      preview: String(payload.preview || '')
+    }
+    if (payload.ok) {
+      onboardingOpen.value = false
+      status.value = '设置验证成功，已经可以开始使用。'
+    }
+  } catch (error) {
+    appSettingsValidation.value = {
+      ok: false,
+      message: error instanceof Error ? error.message : '验证失败',
+      preview: ''
+    }
+  }
+}
+
+async function handleLegacyMigration(action) {
+  try {
+    const response = await fetch(toApiUrl('/api/app/migrate-legacy'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '处理旧数据失败')
+    }
+    appRuntime.value = {
+      ...appRuntime.value,
+      migration: payload.migration || appRuntime.value.migration
+    }
+    migrationModalOpen.value = false
+    status.value = action === 'migrate' ? '旧项目数据已迁移到应用数据目录。' : '已跳过旧数据迁移。'
+    if (action === 'migrate') {
+      await loadProjectHistory({ silent: true })
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '处理旧数据失败'
+  }
+}
+
 function markCanvasPreviewDirty(pageId) {
   const normalizedPageId = String(pageId || '').trim()
   if (!normalizedPageId) {
@@ -1620,6 +1882,17 @@ function formatV2TimeOnly(value) {
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(timestamp))
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0
+  if (bytes <= 0) {
+    return '0 B'
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const formatted = bytes / (1024 ** exponent)
+  return `${formatted >= 100 || exponent === 0 ? Math.round(formatted) : formatted.toFixed(1)} ${units[exponent]}`
 }
 
 function isProjectBusy(project) {
@@ -4926,6 +5199,16 @@ function clearStoredImageApiKey() {
   status.value = '已清除本机浏览器里保存的图像去字 API Key。'
 }
 
+function clearTranslatorApiKey() {
+  clearStoredApiKey()
+  appSettingsValidation.value = { ok: null, message: '', preview: '' }
+}
+
+function clearImageCleanupApiKey() {
+  clearStoredImageApiKey()
+  appSettingsValidation.value = { ok: null, message: '', preview: '' }
+}
+
 async function scrollSelectedRegionCardIntoView() {
   if (!selectedEditRegionKey.value) {
     return
@@ -5664,9 +5947,16 @@ function startTranslation(action = 'translate') {
 }
 
 onMounted(() => {
-  checkBackendStatus()
-  loadFonts()
-  loadProjectHistory()
+  void (async () => {
+    await loadAppRuntime()
+    await loadAppDiagnostics()
+    checkBackendStatus()
+    await Promise.all([
+      loadFonts(),
+      loadProjectHistory(),
+      loadPersistedAppSettings(),
+    ])
+  })()
   window.addEventListener('resize', refreshTranslatedPreviewScale)
   window.addEventListener('pointermove', updateCanvasViewportPan)
   window.addEventListener('pointerup', finishCanvasViewportPan)
@@ -5759,6 +6049,7 @@ watch(
   config,
   (nextValue) => {
     saveStoredConfig(nextValue)
+    queuePersistAppSettings(nextValue)
   },
   { deep: true }
 )
@@ -6679,6 +6970,102 @@ watch(
       </section>
     </main>
 
+    <div v-if="migrationModalOpen" class="v2-overlay" @click.self="migrationModalOpen = false">
+      <section class="v2-modal v2-onboarding-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">旧数据迁移</p>
+            <h2 class="v2-section-title">检测到旧版项目数据</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭迁移提示" @click="migrationModalOpen = false">✕</button>
+        </header>
+        <div class="v2-settings-content">
+          <section class="v2-settings-group">
+            <header>
+              <strong>建议迁移到新的应用数据目录</strong>
+              <span>{{ appRuntime.migration?.target?.app_data || '将迁移到新的用户目录' }}</span>
+            </header>
+            <p class="v2-onboarding-copy">
+              旧版历史项目和输出结果目前还在仓库目录里。迁移后，升级和重新安装都不会覆盖你的项目数据。
+            </p>
+            <div class="v2-inline-actions">
+              <button type="button" class="v2-primary-button" @click="handleLegacyMigration('migrate')">迁移旧数据</button>
+              <button type="button" class="v2-secondary-button" @click="handleLegacyMigration('skip')">暂不迁移</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="onboardingOpen" class="v2-overlay" @click.self="onboardingOpen = false">
+      <section class="v2-modal v2-onboarding-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">首次启动</p>
+            <h2 class="v2-section-title">先完成基础设置</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭首次设置" @click="onboardingOpen = false">✕</button>
+        </header>
+        <div class="v2-settings-content">
+          <section class="v2-settings-group">
+            <header>
+              <strong>翻译服务</strong>
+              <span>这些设置会保存到桌面应用的配置文件，而不是浏览器缓存里。</span>
+            </header>
+
+            <label class="v2-field">
+              <span>翻译引擎</span>
+              <select v-model="config.translator">
+                <option value="gemini">Gemini</option>
+                <option value="doubao-ark">Doubao</option>
+                <option value="sugoi">SUGOI</option>
+                <option value="chatgpt">ChatGPT</option>
+                <option value="youdao">有道</option>
+                <option value="baidu">百度</option>
+                <option value="offline">Offline</option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>目标语言</span>
+              <select v-model="config.target_lang">
+                <option value="CHS">简体中文</option>
+                <option value="CHT">繁体中文</option>
+                <option value="ENG">英语</option>
+                <option value="JPN">日语</option>
+                <option value="KOR">韩语</option>
+              </select>
+            </label>
+
+            <label v-if="showTranslatorApiKeyField" class="v2-field">
+              <span>{{ translatorApiKeyLabel }}</span>
+              <input
+                v-model="config.api_key"
+                :placeholder="translatorApiKeyPlaceholder"
+                type="password"
+                autocomplete="off"
+              />
+            </label>
+
+            <div class="v2-inline-actions">
+              <button type="button" class="v2-secondary-button" @click="validateCurrentSettings">
+                测试连接
+              </button>
+              <button type="button" class="v2-primary-button" @click="validateCurrentSettings">
+                保存并开始
+              </button>
+            </div>
+            <p class="v2-onboarding-copy" :class="appSettingsValidation.ok === false ? 'is-error' : ''">
+              {{ appSettingsValidation.message || '建议先测试一次连接，确认桌面版可以正常访问你的翻译服务。' }}
+            </p>
+            <p v-if="appSettingsValidation.preview" class="v2-onboarding-copy">
+              测试返回：{{ appSettingsValidation.preview }}
+            </p>
+          </section>
+        </div>
+      </section>
+    </div>
+
     <div v-if="v2HistoryModalOpen" class="v2-overlay" @click.self="closeV2HistoryModal">
       <section class="v2-modal v2-history-modal" data-testid="v2-history-modal">
         <header class="v2-modal-head">
@@ -6820,6 +7207,43 @@ watch(
         </header>
 
         <div class="v2-settings-content">
+          <section class="v2-settings-group">
+            <header>
+              <strong>应用运行环境</strong>
+              <span>{{ isDesktopRuntime ? '桌面版本地运行时' : '浏览器模式' }}</span>
+            </header>
+
+            <label class="v2-field">
+              <span>设置状态</span>
+              <input :value="settingsStatusLabel" type="text" readonly />
+            </label>
+
+            <label v-if="appRuntime.settings_path" class="v2-field">
+              <span>设置文件</span>
+              <input :value="appRuntime.settings_path" type="text" readonly />
+            </label>
+
+            <label v-if="appRuntime.data_dir" class="v2-field">
+              <span>数据目录</span>
+              <input :value="appRuntime.data_dir" type="text" readonly />
+            </label>
+
+            <label class="v2-field">
+              <span>GPU / CUDA</span>
+              <input :value="appRuntimeGpuLabel" type="text" readonly />
+            </label>
+
+            <label class="v2-field">
+              <span>可用磁盘空间</span>
+              <input :value="appRuntimeDiskLabel" type="text" readonly />
+            </label>
+
+            <label v-if="appRuntime.logs_dir" class="v2-field">
+              <span>日志目录</span>
+              <input :value="appRuntime.logs_dir" type="text" readonly />
+            </label>
+          </section>
+
           <section v-if="currentProject" class="v2-settings-group">
             <header>
               <strong>项目信息</strong>
@@ -6907,6 +7331,23 @@ watch(
               />
             </label>
 
+            <div class="v2-inline-actions">
+              <button type="button" class="v2-secondary-button" @click="validateCurrentSettings">
+                测试连接
+              </button>
+              <button
+                v-if="showTranslatorApiKeyField"
+                type="button"
+                class="v2-ghost-button"
+                @click="clearTranslatorApiKey"
+              >
+                清除密钥
+              </button>
+            </div>
+            <p class="v2-settings-inline-note" :class="appSettingsValidation.ok === false ? 'is-error' : ''">
+              {{ appSettingsValidation.message || '当前会自动保存到应用配置文件。' }}
+            </p>
+
             <label class="v2-inline-checkbox">
               <input v-model="config.pause_after_detection" type="checkbox" />
               <span>上传后先停在识别阶段，进入逐框审校</span>
@@ -6979,6 +7420,16 @@ watch(
                 autocomplete="off"
               />
             </label>
+
+            <div v-if="showImageCleanupApiKeyField" class="v2-inline-actions">
+              <button
+                type="button"
+                class="v2-ghost-button"
+                @click="clearImageCleanupApiKey"
+              >
+                清除图像密钥
+              </button>
+            </div>
 
             <label class="v2-inline-checkbox">
               <input v-model="config.export_mask_debug" type="checkbox" />

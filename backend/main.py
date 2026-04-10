@@ -697,6 +697,7 @@ async def download_translated_archive(session_id: str):
 @app.websocket("/ws/translate/{session_id}")
 async def translate_session(websocket: WebSocket, session_id: str):
     await websocket.accept()
+    busy_cleared = False
 
     try:
         session = get_or_restore_session(session_id)
@@ -758,6 +759,8 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 raw_config=config,
                 progress_callback=send_event,
             )
+        translator_engine.clear_session_busy(session_id)
+        busy_cleared = True
         await websocket.send_json(
             {
                 "event": "completed",
@@ -770,7 +773,8 @@ async def translate_session(websocket: WebSocket, session_id: str):
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": str(exc)})
     finally:
-        translator_engine.clear_session_busy(session_id)
+        if not busy_cleared:
+            translator_engine.clear_session_busy(session_id)
 
 
 if __name__ == "__main__":

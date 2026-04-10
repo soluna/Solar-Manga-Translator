@@ -9,7 +9,7 @@ const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && ty
   ? window.mangaDesktop
   : null
 const runtimeApiBaseUrl = String(desktopBridge?.runtime?.apiBaseUrl || '').trim()
-const apiBaseUrl = (runtimeApiBaseUrl || import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const defaultApiBaseUrl = (runtimeApiBaseUrl || import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
 const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
 const browserConfigKeys = [
@@ -113,7 +113,7 @@ const v2PlaceholderThumbs = [
 const emptyRuntimeInfo = {
   desktop_mode: false,
   app_version: 'web',
-  backend_base_url: apiBaseUrl,
+  backend_base_url: defaultApiBaseUrl,
   data_dir: '',
   models_dir: '',
   output_dir: '',
@@ -539,6 +539,7 @@ const projectNoteDraft = ref('')
 const translatedPreviewCanvasRef = ref(null)
 const appRuntime = ref({ ...emptyRuntimeInfo, ...(desktopBridge?.runtime || {}) })
 const appDiagnostics = ref({ ...emptyDiagnosticsInfo })
+const apiBaseUrl = ref(defaultApiBaseUrl)
 const appSettingsLoading = ref(false)
 const appSettingsSaving = ref(false)
 const appSettingsLoaded = ref(false)
@@ -592,6 +593,7 @@ const v2UploadInputRef = ref(null)
 const v2SupplementInputRef = ref(null)
 
 let socket = null
+const expectedClosingSockets = new WeakSet()
 let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
 let suppressCanvasRegionClickUntil = 0
@@ -1435,7 +1437,7 @@ function toApiUrl(path) {
     return path
   }
 
-  return `${apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`
+  return `${apiBaseUrl.value}${path.startsWith('/') ? path : `/${path}`}`
 }
 
 function toWebSocketUrl(path) {
@@ -1455,6 +1457,23 @@ function withCacheBust(url) {
 
 async function loadAppRuntime() {
   try {
+    if (desktopBridge && typeof desktopBridge.getRuntime === 'function') {
+      const bridgeRuntime = await desktopBridge.getRuntime()
+      const resolvedBaseUrl = String(bridgeRuntime?.apiBaseUrl || bridgeRuntime?.backend_base_url || '').trim()
+      if (resolvedBaseUrl) {
+        apiBaseUrl.value = resolvedBaseUrl.replace(/\/$/, '')
+      }
+      appRuntime.value = {
+        ...appRuntime.value,
+        ...(bridgeRuntime || {}),
+        backend_base_url: apiBaseUrl.value,
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to read desktop runtime bridge.', error)
+  }
+
+  try {
     const response = await fetch(toApiUrl('/api/app/runtime'))
     const payload = await response.json()
     if (!response.ok) {
@@ -1465,6 +1484,17 @@ async function loadAppRuntime() {
       ...(desktopBridge?.runtime || {}),
       ...(payload.runtime || {})
     }
+    const resolvedBaseUrl = String(
+      payload?.runtime?.backend_base_url
+      || payload?.runtime?.apiBaseUrl
+      || appRuntime.value?.backend_base_url
+      || apiBaseUrl.value
+      || ''
+    ).trim()
+    if (resolvedBaseUrl) {
+      apiBaseUrl.value = resolvedBaseUrl.replace(/\/$/, '')
+    }
+    appRuntime.value.backend_base_url = apiBaseUrl.value
     migrationModalOpen.value = Boolean(appRuntime.value?.migration?.needed)
   } catch (error) {
     console.warn('Failed to load app runtime.', error)
@@ -1758,8 +1788,10 @@ async function exportCurrentProjectTranslationRequestDebug() {
 
 function closeSocket() {
   if (socket) {
-    socket.close()
+    const socketToClose = socket
     socket = null
+    expectedClosingSockets.add(socketToClose)
+    socketToClose.close()
   }
 }
 
@@ -5928,17 +5960,18 @@ function startTranslation(action = 'translate') {
         : '正在启动翻译任务...'
   closeSocket()
 
-  socket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
+  const currentSocket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
+  socket = currentSocket
 
-  socket.onopen = () => {
-    socket.send(JSON.stringify({
+  currentSocket.onopen = () => {
+    currentSocket.send(JSON.stringify({
       action,
       config: buildRuntimeConfig(),
       target_stored_name: pageTargetStoredName || undefined
     }))
   }
 
-  socket.onmessage = async (event) => {
+  currentSocket.onmessage = async (event) => {
     const payload = JSON.parse(event.data)
 
     if (payload.event === 'start') {
@@ -6056,7 +6089,10 @@ function startTranslation(action = 'translate') {
     }
   }
 
-  socket.onerror = () => {
+  currentSocket.onerror = () => {
+    if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
+      return
+    }
     errorMessage.value = '翻译连接中断，请查看后端控制台日志。'
     status.value = activeAction.value === 'rerender'
       ? '重嵌字连接中断。'
@@ -6071,7 +6107,14 @@ function startTranslation(action = 'translate') {
     closeSocket()
   }
 
-  socket.onclose = () => {
+  currentSocket.onclose = () => {
+    if (expectedClosingSockets.has(currentSocket)) {
+      expectedClosingSockets.delete(currentSocket)
+      return
+    }
+    if (currentSocket !== socket) {
+      return
+    }
     if (translating.value) {
       errorMessage.value = '翻译任务意外断开，请查看后端日志。'
       status.value = activeAction.value === 'rerender'
@@ -6084,6 +6127,9 @@ function startTranslation(action = 'translate') {
             ? '继续翻译未完成。'
             : '翻译未完成。'
       translating.value = false
+    }
+    if (socket === currentSocket) {
+      socket = null
     }
   }
 }

@@ -651,15 +651,16 @@ def _calc_horizontal_wrapped(font_size: int, text: str, max_width: int, max_heig
     for i, word in enumerate(words):
         word_widths.append(get_string_width(font_size, word))
 
-    # Try to increase width usage if a height overflow is unavoidable
+    # Keep horizontal layout constrained by the requested box width.
+    # If the current width cannot hold the content, grow the available height
+    # instead of silently widening the line box or shrinking the font.
     while True:
         max_lines = max_height // font_size + 1
         expected_size = sum(word_widths) + max((len(word_widths) - 1) * whitespace_offset_x - (max_lines - 1) * hyphen_offset_x, 0)
         max_size = max_width * max_lines
         if max_size < expected_size:
-            multiplier = np.sqrt(expected_size / max_size)
-            max_width *= max(multiplier, 1.05)
-            max_height *= multiplier
+            multiplier = max(expected_size / max(max_size, 1), 1.05)
+            max_height = int(np.ceil(max_height * multiplier))
         else:
             break
 

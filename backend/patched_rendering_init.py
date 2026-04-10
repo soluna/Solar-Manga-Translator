@@ -273,6 +273,26 @@ def _layout_metrics(candidate_box: np.ndarray, box_width: int, box_height: int):
     return fits, overflow, fill
 
 
+def _layout_metrics_for_direction(candidate_box: np.ndarray, box_width: int, box_height: int, direction: str):
+    if candidate_box is None or candidate_box.size == 0:
+        return False, float('inf'), 0.0
+
+    rendered_height, rendered_width = candidate_box.shape[:2]
+    width_ratio = rendered_width / max(box_width, 1)
+    height_ratio = rendered_height / max(box_height, 1)
+
+    if direction.startswith('h'):
+        fits = rendered_width <= box_width
+        overflow = width_ratio
+        fill = min(width_ratio, 1.0)
+    else:
+        fits = rendered_height <= box_height
+        overflow = height_ratio
+        fill = min(height_ratio, 1.0)
+
+    return fits, overflow, fill
+
+
 def _direction_priority(region: TextBlock, direction: str) -> int:
     return 1 if direction.startswith('h') == region.horizontal else 0
 
@@ -404,7 +424,7 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
                 line_spacing,
                 default_font_path,
             )
-            fits, overflow, fill = _layout_metrics(candidate_box, box_width, box_height)
+            fits, overflow, fill = _layout_metrics_for_direction(candidate_box, box_width, box_height, direction)
             direction_priority = _direction_priority(region, direction)
 
             if best_fallback is None or overflow < best_fallback[0] or (

@@ -2,6 +2,8 @@
   "name": "manga-translator-desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "Windows desktop shell for Manga Translator",
+  "author": "SOL",
   "type": "module",
   "main": "main.mjs",
   "scripts": {
@@ -44,6 +46,7 @@
       "output": "dist"
     },
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         "nsis"
       ],

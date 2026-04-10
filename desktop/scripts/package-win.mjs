@@ -8,12 +8,32 @@ const repoRoot = resolve(desktopDir, '..')
 const frontendDir = resolve(repoRoot, 'frontend')
 const args = process.argv.slice(2)
 
+function quoteWindowsArg(value) {
+  const stringValue = String(value ?? '')
+  if (!stringValue.length) {
+    return '""'
+  }
+  if (!/[ \t"]/u.test(stringValue)) {
+    return stringValue
+  }
+  return `"${stringValue.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`
+}
+
 function run(command, commandArgs, options = {}) {
+  const useWindowsCommandWrapper = process.platform === 'win32' && options.windowsCommandWrapper !== false
+  const spawnCommand = useWindowsCommandWrapper ? 'cmd.exe' : command
+  const spawnArgs = useWindowsCommandWrapper
+    ? ['/d', '/s', '/c', [quoteWindowsArg(command), ...(commandArgs || []).map(quoteWindowsArg)].join(' ')]
+    : commandArgs
+
   return new Promise((resolveRun, reject) => {
-    const child = spawn(command, commandArgs, {
+    const child = spawn(spawnCommand, spawnArgs, {
       stdio: 'inherit',
       shell: false,
       ...options,
+    })
+    child.on('error', (error) => {
+      reject(new Error(`无法启动命令：${command} ${(commandArgs || []).join(' ')}\n${error instanceof Error ? error.message : error}`))
     })
     child.on('exit', (code) => {
       if (code === 0) {
@@ -38,6 +58,7 @@ async function main() {
   await run(process.execPath, [resolve(desktopDir, 'scripts', 'stage-runtime.mjs')], {
     cwd: desktopDir,
     env: process.env,
+    windowsCommandWrapper: false,
   })
 
   const electronBuilderArgs = ['electron-builder', '--win', 'nsis']
@@ -45,9 +66,11 @@ async function main() {
     electronBuilderArgs.push('--dir')
   }
 
-  await run(process.platform === 'win32' ? 'npx.cmd' : 'npx', electronBuilderArgs, {
+  const electronBuilderCli = resolve(desktopDir, 'node_modules', 'electron-builder', 'cli.js')
+  await run(process.execPath, [electronBuilderCli, ...electronBuilderArgs.slice(1)], {
     cwd: desktopDir,
     env: process.env,
+    windowsCommandWrapper: false,
   })
 }
 

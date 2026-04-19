@@ -1062,6 +1062,35 @@ img {
 
 .v2-pane-actions {
   gap: 14px;
+  flex-wrap: wrap;
+}
+
+.v2-view-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.v2-view-controls button {
+  min-height: 25px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--v2-text-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.v2-view-controls button:hover,
+.v2-view-controls button:focus-visible {
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--v2-accent-strong);
 }
 
 .v2-canvas-shell {
@@ -1069,8 +1098,17 @@ img {
   min-height: 0;
   overflow: hidden;
   padding: 24px 12px 12px;
+  cursor: default;
   background:
     linear-gradient(180deg, rgba(245, 247, 251, 0.96), rgba(238, 242, 247, 0.98));
+}
+
+.v2-canvas-shell.is-space-ready {
+  cursor: grab;
+}
+
+.v2-canvas-shell.is-panning {
+  cursor: grabbing;
 }
 
 .v2-canvas-stage {
@@ -1131,6 +1169,11 @@ img {
 
 .style-box.canvas-editable {
   cursor: move;
+}
+
+.style-box.canvas-editable:hover {
+  border-color: rgba(37, 99, 235, 0.88);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
 }
 
 .style-box.active,
@@ -1217,6 +1260,10 @@ img {
   border: 2px solid white;
 }
 
+.style-box-handle:hover {
+  transform: scale(1.16);
+}
+
 .style-box-handle.handle-nw {
   top: -6px;
   left: -6px;
@@ -1260,6 +1307,23 @@ img {
 .v2-canvas-stage.draw-mode .style-box,
 .v2-canvas-stage.draw-mode .style-box-handle {
   pointer-events: none;
+}
+
+.v2-canvas-measure-popover {
+  position: absolute;
+  z-index: 6;
+  transform: translateY(calc(-100% - 8px)) scale(var(--measure-scale, 1));
+  transform-origin: left bottom;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.9);
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.22);
 }
 
 .v2-region-sidebar {

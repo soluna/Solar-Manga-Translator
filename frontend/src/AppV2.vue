@@ -78,6 +78,8 @@ const textDirectionOptions = [
   { value: 'horizontal', label: '横排' }
 ]
 const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const canvasZoomMin = 0.2
+const canvasZoomMax = 6
 const maxCanvasHistoryEntries = 50
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
@@ -2612,12 +2614,16 @@ function getViewportState(pageId, pane = 'main') {
   return pageState[pane] || createDefaultPerPageUiState()[pane]
 }
 
+function clampCanvasZoom(value) {
+  return Math.min(canvasZoomMax, Math.max(canvasZoomMin, Number(value) || 1))
+}
+
 function updateViewportState(pageId, pane, patch, options = {}) {
   const normalizedPane = pane === 'compare' ? 'compare' : 'main'
   updatePageUiState(pageId, (current) => {
     const currentViewport = current[normalizedPane] || createDefaultPerPageUiState()[normalizedPane]
     const nextViewport = {
-      zoom: Math.min(4, Math.max(1, Number(patch.zoom ?? currentViewport.zoom ?? 1))),
+      zoom: clampCanvasZoom(patch.zoom ?? currentViewport.zoom ?? 1),
       panX: Number(patch.panX ?? currentViewport.panX ?? 0),
       panY: Number(patch.panY ?? currentViewport.panY ?? 0)
     }
@@ -3029,8 +3035,8 @@ function isManualRegion(region) {
 
 function getCanvasPoint(event, page) {
   const canvas = resolveCanvasInteractionSurface(event.currentTarget) || event.currentTarget
-  const rect = canvas.getBoundingClientRect()
-  return getCanvasPointFromRect(rect, event.clientX, event.clientY, page, 'main')
+  const geometry = getCanvasGeometryFromSurface(canvas, page, 'main')
+  return getCanvasPointFromGeometry(geometry, event.clientX, event.clientY, page)
 }
 
 function resolveCanvasInteractionSurface(target) {
@@ -3047,20 +3053,49 @@ function resolveCanvasInteractionSurface(target) {
   )
 }
 
-function getCanvasPointFromRect(rect, clientX, clientY, page, pane = 'main') {
+function getCanvasShellForPane(pane = 'main') {
+  return pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+}
+
+function getCanvasGeometryFromSurface(surface, page, pane = 'main') {
+  const shell = resolveCanvasInteractionSurface(surface) || getCanvasShellForPane(pane)
+  const shellRect = shell?.getBoundingClientRect?.() || { left: 0, top: 0, width: 1, height: 1 }
+  const stage = shell?.querySelector?.('.v2-canvas-stage') || null
+  const stageWidth = Math.max(stage?.offsetWidth || shell?.clientWidth || shellRect.width || 1, 1)
+  const stageHeight = Math.max(stage?.offsetHeight || shell?.clientHeight || shellRect.height || 1, 1)
+  const stageOffsetLeft = Number(stage?.offsetLeft || 0)
+  const stageOffsetTop = Number(stage?.offsetTop || 0)
+  const viewport = getViewportState(page?.stored_name || '', pane)
+  return {
+    shell,
+    shellRect,
+    shellWidth: Math.max(shell?.clientWidth || shellRect.width || 1, 1),
+    shellHeight: Math.max(shell?.clientHeight || shellRect.height || 1, 1),
+    stageWidth,
+    stageHeight,
+    stageOffsetLeft,
+    stageOffsetTop,
+    viewport
+  }
+}
+
+function getCanvasPointFromGeometry(geometry, clientX, clientY, page) {
   const imageWidth = Math.max(page?.image_width || 1, 1)
   const imageHeight = Math.max(page?.image_height || 1, 1)
-  const safeWidth = Math.max(rect?.width || 1, 1)
-  const safeHeight = Math.max(rect?.height || 1, 1)
-  const viewport = getViewportState(page?.stored_name || '', pane)
+  const safeWidth = Math.max(geometry?.stageWidth || 1, 1)
+  const safeHeight = Math.max(geometry?.stageHeight || 1, 1)
+  const viewport = geometry?.viewport || getViewportState(page?.stored_name || '', 'main')
   const zoom = Math.max(viewport.zoom || 1, 0.001)
+  const shellRect = geometry?.shellRect || { left: 0, top: 0 }
+  const stageOffsetLeft = Number(geometry?.stageOffsetLeft || 0)
+  const stageOffsetTop = Number(geometry?.stageOffsetTop || 0)
   const x = Math.min(
     imageWidth,
-    Math.max(0, (((clientX - rect.left - viewport.panX) / (safeWidth * zoom)) * imageWidth))
+    Math.max(0, (((clientX - shellRect.left - stageOffsetLeft - viewport.panX) / (safeWidth * zoom)) * imageWidth))
   )
   const y = Math.min(
     imageHeight,
-    Math.max(0, (((clientY - rect.top - viewport.panY) / (safeHeight * zoom)) * imageHeight))
+    Math.max(0, (((clientY - shellRect.top - stageOffsetTop - viewport.panY) / (safeHeight * zoom)) * imageHeight))
   )
   return {
     x: Math.round(x),
@@ -3221,19 +3256,76 @@ function nudgeSelectedRegion(deltaX, deltaY) {
   scheduleCanvasNudgeCommit()
 }
 
-function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page) {
+function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page, options = {}) {
   let [x1, y1, x2, y2] = originBBox
   if (handle.includes('n')) {
     y1 += deltaY
+    if (options.fromCenter) {
+      y2 -= deltaY
+    }
   }
   if (handle.includes('s')) {
     y2 += deltaY
+    if (options.fromCenter) {
+      y1 -= deltaY
+    }
   }
   if (handle.includes('w')) {
     x1 += deltaX
+    if (options.fromCenter) {
+      x2 -= deltaX
+    }
   }
   if (handle.includes('e')) {
     x2 += deltaX
+    if (options.fromCenter) {
+      x1 -= deltaX
+    }
+  }
+
+  if (options.proportional && handle.length === 2) {
+    const originWidth = Math.max(8, originBBox[2] - originBBox[0])
+    const originHeight = Math.max(8, originBBox[3] - originBBox[1])
+    const ratio = originWidth / originHeight
+    let nextWidth = Math.max(8, Math.abs(x2 - x1))
+    let nextHeight = Math.max(8, Math.abs(y2 - y1))
+    const widthScale = nextWidth / originWidth
+    const heightScale = nextHeight / originHeight
+
+    if (widthScale >= heightScale) {
+      nextHeight = nextWidth / ratio
+    } else {
+      nextWidth = nextHeight * ratio
+    }
+
+    if (options.fromCenter) {
+      const centerX = (originBBox[0] + originBBox[2]) / 2
+      const centerY = (originBBox[1] + originBBox[3]) / 2
+      x1 = centerX - (nextWidth / 2)
+      x2 = centerX + (nextWidth / 2)
+      y1 = centerY - (nextHeight / 2)
+      y2 = centerY + (nextHeight / 2)
+    } else if (handle === 'se') {
+      x1 = originBBox[0]
+      y1 = originBBox[1]
+      x2 = x1 + nextWidth
+      y2 = y1 + nextHeight
+    } else if (handle === 'ne') {
+      x1 = originBBox[0]
+      y2 = originBBox[3]
+      x2 = x1 + nextWidth
+      y1 = y2 - nextHeight
+    } else if (handle === 'sw') {
+      x2 = originBBox[2]
+      y1 = originBBox[1]
+      x1 = x2 - nextWidth
+      y2 = y1 + nextHeight
+    } else if (handle === 'nw') {
+      x2 = originBBox[2]
+      y2 = originBBox[3]
+      x1 = x2 - nextWidth
+      y1 = y2 - nextHeight
+    }
   }
   return normalizeBBoxToPage([x1, y1, x2, y2], page)
 }
@@ -3484,16 +3576,28 @@ function handleCanvasWheel(event, page, pane = 'main') {
     return
   }
   event.preventDefault()
-  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  const shell = getCanvasShellForPane(pane)
   if (!shell) {
     return
   }
-  const rect = shell.getBoundingClientRect()
+  const geometry = getCanvasGeometryFromSurface(shell, page, pane)
   const viewport = getViewportState(page.stored_name, pane)
-  const pointerX = event.clientX - rect.left
-  const pointerY = event.clientY - rect.top
+  const shouldZoom = event.ctrlKey || event.metaKey
+
+  if (!shouldZoom) {
+    const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX
+    const verticalDelta = event.shiftKey ? 0 : event.deltaY
+    updateViewportState(page.stored_name, pane, {
+      panX: viewport.panX - horizontalDelta,
+      panY: viewport.panY - verticalDelta
+    })
+    return
+  }
+
+  const pointerX = event.clientX - geometry.shellRect.left - geometry.stageOffsetLeft
+  const pointerY = event.clientY - geometry.shellRect.top - geometry.stageOffsetTop
   const delta = event.deltaY < 0 ? 1.1 : 0.92
-  const nextZoom = Math.min(4, Math.max(1, Number((viewport.zoom * delta).toFixed(3))))
+  const nextZoom = clampCanvasZoom(Number((viewport.zoom * delta).toFixed(3)))
   const ratio = nextZoom / Math.max(viewport.zoom || 1, 0.001)
   updateViewportState(page.stored_name, pane, {
     zoom: nextZoom,
@@ -3518,11 +3622,11 @@ function stepCurrentPageZoom(step) {
     if (!shell) {
       return
     }
-    const rect = shell.getBoundingClientRect()
+    const geometry = getCanvasGeometryFromSurface(shell, page, key)
     const viewport = getViewportState(page.stored_name, key)
-    const pointerX = Math.max((rect.width || 0) / 2, 1)
-    const pointerY = Math.max((rect.height || 0) / 2, 1)
-    const nextZoom = Math.min(4, Math.max(1, Number((viewport.zoom * delta).toFixed(3))))
+    const pointerX = Math.max((geometry.shellWidth - geometry.stageOffsetLeft * 2) / 2, 1)
+    const pointerY = Math.max((geometry.shellHeight - geometry.stageOffsetTop) / 2, 1)
+    const nextZoom = clampCanvasZoom(Number((viewport.zoom * delta).toFixed(3)))
     const ratio = nextZoom / Math.max(viewport.zoom || 1, 0.001)
     updateViewportState(page.stored_name, key, {
       zoom: nextZoom,
@@ -3530,6 +3634,37 @@ function stepCurrentPageZoom(step) {
       panY: pointerY - ((pointerY - viewport.panY) * ratio)
     }, { syncCompare: false })
   })
+}
+
+function setCanvasViewportPreset(page, pane = 'main', preset = 'fit') {
+  const shell = getCanvasShellForPane(pane)
+  if (!page || !shell) {
+    return
+  }
+  const geometry = getCanvasGeometryFromSurface(shell, page, pane)
+  const availableWidth = Math.max(geometry.shellWidth - (geometry.stageOffsetLeft * 2), 1)
+  const availableHeight = Math.max(geometry.shellHeight - geometry.stageOffsetTop - 12, 1)
+  let zoom = 1
+
+  if (preset === 'fit') {
+    zoom = Math.min(availableWidth / geometry.stageWidth, availableHeight / geometry.stageHeight)
+  } else if (preset === 'width') {
+    zoom = availableWidth / geometry.stageWidth
+  }
+
+  zoom = clampCanvasZoom(zoom)
+  updateViewportState(page.stored_name, pane, {
+    zoom,
+    panX: Math.round((availableWidth - (geometry.stageWidth * zoom)) / 2),
+    panY: Math.round((availableHeight - (geometry.stageHeight * zoom)) / 2)
+  }, { syncCompare: pane !== 'compare' })
+}
+
+function setCurrentPageViewportPreset(preset = 'fit', pane = 'main') {
+  if (!selectedEditPage.value) {
+    return
+  }
+  setCanvasViewportPreset(selectedEditPage.value, pane, preset)
 }
 
 function selectAdjacentEditPage(offset) {
@@ -3682,6 +3817,66 @@ function getManualDraftStyle(page) {
     return {}
   }
   return getStyleRegionBoxStyle({ bbox }, page)
+}
+
+function getCanvasMeasurementOverlay(page) {
+  if (!page?.stored_name) {
+    return null
+  }
+
+  const transformDraft = canvasTransformState.value
+  if (transformDraft?.pageId === page.stored_name && Array.isArray(transformDraft.currentBBox)) {
+    return {
+      bbox: transformDraft.currentBBox,
+      label: transformDraft.mode === 'move' ? '移动' : '缩放',
+      modifiers: [
+        transformDraft.proportional ? '等比' : '',
+        transformDraft.fromCenter ? '中心' : ''
+      ].filter(Boolean)
+    }
+  }
+
+  const manualBBox = getManualDraftBBox(page)
+  if (manualBBox) {
+    return {
+      bbox: manualBBox,
+      label: manualDrawDraft.value?.action === 'adjust' ? '替换范围' : '新框',
+      modifiers: []
+    }
+  }
+
+  return null
+}
+
+function getCanvasMeasurementStyle(page) {
+  const overlay = getCanvasMeasurementOverlay(page)
+  if (!overlay) {
+    return {}
+  }
+  const [x1, y1] = overlay.bbox
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const viewport = getViewportState(page?.stored_name || '', 'main')
+  const inverseScale = 1 / Math.max(viewport.zoom || 1, 0.001)
+  return {
+    left: `${(x1 / imageWidth) * 100}%`,
+    top: `${(y1 / imageHeight) * 100}%`,
+    '--measure-scale': inverseScale
+  }
+}
+
+function getCanvasMeasurementText(page) {
+  const overlay = getCanvasMeasurementOverlay(page)
+  if (!overlay) {
+    return ''
+  }
+  const [x1, y1, x2, y2] = overlay.bbox.map((value) => Math.round(Number(value) || 0))
+  const suffix = overlay.modifiers?.length ? ` · ${overlay.modifiers.join(' · ')}` : ''
+  return `${overlay.label} · x ${x1} y ${y1} · ${Math.max(0, x2 - x1)} × ${Math.max(0, y2 - y1)}${suffix}`
+}
+
+function isCanvasViewportPanning(pane = 'main') {
+  return Boolean(viewportPanState.value && viewportPanState.value.pane === pane)
 }
 
 function clearTopbarTaskProgress() {
@@ -4731,9 +4926,9 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     return
   }
 
-  const rect = canvas.getBoundingClientRect()
+  const geometry = getCanvasGeometryFromSurface(canvas, page, 'main')
   const captureTarget = event.currentTarget instanceof Element ? event.currentTarget : null
-  const point = getCanvasPointFromRect(rect, event.clientX, event.clientY, page)
+  const point = getCanvasPointFromGeometry(geometry, event.clientX, event.clientY, page)
   canvasTransformState.value = {
     pointerId: event.pointerId,
     captureTarget,
@@ -4741,7 +4936,7 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     pageId: page.stored_name,
     mode,
     handle,
-    rect,
+    geometry,
     startPoint: point,
     originBBox: getEffectiveRegionBBox(region),
     currentBBox: getEffectiveRegionBBox(region),
@@ -4776,7 +4971,7 @@ function updateCanvasRegionTransform(event) {
     return
   }
 
-  const point = getCanvasPointFromRect(draft.rect, event.clientX, event.clientY, page)
+  const point = getCanvasPointFromGeometry(draft.geometry, event.clientX, event.clientY, page)
   const deltaX = point.x - draft.startPoint.x
   const deltaY = point.y - draft.startPoint.y
   let nextBBox = draft.originBBox
@@ -4784,12 +4979,17 @@ function updateCanvasRegionTransform(event) {
   if (draft.mode === 'move') {
     nextBBox = translateBBoxWithinPage(draft.originBBox, deltaX, deltaY, page)
   } else {
-    nextBBox = resizeBBoxWithinPage(draft.originBBox, draft.handle, deltaX, deltaY, page)
+    nextBBox = resizeBBoxWithinPage(draft.originBBox, draft.handle, deltaX, deltaY, page, {
+      proportional: event.shiftKey,
+      fromCenter: event.altKey
+    })
   }
 
   const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
   draft.moved = draft.moved || changed
   draft.currentBBox = nextBBox
+  draft.proportional = Boolean(event.shiftKey)
+  draft.fromCenter = Boolean(event.altKey)
   updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
 }
 
@@ -5414,12 +5614,12 @@ function handleGlobalCanvasKeydown(event) {
   if (v2View.value !== 'review' || !selectedEditPage.value) {
     return
   }
+  if (isEditableTextTarget(event.target)) {
+    return
+  }
   if (isCanvasReviewMode.value && event.code === 'Space') {
     spacePanPressed.value = true
     event.preventDefault()
-  }
-  if (isEditableTextTarget(event.target)) {
-    return
   }
   const isUndo = (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z'
   const isRedo = (
@@ -5438,14 +5638,17 @@ function handleGlobalCanvasKeydown(event) {
   } else if (event.key === 'PageDown' || event.key === ']') {
     event.preventDefault()
     selectAdjacentEditPage(1)
-  } else if ((event.altKey || event.shiftKey) && event.key === 'ArrowUp') {
+  } else if (event.altKey && event.key === 'ArrowUp') {
     event.preventDefault()
     selectAdjacentEditRegion(-1)
-  } else if ((event.altKey || event.shiftKey) && event.key === 'ArrowDown') {
+  } else if (event.altKey && event.key === 'ArrowDown') {
     event.preventDefault()
     selectAdjacentEditRegion(1)
   } else if (event.key === 'Escape') {
     event.preventDefault()
+    clearManualDraft()
+    mergeMode.value = false
+    mergeRegionSelection.value = {}
     selectedEditRegionKey.value = ''
     updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
       ...state,
@@ -5453,10 +5656,13 @@ function handleGlobalCanvasKeydown(event) {
     }))
   } else if (event.shiftKey && event.code === 'Digit1') {
     event.preventDefault()
-    resetViewportStateForPage(selectedEditPage.value)
+    setCurrentPageViewportPreset('fit', 'main')
   } else if (event.shiftKey && event.code === 'Digit2' && selectedEditRegion.value) {
     event.preventDefault()
     focusSelectedRegionInViewport(selectedEditPage.value, 'main')
+  } else if (event.shiftKey && event.code === 'Digit0') {
+    event.preventDefault()
+    setCurrentPageViewportPreset('actual', 'main')
   } else if (event.key === 'Enter' && selectedEditRegion.value) {
     event.preventDefault()
     const input = document.querySelector(
@@ -5477,7 +5683,7 @@ function handleGlobalCanvasKeydown(event) {
       return
     }
     event.preventDefault()
-    const step = event.ctrlKey ? 5 : 1
+    const step = event.shiftKey ? 10 : (event.ctrlKey || event.metaKey) ? 5 : 1
     nudgeSelectedRegion(delta[0] * step, delta[1] * step)
   }
 }
@@ -6807,7 +7013,12 @@ watch(
 
                 <div
                   ref="compareCanvasShellRef"
-                  class="v2-canvas-shell v2-canvas-shell-compare"
+                  :class="[
+                    'v2-canvas-shell',
+                    'v2-canvas-shell-compare',
+                    isCanvasViewportPanning('compare') ? 'is-panning' : '',
+                    spacePanPressed ? 'is-space-ready' : ''
+                  ]"
                   :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
                   @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
                   @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
@@ -6841,6 +7052,11 @@ watch(
                     >
                       {{ manualDrawMode ? '正在画框…' : '手动添加框' }}
                     </button>
+                    <div v-if="selectedEditPage" class="v2-view-controls" aria-label="画布视图控制">
+                      <button type="button" @click="setCurrentPageViewportPreset('fit', 'main')">适合</button>
+                      <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
+                      <button type="button" @click="setCurrentPageViewportPreset('width', 'main')">适宽</button>
+                    </div>
                     <button
                       v-if="selectedEditPage"
                       type="button"
@@ -6862,7 +7078,11 @@ watch(
 
                 <div
                   ref="translatedPreviewCanvasRef"
-                  class="v2-canvas-shell"
+                  :class="[
+                    'v2-canvas-shell',
+                    isCanvasViewportPanning('main') ? 'is-panning' : '',
+                    spacePanPressed ? 'is-space-ready' : ''
+                  ]"
                   :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
                   @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'main')"
                   @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'main')"
@@ -6937,6 +7157,13 @@ watch(
                           @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
                         ></span>
                       </button>
+                      <div
+                        v-if="getCanvasMeasurementOverlay(selectedEditPage)"
+                        class="v2-canvas-measure-popover"
+                        :style="getCanvasMeasurementStyle(selectedEditPage)"
+                      >
+                        {{ getCanvasMeasurementText(selectedEditPage) }}
+                      </div>
                     </template>
                   </div>
                 </div>

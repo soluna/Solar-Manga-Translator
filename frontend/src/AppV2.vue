@@ -80,6 +80,7 @@ const textDirectionOptions = [
 const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const canvasZoomMin = 0.2
 const canvasZoomMax = 6
+const canvasSnapScreenThreshold = 8
 const maxCanvasHistoryEntries = 50
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
@@ -526,6 +527,7 @@ const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
 const manualDrawDraft = ref(null)
 const canvasTransformState = ref(null)
+const canvasSnapState = ref(null)
 const mergeMode = ref(false)
 const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
@@ -602,6 +604,7 @@ let suppressCanvasRegionClickUntil = 0
 let topbarTaskProgressTimer = null
 let reviewInspectionRequestToken = 0
 let styleInspectionRequestToken = 0
+let autoFitCanvasPageIds = new Set()
 const pageCommandExecutionQueue = new Map()
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
@@ -1497,7 +1500,7 @@ async function loadAppRuntime() {
       apiBaseUrl.value = resolvedBaseUrl.replace(/\/$/, '')
     }
     appRuntime.value.backend_base_url = apiBaseUrl.value
-    migrationModalOpen.value = Boolean(appRuntime.value?.migration?.needed)
+    migrationModalOpen.value = Boolean(isDesktopRuntime.value && appRuntime.value?.migration?.needed)
   } catch (error) {
     console.warn('Failed to load app runtime.', error)
   }
@@ -1810,6 +1813,7 @@ function resetTranslationReview() {
   translationRegionSkipOverrides.value = {}
   translationRegionDisabledOverrides.value = {}
   translationRegionLayoutOverrides.value = {}
+  canvasSnapState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
   adjustingRegionId.value = ''
@@ -1821,6 +1825,7 @@ function resetEditInspectorSelection() {
   manualDrawDraft.value = null
   adjustingRegionId.value = ''
   canvasTransformState.value = null
+  canvasSnapState.value = null
   viewportPanState.value = null
   compareSplitterState.value = null
   mergeRegionSelection.value = {}
@@ -1829,6 +1834,7 @@ function resetEditInspectorSelection() {
   fontSizeInputDrafts.value = {}
   pageEditHistory.value = {}
   perPageUiState.value = {}
+  autoFitCanvasPageIds = new Set()
   regionListSearch.value = ''
   regionListFilter.value = 'all'
 }
@@ -2006,6 +2012,8 @@ function applySessionPayload(payload, options = {}) {
   pageEditHistory.value = {}
   canvasPreviewDirtyPages.value = {}
   perPageUiState.value = {}
+  canvasSnapState.value = null
+  autoFitCanvasPageIds = new Set()
   regionListSearch.value = ''
   regionListFilter.value = 'all'
 
@@ -3330,6 +3338,168 @@ function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page, options 
   return normalizeBBoxToPage([x1, y1, x2, y2], page)
 }
 
+function dedupeSnapReferences(references) {
+  const seen = new Set()
+  const nextReferences = []
+  for (const reference of references || []) {
+    const value = Math.round(Number(reference?.value) || 0)
+    const key = `${reference?.axis || ''}:${value}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    nextReferences.push({
+      ...reference,
+      value
+    })
+  }
+  return nextReferences
+}
+
+function collectCanvasSnapReferences(page, activeRegionId) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const x = [
+    { axis: 'x', value: 0, source: 'page' },
+    { axis: 'x', value: imageWidth / 2, source: 'page' },
+    { axis: 'x', value: imageWidth, source: 'page' }
+  ]
+  const y = [
+    { axis: 'y', value: 0, source: 'page' },
+    { axis: 'y', value: imageHeight / 2, source: 'page' },
+    { axis: 'y', value: imageHeight, source: 'page' }
+  ]
+
+  for (const region of page?.regions || []) {
+    if (!region?.id || region.id === activeRegionId) {
+      continue
+    }
+    const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+    x.push(
+      { axis: 'x', value: x1, source: 'region' },
+      { axis: 'x', value: (x1 + x2) / 2, source: 'region' },
+      { axis: 'x', value: x2, source: 'region' }
+    )
+    y.push(
+      { axis: 'y', value: y1, source: 'region' },
+      { axis: 'y', value: (y1 + y2) / 2, source: 'region' },
+      { axis: 'y', value: y2, source: 'region' }
+    )
+  }
+
+  return {
+    x: dedupeSnapReferences(x),
+    y: dedupeSnapReferences(y)
+  }
+}
+
+function getCanvasSnapThreshold(page, geometry, axis = 'x') {
+  const imageSize = axis === 'y'
+    ? Math.max(page?.image_height || 1, 1)
+    : Math.max(page?.image_width || 1, 1)
+  const stageSize = axis === 'y'
+    ? Math.max(geometry?.stageHeight || 1, 1)
+    : Math.max(geometry?.stageWidth || 1, 1)
+  const viewport = geometry?.viewport || getViewportState(page?.stored_name || '', 'main')
+  const screenPixelsPerPagePixel = (stageSize * Math.max(viewport.zoom || 1, 0.001)) / imageSize
+  return Math.max(1, canvasSnapScreenThreshold / Math.max(screenPixelsPerPagePixel, 0.001))
+}
+
+function findClosestCanvasSnap(candidates, references, threshold) {
+  let bestSnap = null
+  for (const candidate of candidates || []) {
+    for (const reference of references || []) {
+      const distance = Math.abs(reference.value - candidate.value)
+      if (distance > threshold) {
+        continue
+      }
+      if (!bestSnap || distance < bestSnap.distance) {
+        bestSnap = {
+          distance,
+          delta: reference.value - candidate.value,
+          guide: {
+            axis: reference.axis,
+            value: reference.value,
+            source: reference.source
+          }
+        }
+      }
+    }
+  }
+  return bestSnap
+}
+
+function applyCanvasSnapToBBox(bbox, page, regionId, mode, handle, geometry) {
+  const references = collectCanvasSnapReferences(page, regionId)
+  const thresholdX = getCanvasSnapThreshold(page, geometry, 'x')
+  const thresholdY = getCanvasSnapThreshold(page, geometry, 'y')
+  const [x1, y1, x2, y2] = bbox
+  const guides = []
+
+  if (mode === 'move') {
+    const snapX = findClosestCanvasSnap([
+      { value: x1 },
+      { value: (x1 + x2) / 2 },
+      { value: x2 }
+    ], references.x, thresholdX)
+    const snapY = findClosestCanvasSnap([
+      { value: y1 },
+      { value: (y1 + y2) / 2 },
+      { value: y2 }
+    ], references.y, thresholdY)
+
+    if (snapX?.guide) {
+      guides.push(snapX.guide)
+    }
+    if (snapY?.guide) {
+      guides.push(snapY.guide)
+    }
+
+    return {
+      bbox: translateBBoxWithinPage(bbox, snapX?.delta || 0, snapY?.delta || 0, page),
+      guides
+    }
+  }
+
+  let nextX1 = x1
+  let nextY1 = y1
+  let nextX2 = x2
+  let nextY2 = y2
+
+  if (handle.includes('w')) {
+    const snap = findClosestCanvasSnap([{ value: x1 }], references.x, thresholdX)
+    if (snap?.guide) {
+      nextX1 = snap.guide.value
+      guides.push(snap.guide)
+    }
+  } else if (handle.includes('e')) {
+    const snap = findClosestCanvasSnap([{ value: x2 }], references.x, thresholdX)
+    if (snap?.guide) {
+      nextX2 = snap.guide.value
+      guides.push(snap.guide)
+    }
+  }
+
+  if (handle.includes('n')) {
+    const snap = findClosestCanvasSnap([{ value: y1 }], references.y, thresholdY)
+    if (snap?.guide) {
+      nextY1 = snap.guide.value
+      guides.push(snap.guide)
+    }
+  } else if (handle.includes('s')) {
+    const snap = findClosestCanvasSnap([{ value: y2 }], references.y, thresholdY)
+    if (snap?.guide) {
+      nextY2 = snap.guide.value
+      guides.push(snap.guide)
+    }
+  }
+
+  return {
+    bbox: normalizeBBoxToPage([nextX1, nextY1, nextX2, nextY2], page),
+    guides
+  }
+}
+
 function getCanvasHandleCursor(handle) {
   const cursorMap = {
     nw: 'nwse-resize',
@@ -3830,8 +4000,10 @@ function getCanvasMeasurementOverlay(page) {
       bbox: transformDraft.currentBBox,
       label: transformDraft.mode === 'move' ? '移动' : '缩放',
       modifiers: [
+        transformDraft.axisLocked ? '轴锁定' : '',
         transformDraft.proportional ? '等比' : '',
-        transformDraft.fromCenter ? '中心' : ''
+        transformDraft.fromCenter ? '中心' : '',
+        transformDraft.snapDisabled ? '吸附暂停' : (canvasSnapState.value?.guides?.length ? '已吸附' : '')
       ].filter(Boolean)
     }
   }
@@ -3873,6 +4045,77 @@ function getCanvasMeasurementText(page) {
   const [x1, y1, x2, y2] = overlay.bbox.map((value) => Math.round(Number(value) || 0))
   const suffix = overlay.modifiers?.length ? ` · ${overlay.modifiers.join(' · ')}` : ''
   return `${overlay.label} · x ${x1} y ${y1} · ${Math.max(0, x2 - x1)} × ${Math.max(0, y2 - y1)}${suffix}`
+}
+
+function getCanvasViewportPercent(page, pane = 'main') {
+  const viewport = getViewportState(page?.stored_name || '', pane)
+  return `${Math.round((viewport.zoom || 1) * 100)}%`
+}
+
+function getCanvasHudDetail(page, pane = 'main') {
+  if (!page) {
+    return ''
+  }
+  const syncLabel = pane === 'compare' || reviewWorkspacePrefs.value.compare_sync_enabled ? '联动' : '独立'
+  return `${syncLabel} · 滚轮平移 · Shift 锁轴 · Ctrl/⌘ 缩放`
+}
+
+function getCanvasSnapGuides(page) {
+  if (!page?.stored_name || canvasSnapState.value?.pageId !== page.stored_name) {
+    return []
+  }
+  return canvasSnapState.value.guides || []
+}
+
+function getCanvasSnapGuideStyle(guide, page) {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const viewport = getViewportState(page?.stored_name || '', 'main')
+  const inverseScale = 1 / Math.max(viewport.zoom || 1, 0.001)
+
+  if (guide?.axis === 'x') {
+    return {
+      left: `${(Number(guide.value || 0) / imageWidth) * 100}%`,
+      top: '0',
+      bottom: '0',
+      width: `${inverseScale}px`
+    }
+  }
+
+  return {
+    top: `${(Number(guide?.value || 0) / imageHeight) * 100}%`,
+    left: '0',
+    right: '0',
+    height: `${inverseScale}px`
+  }
+}
+
+function getCanvasSelectionToolbarStyle(page) {
+  const region = selectedEditRegion.value
+  if (!page?.stored_name || !region || canvasTransformState.value?.pageId === page.stored_name) {
+    return {}
+  }
+  const [x1, y1, _x2, y2] = getEffectiveRegionBBox(region)
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const viewport = getViewportState(page.stored_name, 'main')
+  const placeBelow = (y1 / imageHeight) < 0.08
+  return {
+    left: `${(x1 / imageWidth) * 100}%`,
+    top: `${((placeBelow ? y2 : y1) / imageHeight) * 100}%`,
+    '--toolbar-scale': 1 / Math.max(viewport.zoom || 1, 0.001),
+    '--toolbar-offset-y': placeBelow ? '10px' : 'calc(-100% - 10px)',
+    '--toolbar-origin-y': placeBelow ? 'top' : 'bottom'
+  }
+}
+
+function getCanvasSelectionToolbarText(page) {
+  const region = selectedEditRegion.value
+  if (!page || !region) {
+    return ''
+  }
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region).map((value) => Math.round(Number(value) || 0))
+  return `x ${x1} y ${y1} · ${Math.max(0, x2 - x1)} × ${Math.max(0, y2 - y1)}`
 }
 
 function isCanvasViewportPanning(pane = 'main') {
@@ -4929,6 +5172,7 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
   const geometry = getCanvasGeometryFromSurface(canvas, page, 'main')
   const captureTarget = event.currentTarget instanceof Element ? event.currentTarget : null
   const point = getCanvasPointFromGeometry(geometry, event.clientX, event.clientY, page)
+  canvasSnapState.value = null
   canvasTransformState.value = {
     pointerId: event.pointerId,
     captureTarget,
@@ -4972,11 +5216,18 @@ function updateCanvasRegionTransform(event) {
   }
 
   const point = getCanvasPointFromGeometry(draft.geometry, event.clientX, event.clientY, page)
-  const deltaX = point.x - draft.startPoint.x
-  const deltaY = point.y - draft.startPoint.y
+  let deltaX = point.x - draft.startPoint.x
+  let deltaY = point.y - draft.startPoint.y
   let nextBBox = draft.originBBox
 
   if (draft.mode === 'move') {
+    if (event.shiftKey) {
+      if (Math.abs(deltaX) >= Math.abs(deltaY)) {
+        deltaY = 0
+      } else {
+        deltaX = 0
+      }
+    }
     nextBBox = translateBBoxWithinPage(draft.originBBox, deltaX, deltaY, page)
   } else {
     nextBBox = resizeBBoxWithinPage(draft.originBBox, draft.handle, deltaX, deltaY, page, {
@@ -4985,11 +5236,27 @@ function updateCanvasRegionTransform(event) {
     })
   }
 
+  const snapDisabled = event.ctrlKey || event.metaKey || event.altKey || (draft.mode !== 'move' && event.shiftKey)
+  if (!snapDisabled) {
+    const snapResult = applyCanvasSnapToBBox(nextBBox, page, draft.regionId, draft.mode, draft.handle, draft.geometry)
+    nextBBox = snapResult.bbox
+    canvasSnapState.value = snapResult.guides.length
+      ? {
+          pageId: draft.pageId,
+          guides: snapResult.guides
+        }
+      : null
+  } else {
+    canvasSnapState.value = null
+  }
+
   const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
   draft.moved = draft.moved || changed
   draft.currentBBox = nextBBox
-  draft.proportional = Boolean(event.shiftKey)
+  draft.proportional = Boolean(draft.mode !== 'move' && event.shiftKey)
   draft.fromCenter = Boolean(event.altKey)
+  draft.axisLocked = Boolean(draft.mode === 'move' && event.shiftKey)
+  draft.snapDisabled = snapDisabled
   updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
 }
 
@@ -5003,6 +5270,7 @@ async function finishCanvasRegionTransform(event) {
   }
 
   canvasTransformState.value = null
+  canvasSnapState.value = null
   if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
     try {
       draft.captureTarget.releasePointerCapture(draft.pointerId)
@@ -5059,6 +5327,7 @@ function cancelCanvasRegionTransform() {
   }
   updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
   canvasTransformState.value = null
+  canvasSnapState.value = null
 }
 
 function updateRegionFontSize(region, nextValue) {
@@ -6532,7 +6801,8 @@ watch(
     if (!nextPage) {
       return
     }
-    if (!perPageUiState.value[normalizedPageId]) {
+    const hadStoredCanvasState = Boolean(perPageUiState.value[normalizedPageId])
+    if (!hadStoredCanvasState) {
       updatePageUiState(normalizedPageId, {
         ...createDefaultPerPageUiState(),
         selectedRegionId: nextPage.regions[0]?.id || ''
@@ -6541,6 +6811,12 @@ watch(
     selectedEditRegionKey.value = String(getPageUiState(normalizedPageId).selectedRegionId || '')
     reconcileCanvasInteractionState()
     void scrollSelectedPageRailItemIntoView()
+    if (!hadStoredCanvasState && isCanvasReviewMode.value && !autoFitCanvasPageIds.has(normalizedPageId)) {
+      autoFitCanvasPageIds.add(normalizedPageId)
+      void nextTick(() => {
+        setCanvasViewportPreset(nextPage, 'main', 'fit')
+      })
+    }
   }
 )
 
@@ -7033,6 +7309,10 @@ watch(
                       当前没有可展示的页面图像
                     </div>
                   </div>
+                  <div v-if="selectedEditPage" class="v2-canvas-hud">
+                    <strong>{{ getCanvasViewportPercent(selectedEditPage, 'compare') }}</strong>
+                    <span>{{ getCanvasHudDetail(selectedEditPage, 'compare') }}</span>
+                  </div>
                 </div>
               </article>
 
@@ -7106,6 +7386,12 @@ watch(
                     </div>
 
                     <template v-if="selectedEditPage">
+                      <span
+                        v-for="(guide, guideIndex) in getCanvasSnapGuides(selectedEditPage)"
+                        :key="`snap-${guide.axis}-${guide.value}-${guideIndex}`"
+                        :class="['v2-canvas-snap-guide', guide.axis === 'x' ? 'is-vertical' : 'is-horizontal']"
+                        :style="getCanvasSnapGuideStyle(guide, selectedEditPage)"
+                      ></span>
                       <button
                         v-for="region in selectedEditPage.regions"
                         :key="`main-${region.id}`"
@@ -7164,7 +7450,22 @@ watch(
                       >
                         {{ getCanvasMeasurementText(selectedEditPage) }}
                       </div>
+                      <div
+                        v-else-if="selectedEditRegion"
+                        class="v2-canvas-selection-toolbar"
+                        :style="getCanvasSelectionToolbarStyle(selectedEditPage)"
+                        @pointerdown.stop
+                        @click.stop
+                      >
+                        <span>{{ getCanvasSelectionToolbarText(selectedEditPage) }}</span>
+                        <button type="button" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位</button>
+                        <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
+                      </div>
                     </template>
+                  </div>
+                  <div v-if="selectedEditPage" class="v2-canvas-hud">
+                    <strong>{{ getCanvasViewportPercent(selectedEditPage, 'main') }}</strong>
+                    <span>{{ getCanvasHudDetail(selectedEditPage, 'main') }}</span>
                   </div>
                 </div>
               </article>

@@ -516,6 +516,7 @@ const translationRegionDisabledOverrides = ref({})
 const translationRegionLayoutOverrides = ref({})
 const translationInputDrafts = ref({})
 const fontSizeInputDrafts = ref({})
+const fontSizeDraftOriginOverrides = ref({})
 const styleInspectionPages = ref([])
 const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
@@ -528,6 +529,8 @@ const adjustingRegionId = ref('')
 const manualDrawDraft = ref(null)
 const canvasTransformState = ref(null)
 const canvasSnapState = ref(null)
+const canvasRegionSelection = ref({})
+const canvasMarqueeState = ref(null)
 const mergeMode = ref(false)
 const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
@@ -712,6 +715,28 @@ const selectedPageHistoryState = computed(() => {
 const canUndoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.undo.length > 0 && !translating.value))
 const canRedoCanvasEdit = computed(() => Boolean(isCanvasReviewMode.value && selectedPageHistoryState.value.redo.length > 0 && !translating.value))
 const mergeSelectionCount = computed(() => Object.keys(mergeRegionSelection.value).length)
+const selectedCanvasRegionIds = computed(() => {
+  const page = selectedEditPage.value
+  if (!page?.regions?.length) {
+    return []
+  }
+  const explicitSelection = new Set(
+    Object.keys(canvasRegionSelection.value || {})
+      .filter((regionId) => canvasRegionSelection.value[regionId])
+  )
+  if (!explicitSelection.size && selectedEditRegionKey.value) {
+    explicitSelection.add(selectedEditRegionKey.value)
+  }
+  return page.regions
+    .map((region) => region.id)
+    .filter((regionId) => explicitSelection.has(regionId))
+})
+const selectedCanvasRegions = computed(() => {
+  const selectedIds = new Set(selectedCanvasRegionIds.value)
+  return (selectedEditPage.value?.regions || []).filter((region) => selectedIds.has(region.id))
+})
+const selectedCanvasRegionCount = computed(() => selectedCanvasRegionIds.value.length)
+const hasCanvasMultiSelection = computed(() => selectedCanvasRegionCount.value > 1)
 const disabledRegionCountForSelectedPage = computed(() => {
   const storedName = selectedEditPage.value?.stored_name
   if (!storedName) {
@@ -1814,6 +1839,8 @@ function resetTranslationReview() {
   translationRegionDisabledOverrides.value = {}
   translationRegionLayoutOverrides.value = {}
   canvasSnapState.value = null
+  canvasRegionSelection.value = {}
+  canvasMarqueeState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
   adjustingRegionId.value = ''
@@ -1826,12 +1853,15 @@ function resetEditInspectorSelection() {
   adjustingRegionId.value = ''
   canvasTransformState.value = null
   canvasSnapState.value = null
+  canvasRegionSelection.value = {}
+  canvasMarqueeState.value = null
   viewportPanState.value = null
   compareSplitterState.value = null
   mergeRegionSelection.value = {}
   mergeMode.value = false
   translationInputDrafts.value = {}
   fontSizeInputDrafts.value = {}
+  fontSizeDraftOriginOverrides.value = {}
   pageEditHistory.value = {}
   perPageUiState.value = {}
   autoFitCanvasPageIds = new Set()
@@ -2009,10 +2039,13 @@ function applySessionPayload(payload, options = {}) {
   styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
   translationInputDrafts.value = {}
   fontSizeInputDrafts.value = {}
+  fontSizeDraftOriginOverrides.value = {}
   pageEditHistory.value = {}
   canvasPreviewDirtyPages.value = {}
   perPageUiState.value = {}
   canvasSnapState.value = null
+  canvasRegionSelection.value = {}
+  canvasMarqueeState.value = null
   autoFitCanvasPageIds = new Set()
   regionListSearch.value = ''
   regionListFilter.value = 'all'
@@ -2770,6 +2803,11 @@ function getRegionFontSize(region) {
   return Number(region.font_size || 12)
 }
 
+function getRegionExplicitFontSizeOverride(regionId) {
+  const override = translationRegionLayoutOverrides.value[String(regionId || '')]
+  return typeof override?.font_size === 'number' ? override.font_size : null
+}
+
 function getPageHistoryState(pageId) {
   return pageEditHistory.value[pageId] || { undo: [], redo: [] }
 }
@@ -2849,6 +2887,7 @@ function applyPageCommandPayload(payload) {
   applyInspectionOverrides(payload?.overrides)
   translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
   fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
+  fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
   syncEditSelection()
 }
 
@@ -2899,7 +2938,62 @@ function isRegionSelectedForMerge(region) {
   return Boolean(mergeRegionSelection.value[region.id])
 }
 
-function handleCanvasRegionClick(region) {
+function isRegionSelectedOnCanvas(region) {
+  if (!region?.id) {
+    return false
+  }
+  if (canvasRegionSelection.value[region.id]) {
+    return true
+  }
+  return !Object.keys(canvasRegionSelection.value || {}).length && selectedEditRegionKey.value === region.id
+}
+
+function setCanvasRegionSelection(regionIds, primaryRegionId = '') {
+  const pageRegionIds = new Set((selectedEditPage.value?.regions || []).map((region) => region.id))
+  const nextSelection = {}
+  for (const regionId of regionIds || []) {
+    if (pageRegionIds.has(regionId)) {
+      nextSelection[regionId] = true
+    }
+  }
+  canvasRegionSelection.value = nextSelection
+  const normalizedPrimary = String(primaryRegionId || '').trim()
+  if (normalizedPrimary && pageRegionIds.has(normalizedPrimary)) {
+    selectedEditRegionKey.value = normalizedPrimary
+  } else if (Object.keys(nextSelection).length) {
+    selectedEditRegionKey.value = Object.keys(nextSelection)[0]
+  } else {
+    selectedEditRegionKey.value = ''
+  }
+}
+
+function selectSingleCanvasRegion(region) {
+  canvasRegionSelection.value = {}
+  selectedEditRegionKey.value = region?.id || ''
+}
+
+function toggleCanvasRegionSelection(region) {
+  if (!region?.id) {
+    return
+  }
+  const nextSelection = { ...canvasRegionSelection.value }
+  if (!Object.keys(nextSelection).length && selectedEditRegionKey.value) {
+    nextSelection[selectedEditRegionKey.value] = true
+  }
+  if (nextSelection[region.id]) {
+    delete nextSelection[region.id]
+  } else {
+    nextSelection[region.id] = true
+  }
+  setCanvasRegionSelection(Object.keys(nextSelection), region.id)
+}
+
+function clearCanvasRegionSelection() {
+  canvasRegionSelection.value = {}
+  selectedEditRegionKey.value = ''
+}
+
+function handleCanvasRegionClick(event, region) {
   if (!region) {
     return
   }
@@ -2910,7 +3004,19 @@ function handleCanvasRegionClick(region) {
     toggleMergeSelection(region)
     return
   }
-  selectedEditRegionKey.value = region.id
+  if (event?.shiftKey || event?.metaKey || event?.ctrlKey) {
+    toggleCanvasRegionSelection(region)
+    return
+  }
+  selectSingleCanvasRegion(region)
+}
+
+function handleRegionCardClick(event, region) {
+  if (event?.shiftKey || event?.metaKey || event?.ctrlKey) {
+    toggleCanvasRegionSelection(region)
+    return
+  }
+  selectSingleCanvasRegion(region)
 }
 
 function syncEditSelection() {
@@ -2957,6 +3063,17 @@ function reconcileCanvasInteractionState() {
     manualDrawDraft.value = null
   }
 
+  const nextCanvasSelection = {}
+  for (const regionId of Object.keys(canvasRegionSelection.value || {})) {
+    if (validRegionIds.has(regionId)) {
+      nextCanvasSelection[regionId] = true
+    }
+  }
+  canvasRegionSelection.value = nextCanvasSelection
+  if (selectedEditRegionKey.value && !validRegionIds.has(selectedEditRegionKey.value)) {
+    selectedEditRegionKey.value = Object.keys(nextCanvasSelection)[0] || ''
+  }
+
   if (mergeMode.value) {
     const nextSelection = {}
     for (const regionId of Object.keys(mergeRegionSelection.value || {})) {
@@ -2978,6 +3095,7 @@ function reconcileCanvasInteractionState() {
 function clearCanvasInteractionLocks() {
   mergeMode.value = false
   mergeRegionSelection.value = {}
+  canvasMarqueeState.value = null
   clearManualDraft()
   status.value = '已解除画布交互锁，可以继续拖框、缩框和方向键微调。'
 }
@@ -3180,6 +3298,14 @@ function scheduleCanvasNudgeCommit() {
   }, 90)
 }
 
+function haveSameRegionIdSet(first = [], second = []) {
+  if (!Array.isArray(first) || !Array.isArray(second) || first.length !== second.length) {
+    return false
+  }
+  const firstSet = new Set(first.map((item) => String(item || '')))
+  return second.every((item) => firstSet.has(String(item || '')))
+}
+
 async function flushPendingCanvasNudge() {
   const pending = pendingCanvasNudge
   if (!pending) {
@@ -3190,41 +3316,60 @@ async function flushPendingCanvasNudge() {
   clearCanvasNudgeCommitTimer()
 
   const page = mergedInspectionPages.value.find((item) => item.stored_name === pending.pageId)
-  const region = page?.regions?.find((item) => item.id === pending.regionId)
-  const currentOverride = translationRegionLayoutOverrides.value[pending.regionId]
-  const nextBBox = Array.isArray(currentOverride?.bbox) && currentOverride.bbox.length === 4
-    ? currentOverride.bbox
-    : region
-      ? getEffectiveRegionBBox(region)
-      : null
-
-  if (!page || !nextBBox) {
+  if (!page) {
     return
   }
 
-  const changed = nextBBox.some((value, index) => value !== pending.originBBox[index])
-  if (!changed) {
+  const regionIds = Array.isArray(pending.regionIds) && pending.regionIds.length
+    ? pending.regionIds
+    : [pending.regionId].filter(Boolean)
+  const redoCommands = []
+  const undoCommands = []
+  for (const regionId of regionIds) {
+    const region = page.regions?.find((item) => item.id === regionId)
+    const originBBox = pending.originBBoxes?.[regionId] || pending.originBBox
+    const currentOverride = translationRegionLayoutOverrides.value[regionId]
+    const nextBBox = Array.isArray(currentOverride?.bbox) && currentOverride.bbox.length === 4
+      ? currentOverride.bbox
+      : region
+        ? getEffectiveRegionBBox(region)
+        : null
+    if (!originBBox || !nextBBox) {
+      continue
+    }
+    const changed = nextBBox.some((value, index) => value !== originBBox[index])
+    if (!changed) {
+      continue
+    }
+    redoCommands.push({
+      type: 'update_region_bbox',
+      region_id: regionId,
+      bbox: nextBBox
+    })
+    undoCommands.push({
+      type: 'update_region_bbox',
+      region_id: regionId,
+      bbox: originBBox
+    })
+  }
+
+  if (!redoCommands.length) {
     return
   }
 
   await runCanvasCommand(page, {
-    label: '微调文本框位置',
-    redoCommands: [
-      {
-        type: 'update_region_bbox',
-        region_id: pending.regionId,
-        bbox: nextBBox
+    label: redoCommands.length > 1 ? `微调 ${redoCommands.length} 个文本框` : '微调文本框位置',
+    redoCommands,
+    undoCommands,
+    focusRegionId: pending.regionId || regionIds[0],
+    rollback: () => {
+      for (const regionId of regionIds) {
+        const originBBox = pending.originBBoxes?.[regionId] || pending.originBBox
+        if (originBBox) {
+          updateRegionLayoutOverride(regionId, { bbox: originBBox })
+        }
       }
-    ],
-    undoCommands: [
-      {
-        type: 'update_region_bbox',
-        region_id: pending.regionId,
-        bbox: pending.originBBox
-      }
-    ],
-    focusRegionId: pending.regionId,
-    rollback: () => updateRegionLayoutOverride(pending.regionId, { bbox: pending.originBBox })
+    }
   })
 }
 
@@ -3235,31 +3380,58 @@ function nudgeSelectedRegion(deltaX, deltaY) {
     return
   }
 
-  const hasPendingForSameRegion = Boolean(
+  const regionIds = selectedCanvasRegionIds.value.length > 1 && selectedCanvasRegionIds.value.includes(region.id)
+    ? selectedCanvasRegionIds.value
+    : [region.id]
+  const pendingRegionIds = pendingCanvasNudge
+    ? (Array.isArray(pendingCanvasNudge.regionIds) && pendingCanvasNudge.regionIds.length
+        ? pendingCanvasNudge.regionIds
+        : [pendingCanvasNudge.regionId].filter(Boolean))
+    : []
+  const hasPendingForSameSelection = Boolean(
     pendingCanvasNudge
     && pendingCanvasNudge.pageId === page.stored_name
-    && pendingCanvasNudge.regionId === region.id
+    && haveSameRegionIdSet(pendingRegionIds, regionIds)
   )
-  if (pendingCanvasNudge && !hasPendingForSameRegion) {
+  if (pendingCanvasNudge && !hasPendingForSameSelection) {
     void flushPendingCanvasNudge()
   }
 
-  const currentBBox = getEffectiveRegionBBox(region)
-  const nextBBox = translateBBoxWithinPage(currentBBox, deltaX, deltaY, page)
-  const changed = nextBBox.some((value, index) => value !== currentBBox[index])
-  if (!changed) {
-    return
-  }
-
-  if (!hasPendingForSameRegion) {
+  if (!hasPendingForSameSelection) {
+    const originBBoxes = {}
+    for (const regionId of regionIds) {
+      const targetRegion = page.regions?.find((item) => item.id === regionId)
+      if (targetRegion) {
+        originBBoxes[regionId] = getEffectiveRegionBBox(targetRegion)
+      }
+    }
     pendingCanvasNudge = {
       pageId: page.stored_name,
       regionId: region.id,
-      originBBox: currentBBox
+      regionIds,
+      originBBox: originBBoxes[region.id],
+      originBBoxes
     }
   }
 
-  updateRegionLayoutOverride(region.id, { bbox: nextBBox })
+  let changedAny = false
+  for (const regionId of regionIds) {
+    const targetRegion = page.regions?.find((item) => item.id === regionId)
+    if (!targetRegion) {
+      continue
+    }
+    const currentBBox = getEffectiveRegionBBox(targetRegion)
+    const nextBBox = translateBBoxWithinPage(currentBBox, deltaX, deltaY, page)
+    const changed = nextBBox.some((value, index) => value !== currentBBox[index])
+    if (!changed) {
+      continue
+    }
+    changedAny = true
+    updateRegionLayoutOverride(regionId, { bbox: nextBBox })
+  }
+  if (!changedAny) {
+    return
+  }
   selectedEditRegionKey.value = region.id
   scheduleCanvasNudgeCommit()
 }
@@ -3847,8 +4019,21 @@ function selectAdjacentEditPage(offset) {
   )
   const nextPage = mergedInspectionPages.value[nextIndex]
   if (nextPage?.stored_name) {
-    selectedEditPageKey.value = nextPage.stored_name
+    selectEditPageForReview(nextPage.stored_name)
   }
+}
+
+function selectEditPageForReview(pageKey) {
+  const normalizedPageKey = String(pageKey || '').trim()
+  if (!normalizedPageKey) {
+    return
+  }
+  if (pendingCanvasNudge) {
+    void flushPendingCanvasNudge()
+  }
+  canvasRegionSelection.value = {}
+  canvasMarqueeState.value = null
+  selectedEditPageKey.value = normalizedPageKey
 }
 
 function selectAdjacentEditRegion(offset) {
@@ -3859,7 +4044,7 @@ function selectAdjacentEditRegion(offset) {
   const currentIndex = selectedEditRegionVisibleIndex.value
   if (currentIndex < 0) {
     const fallbackIndex = offset >= 0 ? 0 : filteredEditRegions.value.length - 1
-    selectedEditRegionKey.value = filteredEditRegions.value[fallbackIndex]?.id || ''
+    selectSingleCanvasRegion(filteredEditRegions.value[fallbackIndex])
     return
   }
 
@@ -3867,7 +4052,7 @@ function selectAdjacentEditRegion(offset) {
     filteredEditRegions.value.length - 1,
     Math.max(0, currentIndex + offset),
   )
-  selectedEditRegionKey.value = filteredEditRegions.value[nextIndex]?.id || selectedEditRegionKey.value
+  selectSingleCanvasRegion(filteredEditRegions.value[nextIndex] || selectedEditRegion.value)
 }
 
 function getCanvasPreviewText(region) {
@@ -3989,6 +4174,39 @@ function getManualDraftStyle(page) {
   return getStyleRegionBoxStyle({ bbox }, page)
 }
 
+function getCanvasMarqueeBBox(page) {
+  const draft = canvasMarqueeState.value
+  if (!draft || !page || draft.pageId !== page.stored_name) {
+    return null
+  }
+  const x1 = Math.min(draft.startX, draft.currentX)
+  const y1 = Math.min(draft.startY, draft.currentY)
+  const x2 = Math.max(draft.startX, draft.currentX)
+  const y2 = Math.max(draft.startY, draft.currentY)
+  if (x2 - x1 < 2 || y2 - y1 < 2) {
+    return null
+  }
+  return [x1, y1, x2, y2]
+}
+
+function getCanvasMarqueeStyle(page) {
+  const bbox = getCanvasMarqueeBBox(page)
+  if (!bbox) {
+    return {}
+  }
+  return getStyleRegionBoxStyle({ bbox }, page)
+}
+
+function doBBoxesIntersect(first, second) {
+  if (!Array.isArray(first) || !Array.isArray(second)) {
+    return false
+  }
+  return first[0] <= second[2]
+    && first[2] >= second[0]
+    && first[1] <= second[3]
+    && first[3] >= second[1]
+}
+
 function getCanvasMeasurementOverlay(page) {
   if (!page?.stored_name) {
     return null
@@ -4091,11 +4309,14 @@ function getCanvasSnapGuideStyle(guide, page) {
 }
 
 function getCanvasSelectionToolbarStyle(page) {
-  const region = selectedEditRegion.value
-  if (!page?.stored_name || !region || canvasTransformState.value?.pageId === page.stored_name) {
+  const regions = hasCanvasMultiSelection.value ? selectedCanvasRegions.value : (selectedEditRegion.value ? [selectedEditRegion.value] : [])
+  if (!page?.stored_name || !regions.length || canvasTransformState.value?.pageId === page.stored_name) {
     return {}
   }
-  const [x1, y1, _x2, y2] = getEffectiveRegionBBox(region)
+  const bboxes = regions.map((region) => getEffectiveRegionBBox(region))
+  const x1 = Math.min(...bboxes.map((bbox) => bbox[0]))
+  const y1 = Math.min(...bboxes.map((bbox) => bbox[1]))
+  const y2 = Math.max(...bboxes.map((bbox) => bbox[3]))
   const imageWidth = Math.max(page?.image_width || 1, 1)
   const imageHeight = Math.max(page?.image_height || 1, 1)
   const viewport = getViewportState(page.stored_name, 'main')
@@ -4111,6 +4332,9 @@ function getCanvasSelectionToolbarStyle(page) {
 
 function getCanvasSelectionToolbarText(page) {
   const region = selectedEditRegion.value
+  if (hasCanvasMultiSelection.value) {
+    return `${selectedCanvasRegionCount.value} 个框已选`
+  }
   if (!page || !region) {
     return ''
   }
@@ -4272,6 +4496,97 @@ function startManualDraw(event, page) {
   selectedEditPageKey.value = page.stored_name
   event.currentTarget.setPointerCapture?.(event.pointerId)
   event.preventDefault()
+}
+
+function startCanvasMarqueeSelection(event, page) {
+  if (!page || !canDirectManipulateCanvas.value || manualDrawMode.value || adjustingRegionId.value || mergeMode.value) {
+    return
+  }
+  if (spacePanPressed.value || event.button !== 0) {
+    return
+  }
+
+  const point = getCanvasPoint(event, page)
+  canvasMarqueeState.value = {
+    pageId: page.stored_name,
+    pointerId: event.pointerId,
+    startX: point.x,
+    startY: point.y,
+    currentX: point.x,
+    currentY: point.y,
+    additive: Boolean(event.shiftKey || event.metaKey || event.ctrlKey),
+    moved: false
+  }
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+
+function updateCanvasMarqueeSelection(event, page) {
+  const draft = canvasMarqueeState.value
+  if (!draft || !page || draft.pageId !== page.stored_name) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  const point = getCanvasPoint(event, page)
+  draft.currentX = point.x
+  draft.currentY = point.y
+  draft.moved = draft.moved || Math.abs(draft.currentX - draft.startX) >= 4 || Math.abs(draft.currentY - draft.startY) >= 4
+}
+
+function finishCanvasMarqueeSelection(event, page) {
+  const draft = canvasMarqueeState.value
+  if (!draft || !page || draft.pageId !== page.stored_name) {
+    return
+  }
+  if (draft.pointerId != null && event.pointerId != null && draft.pointerId !== event.pointerId) {
+    return
+  }
+  if (event.currentTarget.hasPointerCapture?.(draft.pointerId)) {
+    event.currentTarget.releasePointerCapture?.(draft.pointerId)
+  }
+
+  const marqueeBBox = getCanvasMarqueeBBox(page)
+  canvasMarqueeState.value = null
+  if (!draft.moved || !marqueeBBox) {
+    clearCanvasRegionSelection()
+    return
+  }
+
+  const selectedIds = (page.regions || [])
+    .filter((region) => doBBoxesIntersect(marqueeBBox, getEffectiveRegionBBox(region)))
+    .map((region) => region.id)
+  const nextIds = draft.additive
+    ? Array.from(new Set([...selectedCanvasRegionIds.value, ...selectedIds]))
+    : selectedIds
+  setCanvasRegionSelection(nextIds, nextIds[0] || '')
+}
+
+function handleCanvasStagePointerDown(event, page) {
+  if (manualDrawMode.value || adjustingRegionId.value) {
+    startManualDraw(event, page)
+    return
+  }
+  startCanvasMarqueeSelection(event, page)
+}
+
+function handleCanvasStagePointerMove(event, page) {
+  updateManualDraw(event, page)
+  updateCanvasMarqueeSelection(event, page)
+}
+
+function handleCanvasStagePointerUp(event, page) {
+  if (manualDrawDraft.value) {
+    void finishManualDraw(event, page)
+    return
+  }
+  finishCanvasMarqueeSelection(event, page)
+}
+
+function cancelCanvasStagePointerInteraction() {
+  clearManualDraft({ keepMode: true })
+  canvasMarqueeState.value = null
 }
 
 function updateManualDraw(event, page) {
@@ -4579,6 +4894,7 @@ async function loadEditInspection(options = {}) {
   await Promise.all(tasks)
   translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
   fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
+  fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
   syncEditSelection()
 }
 
@@ -4868,7 +5184,7 @@ async function runCanvasCommand(page, options) {
   }
 
   try {
-    const result = await applyPageCommands(page.stored_name, redoCommands)
+    const result = await applyPageCommands(page.stored_name, redoCommands, { syncPayload: false })
     if (undoCommands.length) {
       pushCanvasHistory(page.stored_name, {
         label: String(options?.label || '编辑文本框'),
@@ -5154,7 +5470,19 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     return
   }
 
-  selectedEditRegionKey.value = region.id
+  if ((event.shiftKey || event.metaKey || event.ctrlKey) && mode === 'move') {
+    toggleCanvasRegionSelection(region)
+    suppressCanvasRegionClickUntil = Date.now() + 180
+    event.preventDefault()
+    event.stopPropagation()
+    return
+  }
+
+  if (!isRegionSelectedOnCanvas(region)) {
+    selectSingleCanvasRegion(region)
+  } else {
+    selectedEditRegionKey.value = region.id
+  }
 
   if (!canDirectManipulateCanvas.value) {
     return
@@ -5172,6 +5500,16 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
   const geometry = getCanvasGeometryFromSurface(canvas, page, 'main')
   const captureTarget = event.currentTarget instanceof Element ? event.currentTarget : null
   const point = getCanvasPointFromGeometry(geometry, event.clientX, event.clientY, page)
+  const dragRegionIds = mode === 'move' && isRegionSelectedOnCanvas(region)
+    ? selectedCanvasRegionIds.value
+    : [region.id]
+  const originBBoxes = {}
+  for (const dragRegionId of dragRegionIds) {
+    const dragRegion = page.regions?.find((item) => item.id === dragRegionId)
+    if (dragRegion) {
+      originBBoxes[dragRegionId] = getEffectiveRegionBBox(dragRegion)
+    }
+  }
   canvasSnapState.value = null
   canvasTransformState.value = {
     pointerId: event.pointerId,
@@ -5183,7 +5521,10 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
     geometry,
     startPoint: point,
     originBBox: getEffectiveRegionBBox(region),
+    originBBoxes,
+    regionIds: Object.keys(originBBoxes),
     currentBBox: getEffectiveRegionBBox(region),
+    currentBBoxes: { ...originBBoxes },
     moved: false,
     startedAt: Date.now()
   }
@@ -5251,13 +5592,32 @@ function updateCanvasRegionTransform(event) {
   }
 
   const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
+  const effectiveDeltaX = draft.mode === 'move' ? nextBBox[0] - draft.originBBox[0] : 0
+  const effectiveDeltaY = draft.mode === 'move' ? nextBBox[1] - draft.originBBox[1] : 0
+  const nextBBoxes = { ...(draft.currentBBoxes || {}) }
+  if (draft.mode === 'move' && Array.isArray(draft.regionIds) && draft.regionIds.length > 1) {
+    for (const regionId of draft.regionIds) {
+      const originBBox = draft.originBBoxes?.[regionId]
+      const dragRegion = page.regions?.find((item) => item.id === regionId)
+      if (!originBBox || !dragRegion) {
+        continue
+      }
+      const targetBBox = translateBBoxWithinPage(originBBox, effectiveDeltaX, effectiveDeltaY, page)
+      nextBBoxes[regionId] = targetBBox
+      updateRegionLayoutOverride(regionId, { bbox: targetBBox })
+    }
+  } else {
+    nextBBoxes[draft.regionId] = nextBBox
+    updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
+  }
+
   draft.moved = draft.moved || changed
   draft.currentBBox = nextBBox
+  draft.currentBBoxes = nextBBoxes
   draft.proportional = Boolean(draft.mode !== 'move' && event.shiftKey)
   draft.fromCenter = Boolean(event.altKey)
   draft.axisLocked = Boolean(draft.mode === 'move' && event.shiftKey)
   draft.snapDisabled = snapDisabled
-  updateRegionLayoutOverride(draft.regionId, { bbox: nextBBox })
 }
 
 async function finishCanvasRegionTransform(event) {
@@ -5288,28 +5648,54 @@ async function finishCanvasRegionTransform(event) {
   if (!page || !nextBBox) {
     return
   }
+  const movedRegionIds = Array.isArray(draft.regionIds) && draft.regionIds.length
+    ? draft.regionIds
+    : [draft.regionId]
+  const redoCommands = []
+  const undoCommands = []
+  for (const regionId of movedRegionIds) {
+    const originBBox = draft.originBBoxes?.[regionId] || (regionId === draft.regionId ? draft.originBBox : null)
+    const currentBBox = draft.currentBBoxes?.[regionId] || (regionId === draft.regionId ? nextBBox : null)
+    if (!originBBox || !currentBBox) {
+      continue
+    }
+    const changed = currentBBox.some((value, index) => value !== originBBox[index])
+    if (!changed) {
+      continue
+    }
+    redoCommands.push({
+      type: 'update_region_bbox',
+      region_id: regionId,
+      bbox: currentBBox
+    })
+    undoCommands.push({
+      type: 'update_region_bbox',
+      region_id: regionId,
+      bbox: originBBox
+    })
+  }
+  if (!redoCommands.length) {
+    return
+  }
 
   await runCanvasCommand(page, {
-    label: draft.mode === 'move' ? '移动文本框' : '调整文本框大小',
-    redoCommands: [
-      {
-        type: 'update_region_bbox',
-        region_id: draft.regionId,
-        bbox: nextBBox
-      }
-    ],
-    undoCommands: [
-      {
-        type: 'update_region_bbox',
-        region_id: draft.regionId,
-        bbox: draft.originBBox
-      }
-    ],
+    label: draft.mode === 'move'
+      ? (redoCommands.length > 1 ? `移动 ${redoCommands.length} 个文本框` : '移动文本框')
+      : '调整文本框大小',
+    redoCommands,
+    undoCommands,
     successMessage: draft.mode === 'move'
-      ? '已移动文本框位置，重新嵌字时会按新位置计算。'
+      ? (redoCommands.length > 1 ? `已移动 ${redoCommands.length} 个文本框。` : '已移动文本框位置，重新嵌字时会按新位置计算。')
       : '已更新文本框大小，重新嵌字时会按新框重新排版。',
     focusRegionId: draft.regionId,
-    rollback: () => updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+    rollback: () => {
+      for (const regionId of movedRegionIds) {
+        const originBBox = draft.originBBoxes?.[regionId]
+        if (originBBox) {
+          updateRegionLayoutOverride(regionId, { bbox: originBBox })
+        }
+      }
+    }
   })
 }
 
@@ -5325,7 +5711,9 @@ function cancelCanvasRegionTransform() {
       // Ignore if capture has already been released.
     }
   }
-  updateRegionLayoutOverride(draft.regionId, { bbox: draft.originBBox })
+  for (const [regionId, originBBox] of Object.entries(draft.originBBoxes || { [draft.regionId]: draft.originBBox })) {
+    updateRegionLayoutOverride(regionId, { bbox: originBBox })
+  }
   canvasTransformState.value = null
   canvasSnapState.value = null
 }
@@ -5628,6 +6016,12 @@ function commitRegionTextDraft(region) {
 function handleRegionFontSizeInput(region, nextValue) {
   selectedEditRegionKey.value = region.id
   const rawValue = String(nextValue ?? '')
+  if (!Object.prototype.hasOwnProperty.call(fontSizeDraftOriginOverrides.value, region.id)) {
+    fontSizeDraftOriginOverrides.value = {
+      ...fontSizeDraftOriginOverrides.value,
+      [region.id]: getRegionExplicitFontSizeOverride(region.id)
+    }
+  }
   if (isCanvasReviewMode.value) {
     fontSizeInputDrafts.value = {
       ...fontSizeInputDrafts.value,
@@ -5664,6 +6058,13 @@ function commitRegionFontSize(region) {
   const nextDrafts = { ...fontSizeInputDrafts.value }
   delete nextDrafts[region.id]
   fontSizeInputDrafts.value = nextDrafts
+  const hasOriginSnapshot = Object.prototype.hasOwnProperty.call(fontSizeDraftOriginOverrides.value, region.id)
+  const previousExplicit = hasOriginSnapshot
+    ? fontSizeDraftOriginOverrides.value[region.id]
+    : getRegionExplicitFontSizeOverride(region.id)
+  const nextOrigins = { ...fontSizeDraftOriginOverrides.value }
+  delete nextOrigins[region.id]
+  fontSizeDraftOriginOverrides.value = nextOrigins
 
   if (Number.isNaN(nextValue)) {
     return
@@ -5674,9 +6075,6 @@ function commitRegionFontSize(region) {
     updateRegionFontSize(region, normalizedValue)
     return
   }
-
-  const currentOverride = translationRegionLayoutOverrides.value[region.id] || {}
-  const previousExplicit = typeof currentOverride.font_size === 'number' ? currentOverride.font_size : null
 
   updateRegionLayoutOverride(region.id, { font_size: normalizedValue })
   void runCanvasCommand(selectedEditPage.value, {
@@ -5710,8 +6108,15 @@ function commitRegionFontSize(region) {
       } else {
         current.font_size = previousExplicit
       }
-      rollbackOverrides[region.id] = current
+      if (Object.keys(current).length) {
+        rollbackOverrides[region.id] = current
+      } else {
+        delete rollbackOverrides[region.id]
+      }
       translationRegionLayoutOverrides.value = rollbackOverrides
+      if (selectedEditPage.value?.stored_name) {
+        markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+      }
     }
   })
 }
@@ -5918,7 +6323,7 @@ function handleGlobalCanvasKeydown(event) {
     clearManualDraft()
     mergeMode.value = false
     mergeRegionSelection.value = {}
-    selectedEditRegionKey.value = ''
+    clearCanvasRegionSelection()
     updatePageUiState(selectedEditPage.value.stored_name, (state) => ({
       ...state,
       selectedRegionId: ''
@@ -6291,7 +6696,7 @@ async function openV2ReviewPage(pageKey = '') {
   if (!targetKey) {
     return
   }
-  selectedEditPageKey.value = targetKey
+  selectEditPageForReview(targetKey)
   try {
     await loadEditInspection({ silent: true })
   } catch (_error) {
@@ -6342,6 +6747,187 @@ function toggleRegionEnabledV2(region) {
 
 function toggleRegionDirectionV2(region) {
   updateRegionTextDirection(region, isVerticalRegion(region) ? 'horizontal' : 'vertical')
+}
+
+function getSelectedBatchRegions() {
+  const selectedIds = new Set(selectedCanvasRegionIds.value)
+  return (selectedEditPage.value?.regions || []).filter((region) => selectedIds.has(region.id))
+}
+
+function snapshotRegionOverrideMaps() {
+  return {
+    disabled: { ...translationRegionDisabledOverrides.value },
+    skip: { ...translationRegionSkipOverrides.value },
+    translations: { ...translationRegionOverrides.value },
+    layout: { ...translationRegionLayoutOverrides.value },
+    style: { ...styleRegionOverrides.value }
+  }
+}
+
+function restoreRegionOverrideMaps(snapshot) {
+  if (!snapshot) {
+    return
+  }
+  translationRegionDisabledOverrides.value = { ...(snapshot.disabled || {}) }
+  translationRegionSkipOverrides.value = { ...(snapshot.skip || {}) }
+  translationRegionOverrides.value = { ...(snapshot.translations || {}) }
+  translationRegionLayoutOverrides.value = { ...(snapshot.layout || {}) }
+  styleRegionOverrides.value = { ...(snapshot.style || {}) }
+  if (selectedEditPage.value?.stored_name) {
+    markCanvasPreviewDirty(selectedEditPage.value.stored_name)
+  }
+}
+
+function applyBatchRegionEnabled(enabled) {
+  const page = selectedEditPage.value
+  const regions = getSelectedBatchRegions()
+  if (!page || regions.length < 2) {
+    return
+  }
+  const snapshot = snapshotRegionOverrideMaps()
+  const redoCommands = []
+  const undoCommands = []
+  const nextDisabled = { ...translationRegionDisabledOverrides.value }
+  const nextSkip = { ...translationRegionSkipOverrides.value }
+  const nextTranslations = { ...translationRegionOverrides.value }
+  const nextLayout = { ...translationRegionLayoutOverrides.value }
+  const nextStyle = { ...styleRegionOverrides.value }
+
+  for (const region of regions) {
+    const previousValue = isRegionDisabled(region)
+    const nextDisabledValue = !enabled
+    if (previousValue === nextDisabledValue) {
+      continue
+    }
+    if (nextDisabledValue) {
+      nextDisabled[region.id] = true
+      delete nextSkip[region.id]
+      delete nextTranslations[region.id]
+      delete nextLayout[region.id]
+      delete nextStyle[region.id]
+      redoCommands.push({ type: 'disable_region', region_id: region.id })
+    } else {
+      delete nextDisabled[region.id]
+      redoCommands.push({ type: 'restore_region', region_id: region.id })
+    }
+    undoCommands.push(previousValue
+      ? { type: 'disable_region', region_id: region.id }
+      : { type: 'restore_region', region_id: region.id })
+  }
+
+  if (!redoCommands.length) {
+    return
+  }
+
+  translationRegionDisabledOverrides.value = nextDisabled
+  translationRegionSkipOverrides.value = nextSkip
+  translationRegionOverrides.value = nextTranslations
+  translationRegionLayoutOverrides.value = nextLayout
+  styleRegionOverrides.value = nextStyle
+  markCanvasPreviewDirty(page.stored_name)
+
+  void runCanvasCommand(page, {
+    label: enabled ? `批量启用 ${redoCommands.length} 个文本框` : `批量停用 ${redoCommands.length} 个文本框`,
+    redoCommands,
+    undoCommands,
+    successMessage: enabled ? `已启用 ${redoCommands.length} 个文本框。` : `已停用 ${redoCommands.length} 个文本框。`,
+    focusRegionId: selectedEditRegionKey.value || regions[0]?.id,
+    rollback: () => restoreRegionOverrideMaps(snapshot)
+  })
+}
+
+function applyBatchDirection(direction) {
+  const page = selectedEditPage.value
+  const regions = getSelectedBatchRegions()
+  const normalizedDirection = normalizeDirectionValue(direction)
+  if (!page || regions.length < 2 || normalizedDirection === 'auto') {
+    return
+  }
+  const snapshot = snapshotRegionOverrideMaps()
+  const redoCommands = []
+  const undoCommands = []
+  for (const region of regions) {
+    const previousDirection = getRegionDirectionValue(region)
+    if (getResolvedRegionDirection(region) === normalizedDirection && previousDirection === normalizedDirection) {
+      continue
+    }
+    updateRegionLayoutOverride(region.id, { direction: normalizedDirection })
+    redoCommands.push({
+      type: 'update_text_direction',
+      region_id: region.id,
+      direction: normalizedDirection
+    })
+    undoCommands.push({
+      type: 'update_text_direction',
+      region_id: region.id,
+      direction: previousDirection || 'auto'
+    })
+  }
+  if (!redoCommands.length) {
+    return
+  }
+  void runCanvasCommand(page, {
+    label: normalizedDirection === 'vertical' ? `批量改为纵排` : `批量改为横排`,
+    redoCommands,
+    undoCommands,
+    successMessage: normalizedDirection === 'vertical' ? `已将 ${redoCommands.length} 个文本框改为纵排。` : `已将 ${redoCommands.length} 个文本框改为横排。`,
+    focusRegionId: selectedEditRegionKey.value || regions[0]?.id,
+    rollback: () => restoreRegionOverrideMaps(snapshot)
+  })
+}
+
+function applyBatchFontFromActive() {
+  const page = selectedEditPage.value
+  const sourceRegion = selectedEditRegion.value
+  const regions = getSelectedBatchRegions()
+  const targetFontId = sourceRegion ? getEffectiveRegionFontId(sourceRegion) : ''
+  if (!page || !sourceRegion || regions.length < 2 || !targetFontId) {
+    return
+  }
+  const snapshot = snapshotRegionOverrideMaps()
+  const redoCommands = []
+  const undoCommands = []
+  for (const region of regions) {
+    const previousFontId = getRegionFontOverrideId(region)
+    updateRegionLayoutOverride(region.id, { font_key: targetFontId })
+    redoCommands.push({ type: 'update_region_font', region_id: region.id, font_key: targetFontId })
+    undoCommands.push({ type: 'update_region_font', region_id: region.id, font_key: previousFontId })
+  }
+  void runCanvasCommand(page, {
+    label: `批量套用字体`,
+    redoCommands,
+    undoCommands,
+    successMessage: `已给 ${redoCommands.length} 个文本框套用当前字体。`,
+    focusRegionId: sourceRegion.id,
+    rollback: () => restoreRegionOverrideMaps(snapshot)
+  })
+}
+
+function applyBatchFontSizeFromActive() {
+  const page = selectedEditPage.value
+  const sourceRegion = selectedEditRegion.value
+  const regions = getSelectedBatchRegions()
+  const targetFontSize = Math.max(8, Math.min(240, Math.round(Number(sourceRegion ? getRegionFontSize(sourceRegion) : 0))))
+  if (!page || !sourceRegion || regions.length < 2 || !Number.isFinite(targetFontSize)) {
+    return
+  }
+  const snapshot = snapshotRegionOverrideMaps()
+  const redoCommands = []
+  const undoCommands = []
+  for (const region of regions) {
+    const previousFontSize = Number(getRegionFontSize(region) || region.font_size || 12)
+    updateRegionLayoutOverride(region.id, { font_size: targetFontSize })
+    redoCommands.push({ type: 'update_font_size', region_id: region.id, font_size: targetFontSize })
+    undoCommands.push({ type: 'update_font_size', region_id: region.id, font_size: previousFontSize })
+  }
+  void runCanvasCommand(page, {
+    label: `批量套用字号`,
+    redoCommands,
+    undoCommands,
+    successMessage: `已给 ${redoCommands.length} 个文本框套用当前字号。`,
+    focusRegionId: sourceRegion.id,
+    rollback: () => restoreRegionOverrideMaps(snapshot)
+  })
 }
 
 function adjustRegionFontSizeV2(region, delta) {
@@ -7269,7 +7855,7 @@ watch(
                 :data-page-key="page.stored_name"
                 type="button"
                 :class="['v2-page-rail-item', page.stored_name === (v2SelectedPageEntry?.stored_name || '') ? 'active' : '']"
-                @click="selectedEditPageKey = page.stored_name"
+                @click="selectEditPageForReview(page.stored_name)"
               >
                 <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
                 <div class="v2-page-rail-copy">
@@ -7370,10 +7956,10 @@ watch(
                   <div
                     :class="['v2-canvas-stage', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
                     :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'main') : null"
-                    @pointerdown="selectedEditPage && startManualDraw($event, selectedEditPage)"
-                    @pointermove="selectedEditPage && updateManualDraw($event, selectedEditPage)"
-                    @pointerup="selectedEditPage && finishManualDraw($event, selectedEditPage)"
-                    @pointercancel="clearManualDraft({ keepMode: true })"
+                    @pointerdown="selectedEditPage && handleCanvasStagePointerDown($event, selectedEditPage)"
+                    @pointermove="selectedEditPage && handleCanvasStagePointerMove($event, selectedEditPage)"
+                    @pointerup="selectedEditPage && handleCanvasStagePointerUp($event, selectedEditPage)"
+                    @pointercancel="cancelCanvasStagePointerInteraction"
                   >
                     <img
                       v-if="v2EditorPaneImageUrl"
@@ -7400,12 +7986,13 @@ watch(
                           'style-box',
                           isManualRegion(region) ? 'manual' : '',
                           mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
+                          isRegionSelectedOnCanvas(region) ? 'multi-selected' : '',
                           selectedEditRegionKey === region.id ? 'active' : '',
                           canDirectManipulateCanvas ? 'canvas-editable' : '',
                           getStyleRegionLabelClass(region, selectedEditPage)
                         ]"
                         :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                        @click="handleCanvasRegionClick(region)"
+                        @click="handleCanvasRegionClick($event, region)"
                         @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                       >
                         <span class="style-box-label">{{ region.index + 1 }}</span>
@@ -7443,6 +8030,11 @@ watch(
                           @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
                         ></span>
                       </button>
+                      <span
+                        v-if="canvasMarqueeState?.pageId === selectedEditPage.stored_name"
+                        class="v2-canvas-marquee"
+                        :style="getCanvasMarqueeStyle(selectedEditPage)"
+                      ></span>
                       <div
                         v-if="getCanvasMeasurementOverlay(selectedEditPage)"
                         class="v2-canvas-measure-popover"
@@ -7458,8 +8050,18 @@ watch(
                         @click.stop
                       >
                         <span>{{ getCanvasSelectionToolbarText(selectedEditPage) }}</span>
-                        <button type="button" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位</button>
-                        <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
+                        <template v-if="hasCanvasMultiSelection">
+                          <button type="button" @click="applyBatchRegionEnabled(true)">启用</button>
+                          <button type="button" @click="applyBatchRegionEnabled(false)">停用</button>
+                          <button type="button" @click="applyBatchDirection('vertical')">纵排</button>
+                          <button type="button" @click="applyBatchDirection('horizontal')">横排</button>
+                          <button type="button" @click="applyBatchFontFromActive">套用字体</button>
+                          <button type="button" @click="applyBatchFontSizeFromActive">套用字号</button>
+                        </template>
+                        <template v-else>
+                          <button type="button" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位</button>
+                          <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
+                        </template>
                       </div>
                     </template>
                   </div>
@@ -7478,7 +8080,7 @@ watch(
                 <div class="v2-region-sidebar-label">
                   <div class="v2-region-sidebar-summary">
                     <span class="v2-pane-label">文本框</span>
-                    <strong>{{ selectedEditRegion ? selectedEditRegionIndexLabel : '未选中' }}</strong>
+                    <strong>{{ hasCanvasMultiSelection ? `${selectedCanvasRegionCount} 个已选` : (selectedEditRegion ? selectedEditRegionIndexLabel : '未选中') }}</strong>
                   </div>
                   <span class="v2-page-rail-count">{{ filteredEditRegions.length }}</span>
                 </div>
@@ -7527,6 +8129,13 @@ watch(
                 <option value="font-override">有字体覆盖</option>
                 <option value="warning">需留意</option>
               </select>
+              <div v-if="hasCanvasMultiSelection" class="v2-region-batch-bar">
+                <span>{{ selectedCanvasRegionCount }} 个框</span>
+                <button type="button" @click="applyBatchRegionEnabled(true)">启用</button>
+                <button type="button" @click="applyBatchRegionEnabled(false)">停用</button>
+                <button type="button" @click="applyBatchDirection('vertical')">纵排</button>
+                <button type="button" @click="applyBatchDirection('horizontal')">横排</button>
+              </div>
             </div>
 
             <div v-if="selectedEditPage && filteredEditRegions.length" class="v2-region-list">
@@ -7534,8 +8143,13 @@ watch(
                 v-for="region in filteredEditRegions"
                 :key="region.id"
                 :data-region-id="region.id"
-                :class="['style-region-card', 'v2-region-card', selectedEditRegionKey === region.id ? 'active' : '']"
-                @click="selectedEditRegionKey = region.id"
+                :class="[
+                  'style-region-card',
+                  'v2-region-card',
+                  selectedEditRegionKey === region.id ? 'active' : '',
+                  isRegionSelectedOnCanvas(region) ? 'multi-selected' : ''
+                ]"
+                @click="handleRegionCardClick($event, region)"
               >
                 <header class="v2-region-card-head">
                   <div class="v2-region-card-title">

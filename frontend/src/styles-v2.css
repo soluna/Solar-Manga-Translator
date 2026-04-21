@@ -1217,8 +1217,27 @@ img {
   box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
 }
 
+.style-box.multi-selected {
+  border-color: rgba(37, 99, 235, 0.92);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.style-box.active.multi-selected {
+  border-color: var(--v2-accent);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.16), 0 0 0 1px rgba(255, 255, 255, 0.9) inset;
+}
+
 .style-box.merge-selected {
   border-color: #9333ea;
+}
+
+.v2-canvas-marquee {
+  position: absolute;
+  z-index: 7;
+  border: 1px dashed rgba(37, 99, 235, 0.96);
+  background: rgba(37, 99, 235, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  pointer-events: none;
 }
 
 .v2-canvas-snap-guide {
@@ -1382,9 +1401,11 @@ img {
   z-index: 8;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   transform: translateY(var(--toolbar-offset-y, calc(-100% - 10px))) scale(var(--toolbar-scale, 1));
   transform-origin: left var(--toolbar-origin-y, bottom);
+  max-width: 420px;
   min-height: 32px;
   padding: 0 8px;
   border-radius: 10px;
@@ -1494,6 +1515,16 @@ img {
   box-shadow: 0 12px 28px rgba(37, 99, 235, 0.08);
 }
 
+.v2-region-card.multi-selected {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: rgba(239, 246, 255, 0.72);
+}
+
+.v2-region-card.active.multi-selected {
+  border-color: rgba(37, 99, 235, 0.72);
+  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.14);
+}
+
 .v2-region-card-head {
   justify-content: space-between;
   gap: 8px;
@@ -1554,6 +1585,40 @@ img {
   border-top: 1px solid rgba(38, 55, 77, 0.08);
   display: grid;
   gap: 10px;
+}
+
+.v2-region-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 12px;
+  background: rgba(239, 246, 255, 0.86);
+}
+
+.v2-region-batch-bar span {
+  margin-right: auto;
+  color: var(--v2-accent-strong);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.v2-region-batch-bar button {
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--v2-text);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.v2-region-batch-bar button:hover,
+.v2-region-batch-bar button:focus-visible {
+  color: var(--v2-accent-strong);
+  border-color: rgba(37, 99, 235, 0.32);
 }
 
 .v2-region-setting-stack {

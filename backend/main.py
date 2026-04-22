@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any
+import logging
 import os
 import shutil
 import sys
@@ -48,6 +49,7 @@ def iter_font_directories(source: str) -> list[Path]:
     return directories
 SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
+logger = logging.getLogger("manga_translator.api")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +62,37 @@ app.add_middleware(
 # 确保输出和临时目录存在并挂载静态文件
 APP_PATHS.ensure_directories()
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
+
+
+def configure_app_logging() -> None:
+    log_path = APP_PATHS.backend_log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    normalized_log_path = str(log_path.resolve())
+    has_file_handler = any(
+        isinstance(handler, logging.FileHandler)
+        and str(Path(getattr(handler, "baseFilename", "")).resolve()) == normalized_log_path
+        for handler in root_logger.handlers
+    )
+    has_stream_handler = any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in root_logger.handlers
+    )
+    if not has_file_handler:
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root_logger.addHandler(file_handler)
+
+    if not has_stream_handler:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root_logger.addHandler(stream_handler)
+
+
+configure_app_logging()
+logger.info("Backend API initialized. data_dir=%s output_dir=%s logs_dir=%s", APP_PATHS.app_data_dir, APP_PATHS.output_dir, APP_PATHS.logs_dir)
 
 
 def prepare_session_images(session_id: str, image_paths: list[str]) -> tuple[Path, list[dict[str, str]]]:
@@ -698,10 +731,13 @@ async def download_translated_archive(session_id: str):
 async def translate_session(websocket: WebSocket, session_id: str):
     await websocket.accept()
     busy_cleared = False
+    action = "translate"
+    target_stored_name = ""
 
     try:
         session = get_or_restore_session(session_id)
     except HTTPException:
+        logger.warning("Translation websocket rejected because session was not found. session_id=%s", session_id)
         await websocket.send_json({"event": "error", "message": "会话不存在，请重新上传文件。"})
         await websocket.close()
         return
@@ -711,8 +747,15 @@ async def translate_session(websocket: WebSocket, session_id: str):
         action = str(payload.get("action") or "translate").strip().lower()
         config = payload.get("config", {})
         target_stored_name = str(payload.get("target_stored_name") or "").strip()
+        logger.info(
+            "Translation websocket started. session_id=%s action=%s target=%s",
+            session_id,
+            action,
+            target_stored_name or "*",
+        )
 
         if translator_engine.is_session_busy(session_id):
+            logger.warning("Translation websocket rejected because session is busy. session_id=%s action=%s", session_id, action)
             await websocket.send_json({"event": "error", "message": "该项目已有任务在运行，请等待当前任务完成。"})
             await websocket.close()
             return
@@ -720,7 +763,16 @@ async def translate_session(websocket: WebSocket, session_id: str):
         translator_engine.mark_session_busy(session_id, action)
 
         async def send_event(event: dict[str, Any]) -> None:
-            await websocket.send_json(event)
+            try:
+                await websocket.send_json(event)
+            except Exception:
+                logger.exception(
+                    "Failed to send translation progress event. session_id=%s action=%s event=%s",
+                    session_id,
+                    action,
+                    event.get("event") if isinstance(event, dict) else type(event).__name__,
+                )
+                raise
 
         if action == "rerender":
             result = await translator_engine.rerender_session(
@@ -761,6 +813,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
             )
         translator_engine.clear_session_busy(session_id)
         busy_cleared = True
+        logger.info("Translation websocket completed. session_id=%s action=%s", session_id, action)
         await websocket.send_json(
             {
                 "event": "completed",
@@ -769,9 +822,24 @@ async def translate_session(websocket: WebSocket, session_id: str):
             }
         )
     except WebSocketDisconnect:
+        logger.warning(
+            "Translation websocket disconnected. session_id=%s action=%s target=%s",
+            session_id,
+            action,
+            target_stored_name or "*",
+        )
         return
     except Exception as exc:
-        await websocket.send_json({"event": "error", "message": str(exc)})
+        logger.exception(
+            "Translation websocket failed. session_id=%s action=%s target=%s",
+            session_id,
+            action,
+            target_stored_name or "*",
+        )
+        try:
+            await websocket.send_json({"event": "error", "message": str(exc)})
+        except Exception:
+            logger.exception("Failed to send websocket error message. session_id=%s action=%s", session_id, action)
     finally:
         if not busy_cleared:
             translator_engine.clear_session_busy(session_id)

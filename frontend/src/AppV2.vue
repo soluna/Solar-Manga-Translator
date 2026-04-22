@@ -6415,6 +6415,13 @@ function downloadV2TranslatedResults() {
   status.value = '已开始导出翻译结果压缩包。'
 }
 
+function getBackendLogHint() {
+  const logsDir = String(appRuntime.value?.logs_dir || '').trim()
+  return logsDir
+    ? `后端日志目录：${logsDir}`
+    : '请查看设置里的运行时信息，或查看启动目录下的后端日志。'
+}
+
 async function checkBackendStatus() {
   try {
     const response = await fetch(toApiUrl('/api/status'))
@@ -7154,7 +7161,7 @@ function startTranslation(action = 'translate') {
     if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
       return
     }
-    errorMessage.value = '翻译连接中断，请查看后端控制台日志。'
+    errorMessage.value = `翻译连接中断。${getBackendLogHint()}`
     status.value = activeAction.value === 'rerender'
       ? '重嵌字连接中断。'
       : activeAction.value === 'detect'
@@ -7177,7 +7184,7 @@ function startTranslation(action = 'translate') {
       return
     }
     if (translating.value) {
-      errorMessage.value = '翻译任务意外断开，请查看后端日志。'
+      errorMessage.value = `翻译任务意外断开。${getBackendLogHint()}`
       status.value = activeAction.value === 'rerender'
         ? '重嵌字未完成。'
         : activeAction.value === 'detect'

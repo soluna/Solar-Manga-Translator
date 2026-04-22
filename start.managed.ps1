@@ -21,6 +21,9 @@ $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) 
     Join-Path $root ".runtime"
 }
 $browserProfileDir = Join-Path $browserProfileBase "browser-profile"
+$logDir = Join-Path $browserProfileBase "logs"
+$backendLogPath = Join-Path $logDir "backend-managed.log"
+$frontendLogPath = Join-Path $logDir "frontend-managed.log"
 
 $backendProcess = $null
 $frontendProcess = $null
@@ -29,7 +32,8 @@ $browserProcess = $null
 function Wait-HttpReady {
     param(
         [string]$Url,
-        [int]$TimeoutSeconds = 45
+        [int]$TimeoutSeconds = 45,
+        [System.Diagnostics.Process]$Process = $null
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -41,21 +45,85 @@ function Wait-HttpReady {
             }
         } catch {
         }
+
+        if ($null -ne $Process) {
+            try {
+                if ($Process.HasExited) {
+                    return $false
+                }
+            } catch {
+            }
+        }
+
         Start-Sleep -Milliseconds 500
     }
 
     return $false
 }
 
+function Get-LogTail {
+    param(
+        [string]$Path,
+        [int]$LineCount = 80
+    )
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return "(log file not found: $Path)"
+    }
+
+    try {
+        return (Get-Content -LiteralPath $Path -Tail $LineCount -ErrorAction Stop) -join [Environment]::NewLine
+    } catch {
+        return "(failed to read log file: $Path)"
+    }
+}
+
+function New-StartupFailureMessage {
+    param(
+        [string]$ServiceName,
+        [string]$Url,
+        [System.Diagnostics.Process]$Process,
+        [string]$LogPath
+    )
+
+    $processState = "unknown"
+    if ($null -ne $Process) {
+        try {
+            $processState = if ($Process.HasExited) {
+                "exited with code $($Process.ExitCode)"
+            } else {
+                "still running, PID $($Process.Id)"
+            }
+        } catch {
+            $processState = "unavailable"
+        }
+    }
+
+    $tail = Get-LogTail -Path $LogPath
+    return @"
+$ServiceName did not become ready in time.
+Checked URL: $Url
+Process state: $processState
+Log file: $LogPath
+
+Last log lines:
+$tail
+"@
+}
+
 function Start-CmdWindow {
     param(
         [string]$Title,
         [string]$WorkingDirectory,
-        [string]$Command
+        [string]$Command,
+        [string]$LogPath
     )
 
-    $fullCommand = "title $Title && $Command"
-    return Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", $fullCommand) -WorkingDirectory $WorkingDirectory -PassThru
+    $safeTitle = $Title.Replace('"', "'")
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $quotedLogPath = '"' + $LogPath + '"'
+    $fullCommand = 'title "' + $safeTitle + '" && echo [' + $timestamp + '] Starting ' + $safeTitle + ' > ' + $quotedLogPath + ' && ' + $Command + ' 1>> ' + $quotedLogPath + ' 2>&1'
+    return Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $fullCommand) -WorkingDirectory $WorkingDirectory -PassThru
 }
 
 function Stop-ProcessTree {
@@ -100,22 +168,26 @@ try {
     Write-Host "both backend and frontend services automatically."
     Write-Host "==================================================="
 
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
     $backendProcess = Start-CmdWindow `
         -Title "Manga Translator API" `
         -WorkingDirectory $backendDir `
-        -Command "call venv\Scripts\activate.bat && uvicorn main:app --host 0.0.0.0 --port 8000"
+        -Command 'call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port 8000' `
+        -LogPath $backendLogPath
 
-    if (-not (Wait-HttpReady -Url $backendUrl -TimeoutSeconds 60)) {
-        throw "Backend API did not become ready in time."
+    if (-not (Wait-HttpReady -Url $backendUrl -TimeoutSeconds 90 -Process $backendProcess)) {
+        throw (New-StartupFailureMessage -ServiceName "Backend API" -Url $backendUrl -Process $backendProcess -LogPath $backendLogPath)
     }
 
     $frontendProcess = Start-CmdWindow `
         -Title "Manga Translator WebUI" `
         -WorkingDirectory $frontendDir `
-        -Command "npm run dev"
+        -Command 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort' `
+        -LogPath $frontendLogPath
 
-    if (-not (Wait-HttpReady -Url $frontendUrl -TimeoutSeconds 60)) {
-        throw "Frontend WebUI did not become ready in time."
+    if (-not (Wait-HttpReady -Url $frontendUrl -TimeoutSeconds 120 -Process $frontendProcess)) {
+        throw (New-StartupFailureMessage -ServiceName "Frontend WebUI" -Url $frontendUrl -Process $frontendProcess -LogPath $frontendLogPath)
     }
 
     $browserExe = Get-BrowserExecutable
@@ -133,6 +205,7 @@ try {
         Write-Host "Backend API:  http://localhost:8000"
         Write-Host "Frontend UI:  http://localhost:5173"
         Write-Host "Browser mode: dedicated app window"
+        Write-Host "Logs:          $logDir"
         Write-Host ""
         Write-Host "Close that browser window to stop this session."
         Wait-Process -Id $browserProcess.Id

@@ -2434,7 +2434,13 @@ class TranslatorEngine:
             stored_name = str(image.get("stored_name") or "")
             source_path = source_dir / stored_name
             cache_page_dir = self._session_page_cache_dir(session, session_id, stored_name)
-            if not self._has_rerenderable_page_cache(cache_page_dir):
+            if not self._ensure_editable_page_cache(
+                session_id=session_id,
+                session=session,
+                stored_name=stored_name,
+                config=config,
+                source_path=source_path,
+            ):
                 raise RuntimeError(f"当前页面缺少可编辑缓存：{stored_name}")
 
             source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
@@ -2556,11 +2562,20 @@ class TranslatorEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         target_images = self._resolve_rerender_images(session, target_stored_name)
-        rerenderable_pages = sum(
-            1
-            for image in target_images
-            if self._has_rerenderable_page_cache(self._session_page_cache_dir(session, session_id, image["stored_name"]))
-        )
+        rerenderable_pages = 0
+        for image in target_images:
+            stored_name = str(image.get("stored_name") or "")
+            if not stored_name:
+                continue
+            source_path = source_dir / stored_name
+            if self._ensure_editable_page_cache(
+                session_id=session_id,
+                session=session,
+                stored_name=stored_name,
+                config=config,
+                source_path=source_path,
+            ):
+                rerenderable_pages += 1
         if rerenderable_pages == 0:
             raise RuntimeError("当前会话还没有可用的重嵌字缓存，请先用当前版本完整翻译一次。")
 
@@ -2593,7 +2608,13 @@ class TranslatorEngine:
             )
             cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
 
-            if self._has_rerenderable_page_cache(cache_page_dir):
+            if self._ensure_editable_page_cache(
+                session_id=session_id,
+                session=session,
+                stored_name=image["stored_name"],
+                config=config,
+                source_path=source_path,
+            ):
                 prepared_regions = None
                 debug_info = None
                 if style_debug_enabled:
@@ -3449,7 +3470,13 @@ class TranslatorEngine:
                 rerender_variant,
             )
             cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
-            if not self._has_rerenderable_page_cache(cache_page_dir):
+            if not self._ensure_editable_page_cache(
+                session_id=session_id,
+                session=session,
+                stored_name=image["stored_name"],
+                config=config,
+                source_path=source_path,
+            ):
                 existing_output = self._current_translated_output(
                     session,
                     output_dir,
@@ -4141,6 +4168,123 @@ class TranslatorEngine:
             and (page_cache_dir / "inpainted.png").exists()
             and (page_cache_dir / "regions.json").exists()
         )
+
+    def _page_document_region_to_text_region(
+        self,
+        region_payload: dict[str, Any],
+        config: dict[str, Any],
+        stored_name: str,
+    ) -> Any | None:
+        region_id = str(region_payload.get("region_id") or "").strip()
+        bbox = region_payload.get("bbox")
+        if not region_id or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+
+        try:
+            normalized_bbox = [int(round(float(value))) for value in bbox]
+        except (TypeError, ValueError):
+            return None
+
+        translation_payload = region_payload.get("translation") or {}
+        style_payload = region_payload.get("style") or {}
+        source_text = str(region_payload.get("source_text") or "").strip()
+        machine_translation = str(translation_payload.get("machine") or "").strip()
+        edited_translation = str(translation_payload.get("edited") or "").strip()
+        resolved_translation = str(
+            translation_payload.get("resolved")
+            or edited_translation
+            or machine_translation
+            or ""
+        ).strip()
+
+        try:
+            font_size = int(round(float(style_payload.get("font_size") or 14)))
+        except (TypeError, ValueError):
+            font_size = 14
+
+        payload = {
+            "texts": [source_text],
+            "source_text": source_text,
+            "text_raw": source_text,
+            "translation": resolved_translation,
+            "font_size": max(8, font_size),
+            "font_family": str(style_payload.get("font_path") or style_payload.get("font_family") or ""),
+            "line_spacing": float(style_payload.get("line_spacing") or 1.0),
+            "letter_spacing": float(style_payload.get("letter_spacing") or 1.0),
+            "direction": str(region_payload.get("direction") or "auto"),
+            "_direction": str(region_payload.get("direction") or "auto"),
+            "alignment": str(style_payload.get("alignment") or "auto"),
+            "_alignment": str(style_payload.get("alignment") or "auto"),
+            "target_lang": str(config.get("target_lang") or ""),
+            "language": "unknown",
+            "fg_color": (0, 0, 0),
+            "bg_color": (255, 255, 255),
+            "_bounding_rect": normalized_bbox,
+            "lines": self._manual_region_lines(normalized_bbox),
+            "translation_region_key": region_id,
+            "style_region_key": region_id,
+        }
+
+        region = self._deserialize_text_region(payload)
+        region.translation_region_key = region_id
+        region.style_region_key = region_id
+        region.source_text = source_text
+        region.text_raw = source_text
+        region.machine_translation = machine_translation or resolved_translation
+        region.translation_override = edited_translation
+        region.translation = resolved_translation
+        region.skip_translation = bool((region_payload.get("flags") or {}).get("keep_original"))
+        region.disabled_region = bool((region_payload.get("flags") or {}).get("disabled"))
+        return region
+
+    def _ensure_editable_page_cache(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        stored_name: str,
+        config: dict[str, Any],
+        source_path: Path | None = None,
+    ) -> bool:
+        page_cache_dir = self._session_page_cache_dir(session, session_id, stored_name)
+        if self._has_rerenderable_page_cache(page_cache_dir):
+            return True
+
+        resolved_source_path = source_path or (Path(session.get("source_dir") or "") / stored_name)
+        if not resolved_source_path.exists():
+            return False
+        if not self._ensure_page_base_image_cache(resolved_source_path, page_cache_dir):
+            return False
+
+        document: dict[str, Any] = {}
+        try:
+            document = self.get_page_document(session_id, session, stored_name)
+        except Exception as exc:
+            print(f"[WARN] Could not load page document while restoring editable cache for {session_id}/{stored_name}: {exc}")
+
+        raw_regions = document.get("regions") if isinstance(document, dict) else []
+        restored_regions: list[Any] = []
+        for region_payload in raw_regions or []:
+            if not isinstance(region_payload, dict):
+                continue
+            if str(region_payload.get("kind") or "auto") in {"manual", "merged"}:
+                continue
+            region = self._page_document_region_to_text_region(region_payload, config, stored_name)
+            if region is not None:
+                restored_regions.append(region)
+
+        has_manual_regions = bool(self._manual_regions_for_page(session, stored_name))
+        if not restored_regions and not has_manual_regions:
+            return False
+
+        page_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._save_cached_regions(page_cache_dir, restored_regions)
+        restored = self._has_rerenderable_page_cache(page_cache_dir)
+        if restored:
+            print(
+                f"[WARN] Restored editable cache for {session_id}/{stored_name} "
+                "from persisted page document."
+            )
+        return restored
 
     def _ensure_page_base_image_cache(self, source_path: Path, page_cache_dir: Path) -> bool:
         source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)

@@ -4,6 +4,7 @@ import reviewJaPlaceholder from './assets/v2/review-ja.jpg'
 import reviewZhPlaceholder from './assets/v2/review-zh.png'
 import thumbAPlaceholder from './assets/v2/thumb-a.jpg'
 import thumbBPlaceholder from './assets/v2/thumb-b.jpg'
+import { usePageCommandState } from './composables/usePageCommandState.js'
 
 const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
   ? window.mangaDesktop
@@ -99,6 +100,11 @@ const previewFallbackFontNameMap = {
   handwritten: ['華康儷粗圓.ttf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
   sfx: ['方正剪紙GBK.ttf', '華康超黑體(P).ttf', '華康儷粗黑.ttf', 'NotoSansSC-Bold.otf']
 }
+const previewFontDecodeDenyList = new Set([
+  '華康方圓體.ttf',
+  '華康布丁體.ttf',
+  '華康竹風體.ttf'
+])
 const styleFontConfigKeyMap = {
   gothic: 'style_font_gothic_key',
   mincho: 'style_font_mincho_key',
@@ -210,7 +216,7 @@ function createDefaultConfig() {
     style_font_cartoon_key: '',
     style_font_handwritten_key: '',
     style_font_sfx_key: '',
-    render_alignment: 'left',
+    render_alignment: 'center',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
     default_review_mode: 'canvas_beta',
@@ -276,6 +282,7 @@ function normalizeStoredConfig(rawValue) {
   const workspaceWidthMode = typeof rawValue.workspace_width_mode === 'string' && isValidWorkspaceWidthMode(rawValue.workspace_width_mode)
     ? rawValue.workspace_width_mode
     : defaults.workspace_width_mode
+  const renderAlignment = normalizeRenderAlignmentValue(rawValue.render_alignment, defaults.render_alignment)
 
   return {
     translator,
@@ -303,9 +310,7 @@ function normalizeStoredConfig(rawValue) {
     style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
       ? rawValue.style_font_sfx_key
       : defaults.style_font_sfx_key,
-    render_alignment: typeof rawValue.render_alignment === 'string'
-      ? rawValue.render_alignment
-      : defaults.render_alignment,
+    render_alignment: renderAlignment,
     render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
       : defaults.render_letter_spacing,
@@ -328,6 +333,16 @@ function normalizeStoredConfig(rawValue) {
       ? rawValue.image_cleanup_api_key
       : defaults.image_cleanup_api_key
   }
+}
+
+function normalizeRenderAlignmentValue(rawValue, fallback = 'center') {
+  const normalized = String(rawValue || fallback)
+    .trim()
+    .toLowerCase()
+  if (normalized === 'right') {
+    return 'right'
+  }
+  return 'center'
 }
 
 function loadStoredConfig() {
@@ -523,6 +538,7 @@ const styleRegionOverrides = ref({})
 const pageEditHistory = ref({})
 const pageCommandRevisions = ref({})
 const canvasPreviewDirtyPages = ref({})
+const pageImageNonces = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
@@ -544,6 +560,10 @@ const currentProject = ref(null)
 const projectTitleDraft = ref('')
 const projectNoteDraft = ref('')
 const translatedPreviewCanvasRef = ref(null)
+const canvasShellMetrics = ref({
+  main: { width: 0, height: 0 },
+  compare: { width: 0, height: 0 }
+})
 const appRuntime = ref({ ...emptyRuntimeInfo, ...(desktopBridge?.runtime || {}) })
 const appDiagnostics = ref({ ...emptyDiagnosticsInfo })
 const apiBaseUrl = ref(defaultApiBaseUrl)
@@ -609,8 +629,22 @@ let reviewInspectionRequestToken = 0
 let styleInspectionRequestToken = 0
 let autoFitCanvasPageIds = new Set()
 const pageCommandExecutionQueue = new Map()
+const preloadedImageUrls = new Set()
+let canvasLayoutFrame = null
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
+const {
+  pageCommandPendingCounts,
+  regionCommitStates,
+  hasPendingPageCommands,
+  setPageCommandPending,
+  isPageCommandPending,
+  getCommandRegionIds,
+  setRegionCommitState,
+  clearRegionCommitState,
+  getRegionCommitStatusLabel,
+  getRegionCommitStatusClass,
+} = usePageCommandState()
 
 const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
@@ -918,14 +952,14 @@ const selectedEditPageThumbnailUrl = computed(() => {
   if (!page) {
     return ''
   }
-  return withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || ''))
+  return toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')
 })
 const selectedEditPageMainImageUrl = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
     return ''
   }
-  return withCacheBust(toApiUrl(page.base_image_url || page.source_image_url || page.image_url || ''))
+  return toApiUrl(page.base_image_url || page.source_image_url || page.image_url || '')
 })
 const selectedEditPageCompareImageUrl = computed(() => {
   const page = selectedEditPage.value
@@ -933,7 +967,7 @@ const selectedEditPageCompareImageUrl = computed(() => {
     return ''
   }
   if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
-    return withCacheBust(toApiUrl(page.source_image_url || page.image_url || ''))
+    return toApiUrl(page.source_image_url || page.image_url || '')
   }
   if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
     return getCanvasPreviewImageUrl(page)
@@ -975,7 +1009,7 @@ const pageRailItems = computed(() => (
   mergedInspectionPages.value.map((page, index) => ({
     ...page,
     pageNumber: index + 1,
-    thumbnailUrl: withCacheBust(toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')),
+    thumbnailUrl: toApiUrl(page.source_image_url || page.image_url || page.base_image_url || ''),
     selected: page.stored_name === selectedEditPageKey.value
   }))
 ))
@@ -1147,6 +1181,13 @@ const v2ProjectSubtitle = computed(() => {
   return `${stage} · ${pageCount || 0} 页`
 })
 const v2ReviewSavedLabel = computed(() => {
+  const selectedPageId = selectedEditPage.value?.stored_name || ''
+  if (selectedPageId && isPageCommandPending(selectedPageId)) {
+    return '页面保存中…'
+  }
+  if (hasPendingPageCommands.value) {
+    return '保存队列处理中…'
+  }
   const updatedAt = currentProject.value?.updated_at || currentProject.value?.created_at || ''
   return `已保存 ${formatV2TimeOnly(updatedAt)}`
 })
@@ -1232,8 +1273,8 @@ const v2PageEntries = computed(() => {
     seen.add(key)
     ensureEntry(key, {
       name: image?.name || key,
-      sourceUrl: withCacheBust(image?.url || ''),
-      blankUrl: withCacheBust(image?.url || ''),
+      sourceUrl: image?.url || '',
+      blankUrl: image?.url || '',
       pageNumber: order.length + 1
     })
   }
@@ -1241,10 +1282,10 @@ const v2PageEntries = computed(() => {
   for (const page of mergedInspectionPages.value) {
     ensureEntry(page?.stored_name, {
       name: page?.name || page?.stored_name || '未命名页面',
-      sourceUrl: withCacheBust(toApiUrl(page?.source_image_url || page?.image_url || page?.base_image_url || '')),
-      blankUrl: withCacheBust(toApiUrl(page?.base_image_url || page?.source_image_url || page?.image_url || '')),
-      finalUrl: getSavedTranslatedImageUrl(page) || withCacheBust(toApiUrl(page?.translated_image_url || page?.image_url || '')),
-      previewUrl: getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || withCacheBust(toApiUrl(page?.translated_image_url || page?.image_url || '')),
+      sourceUrl: toApiUrl(page?.source_image_url || page?.image_url || page?.base_image_url || ''),
+      blankUrl: toApiUrl(page?.base_image_url || page?.source_image_url || page?.image_url || ''),
+      finalUrl: getSavedTranslatedImageUrl(page) || getVersionedPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name),
+      previewUrl: getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || getVersionedPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name),
       regionCount: Number(page?.regions?.length || 0),
       reviewReady: true
     })
@@ -1254,8 +1295,8 @@ const v2PageEntries = computed(() => {
     const key = String(image?.stored_name || image?.name || '').trim()
     const entry = ensureEntry(key, {
       name: image?.name || key,
-      finalUrl: withCacheBust(image?.url || ''),
-      previewUrl: withCacheBust(image?.url || '')
+      finalUrl: image?.url || '',
+      previewUrl: image?.url || ''
     })
     if (entry && !entry.blankUrl) {
       entry.blankUrl = entry.sourceUrl || entry.finalUrl
@@ -1418,6 +1459,9 @@ const previewFontFaceCss = computed(() => {
     if (!font?.id || !font?.url) {
       continue
     }
+    if (isPreviewFontDecodeDenied(font)) {
+      continue
+    }
     const family = getPreviewFontAlias(font.id)
     const formatHint = getPreviewFontFormatHint(font)
     const srcValue = formatHint
@@ -1483,6 +1527,104 @@ function withCacheBust(url) {
 
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}t=${renderNonce.value}`
+}
+
+function withExplicitCacheBust(url, nonce) {
+  if (!url || !nonce) {
+    return url || ''
+  }
+
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}t=${nonce}`
+}
+
+function getPageImageNonce(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  return normalizedPageId ? pageImageNonces.value[normalizedPageId] : ''
+}
+
+function getVersionedPageImageUrl(path, pageId) {
+  const url = toApiUrl(String(path || '').trim())
+  if (!url) {
+    return ''
+  }
+  return withExplicitCacheBust(url, getPageImageNonce(pageId))
+}
+
+function markPageImageUpdated(pageId, timestamp = Date.now()) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return
+  }
+  pageImageNonces.value = {
+    ...pageImageNonces.value,
+    [normalizedPageId]: timestamp
+  }
+}
+
+function markTranslatedPayloadImagesUpdated(images = [], options = {}) {
+  if (!Array.isArray(images) || !images.length) {
+    return
+  }
+  const onlyPageId = String(options.onlyPageId || '').trim()
+  const shouldRefreshAll = Boolean(options.refreshAll)
+  const timestamp = Date.now()
+  const nextNonces = { ...pageImageNonces.value }
+  let changed = false
+
+  for (const image of images) {
+    const storedName = String(image?.stored_name || '').trim()
+    if (!storedName) {
+      continue
+    }
+    if (onlyPageId && storedName !== onlyPageId) {
+      continue
+    }
+    if (!shouldRefreshAll && !onlyPageId && nextNonces[storedName]) {
+      continue
+    }
+    nextNonces[storedName] = timestamp
+    changed = true
+  }
+
+  if (changed) {
+    pageImageNonces.value = nextNonces
+  }
+}
+
+function preloadImageUrl(url) {
+  const normalizedUrl = String(url || '').trim()
+  if (!normalizedUrl || preloadedImageUrls.has(normalizedUrl) || typeof window === 'undefined') {
+    return
+  }
+  preloadedImageUrls.add(normalizedUrl)
+  const image = new window.Image()
+  image.src = normalizedUrl
+}
+
+function preloadReviewImagesAroundPage(pageKey = '') {
+  const entries = v2PageEntries.value
+  if (!entries.length) {
+    return
+  }
+  const normalizedPageKey = String(pageKey || selectedEditPageKey.value || '').trim()
+  const currentIndex = Math.max(0, entries.findIndex((entry) => entry.stored_name === normalizedPageKey))
+  const preloadIndexes = new Set([
+    currentIndex,
+    Math.max(0, currentIndex - 1),
+    Math.min(entries.length - 1, currentIndex + 1)
+  ])
+
+  for (const index of preloadIndexes) {
+    const entry = entries[index]
+    if (!entry) {
+      continue
+    }
+    preloadImageUrl(entry.sourceUrl)
+    preloadImageUrl(entry.blankUrl)
+    preloadImageUrl(entry.finalUrl)
+    preloadImageUrl(entry.previewUrl)
+  }
 }
 
 async function loadAppRuntime() {
@@ -2008,8 +2150,11 @@ function canRestoreHistorySnapshot(project, snapshot) {
 
 function applySessionPayload(payload, options = {}) {
   const resetInspectors = Boolean(options.resetInspectors)
+  const nextSessionId = payload?.session_id || ''
+  const sessionChanged = String(nextSessionId || '') !== String(sessionId.value || '')
+  const resetEditingState = options.resetEditingState ?? (sessionChanged || resetInspectors)
   renderNonce.value = Date.now()
-  sessionId.value = payload?.session_id || ''
+  sessionId.value = nextSessionId
   workflowStage.value = payload?.workflow_stage || 'idle'
   downloadUrl.value = payload?.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
   downloadPath.value = payload?.download_path || ''
@@ -2021,10 +2166,14 @@ function applySessionPayload(payload, options = {}) {
     url: toApiUrl(image.url),
     stored_name: image.stored_name
   }))
+  markTranslatedPayloadImagesUpdated(payload?.translated_images || [], {
+    onlyPageId: options.refreshTranslatedPageId || '',
+    refreshAll: sessionChanged || resetInspectors || Boolean(options.refreshAllTranslatedImages)
+  })
   translatedImages.value = (payload?.translated_images || []).map((image, index) => ({
     id: image.id || `${sessionId.value || 'session'}-translated-${index}`,
     name: image.name,
-    url: withCacheBust(toApiUrl(image.url)),
+    url: getVersionedPageImageUrl(image.url, image.stored_name),
     stored_name: image.stored_name
   }))
 
@@ -2032,23 +2181,29 @@ function applySessionPayload(payload, options = {}) {
   config.value = mergeProjectConfigWithLocalPreferences(payloadConfig, config.value)
 
   const overrides = payload?.overrides || {}
-  translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
-  translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
-  translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
-  translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
-  styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
-  translationInputDrafts.value = {}
-  fontSizeInputDrafts.value = {}
-  fontSizeDraftOriginOverrides.value = {}
-  pageEditHistory.value = {}
-  canvasPreviewDirtyPages.value = {}
-  perPageUiState.value = {}
-  canvasSnapState.value = null
-  canvasRegionSelection.value = {}
-  canvasMarqueeState.value = null
-  autoFitCanvasPageIds = new Set()
-  regionListSearch.value = ''
-  regionListFilter.value = 'all'
+  if (resetEditingState) {
+    translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+    translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+    translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+    translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+    styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+    translationInputDrafts.value = {}
+    fontSizeInputDrafts.value = {}
+    fontSizeDraftOriginOverrides.value = {}
+    pageEditHistory.value = {}
+    pageCommandPendingCounts.value = {}
+    regionCommitStates.value = {}
+    canvasPreviewDirtyPages.value = {}
+    perPageUiState.value = {}
+    canvasSnapState.value = null
+    canvasRegionSelection.value = {}
+    canvasMarqueeState.value = null
+    autoFitCanvasPageIds = new Set()
+    regionListSearch.value = ''
+    regionListFilter.value = 'all'
+  } else {
+    applyInspectionOverrides(overrides)
+  }
 
   currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
   projectTitleDraft.value = currentProject.value?.title || ''
@@ -2058,6 +2213,13 @@ function applySessionPayload(payload, options = {}) {
     resetTranslationReview()
     resetStyleInspector()
     resetEditInspectorSelection()
+    if (resetEditingState) {
+      translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+      translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+      translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+      translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+      styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+    }
   }
 }
 
@@ -2430,6 +2592,17 @@ function getPreviewFontState(fontId) {
   return previewFontLoadState.value[normalizedFontId] || { status: 'unknown', error: '' }
 }
 
+function isPreviewFontDecodeDenied(fontOrId) {
+  const values = typeof fontOrId === 'object' && fontOrId
+    ? [fontOrId.id, fontOrId.name, fontOrId.label, fontOrId.filename]
+    : [fontOrId]
+  return values.some((value) => previewFontDecodeDenyList.has(String(value || '').trim()))
+}
+
+function isPreviewFontIdDecodeDenied(fontId) {
+  return isPreviewFontDecodeDenied(fontId) || isPreviewFontDecodeDenied(getFontById(fontId))
+}
+
 function isPreviewFontUnsupported(fontId) {
   return getPreviewFontState(fontId).status === 'unsupported'
 }
@@ -2498,14 +2671,14 @@ function pickPreviewFallbackFontId(region) {
     ? (getResolvedStyle(region) || 'gothic')
     : 'gothic'
   const preferredNames = previewFallbackFontNameMap[fallbackStyle] || previewFallbackFontNameMap.gothic
-  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id))
+  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id) && !isPreviewFontDecodeDenied(font))
   const matchedFont = pickMappedStyleFont(compatibleFonts, preferredNames)
   return matchedFont?.id || ''
 }
 
 function getResolvedPreviewFontId(region) {
   const effectiveFontId = getEffectiveRegionFontId(region)
-  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId)) {
+  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId) && !isPreviewFontIdDecodeDenied(effectiveFontId)) {
     return effectiveFontId
   }
   return pickPreviewFallbackFontId(region)
@@ -2537,7 +2710,10 @@ function hasRegionWarning(region) {
   const regionText = String(getEditRegionText(region) || '').trim()
   const confidence = Number(region?.ocr_confidence || 0)
   return Boolean(
-    (getEffectiveRegionFontId(region) && isPreviewFontUnsupported(getEffectiveRegionFontId(region)))
+    (getEffectiveRegionFontId(region) && (
+      isPreviewFontUnsupported(getEffectiveRegionFontId(region))
+      || isPreviewFontIdDecodeDenied(getEffectiveRegionFontId(region))
+    ))
     || !regionText
     || (Number.isFinite(confidence) && confidence > 0 && confidence < 0.72)
   )
@@ -2547,7 +2723,7 @@ function getPreviewFontOptionLabel(font) {
   if (!font) {
     return ''
   }
-  return isPreviewFontUnsupported(font.id)
+  return isPreviewFontUnsupported(font.id) || isPreviewFontDecodeDenied(font)
     ? `${font.label}（仅最终重嵌）`
     : font.label
 }
@@ -2706,9 +2882,9 @@ function focusSelectedRegionInViewport(page, pane = 'main') {
   if (!shell) {
     return
   }
-  const rect = shell.getBoundingClientRect()
-  const safeWidth = Math.max(rect.width || 0, 1)
-  const safeHeight = Math.max(rect.height || 0, 1)
+  const geometry = getCanvasGeometryFromSurface(shell, page, pane)
+  const safeWidth = Math.max(canvasShellMetrics.value[pane]?.width || geometry.stageWidth || 0, 1)
+  const safeHeight = Math.max(canvasShellMetrics.value[pane]?.height || geometry.stageHeight || 0, 1)
   const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
   const regionWidth = Math.max(8, x2 - x1)
   const regionHeight = Math.max(8, y2 - y1)
@@ -2726,11 +2902,33 @@ function focusSelectedRegionInViewport(page, pane = 'main') {
   )
   const centerX = (x1 + x2) / 2
   const centerY = (y1 + y2) / 2
+  const shellCenterX = (geometry.shellWidth / 2) - geometry.stageOffsetLeft
+  const shellCenterY = (geometry.shellHeight / 2) - geometry.stageOffsetTop
   updateViewportState(page.stored_name, pane, {
     zoom: fitZoom,
-    panX: (safeWidth / 2) - ((centerX / imageWidth) * safeWidth * fitZoom),
-    panY: (safeHeight / 2) - ((centerY / imageHeight) * safeHeight * fitZoom)
+    panX: shellCenterX - ((centerX / imageWidth) * geometry.stageWidth * fitZoom),
+    panY: shellCenterY - ((centerY / imageHeight) * geometry.stageHeight * fitZoom)
   })
+}
+
+function getCanvasStageBaseStyle(page, pane = 'main') {
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const metrics = canvasShellMetrics.value[pane] || {}
+  const availableWidth = Math.max(Number(metrics.width || 0), 0)
+  const availableHeight = Math.max(Number(metrics.height || 0), 0)
+  if (!availableWidth || !availableHeight) {
+    return {
+      aspectRatio: `${imageWidth} / ${imageHeight}`
+    }
+  }
+
+  const baseScale = Math.min(availableWidth / imageWidth, availableHeight / imageHeight)
+  return {
+    width: `${Math.max(1, Math.floor(imageWidth * baseScale))}px`,
+    height: `${Math.max(1, Math.floor(imageHeight * baseScale))}px`,
+    aspectRatio: `${imageWidth} / ${imageHeight}`
+  }
 }
 
 function getCanvasViewportStyle(page, pane = 'main') {
@@ -2739,6 +2937,13 @@ function getCanvasViewportStyle(page, pane = 'main') {
   return {
     transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.zoom})`,
     transformOrigin: 'top left'
+  }
+}
+
+function getCanvasStageStyle(page, pane = 'main') {
+  return {
+    ...getCanvasStageBaseStyle(page, pane),
+    ...getCanvasViewportStyle(page, pane)
   }
 }
 
@@ -2783,13 +2988,13 @@ function isVerticalRegion(region) {
 }
 
 function getResolvedRegionAlignment(region) {
-  const normalized = String(region?.alignment || config.value.render_alignment || 'left')
+  const normalized = String(region?.alignment || config.value.render_alignment || 'center')
     .trim()
     .toLowerCase()
-  if (normalized === 'center' || normalized === 'right' || normalized === 'left') {
-    return normalized
+  if (normalized === 'right') {
+    return 'right'
   }
-  return 'left'
+  return 'center'
 }
 
 function getRegionFontSize(region) {
@@ -2836,6 +3041,38 @@ function bumpPageCommandRevision(pageId) {
   return nextRevision
 }
 
+function getProtectedRegionIds(forceRegionIds = []) {
+  const forceSet = new Set((forceRegionIds || []).map((regionId) => String(regionId || '').trim()))
+  const protectedIds = new Set()
+  for (const [regionId, commitState] of Object.entries(regionCommitStates.value || {})) {
+    const normalizedRegionId = String(regionId || '').trim()
+    if (normalizedRegionId && !forceSet.has(normalizedRegionId) && ['dirty', 'saving', 'failed'].includes(commitState?.status)) {
+      protectedIds.add(normalizedRegionId)
+    }
+  }
+  for (const regionId of Object.keys(translationInputDrafts.value || {})) {
+    if (!forceSet.has(regionId)) {
+      protectedIds.add(regionId)
+    }
+  }
+  for (const regionId of Object.keys(fontSizeInputDrafts.value || {})) {
+    if (!forceSet.has(regionId)) {
+      protectedIds.add(regionId)
+    }
+  }
+  return protectedIds
+}
+
+function mergeOverrideMapPreservingLocal(currentMap, incomingMap, protectedRegionIds) {
+  const nextMap = { ...(incomingMap || {}) }
+  for (const regionId of protectedRegionIds) {
+    if (Object.prototype.hasOwnProperty.call(currentMap || {}, regionId)) {
+      nextMap[regionId] = currentMap[regionId]
+    }
+  }
+  return nextMap
+}
+
 function replaceInspectionPage(pages, nextPage) {
   if (!nextPage?.stored_name) {
     return pages
@@ -2856,24 +3093,45 @@ function replaceInspectionPage(pages, nextPage) {
   return [...nextPages, { ...nextPage }]
 }
 
-function applyInspectionOverrides(overrides) {
+function applyInspectionOverrides(overrides, options = {}) {
   if (!overrides || typeof overrides !== 'object') {
     return
   }
+  const protectedRegionIds = getProtectedRegionIds(options.forceRegionIds || [])
   if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_overrides')) {
-    translationRegionOverrides.value = { ...(overrides.translation_region_overrides || {}) }
+    translationRegionOverrides.value = mergeOverrideMapPreservingLocal(
+      translationRegionOverrides.value,
+      overrides.translation_region_overrides,
+      protectedRegionIds,
+    )
   }
   if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_skip_overrides')) {
-    translationRegionSkipOverrides.value = { ...(overrides.translation_region_skip_overrides || {}) }
+    translationRegionSkipOverrides.value = mergeOverrideMapPreservingLocal(
+      translationRegionSkipOverrides.value,
+      overrides.translation_region_skip_overrides,
+      protectedRegionIds,
+    )
   }
   if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_disabled_overrides')) {
-    translationRegionDisabledOverrides.value = { ...(overrides.translation_region_disabled_overrides || {}) }
+    translationRegionDisabledOverrides.value = mergeOverrideMapPreservingLocal(
+      translationRegionDisabledOverrides.value,
+      overrides.translation_region_disabled_overrides,
+      protectedRegionIds,
+    )
   }
   if (Object.prototype.hasOwnProperty.call(overrides, 'translation_region_layout_overrides')) {
-    translationRegionLayoutOverrides.value = { ...(overrides.translation_region_layout_overrides || {}) }
+    translationRegionLayoutOverrides.value = mergeOverrideMapPreservingLocal(
+      translationRegionLayoutOverrides.value,
+      overrides.translation_region_layout_overrides,
+      protectedRegionIds,
+    )
   }
   if (Object.prototype.hasOwnProperty.call(overrides, 'style_region_overrides')) {
-    styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
+    styleRegionOverrides.value = mergeOverrideMapPreservingLocal(
+      styleRegionOverrides.value,
+      overrides.style_region_overrides,
+      protectedRegionIds,
+    )
   }
 }
 
@@ -2884,7 +3142,12 @@ function applyPageCommandPayload(payload) {
   if (payload?.style_page) {
     styleInspectionPages.value = replaceInspectionPage(styleInspectionPages.value, payload.style_page)
   }
-  applyInspectionOverrides(payload?.overrides)
+  const forceRegionIds = [
+    ...(payload?.updated_region_ids || []),
+    payload?.created_region_id,
+    payload?.deleted_region_id,
+  ].filter(Boolean)
+  applyInspectionOverrides(payload?.overrides, { forceRegionIds })
   translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
   fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
   fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
@@ -3183,6 +3446,42 @@ function getCanvasShellForPane(pane = 'main') {
   return pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
 }
 
+function readCanvasShellMetric(shell) {
+  if (!shell || typeof window === 'undefined') {
+    return { width: 0, height: 0 }
+  }
+  const computedStyle = window.getComputedStyle(shell)
+  const paddingX = Number.parseFloat(computedStyle.paddingLeft || '0') + Number.parseFloat(computedStyle.paddingRight || '0')
+  const paddingY = Number.parseFloat(computedStyle.paddingTop || '0') + Number.parseFloat(computedStyle.paddingBottom || '0')
+  return {
+    width: Math.max(1, Math.round((shell.clientWidth || 0) - paddingX)),
+    height: Math.max(1, Math.round((shell.clientHeight || 0) - paddingY))
+  }
+}
+
+function refreshCanvasShellMetrics() {
+  canvasShellMetrics.value = {
+    main: readCanvasShellMetric(translatedPreviewCanvasRef.value),
+    compare: readCanvasShellMetric(compareCanvasShellRef.value)
+  }
+}
+
+function scheduleCanvasLayoutRefresh() {
+  if (typeof window === 'undefined') {
+    refreshCanvasShellMetrics()
+    refreshTranslatedPreviewScale()
+    return
+  }
+  if (canvasLayoutFrame != null) {
+    window.cancelAnimationFrame(canvasLayoutFrame)
+  }
+  canvasLayoutFrame = window.requestAnimationFrame(() => {
+    canvasLayoutFrame = null
+    refreshCanvasShellMetrics()
+    refreshTranslatedPreviewScale()
+  })
+}
+
 function getCanvasGeometryFromSurface(surface, page, pane = 'main') {
   const shell = resolveCanvasInteractionSurface(surface) || getCanvasShellForPane(pane)
   const shellRect = shell?.getBoundingClientRect?.() || { left: 0, top: 0, width: 1, height: 1 }
@@ -3359,6 +3658,7 @@ async function flushPendingCanvasNudge() {
 
   await runCanvasCommand(page, {
     label: redoCommands.length > 1 ? `微调 ${redoCommands.length} 个文本框` : '微调文本框位置',
+    pendingMessage: '位置保存中…',
     redoCommands,
     undoCommands,
     focusRegionId: pending.regionId || regionIds[0],
@@ -3398,6 +3698,7 @@ function nudgeSelectedRegion(deltaX, deltaY) {
   }
 
   if (!hasPendingForSameSelection) {
+    bumpPageCommandRevision(page.stored_name)
     const originBBoxes = {}
     for (const regionId of regionIds) {
       const targetRegion = page.regions?.find((item) => item.id === regionId)
@@ -3433,6 +3734,7 @@ function nudgeSelectedRegion(deltaX, deltaY) {
     return
   }
   selectedEditRegionKey.value = region.id
+  setRegionCommitState(regionIds, 'dirty', '位置草稿未保存')
   scheduleCanvasNudgeCommit()
 }
 
@@ -3690,7 +3992,7 @@ function getCanvasPreviewImageUrl(page) {
   const dirty = Boolean(page?.stored_name && canvasPreviewDirtyPages.value[page.stored_name])
   if (isCanvasReviewMode.value && dirty) {
     const baseImagePath = page?.base_image_url || page?.translated_image_url || page?.image_url || ''
-    return withCacheBust(toApiUrl(baseImagePath))
+    return toApiUrl(baseImagePath)
   }
 
   const latestTranslatedUrl = page?.stored_name
@@ -3701,7 +4003,7 @@ function getCanvasPreviewImageUrl(page) {
   }
 
   const imagePath = page?.translated_image_url || page?.image_url || page?.base_image_url || ''
-  return withCacheBust(toApiUrl(imagePath))
+  return getVersionedPageImageUrl(imagePath, page?.stored_name)
 }
 
 function getSavedTranslatedImageUrl(page) {
@@ -3714,7 +4016,7 @@ function getSavedTranslatedImageUrl(page) {
 
   const translatedPath = String(page?.translated_image_url || '').trim()
   if (translatedPath) {
-    return withCacheBust(toApiUrl(translatedPath))
+    return getVersionedPageImageUrl(translatedPath, page?.stored_name)
   }
 
   return ''
@@ -3983,13 +4285,15 @@ function setCanvasViewportPreset(page, pane = 'main', preset = 'fit') {
   if (!page || !shell) {
     return
   }
+  refreshCanvasShellMetrics()
   const geometry = getCanvasGeometryFromSurface(shell, page, pane)
-  const availableWidth = Math.max(geometry.shellWidth - (geometry.stageOffsetLeft * 2), 1)
-  const availableHeight = Math.max(geometry.shellHeight - geometry.stageOffsetTop - 12, 1)
+  const metrics = canvasShellMetrics.value[pane] || {}
+  const availableWidth = Math.max(metrics.width || geometry.stageWidth, 1)
+  const availableHeight = Math.max(metrics.height || geometry.stageHeight, 1)
   let zoom = 1
 
   if (preset === 'fit') {
-    zoom = Math.min(availableWidth / geometry.stageWidth, availableHeight / geometry.stageHeight)
+    zoom = Math.min(1, availableWidth / geometry.stageWidth, availableHeight / geometry.stageHeight)
   } else if (preset === 'width') {
     zoom = availableWidth / geometry.stageWidth
   }
@@ -3997,8 +4301,8 @@ function setCanvasViewportPreset(page, pane = 'main', preset = 'fit') {
   zoom = clampCanvasZoom(zoom)
   updateViewportState(page.stored_name, pane, {
     zoom,
-    panX: Math.round((availableWidth - (geometry.stageWidth * zoom)) / 2),
-    panY: Math.round((availableHeight - (geometry.stageHeight * zoom)) / 2)
+    panX: Math.round((geometry.stageWidth * (1 - zoom)) / 2),
+    panY: preset === 'fit' ? 0 : Math.round((availableHeight - (geometry.stageHeight * zoom)) / 2)
   }, { syncCompare: pane !== 'compare' })
 }
 
@@ -4019,17 +4323,17 @@ function selectAdjacentEditPage(offset) {
   )
   const nextPage = mergedInspectionPages.value[nextIndex]
   if (nextPage?.stored_name) {
-    selectEditPageForReview(nextPage.stored_name)
+    void selectEditPageForReview(nextPage.stored_name)
   }
 }
 
-function selectEditPageForReview(pageKey) {
+async function selectEditPageForReview(pageKey) {
   const normalizedPageKey = String(pageKey || '').trim()
   if (!normalizedPageKey) {
     return
   }
   if (pendingCanvasNudge) {
-    void flushPendingCanvasNudge()
+    await flushPendingCanvasNudge()
   }
   canvasRegionSelection.value = {}
   canvasMarqueeState.value = null
@@ -4106,6 +4410,7 @@ function getCanvasPreviewTextStyle(region) {
   const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
   const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize * 0.2)
   const lineHeight = Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
+  const resolvedAlignment = getResolvedRegionAlignment(region)
   return {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
@@ -4114,26 +4419,14 @@ function getCanvasPreviewTextStyle(region) {
     fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
     textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
-    textAlign: isVerticalRegion(region)
-      ? 'start'
-      : getResolvedRegionAlignment(region) === 'center'
-        ? 'center'
-        : getResolvedRegionAlignment(region) === 'right'
-          ? 'right'
-          : 'left'
+    textAlign: resolvedAlignment === 'right' ? 'right' : 'center'
   }
 }
 
 function getCanvasPreviewTextContainerStyle(region) {
-  if (isVerticalRegion(region)) {
-    return {
-      justifyContent: 'center',
-      alignItems: 'flex-start'
-    }
-  }
-
+  const resolvedAlignment = getResolvedRegionAlignment(region)
   return {
-    justifyContent: 'flex-start',
+    justifyContent: resolvedAlignment === 'right' ? 'flex-end' : 'center',
     alignItems: 'center'
   }
 }
@@ -4145,7 +4438,8 @@ function refreshTranslatedPreviewScale() {
     translatedPreviewScale.value = 1
     return
   }
-  const safeWidth = Math.max(canvasElement.clientWidth || 0, 1)
+  const stageElement = canvasElement.querySelector?.('.v2-canvas-stage')
+  const safeWidth = Math.max(stageElement?.clientWidth || canvasElement.clientWidth || 0, 1)
   const zoom = getViewportState(page.stored_name, 'main').zoom || 1
   translatedPreviewScale.value = (safeWidth / Math.max(page.image_width || 1, 1)) * zoom
 }
@@ -4274,8 +4568,7 @@ function getCanvasHudDetail(page, pane = 'main') {
   if (!page) {
     return ''
   }
-  const syncLabel = pane === 'compare' || reviewWorkspacePrefs.value.compare_sync_enabled ? '联动' : '独立'
-  return `${syncLabel} · 滚轮平移 · Shift 锁轴 · Ctrl/⌘ 缩放`
+  return pane === 'compare' || reviewWorkspacePrefs.value.compare_sync_enabled ? '联动画布' : '独立画布'
 }
 
 function getCanvasSnapGuides(page) {
@@ -4725,10 +5018,12 @@ function applyReviewInspectionPayload(payload) {
       }
     }
   }
-  translationRegionOverrides.value = nextOverrides
-  translationRegionSkipOverrides.value = nextSkipOverrides
-  translationRegionDisabledOverrides.value = nextDisabledOverrides
-  translationRegionLayoutOverrides.value = nextLayoutOverrides
+  applyInspectionOverrides({
+    translation_region_overrides: nextOverrides,
+    translation_region_skip_overrides: nextSkipOverrides,
+    translation_region_disabled_overrides: nextDisabledOverrides,
+    translation_region_layout_overrides: nextLayoutOverrides,
+  })
 }
 
 function applyStyleInspectionPayload(payload) {
@@ -5159,16 +5454,21 @@ async function applyPageCommands(pageId, commands, options = {}) {
   }
   invalidateInspectionRequests()
   const revision = Number(options.revision) || bumpPageCommandRevision(normalizedPageId)
+  setPageCommandPending(normalizedPageId, 1)
   return queuePageCommandExecution(normalizedPageId, async () => {
-    const payload = await requestPageCommands(normalizedPageId, commands, buildRuntimeConfig())
-    const isLatest = revision === getPageCommandRevision(normalizedPageId)
-    if (options.syncPayload !== false && isLatest) {
-      applyPageCommandPayload(payload)
-    }
-    return {
-      payload,
-      isLatest,
-      revision,
+    try {
+      const payload = await requestPageCommands(normalizedPageId, commands, buildRuntimeConfig())
+      const isLatest = revision === getPageCommandRevision(normalizedPageId)
+      if (options.syncPayload !== false && isLatest) {
+        applyPageCommandPayload(payload)
+      }
+      return {
+        payload,
+        isLatest,
+        revision,
+      }
+    } finally {
+      setPageCommandPending(normalizedPageId, -1)
     }
   })
 }
@@ -5184,7 +5484,9 @@ async function runCanvasCommand(page, options) {
   }
 
   try {
-    const result = await applyPageCommands(page.stored_name, redoCommands, { syncPayload: false })
+    const regionIds = getCommandRegionIds(redoCommands)
+    setRegionCommitState(regionIds, 'saving', options?.pendingMessage || '保存中…')
+    const result = await applyPageCommands(page.stored_name, redoCommands, { syncPayload: true })
     if (undoCommands.length) {
       pushCanvasHistory(page.stored_name, {
         label: String(options?.label || '编辑文本框'),
@@ -5199,10 +5501,13 @@ async function runCanvasCommand(page, options) {
       selectedEditPageKey.value = page.stored_name
       selectedEditRegionKey.value = options.focusRegionId
     }
+    clearRegionCommitState(regionIds, ['saving'])
   } catch (error) {
+    const regionIds = getCommandRegionIds(redoCommands)
     if (typeof options?.rollback === 'function') {
       options.rollback()
     }
+    setRegionCommitState(regionIds, 'failed', error instanceof Error ? error.message : '保存失败')
     errorMessage.value = error instanceof Error ? error.message : '更新页面编辑状态失败'
   }
 }
@@ -5936,6 +6241,7 @@ function handleRegionTextInput(region, nextValue) {
   selectedEditRegionKey.value = region.id
   const normalizedDraftValue = normalizeRegionTranslationDraft(nextValue)
   if (isCanvasReviewMode.value) {
+    setRegionCommitState(region.id, 'dirty', '草稿未保存')
     translationInputDrafts.value = {
       ...translationInputDrafts.value,
       [region.id]: normalizedDraftValue
@@ -5965,6 +6271,7 @@ function commitRegionTextDraft(region) {
     const nextDrafts = { ...translationInputDrafts.value }
     delete nextDrafts[region.id]
     translationInputDrafts.value = nextDrafts
+    clearRegionCommitState(region.id, ['dirty', 'failed'])
     return
   }
 
@@ -5981,6 +6288,7 @@ function commitRegionTextDraft(region) {
 
   void runCanvasCommand(selectedEditPage.value, {
     label: '修改译文',
+    pendingMessage: '译文保存中…',
     redoCommands: [
       {
         type: 'update_translation',
@@ -6015,6 +6323,9 @@ function commitRegionTextDraft(region) {
 
 function handleRegionFontSizeInput(region, nextValue) {
   selectedEditRegionKey.value = region.id
+  if (isCanvasReviewMode.value) {
+    setRegionCommitState(region.id, 'dirty', '字号草稿未保存')
+  }
   const rawValue = String(nextValue ?? '')
   if (!Object.prototype.hasOwnProperty.call(fontSizeDraftOriginOverrides.value, region.id)) {
     fontSizeDraftOriginOverrides.value = {
@@ -6067,6 +6378,7 @@ function commitRegionFontSize(region) {
   fontSizeDraftOriginOverrides.value = nextOrigins
 
   if (Number.isNaN(nextValue)) {
+    clearRegionCommitState(region.id, ['dirty'])
     return
   }
   const normalizedValue = Math.max(8, Math.min(240, Math.round(nextValue)))
@@ -6079,6 +6391,7 @@ function commitRegionFontSize(region) {
   updateRegionLayoutOverride(region.id, { font_size: normalizedValue })
   void runCanvasCommand(selectedEditPage.value, {
     label: '调整字号',
+    pendingMessage: '字号保存中…',
     redoCommands: [
       {
         type: 'update_font_size',
@@ -6262,9 +6575,10 @@ async function scrollSelectedRegionCardIntoView() {
     return
   }
   await nextTick()
-  const card = document.querySelector(`.style-region-card[data-region-id="${selectedEditRegionKey.value}"]`)
+  const card = Array.from(document.querySelectorAll('.style-region-card'))
+    .find((element) => element instanceof HTMLElement && element.dataset.regionId === selectedEditRegionKey.value)
   if (card instanceof HTMLElement) {
-    card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    scrollElementWithinContainer(card, '.v2-region-list')
   }
 }
 
@@ -6273,9 +6587,28 @@ async function scrollSelectedPageRailItemIntoView() {
     return
   }
   await nextTick()
-  const pageButton = document.querySelector(`.v2-page-rail-item[data-page-key="${selectedEditPageKey.value}"]`)
+  const pageButton = Array.from(document.querySelectorAll('.v2-page-rail-item'))
+    .find((element) => element instanceof HTMLElement && element.dataset.pageKey === selectedEditPageKey.value)
   if (pageButton instanceof HTMLElement) {
-    pageButton.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    scrollElementWithinContainer(pageButton, '.v2-page-rail-list')
+  }
+}
+
+function scrollElementWithinContainer(element, containerSelector, padding = 12) {
+  const container = element.closest(containerSelector)
+  if (!(container instanceof HTMLElement)) {
+    return
+  }
+  const containerRect = container.getBoundingClientRect()
+  const elementRect = element.getBoundingClientRect()
+  const topOverflow = elementRect.top - containerRect.top
+  const bottomOverflow = elementRect.bottom - containerRect.bottom
+  if (topOverflow < padding) {
+    container.scrollTop = Math.max(0, container.scrollTop + topOverflow - padding)
+    return
+  }
+  if (bottomOverflow > -padding) {
+    container.scrollTop += bottomOverflow + padding
   }
 }
 
@@ -6339,9 +6672,8 @@ function handleGlobalCanvasKeydown(event) {
     setCurrentPageViewportPreset('actual', 'main')
   } else if (event.key === 'Enter' && selectedEditRegion.value) {
     event.preventDefault()
-    const input = document.querySelector(
-      `.translation-review-input[data-region-id="${selectedEditRegion.value.id}"]`
-    )
+    const input = Array.from(document.querySelectorAll('.translation-review-input'))
+      .find((element) => element instanceof HTMLElement && element.dataset.regionId === selectedEditRegion.value.id)
     if (input instanceof HTMLElement) {
       input.focus()
     }
@@ -6703,16 +7035,25 @@ async function openV2ReviewPage(pageKey = '') {
   if (!targetKey) {
     return
   }
-  selectEditPageForReview(targetKey)
-  try {
-    await loadEditInspection({ silent: true })
-  } catch (_error) {
-    // Picker should still open even when the review payload is not ready yet.
-  }
+  await selectEditPageForReview(targetKey)
+  v2View.value = 'review'
+  await nextTick()
+  scheduleCanvasLayoutRefresh()
+  preloadReviewImagesAroundPage(targetKey)
+  void loadEditInspection({ silent: true })
+    .then(() => {
+      if (!selectedEditRegionKey.value && selectedEditPage.value?.regions?.length) {
+        selectedEditRegionKey.value = selectedEditPage.value.regions[0].id
+      }
+      preloadReviewImagesAroundPage(targetKey)
+      scheduleCanvasLayoutRefresh()
+    })
+    .catch(() => {
+      // Picker should still open even when the review payload is not ready yet.
+    })
   if (!selectedEditRegionKey.value && selectedEditPage.value?.regions?.length) {
     selectedEditRegionKey.value = selectedEditPage.value.regions[0].id
   }
-  v2View.value = 'review'
 }
 
 function runV2ReviewPrimaryAction() {
@@ -7063,7 +7404,11 @@ function startTranslation(action = 'translate') {
         current: payload.current,
         total: payload.total
       }
-      const nextImageUrl = withCacheBust(toApiUrl(payload.image_url))
+      if (payload.stored_name) {
+        markPageImageUpdated(payload.stored_name)
+      }
+      const nextImageUrl = getVersionedPageImageUrl(payload.image_url, payload.stored_name)
+      preloadImageUrl(nextImageUrl)
       translatedImages.value = upsertTranslatedImage(
         translatedImages.value,
         payload,
@@ -7103,8 +7448,11 @@ function startTranslation(action = 'translate') {
 
     if (payload.event === 'completed') {
       translating.value = false
-      applySessionPayload(payload)
       const completedAction = activeAction.value
+      applySessionPayload(payload, {
+        refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
+        refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName)
+      })
       if (completedAction === 'rerender') {
         if (pageTargetStoredName) {
           clearCanvasPreviewDirty(pageTargetStoredName)
@@ -7212,8 +7560,9 @@ onMounted(() => {
       loadProjectHistory(),
       loadPersistedAppSettings(),
     ])
+    scheduleCanvasLayoutRefresh()
   })()
-  window.addEventListener('resize', refreshTranslatedPreviewScale)
+  window.addEventListener('resize', scheduleCanvasLayoutRefresh)
   window.addEventListener('pointermove', updateCanvasViewportPan)
   window.addEventListener('pointerup', finishCanvasViewportPan)
   window.addEventListener('pointercancel', cancelCanvasViewportPan)
@@ -7235,7 +7584,11 @@ onBeforeUnmount(() => {
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()
   clearTopbarTaskProgress()
-  window.removeEventListener('resize', refreshTranslatedPreviewScale)
+  if (canvasLayoutFrame != null) {
+    window.cancelAnimationFrame(canvasLayoutFrame)
+    canvasLayoutFrame = null
+  }
+  window.removeEventListener('resize', scheduleCanvasLayoutRefresh)
   window.removeEventListener('pointermove', updateCanvasViewportPan)
   window.removeEventListener('pointerup', finishCanvasViewportPan)
   window.removeEventListener('pointercancel', cancelCanvasViewportPan)
@@ -7260,6 +7613,9 @@ async function warmPreviewFonts() {
   const fontIds = new Set()
   for (const font of availableFonts.value) {
     if (font?.id) {
+      if (isPreviewFontDecodeDenied(font)) {
+        continue
+      }
       fontIds.add(String(font.id))
     }
   }
@@ -7282,6 +7638,13 @@ async function warmPreviewFonts() {
   const nextState = { ...previewFontLoadState.value }
   await Promise.all(
     Array.from(fontIds).map(async (fontId) => {
+      if (isPreviewFontIdDecodeDenied(fontId)) {
+        nextState[fontId] = {
+          status: 'unsupported',
+          error: 'Skipped for browser preview because this font file is not web-decodable.'
+        }
+        return
+      }
       try {
         await document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
         const loaded = document.fonts.check(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
@@ -7404,6 +7767,8 @@ watch(
     selectedEditRegionKey.value = String(getPageUiState(normalizedPageId).selectedRegionId || '')
     reconcileCanvasInteractionState()
     void scrollSelectedPageRailItemIntoView()
+    preloadReviewImagesAroundPage(normalizedPageId)
+    scheduleCanvasLayoutRefresh()
     if (!hadStoredCanvasState && isCanvasReviewMode.value && !autoFitCanvasPageIds.has(normalizedPageId)) {
       autoFitCanvasPageIds.add(normalizedPageId)
       void nextTick(() => {
@@ -7422,6 +7787,7 @@ watch(
     getViewportState(selectedEditPage.value?.stored_name || '', 'main').zoom
   ],
   () => {
+    scheduleCanvasLayoutRefresh()
     void syncTranslatedPreviewScale()
     void refreshSelectedRegionPreviewDebug()
   }
@@ -7438,6 +7804,7 @@ watch(
   ],
   () => {
     void nextTick(() => {
+      scheduleCanvasLayoutRefresh()
       if (selectedEditPage.value?.stored_name) {
         updateViewportState(
           selectedEditPage.value.stored_name,
@@ -7581,28 +7948,11 @@ watch(
           <button
             type="button"
             class="v2-icon-button"
-            aria-label="缩小画布"
-            :disabled="!selectedEditPage"
-            @click="stepCurrentPageZoom(-1)"
-          >
-            －
-          </button>
-          <button
-            type="button"
-            class="v2-icon-button"
-            aria-label="放大画布"
-            :disabled="!selectedEditPage"
-            @click="stepCurrentPageZoom(1)"
-          >
-            ＋
-          </button>
-          <button
-            type="button"
-            class="v2-topbar-button"
             aria-label="打开设置"
+            title="打开设置"
             @click="openV2Settings"
           >
-            设置
+            ⚙
           </button>
         </template>
 
@@ -7796,51 +8146,52 @@ watch(
           <div class="v2-review-toolbar-right">
             <button
               type="button"
-              class="v2-ghost-button"
+              class="v2-icon-button v2-review-tool-button"
+              aria-label="上一页"
+              title="上一页"
               :disabled="!canSelectPreviousEditPage"
               @click="selectAdjacentEditPage(-1)"
             >
-              上一页
+              ‹
             </button>
             <button
               type="button"
-              class="v2-ghost-button"
+              class="v2-icon-button v2-review-tool-button"
+              aria-label="下一页"
+              title="下一页"
               :disabled="!canSelectNextEditPage"
               @click="selectAdjacentEditPage(1)"
             >
-              下一页
-            </button>
-            <button
-              type="button"
-              class="v2-ghost-button"
-              :disabled="!selectedEditPage"
-              @click="selectedEditPage && resetViewportStateForPage(selectedEditPage)"
-            >
-              重置视图
+              ›
             </button>
             <button
               type="button"
               class="v2-ghost-button"
               :disabled="!canRerender"
+              title="用当前编辑重新生成嵌字结果"
               @click="runV2RerenderAction"
             >
               重新嵌字
             </button>
             <button
               type="button"
-              class="v2-ghost-button"
+              class="v2-icon-button v2-review-tool-button"
+              aria-label="撤销"
+              title="撤销"
               :disabled="!selectedEditPage || !getPageHistoryState(selectedEditPage.stored_name).undo.length"
               @click="undoCanvasEdit"
             >
-              撤销
+              ↶
             </button>
             <button
               type="button"
-              class="v2-ghost-button"
+              class="v2-icon-button v2-review-tool-button"
+              aria-label="重做"
+              title="重做"
               :disabled="!selectedEditPage || !getPageHistoryState(selectedEditPage.stored_name).redo.length"
               @click="redoCanvasEdit"
             >
-              重做
+              ↷
             </button>
           </div>
         </div>
@@ -7889,14 +8240,16 @@ watch(
                     spacePanPressed ? 'is-space-ready' : ''
                   ]"
                   :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
+                  title="滚轮平移，按住 Space 平移，Shift 锁轴，Ctrl/⌘ 缩放"
                   @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
                   @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
                 >
-                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'compare') : null">
+                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasStageStyle(selectedEditPage, 'compare') : null">
                     <img
                       v-if="v2SourcePaneImageUrl"
                       :alt="`${v2SelectedPageEntry?.name || '页面'} ${v2ReviewHeaderLabel}`"
                       :src="v2SourcePaneImageUrl"
+                      @load="scheduleCanvasLayoutRefresh"
                     />
                     <div v-else class="v2-canvas-empty">
                       当前没有可展示的页面图像
@@ -7957,12 +8310,13 @@ watch(
                     spacePanPressed ? 'is-space-ready' : ''
                   ]"
                   :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
+                  title="滚轮平移，按住 Space 平移，Shift 锁轴，Ctrl/⌘ 缩放"
                   @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'main')"
                   @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'main')"
                 >
                   <div
                     :class="['v2-canvas-stage', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
-                    :style="selectedEditPage ? getCanvasViewportStyle(selectedEditPage, 'main') : null"
+                    :style="selectedEditPage ? getCanvasStageStyle(selectedEditPage, 'main') : null"
                     @pointerdown="selectedEditPage && handleCanvasStagePointerDown($event, selectedEditPage)"
                     @pointermove="selectedEditPage && handleCanvasStagePointerMove($event, selectedEditPage)"
                     @pointerup="selectedEditPage && handleCanvasStagePointerUp($event, selectedEditPage)"
@@ -7972,7 +8326,7 @@ watch(
                       v-if="v2EditorPaneImageUrl"
                       :alt="`${v2SelectedPageEntry?.name || '页面'} 带框调整图`"
                       :src="v2EditorPaneImageUrl"
-                      @load="refreshTranslatedPreviewScale"
+                      @load="scheduleCanvasLayoutRefresh"
                     />
                     <div v-else class="v2-canvas-empty">
                       当前没有可展示的页面图像
@@ -8008,7 +8362,7 @@ watch(
                           class="style-box-source-crop"
                         >
                           <img
-                            :src="withCacheBust(toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url))"
+                            :src="toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url)"
                             :style="getSourceCropImageStyle(region, selectedEditPage)"
                             alt=""
                           />
@@ -8042,6 +8396,19 @@ watch(
                         class="v2-canvas-marquee"
                         :style="getCanvasMarqueeStyle(selectedEditPage)"
                       ></span>
+                      <span
+                        v-if="getManualDraftBBox(selectedEditPage)"
+                        :class="[
+                          'style-box',
+                          'style-box-draft',
+                          'active',
+                          'manual',
+                          getStyleRegionLabelClass({ bbox: getManualDraftBBox(selectedEditPage) || [0, 0, 0, 0] }, selectedEditPage)
+                        ]"
+                        :style="getManualDraftStyle(selectedEditPage)"
+                      >
+                        <span class="style-box-label">新框</span>
+                      </span>
                       <div
                         v-if="getCanvasMeasurementOverlay(selectedEditPage)"
                         class="v2-canvas-measure-popover"
@@ -8217,6 +8584,12 @@ watch(
                       @keydown.enter.ctrl.prevent="commitRegionTextDraft(region)"
                       @blur="commitRegionTextDraft(region)"
                     ></textarea>
+                    <span
+                      v-if="getRegionCommitStatusLabel(region)"
+                      :class="['v2-region-commit-state', getRegionCommitStatusClass(region)]"
+                    >
+                      {{ getRegionCommitStatusLabel(region) }}
+                    </span>
                   </label>
 
                   <div class="v2-region-setting-stack">
@@ -8442,7 +8815,7 @@ watch(
 
             <div class="v2-history-card-body">
               <div class="v2-history-card-head">
-                <strong>{{ project.title }}</strong>
+                <strong :title="project.title">{{ project.title }}</strong>
                 <span class="v2-inline-badge">{{ workflowStageLabelMap[project.workflow_stage] || project.workflow_stage }}</span>
               </div>
 
@@ -8451,7 +8824,7 @@ watch(
                 <span>{{ formatV2Timestamp(project.updated_at || project.created_at) }}</span>
               </div>
 
-              <p class="v2-history-card-note">{{ project.note || '没有备注' }}</p>
+              <p class="v2-history-card-note" :title="project.note || '没有备注'">{{ project.note || '没有备注' }}</p>
 
               <div class="v2-history-card-actions">
                 <button
@@ -8550,35 +8923,35 @@ watch(
               <span>{{ isDesktopRuntime ? '桌面版本地运行时' : '浏览器模式' }}</span>
             </header>
 
-            <label class="v2-field">
+            <div class="v2-readonly-field">
               <span>设置状态</span>
-              <input :value="settingsStatusLabel" type="text" readonly />
-            </label>
+              <strong :title="settingsStatusLabel">{{ settingsStatusLabel }}</strong>
+            </div>
 
-            <label v-if="appRuntime.settings_path" class="v2-field">
+            <div v-if="appRuntime.settings_path" class="v2-readonly-field">
               <span>设置文件</span>
-              <input :value="appRuntime.settings_path" type="text" readonly />
-            </label>
+              <strong :title="appRuntime.settings_path">{{ appRuntime.settings_path }}</strong>
+            </div>
 
-            <label v-if="appRuntime.data_dir" class="v2-field">
+            <div v-if="appRuntime.data_dir" class="v2-readonly-field">
               <span>数据目录</span>
-              <input :value="appRuntime.data_dir" type="text" readonly />
-            </label>
+              <strong :title="appRuntime.data_dir">{{ appRuntime.data_dir }}</strong>
+            </div>
 
-            <label class="v2-field">
+            <div class="v2-readonly-field">
               <span>GPU / CUDA</span>
-              <input :value="appRuntimeGpuLabel" type="text" readonly />
-            </label>
+              <strong :title="appRuntimeGpuLabel">{{ appRuntimeGpuLabel }}</strong>
+            </div>
 
-            <label class="v2-field">
+            <div class="v2-readonly-field">
               <span>可用磁盘空间</span>
-              <input :value="appRuntimeDiskLabel" type="text" readonly />
-            </label>
+              <strong :title="appRuntimeDiskLabel">{{ appRuntimeDiskLabel }}</strong>
+            </div>
 
-            <label v-if="appRuntime.logs_dir" class="v2-field">
+            <div v-if="appRuntime.logs_dir" class="v2-readonly-field">
               <span>日志目录</span>
-              <input :value="appRuntime.logs_dir" type="text" readonly />
-            </label>
+              <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
+            </div>
           </section>
 
           <section v-if="currentProject" class="v2-settings-group">

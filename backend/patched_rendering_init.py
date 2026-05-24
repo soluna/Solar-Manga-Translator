@@ -297,9 +297,23 @@ def _direction_priority(region: TextBlock, direction: str) -> int:
     return 1 if direction.startswith('h') == region.horizontal else 0
 
 
+def _normalize_alignment(alignment: str) -> str:
+    value = str(alignment or 'center').strip().lower()
+    if value in {'auto', 'middle'}:
+        return 'center'
+    if value in {'left', 'start'}:
+        return 'left'
+    if value in {'center', 'right'}:
+        return value
+    if value == 'end':
+        return 'right'
+    return 'center'
+
+
 def _alignment_offset(alignment: str, available_space: int) -> int:
     if available_space <= 0:
         return 0
+    alignment = _normalize_alignment(alignment)
     if alignment == 'center':
         return available_space // 2
     if alignment == 'right':
@@ -321,22 +335,19 @@ def _compose_render_canvas(
         return canvas
 
     box_height, box_width = temp_box.shape[:2]
+    alignment = _normalize_alignment(alignment)
     canvas_width = max(canvas_width, int(box_width))
     canvas_height = max(canvas_height, int(box_height))
     canvas = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)
 
+    available_x = max(canvas_width - box_width, 0)
+    available_y = max(canvas_height - box_height, 0)
     if render_horizontally:
-        # Horizontal review mode anchors text to the left edge of the detected
-        # region and vertically centers it. If the rendered text is larger than
-        # the detected box we keep the same anchor and allow the canvas to grow.
-        offset_x = 0
-        offset_y = max((canvas_height - box_height) // 2, 0)
+        offset_x = _alignment_offset(alignment, available_x)
+        offset_y = available_y // 2
     else:
-        # Vertical review mode anchors text to the top edge of the detected
-        # region and horizontally centers it. Wider/taller content can extend
-        # beyond the original box through the larger canvas.
-        offset_x = max((canvas_width - box_width) // 2, 0)
-        offset_y = 0
+        offset_x = available_x // 2
+        offset_y = _alignment_offset(alignment, available_y)
 
     canvas[offset_y:offset_y + box_height, offset_x:offset_x + box_width] = temp_box
     return canvas
@@ -349,6 +360,7 @@ def _expand_destination_quad(
     target_width: int,
     target_height: int,
     render_horizontally: bool,
+    alignment: str,
 ) -> np.ndarray:
     expanded = np.array(dst_points, dtype=np.float32, copy=True)
     restore_singleton_axis = False
@@ -365,6 +377,7 @@ def _expand_destination_quad(
             return expanded[np.newaxis, ...]
         return expanded
 
+    alignment = _normalize_alignment(alignment)
     top_vec = expanded[1] - expanded[0]
     bottom_vec = expanded[2] - expanded[3]
     left_vec = expanded[3] - expanded[0]
@@ -374,8 +387,19 @@ def _expand_destination_quad(
         extra_top = top_vec * (width_scale - 1.0)
         extra_bottom = bottom_vec * (width_scale - 1.0)
         if render_horizontally:
-            expanded[1] += extra_top
-            expanded[2] += extra_bottom
+            if alignment == 'right':
+                expanded[0] -= extra_top
+                expanded[3] -= extra_bottom
+            elif alignment == 'center':
+                half_top = extra_top * 0.5
+                half_bottom = extra_bottom * 0.5
+                expanded[0] -= half_top
+                expanded[1] += half_top
+                expanded[3] -= half_bottom
+                expanded[2] += half_bottom
+            else:
+                expanded[1] += extra_top
+                expanded[2] += extra_bottom
         else:
             half_top = extra_top * 0.5
             half_bottom = extra_bottom * 0.5
@@ -395,8 +419,19 @@ def _expand_destination_quad(
             expanded[1] -= half_right
             expanded[2] += half_right
         else:
-            expanded[3] += extra_left
-            expanded[2] += extra_right
+            if alignment == 'right':
+                expanded[0] -= extra_left
+                expanded[1] -= extra_right
+            elif alignment == 'center':
+                half_left = extra_left * 0.5
+                half_right = extra_right * 0.5
+                expanded[0] -= half_left
+                expanded[3] += half_left
+                expanded[1] -= half_right
+                expanded[2] += half_right
+            else:
+                expanded[3] += extra_left
+                expanded[2] += extra_right
 
     if restore_singleton_axis:
         return expanded[np.newaxis, ...]
@@ -615,6 +650,7 @@ def render(
         target_width,
         target_height,
         render_horizontally,
+        region.alignment,
     )
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 

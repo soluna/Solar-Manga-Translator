@@ -127,6 +127,8 @@ function createDefaultConfig() {
     target_lang: 'CHT',
     use_gpu: true,
     api_key: '',
+    openai_base_url: '',
+    openai_model: '',
     font_key: '',
     font_style_mode: 'single',
     style_font_gothic_key: '',
@@ -209,6 +211,8 @@ function normalizeStoredConfig(rawValue) {
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
+    openai_base_url: typeof rawValue.openai_base_url === 'string' ? rawValue.openai_base_url : defaults.openai_base_url,
+    openai_model: typeof rawValue.openai_model === 'string' ? rawValue.openai_model : defaults.openai_model,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
     font_style_mode: fontStyleMode,
     // 黑体统一跟随主字体，避免“主字体改了但对白黑体不动”的混乱体验。
@@ -1551,16 +1555,17 @@ function buildRuntimeConfig() {
 }
 
 function getResolvedTranslatorModel(value = config.value) {
-  if (value.translator !== 'doubao-ark') {
-    return value.translator_model || ''
+  if (value.translator === 'doubao-ark') {
+    const customModel = String(value.translator_model_custom || '').trim()
+    if (customModel) {
+      return customModel
+    }
+    return value.translator_model || getDefaultTranslatorModel(value.translator)
   }
-
-  const customModel = String(value.translator_model_custom || '').trim()
-  if (customModel) {
-    return customModel
+  if (value.translator === 'openai-compatible') {
+    return String(value.openai_model || '').trim()
   }
-
-  return value.translator_model || getDefaultTranslatorModel(value.translator)
+  return value.translator_model || ''
 }
 
 function getStyleLabel(style) {
@@ -5130,6 +5135,7 @@ watch(
             <option value="sugoi">sugoi</option>
             <option value="gemini">gemini (推荐)</option>
             <option value="doubao-ark">Doubao (Ark / 火山方舟)</option>
+            <option value="openai-compatible">OpenAI Compatible (通用 OpenAI API)</option>
             <option value="chatgpt">chatgpt</option>
             <option value="youdao">有道 (youdao)</option>
             <option value="baidu">百度 (baidu)</option>
@@ -5160,6 +5166,32 @@ watch(
           </small>
         </label>
 
+        <label v-if="config.translator === 'openai-compatible'" class="field" style="grid-column: span 2;">
+          <span>OpenAI API Base URL</span>
+          <input
+            v-model="config.openai_base_url"
+            type="text"
+            placeholder="https://api.openai.com/v1"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
+          />
+          <small class="field-hint">
+            任何 OpenAI 兼容 API 地址（如 https://api.deepseek.com、https://api.openai.com/v1、http://localhost:11434/v1 等）。必填。
+          </small>
+        </label>
+
+        <label v-if="config.translator === 'openai-compatible'" class="field">
+          <span>模型 ID</span>
+          <input
+            v-model="config.openai_model"
+            type="text"
+            placeholder="如 gpt-4o、deepseek-chat、qwen2.5:7b"
+            style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
+          />
+          <small class="field-hint">
+            直接输入模型 ID，例如 deepseek-chat、gpt-4o、claude-sonnet-4-20250514 等。必填。
+          </small>
+        </label>
+
         <label class="field">
           <span>目标语言</span>
           <select v-model="config.target_lang">
@@ -5171,12 +5203,12 @@ watch(
           </select>
         </label>
 
-        <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt' || config.translator === 'doubao-ark'" class="field" style="grid-column: span 2;">
-          <span>{{ config.translator === 'doubao-ark' ? 'Ark API Key (可选，留空则使用默认配置)' : 'API Key (可选，留空则使用默认配置)' }}</span>
+        <label v-if="config.translator === 'gemini' || config.translator === 'chatgpt' || config.translator === 'doubao-ark' || config.translator === 'openai-compatible'" class="field" style="grid-column: span 2;">
+          <span>{{ config.translator === 'doubao-ark' ? 'Ark API Key (可选，留空则使用默认配置)' : config.translator === 'openai-compatible' ? 'API Key (必填)' : 'API Key (可选，留空则使用默认配置)' }}</span>
           <input
             v-model="config.api_key"
             type="password"
-            :placeholder="config.translator === 'doubao-ark' ? '输入火山方舟 Ark API Key' : '输入你的 API Key'"
+            :placeholder="config.translator === 'doubao-ark' ? '输入火山方舟 Ark API Key' : config.translator === 'openai-compatible' ? '输入 OpenAI API Key (sk-...)' : '输入你的 API Key'"
             style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border);"
           />
           <small class="field-hint field-hint-row">

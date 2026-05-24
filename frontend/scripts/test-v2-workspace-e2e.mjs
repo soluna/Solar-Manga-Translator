@@ -194,6 +194,28 @@ async function readBoxMetrics(locator) {
   })
 }
 
+async function readPreviewTextCentering(locator) {
+  return locator.evaluate((element) => {
+    const previewText = element.querySelector('.style-box-preview-text-content')
+    if (!previewText) {
+      return null
+    }
+    const boxRect = element.getBoundingClientRect()
+    const textRect = previewText.getBoundingClientRect()
+    const boxCenterX = (boxRect.left + boxRect.right) / 2
+    const boxCenterY = (boxRect.top + boxRect.bottom) / 2
+    const textCenterX = (textRect.left + textRect.right) / 2
+    const textCenterY = (textRect.top + textRect.bottom) / 2
+    return {
+      boxWidth: boxRect.width,
+      boxHeight: boxRect.height,
+      deltaX: Math.abs(textCenterX - boxCenterX),
+      deltaY: Math.abs(textCenterY - boxCenterY),
+      textAlign: getComputedStyle(previewText).textAlign,
+    }
+  })
+}
+
 async function main() {
   await fs.mkdir(artifactDir, { recursive: true })
 
@@ -265,6 +287,37 @@ async function main() {
     if (handleCount === 0) {
       throw new Error('当前选中框没有出现拖拽/缩放控制点')
     }
+    const hudText = (await page.locator('.v2-canvas-hud').first().textContent()) || ''
+    if (/滚轮|Ctrl|Shift|快捷键/.test(hudText)) {
+      throw new Error(`画布 HUD 仍然显示常驻操作说明：${hudText}`)
+    }
+    const translationInput = page.locator('.v2-region-card .translation-review-input').first()
+    const originalTranslation = await translationInput.inputValue()
+    const editedTranslation = `${originalTranslation || 'E2E translation'} / stable edit`
+    const editSave = page.waitForResponse((response) => (
+      response.url().includes(`/api/pages/${FIXTURE_PROJECT_ID}/`)
+      && response.url().includes('/commands')
+      && response.request().method() === 'POST'
+      && response.ok()
+    ))
+    await translationInput.fill(editedTranslation)
+    await translationInput.blur()
+    await editSave
+    await page.waitForTimeout(150)
+    if (await page.locator('.v2-region-commit-state.is-failed').count()) {
+      throw new Error('译文编辑提交后出现失败状态')
+    }
+    const previewCentering = await readPreviewTextCentering(activeBox)
+    if (!previewCentering) {
+      throw new Error('译文编辑后没有出现框内预览文本，无法验证居中效果')
+    }
+    if (
+      previewCentering.deltaX > Math.max(8, previewCentering.boxWidth * 0.18)
+      || previewCentering.deltaY > Math.max(8, previewCentering.boxHeight * 0.18)
+      || previewCentering.textAlign !== 'center'
+    ) {
+      throw new Error(`框内预览文本没有稳定居中：${JSON.stringify(previewCentering)}`)
+    }
     const boxBounds = await activeBox.boundingBox()
     if (!boxBounds) {
       throw new Error('无法读取当前选中框的位置，无法验证拖拽能力')
@@ -289,6 +342,10 @@ async function main() {
     const nudgedBoxMetrics = await readBoxMetrics(activeBox)
     if (nudgedBoxMetrics.left === draggedBoxMetrics.left && nudgedBoxMetrics.top === draggedBoxMetrics.top) {
       throw new Error('方向键微调当前选中框后，位置没有变化')
+    }
+    const translationAfterLayoutEdit = await translationInput.inputValue()
+    if (translationAfterLayoutEdit !== editedTranslation) {
+      throw new Error(`框体编辑后译文发生回滚：${translationAfterLayoutEdit}`)
     }
     const reviewShot = await saveScreenshot(page, 'v2-review.png')
 

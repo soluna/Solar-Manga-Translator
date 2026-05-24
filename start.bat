@@ -10,7 +10,6 @@ echo Manga Auto-Translator WebUI Start Script
 echo ===================================================
 
 call :stop_existing_service_on_port 8000 "uvicorn main:app"
-call :stop_existing_service_on_port 5173 "vite"
 
 :: Check Python
 python --version >nul 2>&1

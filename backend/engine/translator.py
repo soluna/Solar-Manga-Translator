@@ -10,6 +10,7 @@ import sys
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -66,6 +67,7 @@ class TranslatorEngine:
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
+        self.active_sessions_lock = threading.Lock()
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -117,10 +119,10 @@ class TranslatorEngine:
     async def validate_user_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
         selected_translator = str(config.get("selected_translator") or "").strip()
-        if selected_translator not in {"gemini", "doubao-ark"}:
+        if selected_translator not in {"gemini", "doubao-ark", "openai-compatible"}:
             return {
                 "ok": False,
-                "message": f"当前只支持校验 Gemini / Doubao，暂不支持 {selected_translator or '当前引擎'}。",
+                "message": f"当前只支持校验 Gemini / Doubao / OpenAI Compatible，暂不支持 {selected_translator or '当前引擎'}。",
                 "translator": selected_translator,
             }
 
@@ -566,7 +568,7 @@ class TranslatorEngine:
             "snapshot_count": len(manifests),
             "archived": bool(session.get("project_archived", False)),
             "is_busy": self.is_session_busy(project_id),
-            "busy_action": self.active_sessions.get(project_id, ""),
+            "busy_action": self.get_session_busy_action(project_id),
         }
 
     def _write_project_index(self, summaries: list[dict[str, Any]]) -> None:
@@ -751,7 +753,7 @@ class TranslatorEngine:
             for item in valid_items:
                 project_id = str(item.get("project_id") or "")
                 item["is_busy"] = self.is_session_busy(project_id)
-                item["busy_action"] = self.active_sessions.get(project_id, "")
+                item["busy_action"] = self.get_session_busy_action(project_id)
             valid_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
             return valid_items
 
@@ -762,27 +764,48 @@ class TranslatorEngine:
             if isinstance(payload, dict) and payload:
                 project_id = str(payload.get("project_id") or "")
                 payload["is_busy"] = self.is_session_busy(project_id)
-                payload["busy_action"] = self.active_sessions.get(project_id, "")
+                payload["busy_action"] = self.get_session_busy_action(project_id)
                 items.append(payload)
         items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         if items:
             self._write_project_index(items)
         return items
 
+    def try_mark_session_busy(self, project_id: str, action: str) -> bool:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return False
+        normalized_action = str(action or "translate").strip().lower() or "translate"
+        with self.active_sessions_lock:
+            if normalized_project_id in self.active_sessions:
+                return False
+            self.active_sessions[normalized_project_id] = normalized_action
+        return True
+
     def mark_session_busy(self, project_id: str, action: str) -> None:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             return
-        self.active_sessions[normalized_project_id] = str(action or "translate").strip().lower() or "translate"
+        normalized_action = str(action or "translate").strip().lower() or "translate"
+        with self.active_sessions_lock:
+            self.active_sessions[normalized_project_id] = normalized_action
 
     def clear_session_busy(self, project_id: str) -> None:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             return
-        self.active_sessions.pop(normalized_project_id, None)
+        with self.active_sessions_lock:
+            self.active_sessions.pop(normalized_project_id, None)
 
     def is_session_busy(self, project_id: str) -> bool:
-        return str(project_id or "").strip() in self.active_sessions
+        normalized_project_id = str(project_id or "").strip()
+        with self.active_sessions_lock:
+            return normalized_project_id in self.active_sessions
+
+    def get_session_busy_action(self, project_id: str) -> str:
+        normalized_project_id = str(project_id or "").strip()
+        with self.active_sessions_lock:
+            return self.active_sessions.get(normalized_project_id, "")
 
     def list_project_snapshots(self, project_id: str) -> list[dict[str, Any]]:
         snapshots = []
@@ -903,12 +926,89 @@ class TranslatorEngine:
                 self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
             )
             restored_from_manifest = True
+        recovered_source_images, recovered_output_map, recovery_changed = self._validate_restored_page_assets(
+            project_id,
+            source_dir_path,
+            translated_dir_path,
+            list(session.get("source_images") or []),
+            dict(session.get("translated_output_map") or {}),
+            self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
+        )
+        if recovery_changed:
+            session["source_images"] = recovered_source_images
+            session["translated_output_map"] = recovered_output_map
+            restored_from_manifest = True
+        if not session.get("source_images"):
+            raise FileNotFoundError("项目原图文件缺失，无法恢复。请确认项目数据目录仍然完整。")
         if session.get("workflow_stage") in {"", "idle"} and session["translated_output_map"]:
             session["workflow_stage"] = str(manifest_dict.get("workflow_stage") or "translated")
             restored_from_manifest = True
         if restored_from_manifest:
             self.persist_project_state(project_id, session, persist_page_documents=False)
         return session
+
+    def _validate_restored_page_assets(
+        self,
+        project_id: str,
+        source_dir: Path,
+        translated_dir: Path,
+        source_images: list[dict[str, Any]],
+        translated_output_map: dict[str, Any],
+        preferred_format: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, str], bool]:
+        canonical_source_dir = self._project_source_dir(project_id)
+        canonical_translated_dir = self._project_translated_dir(project_id)
+        changed = False
+        valid_source_images: list[dict[str, Any]] = []
+        seen_source_names: set[str] = set()
+
+        for image in source_images:
+            if not isinstance(image, dict):
+                changed = True
+                continue
+            stored_name = str(image.get("stored_name") or image.get("name") or "").strip()
+            if not stored_name or stored_name in seen_source_names:
+                changed = True
+                continue
+            if not (source_dir / stored_name).exists() and not (canonical_source_dir / stored_name).exists():
+                changed = True
+                continue
+            seen_source_names.add(stored_name)
+            valid_source_images.append({
+                "name": str(image.get("name") or stored_name),
+                "stored_name": stored_name,
+            })
+
+        if not valid_source_images:
+            inferred = self._infer_source_images_from_dir(source_dir)
+            if not inferred and canonical_source_dir != source_dir:
+                inferred = self._infer_source_images_from_dir(canonical_source_dir)
+            if inferred:
+                valid_source_images = inferred
+                changed = True
+
+        valid_source_names = {str(image.get("stored_name") or "") for image in valid_source_images}
+        valid_output_map: dict[str, str] = {}
+        for stored_name, output_name in translated_output_map.items():
+            normalized_stored_name = str(stored_name or "").strip()
+            normalized_output_name = str(output_name or "").strip()
+            if not normalized_stored_name or normalized_stored_name not in valid_source_names or not normalized_output_name:
+                changed = True
+                continue
+            if (translated_dir / normalized_output_name).exists() or (canonical_translated_dir / normalized_output_name).exists():
+                valid_output_map[normalized_stored_name] = normalized_output_name
+            else:
+                changed = True
+
+        if valid_source_images and not valid_output_map and (translated_dir.exists() or canonical_translated_dir.exists()):
+            recovered = self._infer_translated_output_map(translated_dir, valid_source_images, preferred_format)
+            if not recovered and canonical_translated_dir != translated_dir:
+                recovered = self._infer_translated_output_map(canonical_translated_dir, valid_source_images, preferred_format)
+            if recovered:
+                valid_output_map = recovered
+                changed = True
+
+        return valid_source_images, valid_output_map, changed
 
     def restore_snapshot_as_project(self, project_id: str, snapshot_id: str) -> tuple[str, dict[str, Any]]:
         source_session = self.restore_project_session(project_id)
@@ -1396,6 +1496,17 @@ class TranslatorEngine:
                 self._write_json_file(document_path, normalized_payload)
             return normalized_payload
         raise FileNotFoundError("当前页面文档不存在，请先完成一次识别或翻译。")
+
+    def _page_document_region_ids(self, project_id: str, session: dict[str, Any], page_id: str) -> set[str]:
+        document = self.get_page_document(project_id, session, page_id)
+        region_ids: set[str] = set()
+        for region in document.get("regions") or []:
+            if not isinstance(region, dict):
+                continue
+            region_id = str(region.get("id") or region.get("region_id") or "").strip()
+            if region_id:
+                region_ids.add(region_id)
+        return region_ids
 
     def get_page_base_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
         source_path = self.get_page_source_image_path(project_id, session, page_id)
@@ -1977,6 +2088,18 @@ class TranslatorEngine:
         created_region_id = ""
         deleted_region_id = ""
         deleted_region_payload: dict[str, Any] | None = None
+        page_region_ids: set[str] | None = None
+
+        def require_existing_region_id(command: dict[str, Any]) -> str:
+            nonlocal page_region_ids
+            region_id = str(command.get("region_id") or "").strip()
+            if not region_id:
+                raise ValueError("缺少文本框标识。")
+            if page_region_ids is None:
+                page_region_ids = self._page_document_region_ids(project_id, session, page_id)
+            if region_id not in page_region_ids:
+                raise FileNotFoundError("目标文本框不存在，请刷新后重试。")
+            return region_id
 
         for command in commands:
             if not isinstance(command, dict):
@@ -1986,35 +2109,35 @@ class TranslatorEngine:
                 continue
 
             if command_type == "update_translation":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_translation_override_value(session, region_id, str(command.get("text") or command.get("translation") or ""))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("translation_updated")
                 continue
 
             if command_type == "set_keep_original":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_keep_original(session, region_id, bool(command.get("enabled")))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("keep_original_updated")
                 continue
 
             if command_type == "disable_region":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_disabled(session, region_id, True)
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("region_disabled")
                 continue
 
             if command_type == "restore_region":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_disabled(session, region_id, False)
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("region_restored")
                 continue
 
             if command_type == "update_region_bbox":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 bbox = command.get("bbox")
                 if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
                     raise ValueError("缺少有效的文本框坐标。")
@@ -2024,7 +2147,7 @@ class TranslatorEngine:
                 continue
 
             if command_type == "update_font_size":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 raw_font_size = command.get("font_size")
                 if raw_font_size is None:
                     self._set_region_font_size_override(session, region_id, None)
@@ -2035,21 +2158,21 @@ class TranslatorEngine:
                 continue
 
             if command_type == "update_text_direction":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_direction_override(session, region_id, str(command.get("direction") or "auto"))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("text_direction_updated")
                 continue
 
             if command_type == "update_region_font":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_font_key_override(session, region_id, str(command.get("font_key") or command.get("font") or ""))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("font_family_updated")
                 continue
 
             if command_type == "update_font_style":
-                region_id = str(command.get("region_id") or "").strip()
+                region_id = require_existing_region_id(command)
                 self._set_region_style_override_value(session, region_id, str(command.get("style") or ""))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("font_style_updated")
@@ -2888,20 +3011,19 @@ class TranslatorEngine:
             raw_config.get("translator_model_custom"),
         )
 
-        # Bug fix: Some translators use different language codes for Chinese
-        # For example, sugoi might not support CHS, but only JPN/ENG
-        # If it's CHS/CHT, the backend needs to convert it appropriately based on the translator
-        # But looking at the logs: Language unsupported exception for SugoiTranslator: "CHS"
-        # Sugoi only supports Japanese to English translations!
+        # Sugoi doesn't support Chinese
         if translator == "sugoi" and target_lang in ["CHS", "CHT"]:
-            # Fall back to gemini for Chinese if user selected Sugoi but wants Chinese
             print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'gemini'")
             translator = "gemini"
         elif selected_translator == "doubao-ark":
             translator = "custom_openai"
+        elif selected_translator == "openai-compatible":
+            translator = "custom_openai"
 
         use_gpu = bool(raw_config.get("use_gpu", True))
         api_key = str(raw_config.get("api_key", "")).strip()
+        openai_base_url = str(raw_config.get("openai_base_url", "")).strip()
+        openai_model = str(raw_config.get("openai_model", "")).strip()
         font_key = str(raw_config.get("font_key", "")).strip()
         font_path = self._resolve_font_path(font_key)
         render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
@@ -2943,6 +3065,8 @@ class TranslatorEngine:
             "target_lang": target_lang,
             "use_gpu": use_gpu,
             "api_key": api_key,
+            "openai_base_url": openai_base_url,
+            "openai_model": openai_model,
             "font_key": font_key,
             "font_path": font_path,
             "font_style_mode": font_style_mode,
@@ -2990,9 +3114,11 @@ class TranslatorEngine:
         return value
 
     def _normalize_render_alignment(self, raw_value: Any) -> str:
-        value = str(raw_value or "left").strip().lower()
+        value = str(raw_value or "center").strip().lower()
         if value not in {"auto", "left", "center", "right"}:
-            return "left"
+            return "center"
+        if value == "auto":
+            return "center"
         return value
 
     def _normalize_font_style_mode(self, raw_value: Any) -> str:
@@ -3392,6 +3518,17 @@ class TranslatorEngine:
             env["CUSTOM_OPENAI_MODEL"] = model_name
             env["CUSTOM_OPENAI_MODEL_CONF"] = ""
             env["CUSTOM_OPENAI_USE_RESPONSES"] = "1" if str(model_name).startswith("doubao-seed-translation") else "0"
+            if api_key:
+                env["CUSTOM_OPENAI_API_KEY"] = api_key
+        elif config.get("selected_translator") == "openai-compatible":
+            base_url = str(config.get("openai_base_url") or "").strip()
+            model = str(config.get("openai_model") or config.get("translator_model") or "").strip()
+            if base_url:
+                env["CUSTOM_OPENAI_API_BASE"] = base_url
+            if model:
+                env["CUSTOM_OPENAI_MODEL"] = model
+            env["CUSTOM_OPENAI_MODEL_CONF"] = ""
+            env["CUSTOM_OPENAI_USE_RESPONSES"] = "0"
             if api_key:
                 env["CUSTOM_OPENAI_API_KEY"] = api_key
         if session_id and config.get("export_mask_debug"):

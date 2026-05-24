@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any
+import asyncio
 import logging
 import os
 import shutil
@@ -53,7 +54,14 @@ logger = logging.getLogger("manga_translator.api")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "null",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,6 +70,12 @@ app.add_middleware(
 # 确保输出和临时目录存在并挂载静态文件
 APP_PATHS.ensure_directories()
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
+
+
+def copy_upload_to_path(upload: UploadFile, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as buffer:
+        shutil.copyfileobj(upload.file, buffer)
 
 
 def configure_app_logging() -> None:
@@ -381,8 +395,7 @@ async def upload_project_base_images(project_id: str, file: UploadFile = File(..
 
     upload_token = str(uuid.uuid4())
     file_path = TEMP_UPLOADS_DIR / f"{upload_token}_{filename}"
-    with file_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    await asyncio.to_thread(copy_upload_to_path, file, file_path)
 
     extract_dir = TEMP_EXTRACTED_DIR / f"{project_id}_base_{upload_token}"
     extract_dir.mkdir(exist_ok=True)
@@ -669,8 +682,7 @@ async def upload_comic(
     session_id = str(uuid.uuid4())
     file_path = TEMP_UPLOADS_DIR / f"{session_id}_{filename}"
 
-    with file_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    await asyncio.to_thread(copy_upload_to_path, file, file_path)
 
     extract_dir = TEMP_EXTRACTED_DIR / session_id
     extract_dir.mkdir(exist_ok=True)
@@ -754,13 +766,11 @@ async def translate_session(websocket: WebSocket, session_id: str):
             target_stored_name or "*",
         )
 
-        if translator_engine.is_session_busy(session_id):
+        if not translator_engine.try_mark_session_busy(session_id, action):
             logger.warning("Translation websocket rejected because session is busy. session_id=%s action=%s", session_id, action)
             await websocket.send_json({"event": "error", "message": "该项目已有任务在运行，请等待当前任务完成。"})
             await websocket.close()
             return
-
-        translator_engine.mark_session_busy(session_id, action)
 
         async def send_event(event: dict[str, Any]) -> None:
             try:

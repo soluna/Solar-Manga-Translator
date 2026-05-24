@@ -14,7 +14,6 @@ $root = (Resolve-Path -LiteralPath $normalizedRootDir).Path
 $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
 $backendUrl = "http://127.0.0.1:8000/api/status"
-$frontendUrl = "http://127.0.0.1:5173"
 $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
     Join-Path $env:LOCALAPPDATA "MangaTranslator"
 } else {
@@ -28,6 +27,49 @@ $frontendLogPath = Join-Path $logDir "frontend-managed.log"
 $backendProcess = $null
 $frontendProcess = $null
 $browserProcess = $null
+
+function Find-FreeTcpPort {
+    param(
+        [int]$PreferredPort = 5173,
+        [string]$HostName = "0.0.0.0"
+    )
+
+    $ipAddress = [System.Net.IPAddress]::Parse($HostName)
+    for ($port = $PreferredPort; $port -lt ($PreferredPort + 200); $port++) {
+        $listener = $null
+        try {
+            $listener = [System.Net.Sockets.TcpListener]::new($ipAddress, $port)
+            $listener.Start()
+            return $port
+        } catch {
+        } finally {
+            if ($null -ne $listener) {
+                $listener.Stop()
+            }
+        }
+    }
+
+    $fallbackListener = [System.Net.Sockets.TcpListener]::new($ipAddress, 0)
+    try {
+        $fallbackListener.Start()
+        return [int]$fallbackListener.LocalEndpoint.Port
+    } finally {
+        $fallbackListener.Stop()
+    }
+}
+
+function Resolve-FrontendPort {
+    $preferredPort = 5173
+    $candidates = @($env:FRONTEND_PORT, $env:VITE_DEV_PORT)
+    foreach ($candidate in $candidates) {
+        if ($candidate -match '^\d+$') {
+            $preferredPort = [int]$candidate
+            break
+        }
+    }
+
+    return Find-FreeTcpPort -PreferredPort $preferredPort
+}
 
 function Wait-HttpReady {
     param(
@@ -169,6 +211,9 @@ try {
     Write-Host "==================================================="
 
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $frontendPort = Resolve-FrontendPort
+    $frontendUrl = "http://127.0.0.1:$frontendPort"
+    $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
 
     $backendProcess = Start-CmdWindow `
         -Title "Manga Translator API" `
@@ -183,7 +228,7 @@ try {
     $frontendProcess = Start-CmdWindow `
         -Title "Manga Translator WebUI" `
         -WorkingDirectory $frontendDir `
-        -Command 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort' `
+        -Command $frontendCommand `
         -LogPath $frontendLogPath
 
     if (-not (Wait-HttpReady -Url $frontendUrl -TimeoutSeconds 120 -Process $frontendProcess)) {
@@ -203,7 +248,7 @@ try {
         $browserProcess = Start-Process -FilePath $browserExe -ArgumentList $browserArgs -PassThru
         Write-Host ""
         Write-Host "Backend API:  http://localhost:8000"
-        Write-Host "Frontend UI:  http://localhost:5173"
+        Write-Host "Frontend UI:  $frontendUrl"
         Write-Host "Browser mode: dedicated app window"
         Write-Host "Logs:          $logDir"
         Write-Host ""

@@ -60,13 +60,15 @@ sleep 3
 
 echo "启动前端服务..."
 cd ../frontend
-npm run dev -- --open &
+FRONTEND_PORT="$(node scripts/find-free-port.mjs "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}")"
+FRONTEND_URL="http://localhost:$FRONTEND_PORT"
+FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort --open "$FRONTEND_URL" &
 FRONTEND_PID=$!
 
 echo -e "\n==================================================="
 echo "服务已全部启动！"
 echo "后端 API: http://localhost:8000"
-echo "前端 WebUI: http://localhost:5173"
+echo "前端 WebUI: $FRONTEND_URL"
 echo "按 Ctrl+C 停止所有服务"
 echo "==================================================="
 

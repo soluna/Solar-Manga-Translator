@@ -89,17 +89,19 @@ echo "等待后端启动..."
 sleep 3
 
 cd "$FRONTEND_DIR"
+FRONTEND_PORT="$(node "$FRONTEND_DIR/scripts/find-free-port.mjs" "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}")"
+FRONTEND_URL="http://localhost:$FRONTEND_PORT"
 if [ "$MAC_OPEN_BROWSER" = "0" ]; then
-  npm run dev &
+  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort &
 else
-  npm run dev -- --open &
+  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort --open "$FRONTEND_URL" &
 fi
 FRONTEND_PID=$!
 
 echo "==================================================="
 echo "mac 测试环境已启动"
 echo "后端 API: http://localhost:8000"
-echo "前端 WebUI: http://localhost:5173"
+echo "前端 WebUI: $FRONTEND_URL"
 echo "按 Ctrl+C 停止所有服务"
 echo "==================================================="
 

@@ -188,9 +188,22 @@ def _detect_box_cleanup_mask(img: np.ndarray, textline: Quadrilateral):
     if best_label < 0:
         return None
 
+    # Fill the entire bounding rect of the detected box component.
+    # This covers decorative symbols (♡ ★ ☆ etc.) that sit inside
+    # the text box but are neither text (OCR) nor bright background.
+    bx1 = int(stats[best_label, cv2.CC_STAT_LEFT])
+    by1 = int(stats[best_label, cv2.CC_STAT_TOP])
+    bw = int(stats[best_label, cv2.CC_STAT_WIDTH])
+    bh = int(stats[best_label, cv2.CC_STAT_HEIGHT])
+
     component_mask = np.zeros_like(gray, dtype=np.uint8)
-    component_mask[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w][labels == best_label] = 255
-    component_mask = cv2.morphologyEx(component_mask, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
+    abs_bx1 = max(0, roi_x + bx1)
+    abs_by1 = max(0, roi_y + by1)
+    abs_bx2 = min(gray.shape[1], roi_x + bx1 + bw)
+    abs_by2 = min(gray.shape[0], roi_y + by1 + bh)
+    component_mask[abs_by1:abs_by2, abs_bx1:abs_bx2] = 255
+
+    component_mask = cv2.morphologyEx(component_mask, cv2.MORPH_CLOSE, np.ones((7, 7), dtype=np.uint8))
     return component_mask
 
 def _apply_box_cleanup(img: np.ndarray, final_mask: np.ndarray, textlines: List[Quadrilateral]):

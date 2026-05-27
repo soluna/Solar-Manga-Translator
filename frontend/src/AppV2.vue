@@ -2994,13 +2994,13 @@ function isVerticalRegion(region) {
 }
 
 function getResolvedRegionAlignment(region) {
-  const normalized = String(region?.alignment || config.value.render_alignment || 'center')
+  const normalized = String(region?.alignment || config.value.render_alignment || 'left')
     .trim()
     .toLowerCase()
-  if (normalized === 'right') {
-    return 'right'
+  if (normalized === 'center' || normalized === 'right' || normalized === 'left') {
+    return normalized
   }
-  return 'center'
+  return 'left'
 }
 
 function getRegionFontSize(region) {
@@ -4425,14 +4425,29 @@ function getCanvasPreviewTextStyle(region) {
     fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
     textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
-    textAlign: resolvedAlignment === 'right' ? 'right' : 'center'
+    textAlign: isVerticalRegion(region)
+      ? 'start'
+      : resolvedAlignment === 'center'
+        ? 'center'
+        : resolvedAlignment === 'right'
+          ? 'right'
+          : 'left'
   }
 }
 
 function getCanvasPreviewTextContainerStyle(region) {
+  if (isVerticalRegion(region)) {
+    return {
+      justifyContent: 'center',
+      alignItems: 'flex-start'
+    }
+  }
+
   const resolvedAlignment = getResolvedRegionAlignment(region)
   return {
-    justifyContent: resolvedAlignment === 'right' ? 'flex-end' : 'center',
+    justifyContent: resolvedAlignment === 'right' ? 'flex-end'
+      : resolvedAlignment === 'center' ? 'center'
+      : 'flex-start',
     alignItems: 'center'
   }
 }

@@ -208,6 +208,8 @@ function createDefaultConfig() {
     target_lang: 'CHT',
     use_gpu: true,
     api_key: '',
+    openai_base_url: '',
+    openai_model: '',
     font_key: '',
     font_style_mode: 'single',
     style_font_gothic_key: '',
@@ -291,6 +293,8 @@ function normalizeStoredConfig(rawValue) {
     target_lang: typeof rawValue.target_lang === 'string' ? rawValue.target_lang : defaults.target_lang,
     use_gpu: typeof rawValue.use_gpu === 'boolean' ? rawValue.use_gpu : defaults.use_gpu,
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
+    openai_base_url: typeof rawValue.openai_base_url === 'string' ? rawValue.openai_base_url : defaults.openai_base_url,
+    openai_model: typeof rawValue.openai_model === 'string' ? rawValue.openai_model : defaults.openai_model,
     font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
     font_style_mode: fontStyleMode,
     // 黑体统一跟随主字体，避免“主字体改了但对白黑体不动”的混乱体验。
@@ -1082,14 +1086,9 @@ const topbarTaskProgressPercent = computed(() => {
   return Math.min(100, Math.round((current / total) * 100))
 })
 const translatorLabelMap = {
-  sugoi: 'sugoi',
   gemini: 'Gemini',
   'doubao-ark': 'Doubao',
-  chatgpt: 'ChatGPT',
-  youdao: '有道',
-  baidu: '百度',
-  offline: 'offline',
-  none: 'none'
+  'openai-compatible': 'OpenAI Compatible'
 }
 const targetLangLabelMap = {
   CHS: '简中',
@@ -1116,20 +1115,27 @@ const compactConfigSummary = computed(() => {
   const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
   const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
   const reviewMode = reviewModeLabelMap[config.value.default_review_mode] || config.value.default_review_mode
-  const translatorModel = config.value.translator === 'doubao-ark'
-    ? ` / ${getResolvedTranslatorModel(config.value)}`
-    : ''
+  let translatorModel = ''
+  if (config.value.translator === 'doubao-ark') {
+    translatorModel = ` / ${getResolvedTranslatorModel(config.value)}`
+  } else if (config.value.translator === 'openai-compatible') {
+    translatorModel = config.value.openai_model ? ` / ${config.value.openai_model}` : ''
+  }
   return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow} / 默认${reviewMode}`
 })
-const showTranslatorApiKeyField = computed(() => ['gemini', 'doubao-ark'].includes(config.value.translator))
+const showTranslatorApiKeyField = computed(() => ['gemini', 'doubao-ark', 'openai-compatible'].includes(config.value.translator))
 const translatorApiKeyLabel = computed(() => (
   config.value.translator === 'doubao-ark'
     ? 'Doubao Ark API Key'
+    : config.value.translator === 'openai-compatible'
+    ? 'OpenAI Compatible API Key'
     : 'Gemini API Key'
 ))
 const translatorApiKeyPlaceholder = computed(() => (
   config.value.translator === 'doubao-ark'
     ? '输入火山方舟 Ark API Key'
+    : config.value.translator === 'openai-compatible'
+    ? '输入 OpenAI Compatible API Key'
     : '输入 Gemini API Key'
 ))
 const showImageCleanupApiKeyField = computed(() => config.value.image_cleanup_mode !== 'off')
@@ -8728,11 +8734,7 @@ watch(
               <select v-model="config.translator">
                 <option value="gemini">Gemini</option>
                 <option value="doubao-ark">Doubao</option>
-                <option value="sugoi">SUGOI</option>
-                <option value="chatgpt">ChatGPT</option>
-                <option value="youdao">有道</option>
-                <option value="baidu">百度</option>
-                <option value="offline">Offline</option>
+                <option value="openai-compatible">OpenAI Compatible</option>
               </select>
             </label>
 
@@ -8745,6 +8747,39 @@ watch(
                 <option value="JPN">日语</option>
                 <option value="KOR">韩语</option>
               </select>
+            </label>
+
+            <label v-if="config.translator === 'doubao-ark'" class="v2-field">
+              <span>Doubao 模型</span>
+              <select v-model="config.translator_model">
+                <option
+                  v-for="model in doubaoModelOptions"
+                  :key="model.value"
+                  :value="model.value"
+                >
+                  {{ model.label }}
+                </option>
+              </select>
+            </label>
+
+            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
+              <span>API Base URL</span>
+              <input
+                v-model="config.openai_base_url"
+                placeholder="https://api.openai.com/v1"
+                type="text"
+                autocomplete="off"
+              />
+            </label>
+
+            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
+              <span>模型名称</span>
+              <input
+                v-model="config.openai_model"
+                placeholder="gpt-4o / deepseek-chat / ..."
+                type="text"
+                autocomplete="off"
+              />
             </label>
 
             <label v-if="showTranslatorApiKeyField" class="v2-field">
@@ -8991,11 +9026,7 @@ watch(
               <select v-model="config.translator">
                 <option value="gemini">Gemini</option>
                 <option value="doubao-ark">Doubao</option>
-                <option value="sugoi">SUGOI</option>
-                <option value="chatgpt">ChatGPT</option>
-                <option value="youdao">有道</option>
-                <option value="baidu">百度</option>
-                <option value="offline">Offline</option>
+                <option value="openai-compatible">OpenAI Compatible</option>
               </select>
             </label>
 
@@ -9031,7 +9062,27 @@ watch(
               </select>
             </label>
 
-            <label v-if="showTranslatorApiKeyField" class="v2-field">
+            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
+              <span>API Base URL</span>
+              <input
+                v-model="config.openai_base_url"
+                placeholder="https://api.openai.com/v1"
+                type="text"
+                autocomplete="off"
+              />
+            </label>
+
+            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
+              <span>模型名称</span>
+              <input
+                v-model="config.openai_model"
+                placeholder="gpt-4o / deepseek-chat / ..."
+                type="text"
+                autocomplete="off"
+              />
+            </label>
+
+            <label v-if="showTranslatorApiKeyField" class="v2-field">  <!-- settings panel -->
               <span>{{ translatorApiKeyLabel }}</span>
               <input
                 v-model="config.api_key"

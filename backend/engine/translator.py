@@ -19,6 +19,8 @@ from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import cv2
 import numpy as np
@@ -134,11 +136,16 @@ class TranslatorEngine:
             }
 
         try:
-            translated = await self._translate_text_batch(
-                ["テスト"],
-                config,
-                session_id=f"settings-validation-{uuid.uuid4().hex[:8]}",
-            )
+            if selected_translator == "openai-compatible":
+                translated = [await self._validate_openai_compatible_connection(config)]
+            elif selected_translator == "doubao-ark":
+                translated = [await self._validate_doubao_connection(config)]
+            else:
+                translated = await self._translate_text_batch(
+                    ["テスト"],
+                    config,
+                    session_id=f"settings-validation-{uuid.uuid4().hex[:8]}",
+                )
         except Exception as exc:
             return {
                 "ok": False,
@@ -153,6 +160,226 @@ class TranslatorEngine:
             "translator": selected_translator,
             "preview": preview,
         }
+
+    async def _validate_openai_compatible_connection(self, config: dict[str, Any]) -> str:
+        base_url = str(config.get("openai_base_url") or "").strip()
+        model = str(config.get("openai_model") or config.get("translator_model") or "").strip()
+        api_key = str(config.get("api_key") or "").strip()
+        if not base_url:
+            raise ValueError("缺少 OpenAI Compatible API Base URL。")
+        if not model:
+            raise ValueError("缺少 OpenAI Compatible 模型名称。")
+
+        return await asyncio.to_thread(
+            self._request_chat_completions_validation_sync,
+            provider_label="OpenAI Compatible",
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+        )
+
+    async def _validate_doubao_connection(self, config: dict[str, Any]) -> str:
+        model = str(config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL).strip()
+        api_key = str(config.get("api_key") or "").strip()
+        if model.startswith("doubao-seed-translation"):
+            return await asyncio.to_thread(
+                self._request_responses_validation_sync,
+                provider_label="Doubao Ark",
+                base_url=self.DOUBAO_ARK_BASE_URL,
+                model=model,
+                api_key=api_key,
+                target_lang=config.get("target_lang"),
+            )
+
+        return await asyncio.to_thread(
+            self._request_chat_completions_validation_sync,
+            provider_label="Doubao Ark",
+            base_url=self.DOUBAO_ARK_BASE_URL,
+            model=model,
+            api_key=api_key,
+        )
+
+    def _request_chat_completions_validation_sync(
+        self,
+        *,
+        provider_label: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+    ) -> str:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a translation connectivity test. Return only the translated text.",
+                },
+                {
+                    "role": "user",
+                    "content": "Translate this Japanese text to Chinese: テスト",
+                },
+            ],
+            "max_tokens": 64,
+            "temperature": 0,
+            "stream": False,
+        }
+        response = self._post_validation_json(
+            provider_label=provider_label,
+            url=self._chat_completions_url(base_url),
+            api_key=api_key,
+            payload=payload,
+        )
+        return self._extract_chat_completions_preview(response)
+
+    def _request_responses_validation_sync(
+        self,
+        *,
+        provider_label: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+        target_lang: Any,
+    ) -> str:
+        payload = {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "テスト",
+                            "translation_options": {
+                                "target_language": self._validation_language_code(target_lang) or "zh",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        response = self._post_validation_json(
+            provider_label=provider_label,
+            url=self._responses_url(base_url),
+            api_key=api_key,
+            payload=payload,
+        )
+        return self._extract_responses_preview(response)
+
+    def _post_validation_json(
+        self,
+        *,
+        provider_label: str,
+        url: str,
+        api_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        request = urllib_request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=30) as response:
+                body = response.read().decode("utf-8")
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(self._format_validation_http_error(provider_label, exc.code, body)) from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"{provider_label} 请求失败：{exc}") from exc
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{provider_label} 返回了无法解析的 JSON。") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"{provider_label} 返回格式异常。")
+        return parsed
+
+    def _chat_completions_url(self, base_url: str) -> str:
+        normalized = str(base_url or "").strip().rstrip("/")
+        if normalized.endswith("/chat/completions"):
+            return normalized
+        return f"{normalized}/chat/completions"
+
+    def _responses_url(self, base_url: str) -> str:
+        normalized = str(base_url or "").strip().rstrip("/")
+        if normalized.endswith("/responses"):
+            return normalized
+        return f"{normalized}/responses"
+
+    def _extract_chat_completions_preview(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                message = first.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+                text = first.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        raise RuntimeError("服务已响应，但没有返回可读取的文本。")
+
+    def _extract_responses_preview(self, payload: dict[str, Any]) -> str:
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        pieces: list[str] = []
+        output = payload.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for content_item in content:
+                    if isinstance(content_item, dict):
+                        text = content_item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            pieces.append(text.strip())
+
+        preview = "\n".join(pieces).strip()
+        if preview:
+            return preview
+        raise RuntimeError("服务已响应，但没有返回可读取的文本。")
+
+    def _format_validation_http_error(self, provider_label: str, status_code: int, body: str) -> str:
+        detail = ""
+        try:
+            payload = json.loads(body)
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                detail = str(error.get("message") or error.get("detail") or "").strip()
+            elif isinstance(error, str):
+                detail = error.strip()
+            if not detail and isinstance(payload, dict):
+                detail = str(payload.get("message") or payload.get("detail") or "").strip()
+        except Exception:
+            detail = ""
+
+        if not detail:
+            detail = str(body or "").strip()
+        if len(detail) > 500:
+            detail = f"{detail[:500]}..."
+        return f"{provider_label} 请求失败：HTTP {status_code} {detail}".strip()
+
+    def _validation_language_code(self, raw_value: Any) -> str | None:
+        normalized = str(raw_value or "").strip().upper()
+        return {
+            "CHS": "zh",
+            "CHT": "zh-Hant",
+            "JPN": "ja",
+            "ENG": "en",
+            "KOR": "ko",
+        }.get(normalized)
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {

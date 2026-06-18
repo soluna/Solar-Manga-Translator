@@ -88,6 +88,53 @@ class TranslatorEngineStateTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 engine.restore_project_session(project_id)
 
+    def test_openai_compatible_settings_validation_uses_lightweight_http_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            async def fail_vendor_translation(*_args, **_kwargs):
+                raise AssertionError("settings validation should not import the full translator dispatcher")
+
+            def fake_validation_request(**kwargs):
+                self.assertEqual(kwargs["base_url"], "https://api.example.com/v1")
+                self.assertEqual(kwargs["model"], "example-model")
+                self.assertEqual(kwargs["api_key"], "secret")
+                return "测试"
+
+            engine._translate_text_batch = fail_vendor_translation  # type: ignore[method-assign]
+            engine._request_chat_completions_validation_sync = fake_validation_request  # type: ignore[method-assign]
+
+            result = asyncio.run(engine.validate_user_config({
+                "translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }))
+
+            self.assertTrue(result.get("ok"))
+            self.assertEqual(result.get("preview"), "测试")
+            self.assertEqual(result.get("translator"), "openai-compatible")
+
+    def test_openai_compatible_settings_validation_requires_base_url_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            missing_base_url = asyncio.run(engine.validate_user_config({
+                "translator": "openai-compatible",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }))
+            self.assertFalse(missing_base_url.get("ok"))
+            self.assertIn("API Base URL", str(missing_base_url.get("message")))
+
+            missing_model = asyncio.run(engine.validate_user_config({
+                "translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "api_key": "secret",
+            }))
+            self.assertFalse(missing_model.get("ok"))
+            self.assertIn("模型名称", str(missing_model.get("message")))
+
 
 if __name__ == "__main__":
     unittest.main()

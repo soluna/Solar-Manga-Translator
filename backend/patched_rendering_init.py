@@ -14,12 +14,10 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 from . import text_render
 from .text_render_eng import render_textblock_list_eng
 from .text_render_pillow_eng import render_textblock_list_eng as render_textblock_list_eng_pillow
-from ..utils import (
-    BASE_PATH,
-    TextBlock,
-    color_difference,
-    get_logger,
-)
+from ..utils.generic import BASE_PATH
+from ..utils.generic2 import color_difference
+from ..utils.log import get_logger
+from ..utils.textblock import TextBlock
 
 logger = get_logger('render')
 _ACTIVE_FONT_KEY = None
@@ -347,7 +345,7 @@ def _compose_render_canvas(
         offset_y = available_y // 2
     else:
         offset_x = available_x // 2
-        offset_y = _alignment_offset(alignment, available_y)
+        offset_y = 0
 
     canvas[offset_y:offset_y + box_height, offset_x:offset_x + box_width] = temp_box
     return canvas
@@ -419,19 +417,8 @@ def _expand_destination_quad(
             expanded[1] -= half_right
             expanded[2] += half_right
         else:
-            if alignment == 'right':
-                expanded[0] -= extra_left
-                expanded[1] -= extra_right
-            elif alignment == 'center':
-                half_left = extra_left * 0.5
-                half_right = extra_right * 0.5
-                expanded[0] -= half_left
-                expanded[3] += half_left
-                expanded[1] -= half_right
-                expanded[2] += half_right
-            else:
-                expanded[3] += extra_left
-                expanded[2] += extra_right
+            expanded[3] += extra_left
+            expanded[2] += extra_right
 
     if restore_singleton_axis:
         return expanded[np.newaxis, ...]

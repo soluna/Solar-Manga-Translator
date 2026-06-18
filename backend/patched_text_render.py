@@ -11,7 +11,8 @@ from hyphen import Hyphenator
 from hyphen.dictools import LANGUAGES as HYPHENATOR_LANGUAGES
 from langcodes import standardize_tag
 
-from ..utils import BASE_PATH, is_punctuation
+from ..utils.generic import BASE_PATH
+from ..utils.generic2 import is_punctuation
 
 try:
     HYPHENATOR_LANGUAGES.remove('fr')
@@ -586,10 +587,6 @@ def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tup
     # write stuff
     for line_text, line_height in zip(line_text_list, line_height_list):
         pen_line = pen_orig.copy()
-        if alignment == 'center':
-            pen_line[1] += (max(line_height_list) - line_height) // 2
-        elif alignment == 'right':
-            pen_line[1] += max(line_height_list) - line_height
 
         for c in line_text:
             offset_y = put_char_vertical(font_size, c, pen_line, canvas_text, canvas_border, border_size=bg_size)

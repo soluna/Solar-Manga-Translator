@@ -680,6 +680,9 @@ const canTranslateCurrentPage = computed(
 const canRerender = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
 )
+const canRetranslate = computed(
+  () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
+)
 const v2ExportArchiveUrl = computed(() => {
   const activeSessionId = String(sessionId.value || '').trim()
   if (!activeSessionId) {
@@ -3003,6 +3006,34 @@ function getResolvedRegionAlignment(region) {
   return 'left'
 }
 
+function colorTripletToCss(value, fallback = '#152234') {
+  if (!Array.isArray(value) || value.length < 3) {
+    return fallback
+  }
+  const channels = value.slice(0, 3).map((channel) => {
+    const parsed = Number(channel)
+    if (!Number.isFinite(parsed)) {
+      return 0
+    }
+    return Math.max(0, Math.min(255, Math.round(parsed)))
+  })
+  return `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})`
+}
+
+function getCanvasPreviewTextShadow(color, radius) {
+  const spread = Math.max(1, Math.round(Number(radius) || 1))
+  return [
+    `0 ${spread}px 0 ${color}`,
+    `0 -${spread}px 0 ${color}`,
+    `${spread}px 0 0 ${color}`,
+    `-${spread}px 0 0 ${color}`,
+    `${spread}px ${spread}px 0 ${color}`,
+    `-${spread}px ${spread}px 0 ${color}`,
+    `${spread}px -${spread}px 0 ${color}`,
+    `-${spread}px -${spread}px 0 ${color}`
+  ].join(', ')
+}
+
 function getRegionFontSize(region) {
   if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
     return fontSizeInputDrafts.value[region.id]
@@ -4412,16 +4443,22 @@ function getSourceCropImageStyle(region, page) {
 function getCanvasPreviewTextStyle(region) {
   const rawFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
   const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
-  const spacingMultiplier = Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)
+  const spacingMultiplier = Math.max(0.85, Math.min(1.35, Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)))
   const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
-  const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize * 0.2)
-  const lineHeight = Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
+  const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize)
+  const lineHeight = isVerticalRegion(region)
+    ? 1.2
+    : Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
   const resolvedAlignment = getResolvedRegionAlignment(region)
+  const fgColor = colorTripletToCss(region?.fg_color, '#152234')
+  const strokeColor = colorTripletToCss(region?.bg_color, 'rgba(255, 255, 255, 0.92)')
+  const strokeWidth = Math.max(1, Math.round(scaledFontSize * Math.max(0.04, Math.min(0.12, Number(region?.stroke_width || 0.07)))))
   return {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
     letterSpacing: `${letterSpacing.toFixed(2)}px`,
     lineHeight: String(lineHeight),
+    color: fgColor,
     fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
     textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
@@ -4431,7 +4468,10 @@ function getCanvasPreviewTextStyle(region) {
         ? 'center'
         : resolvedAlignment === 'right'
           ? 'right'
-          : 'left'
+          : 'left',
+    WebkitTextStroke: `${strokeWidth}px ${strokeColor}`,
+    textShadow: getCanvasPreviewTextShadow(strokeColor, Math.max(1, Math.round(strokeWidth * 0.75))),
+    paintOrder: 'stroke fill'
   }
 }
 
@@ -7110,6 +7150,13 @@ function runV2RerenderAction() {
   startTranslation('rerender')
 }
 
+function runV2RetranslateAction() {
+  if (!canRetranslate.value || translating.value) {
+    return
+  }
+  startTranslation('translate')
+}
+
 function toggleRegionEnabledV2(region) {
   updateRegionDisabledOverride(region, !isRegionDisabled(region))
 }
@@ -8193,6 +8240,15 @@ watch(
               @click="runV2RerenderAction"
             >
               重新嵌字
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canRetranslate"
+              title="使用当前设置和模型重新翻译整本漫画"
+              @click="runV2RetranslateAction"
+            >
+              重新翻译
             </button>
             <button
               type="button"

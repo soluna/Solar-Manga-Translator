@@ -1542,6 +1542,9 @@ class TranslatorEngine:
                 "letter_spacing": float(getattr(region, "letter_spacing", 1.0) or 1.0),
                 "line_spacing": float(getattr(region, "line_spacing", 1.0) or 1.0),
                 "alignment": str(getattr(region, "_alignment", getattr(region, "alignment", "auto")) or "auto"),
+                "fg_color": self._rgb_color_payload(getattr(region, "fg_colors", None), (0, 0, 0)),
+                "bg_color": self._rgb_color_payload(getattr(region, "bg_colors", None), (255, 255, 255)),
+                "stroke_width": float(getattr(region, "default_stroke_width", 0.2) or 0.2),
             },
             "flags": {
                 "disabled": bool(getattr(region, "disabled_region", False)),
@@ -2123,6 +2126,9 @@ class TranslatorEngine:
                     "alignment": str(style.get("alignment") or "auto"),
                     "letter_spacing": float(style.get("letter_spacing") or 1.0),
                     "line_spacing": float(style.get("line_spacing") or 1.0),
+                    "fg_color": self._rgb_color_payload(style.get("fg_color"), (0, 0, 0)),
+                    "bg_color": self._rgb_color_payload(style.get("bg_color"), (255, 255, 255)),
+                    "stroke_width": float(style.get("stroke_width") or 0.2),
                 }
             )
 
@@ -2168,6 +2174,9 @@ class TranslatorEngine:
                     "alignment": str(style.get("alignment") or "auto"),
                     "letter_spacing": float(style.get("letter_spacing") or 1.0),
                     "line_spacing": float(style.get("line_spacing") or 1.0),
+                    "fg_color": self._rgb_color_payload(style.get("fg_color"), (0, 0, 0)),
+                    "bg_color": self._rgb_color_payload(style.get("bg_color"), (255, 255, 255)),
+                    "stroke_width": float(style.get("stroke_width") or 0.2),
                 }
             )
 
@@ -4704,6 +4713,26 @@ class TranslatorEngine:
             return [self._to_json_compatible(item) for item in value]
         return value
 
+    def _rgb_color_payload(self, value: Any, fallback: tuple[int, int, int]) -> list[int]:
+        compatible = self._to_json_compatible(value)
+        if compatible is None:
+            compatible = fallback
+        if isinstance(compatible, np.ndarray):
+            compatible = compatible.tolist()
+        if not isinstance(compatible, (list, tuple)) or len(compatible) < 3:
+            compatible = fallback
+
+        channel_values: list[int] = []
+        for channel in list(compatible)[:3]:
+            try:
+                normalized = int(round(float(channel)))
+            except (TypeError, ValueError):
+                normalized = 0
+            channel_values.append(max(0, min(255, normalized)))
+        while len(channel_values) < 3:
+            channel_values.append(0)
+        return channel_values
+
     def _save_cached_regions(self, page_cache_dir: Path, regions: list[Any]) -> None:
         serialized_regions: list[dict[str, Any]] = []
         for region in regions:
@@ -6202,14 +6231,11 @@ class TranslatorEngine:
         session: dict[str, Any] | None = None,
     ) -> None:
         self._ensure_vendor_import_path()
-        from PIL import Image
         from manga_translator.rendering import (
             dispatch as dispatch_rendering,
             render as render_region,
             resize_regions_to_font_size,
         )
-        from manga_translator.save import save_result
-        from manga_translator.utils import Context, dump_image, load_image
 
         source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if source_bgr is None:
@@ -6219,8 +6245,6 @@ class TranslatorEngine:
         if inpainted_bgr is None:
             raise RuntimeError(f"重嵌字缓存损坏，无法读取底图: {page_cache_dir / 'inpainted.png'}")
 
-        source_image = Image.open(source_path)
-        _, alpha_ch = load_image(source_image)
         inpainted_rgb = (
             base_image_rgb.copy()
             if base_image_rgb is not None
@@ -6329,14 +6353,37 @@ class TranslatorEngine:
                 json.dumps(render_steps, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        result_image = dump_image(source_image, rendered_rgb, alpha_ch)
+        result_image = self._rendered_rgb_to_pil_image(source_path, rendered_rgb)
 
-        save_ctx = Context(save_quality=100, text_regions=render_regions, result=result_image)
-        self._save_result_atomic(result_image, output_path, save_ctx)
+        self._save_result_atomic(result_image, output_path, save_quality=100)
 
-    def _save_result_atomic(self, result_image: Any, output_path: Path, save_ctx: Any) -> None:
+    def _rendered_rgb_to_pil_image(self, source_path: Path, rendered_rgb: np.ndarray) -> Any:
+        from PIL import Image
+
+        result_rgb = Image.fromarray(np.asarray(rendered_rgb, dtype=np.uint8), "RGB")
+        result_image = result_rgb.convert("RGBA")
+
+        try:
+            with Image.open(source_path) as source_image:
+                has_alpha = (
+                    source_image.mode in {"RGBA", "LA"}
+                    or (source_image.mode == "P" and "transparency" in source_image.info)
+                )
+                if not has_alpha:
+                    return result_image
+                alpha_channel = source_image.convert("RGBA").getchannel("A")
+        except Exception:
+            return result_image
+
+        if alpha_channel.size != result_image.size:
+            alpha_channel = alpha_channel.resize(result_image.size)
+        result_image.putalpha(alpha_channel)
+        return result_image
+
+    def _save_result_atomic(self, result_image: Any, output_path: Path, save_quality: int = 100) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         suffix = output_path.suffix.lower()
+        quality = max(1, min(100, int(save_quality or 100)))
 
         fd, temp_name = tempfile.mkstemp(
             dir=str(output_path.parent),
@@ -6350,16 +6397,16 @@ class TranslatorEngine:
                 rgb_image = result_image.convert("RGB")
                 rgb_image.save(
                     temp_path,
-                    quality=getattr(save_ctx, "save_quality", 100),
+                    quality=quality,
                     format="JPEG",
                     subsampling=0,
                 )
             elif suffix == ".png":
                 result_image.save(temp_path, format="PNG")
             elif suffix == ".webp":
-                result_image.save(temp_path, format="WEBP", quality=100, lossless=True)
+                result_image.save(temp_path, format="WEBP", quality=quality, lossless=True)
             else:
-                save_result(result_image, str(temp_path), save_ctx)
+                result_image.save(temp_path)
 
             self._replace_file_with_retry(temp_path, output_path)
         finally:

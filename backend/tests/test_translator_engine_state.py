@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -134,6 +139,93 @@ class TranslatorEngineStateTests(unittest.TestCase):
             }))
             self.assertFalse(missing_model.get("ok"))
             self.assertIn("模型名称", str(missing_model.get("message")))
+
+    def test_rerender_imports_avoid_vendor_utils_aggregate(self) -> None:
+        render_files = [
+            BACKEND_DIR / "patched_manga_translator_init.py",
+            BACKEND_DIR / "patched_utils_init.py",
+            BACKEND_DIR / "patched_rendering_init.py",
+            BACKEND_DIR / "patched_text_render.py",
+        ]
+
+        for render_file in render_files:
+            with self.subTest(render_file=render_file.name):
+                content = render_file.read_text(encoding="utf-8")
+                self.assertNotIn("from ..utils import", content)
+
+    def test_rendering_import_does_not_load_inference_stack(self) -> None:
+        vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
+        if not vendor_root.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        script = """
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path("backend/manga-image-translator").resolve()))
+sys.path.insert(0, str(Path("backend").resolve()))
+from patch_pydensecrf import patch_mask_refinement
+
+if not patch_mask_refinement():
+    raise SystemExit("runtime patch failed")
+
+import manga_translator.rendering
+
+print(json.dumps({
+    "onnxruntime": "onnxruntime" in sys.modules,
+    "torch": "torch" in sys.modules,
+    "utils_inference": "manga_translator.utils.inference" in sys.modules,
+    "full_translator": "manga_translator.manga_translator" in sys.modules,
+}, sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(BACKEND_DIR.parent),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        loaded_modules = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(
+            loaded_modules,
+            {
+                "onnxruntime": False,
+                "torch": False,
+                "utils_inference": False,
+                "full_translator": False,
+            },
+        )
+
+    def test_vertical_renderer_columns_are_top_aligned(self) -> None:
+        render_files = [
+            BACKEND_DIR / "patched_text_render.py",
+        ]
+        vendor_text_render = BACKEND_DIR / "manga-image-translator" / "manga_translator" / "rendering" / "text_render.py"
+        if vendor_text_render.exists():
+            render_files.append(vendor_text_render)
+
+        for render_file in render_files:
+            with self.subTest(render_file=render_file.name):
+                content = render_file.read_text(encoding="utf-8")
+                self.assertNotIn("pen_line[1] += (max(line_height_list) - line_height) // 2", content)
+                self.assertNotIn("pen_line[1] += max(line_height_list) - line_height", content)
+
+    def test_rerender_result_image_preserves_source_alpha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_path = root / "source.png"
+            Image.new("RGBA", (2, 2), (255, 255, 255, 0)).save(source_path)
+
+            rendered_rgb = np.full((2, 2, 3), [12, 34, 56], dtype=np.uint8)
+            result_image = engine._rendered_rgb_to_pil_image(source_path, rendered_rgb)
+
+            self.assertEqual(result_image.mode, "RGBA")
+            self.assertEqual(np.asarray(result_image.getchannel("A")).reshape(-1).tolist(), [0, 0, 0, 0])
+            output_path = root / "nested" / "result.png"
+            engine._save_result_atomic(result_image, output_path)
+            self.assertTrue(output_path.exists())
 
 
 if __name__ == "__main__":

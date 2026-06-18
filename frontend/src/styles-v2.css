@@ -1359,13 +1359,13 @@ img {
 
 .style-box-preview-text {
   display: flex;
-  padding: 8px;
-  background: rgba(255, 255, 255, 0.86);
+  padding: 0;
+  background: transparent;
   color: #152234;
 }
 
 .style-box-preview-text.vertical {
-  padding: 10px 6px;
+  padding: 0;
 }
 
 .style-box-preview-text-content {
@@ -1377,6 +1377,7 @@ img {
   word-break: break-word;
   overflow-wrap: anywhere;
   pointer-events: none;
+  transform-origin: top left;
 }
 
 .style-box-preview-text-content:not(.vertical) {
@@ -1385,7 +1386,10 @@ img {
 
 .style-box-preview-text-content.vertical {
   height: 100%;
-  white-space: normal;
+  width: auto;
+  white-space: pre-wrap;
+  text-align: start;
+  transform-origin: top right;
 }
 
 .style-box-handle {

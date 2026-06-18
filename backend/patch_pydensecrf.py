@@ -91,6 +91,14 @@ def patch_text_render(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "from ..utils import BASE_PATH, is_punctuation\n",
+        "from ..utils.generic import BASE_PATH\nfrom ..utils.generic2 import is_punctuation\n",
+        "text_render lightweight renderer imports",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int):",
         "def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int, letter_spacing: float = 1.0):",
         "text_render vertical signature",
@@ -142,6 +150,14 @@ def patch_text_render(target_file: Path) -> bool:
         "            pen_line[1] += offset_y\n",
         "            pen_line[1] += max(1, int(round(offset_y * letter_spacing)))\n",
         "text_render vertical glyph advance",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        if alignment == 'center':\n            pen_line[1] += (max(line_height_list) - line_height) // 2\n        elif alignment == 'right':\n            pen_line[1] += max(line_height_list) - line_height\n\n",
+        "        # Vertical columns stay top-aligned; horizontal placement is handled by the outer canvas.\n",
+        "text_render vertical column top alignment",
     )
     changed = changed or did_change
 
@@ -221,6 +237,14 @@ def patch_text_render_eng(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "from ..utils import TextBlock, rect_distance\n",
+        "from ..utils.generic2 import rect_distance\nfrom ..utils.textblock import TextBlock\n",
+        "text_render_eng lightweight renderer imports",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "        font_size = int(font_size)\n",
         "        font_size = max(int(font_size or 0), 1)\n",
         "text_render_eng font size guard",
@@ -255,6 +279,14 @@ def patch_text_render_pillow_eng(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "from ..utils import TextBlock\n",
+        "from ..utils.textblock import TextBlock\n",
+        "text_render_pillow_eng lightweight renderer imports",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "        line_height = font.getmetrics()[0] - font.getmetrics()[1]\n",
         "        line_height = max(font.getmetrics()[0] - font.getmetrics()[1], 1)\n",
         "text_render_pillow_eng line height guard",
@@ -272,6 +304,10 @@ def patch_mask_refinement():
     translator_dir = backend_dir / "manga-image-translator"
     target_file = translator_dir / "manga_translator" / "mask_refinement" / "text_mask_utils.py"
     patched_file = backend_dir / "patched_text_mask_utils.py"
+    target_package_init_file = translator_dir / "manga_translator" / "__init__.py"
+    patched_package_init_file = backend_dir / "patched_manga_translator_init.py"
+    target_utils_init_file = translator_dir / "manga_translator" / "utils" / "__init__.py"
+    patched_utils_init_file = backend_dir / "patched_utils_init.py"
     target_render_file = translator_dir / "manga_translator" / "rendering" / "__init__.py"
     patched_render_file = backend_dir / "patched_rendering_init.py"
     patched_text_render_file = backend_dir / "patched_text_render.py"
@@ -291,6 +327,22 @@ def patch_mask_refinement():
 
     if not patched_file.exists():
         print(f"Error: Could not find our patched version at {patched_file}")
+        return False
+
+    if not target_package_init_file.exists():
+        print(f"Error: Could not find {target_package_init_file}")
+        return False
+
+    if not patched_package_init_file.exists():
+        print(f"Error: Could not find our patched package init at {patched_package_init_file}")
+        return False
+
+    if not target_utils_init_file.exists():
+        print(f"Error: Could not find {target_utils_init_file}")
+        return False
+
+    if not patched_utils_init_file.exists():
+        print(f"Error: Could not find our patched utils init at {patched_utils_init_file}")
         return False
 
     if not target_render_file.exists():
@@ -336,6 +388,12 @@ def patch_mask_refinement():
         else:
             patch_text_render(target_text_render_file)
             print("Successfully patched text_render.py for configurable letter spacing!")
+
+        shutil.copy2(patched_package_init_file, target_package_init_file)
+        print("Successfully replaced manga_translator/__init__.py with the lazy package init!")
+
+        shutil.copy2(patched_utils_init_file, target_utils_init_file)
+        print("Successfully replaced utils/__init__.py with the lazy inference init!")
 
         patch_text_render_eng(target_text_render_eng_file)
         print("Successfully patched text_render_eng.py with rendering guards!")

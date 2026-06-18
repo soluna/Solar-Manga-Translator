@@ -52,6 +52,40 @@ def patch_gemini_translator(target_file: Path) -> bool:
 
     return changed
 
+def patch_chatgpt_translator(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated = content
+    changed = False
+
+    updated, did_change = _replace_once(
+        updated,
+        "from .. import manga_translator\n",
+        "\ndef _get_manga_translator_runtime():\n    from importlib import import_module\n    return import_module(\"manga_translator.manga_translator\")\n",
+        "ChatGPT translator lazy manga_translator runtime import",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        if hasattr(manga_translator, '_global_console') and manga_translator._global_console:\n            self.console = manga_translator._global_console\n        else:\n            self.console = Console()  \n",
+        "        manga_translator_runtime = _get_manga_translator_runtime()\n        global_console = getattr(manga_translator_runtime, '_global_console', None)\n        if global_console:\n            self.console = global_console\n        else:\n            self.console = Console()  \n",
+        "ChatGPT translator lazy global console lookup",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        if hasattr(manga_translator, '_log_console') and manga_translator._log_console:\n            # 直接输出纯文本，不使用边框\n            manga_translator._log_console.print(f\"=== {title} ===\")\n            manga_translator._log_console.print(fixed_text)\n            manga_translator._log_console.print(\"=\" * (len(title) + 8))\n",
+        "        manga_translator_runtime = _get_manga_translator_runtime()\n        log_console = getattr(manga_translator_runtime, '_log_console', None)\n        if log_console:\n            # 直接输出纯文本，不使用边框\n            log_console.print(f\"=== {title} ===\")\n            log_console.print(fixed_text)\n            log_console.print(\"=\" * (len(title) + 8))\n",
+        "ChatGPT translator lazy log console lookup",
+    )
+    changed = changed or did_change
+
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+
+    return changed
+
 def patch_local_mode(target_file: Path) -> bool:
     content = target_file.read_text(encoding='utf-8')
     updated = content
@@ -308,6 +342,8 @@ def patch_mask_refinement():
     patched_package_init_file = backend_dir / "patched_manga_translator_init.py"
     target_utils_init_file = translator_dir / "manga_translator" / "utils" / "__init__.py"
     patched_utils_init_file = backend_dir / "patched_utils_init.py"
+    target_inpainting_init_file = translator_dir / "manga_translator" / "inpainting" / "__init__.py"
+    patched_inpainting_init_file = backend_dir / "patched_inpainting_init.py"
     target_render_file = translator_dir / "manga_translator" / "rendering" / "__init__.py"
     patched_render_file = backend_dir / "patched_rendering_init.py"
     patched_text_render_file = backend_dir / "patched_text_render.py"
@@ -315,6 +351,7 @@ def patch_mask_refinement():
     target_text_render_eng_file = translator_dir / "manga_translator" / "rendering" / "text_render_eng.py"
     target_text_render_pillow_eng_file = translator_dir / "manga_translator" / "rendering" / "text_render_pillow_eng.py"
     target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
+    target_chatgpt_file = translator_dir / "manga_translator" / "translators" / "chatgpt.py"
     target_custom_openai_file = translator_dir / "manga_translator" / "translators" / "custom_openai.py"
     target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
     patched_rerender_cache_file = backend_dir / "patched_rerender_cache.py"
@@ -345,6 +382,14 @@ def patch_mask_refinement():
         print(f"Error: Could not find our patched utils init at {patched_utils_init_file}")
         return False
 
+    if not target_inpainting_init_file.exists():
+        print(f"Error: Could not find {target_inpainting_init_file}")
+        return False
+
+    if not patched_inpainting_init_file.exists():
+        print(f"Error: Could not find our patched inpainting init at {patched_inpainting_init_file}")
+        return False
+
     if not target_render_file.exists():
         print(f"Error: Could not find {target_render_file}")
         return False
@@ -355,6 +400,10 @@ def patch_mask_refinement():
 
     if not target_gemini_file.exists():
         print(f"Error: Could not find {target_gemini_file}")
+        return False
+
+    if not target_chatgpt_file.exists():
+        print(f"Error: Could not find {target_chatgpt_file}")
         return False
 
     if not target_text_render_eng_file.exists():
@@ -395,6 +444,9 @@ def patch_mask_refinement():
         shutil.copy2(patched_utils_init_file, target_utils_init_file)
         print("Successfully replaced utils/__init__.py with the lazy inference init!")
 
+        shutil.copy2(patched_inpainting_init_file, target_inpainting_init_file)
+        print("Successfully replaced inpainting/__init__.py with the lazy inpainter init!")
+
         patch_text_render_eng(target_text_render_eng_file)
         print("Successfully patched text_render_eng.py with rendering guards!")
 
@@ -412,6 +464,9 @@ def patch_mask_refinement():
 
         patch_gemini_translator(target_gemini_file)
         print("Successfully patched Gemini translator for empty-response handling!")
+
+        patch_chatgpt_translator(target_chatgpt_file)
+        print("Successfully patched ChatGPT translator for lazy runtime lookup!")
 
         patch_local_mode(target_local_file)
         print("Successfully patched local mode for rerender cache generation!")

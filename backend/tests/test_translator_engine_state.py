@@ -144,6 +144,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
         render_files = [
             BACKEND_DIR / "patched_manga_translator_init.py",
             BACKEND_DIR / "patched_utils_init.py",
+            BACKEND_DIR / "patched_inpainting_init.py",
             BACKEND_DIR / "patched_rendering_init.py",
             BACKEND_DIR / "patched_text_render.py",
         ]
@@ -194,6 +195,92 @@ print(json.dumps({
                 "torch": False,
                 "utils_inference": False,
                 "full_translator": False,
+            },
+        )
+
+    def test_engine_import_does_not_load_onnxruntime(self) -> None:
+        vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
+        if not vendor_root.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        script = """
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path("backend/manga-image-translator").resolve()))
+sys.path.insert(0, str(Path("backend").resolve()))
+from patch_pydensecrf import patch_mask_refinement
+
+if not patch_mask_refinement():
+    raise SystemExit("runtime patch failed")
+
+import manga_translator.manga_translator
+
+print(json.dumps({
+    "onnxruntime": "onnxruntime" in sys.modules,
+    "booru_tagger": "manga_translator.inpainting.booru_tagger" in sys.modules,
+    "sd_inpainter": "manga_translator.inpainting.inpainting_sd" in sys.modules,
+}, sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(BACKEND_DIR.parent),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        loaded_modules = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(
+            loaded_modules,
+            {
+                "onnxruntime": False,
+                "booru_tagger": False,
+                "sd_inpainter": False,
+            },
+        )
+
+    def test_cli_args_import_does_not_trigger_runtime_cycle_or_onnxruntime(self) -> None:
+        vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
+        if not vendor_root.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        script = """
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path("backend/manga-image-translator").resolve()))
+sys.path.insert(0, str(Path("backend").resolve()))
+from patch_pydensecrf import patch_mask_refinement
+
+if not patch_mask_refinement():
+    raise SystemExit("runtime patch failed")
+
+from manga_translator.args import parser
+
+print(json.dumps({
+    "parser": parser.prog,
+    "onnxruntime": "onnxruntime" in sys.modules,
+    "booru_tagger": "manga_translator.inpainting.booru_tagger" in sys.modules,
+    "sd_inpainter": "manga_translator.inpainting.inpainting_sd" in sys.modules,
+}, sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(BACKEND_DIR.parent),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        loaded_modules = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(
+            loaded_modules,
+            {
+                "parser": "manga_translator",
+                "onnxruntime": False,
+                "booru_tagger": False,
+                "sd_inpainter": False,
             },
         )
 

@@ -82,6 +82,14 @@ const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const canvasZoomMin = 0.2
 const canvasZoomMax = 6
 const maxCanvasHistoryEntries = 50
+const reviewComparePaneOptions = [
+  { key: 'final', label: '嵌后', shortLabel: '嵌后' },
+  { key: 'source', label: '原图', shortLabel: '原图' },
+  { key: 'blank', label: '空页', shortLabel: '空页' },
+  { key: 'frame', label: '框页', shortLabel: '框页' }
+]
+const defaultReviewComparePaneModes = ['final', 'frame']
+const reviewComparePaneOrder = reviewComparePaneOptions.map((option) => option.key)
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
   gothic: ['華康儷中黑.ttf', '華康儷中黑'],
@@ -192,7 +200,51 @@ function isValidWorkspaceWidthMode(value) {
 }
 
 function isValidComparePaneMode(value) {
-  return ['saved', 'preview', 'source'].includes(value)
+  return ['saved', 'preview', 'source', 'blank', 'frame', 'final'].includes(value)
+}
+
+function isValidReviewComparePaneMode(value) {
+  return reviewComparePaneOrder.includes(value)
+}
+
+function normalizeLegacyComparePaneMode(value) {
+  if (value === 'source') {
+    return 'source'
+  }
+  if (value === 'blank') {
+    return 'blank'
+  }
+  if (value === 'frame') {
+    return 'frame'
+  }
+  return 'final'
+}
+
+function normalizeReviewComparePaneModes(value, legacyMode = '') {
+  const sourceModes = Array.isArray(value)
+    ? value
+    : (legacyMode ? [normalizeLegacyComparePaneMode(legacyMode), 'frame'] : defaultReviewComparePaneModes)
+  const uniqueModes = []
+  for (const mode of sourceModes) {
+    const normalized = normalizeLegacyComparePaneMode(String(mode || '').trim())
+    if (!isValidReviewComparePaneMode(normalized) || uniqueModes.includes(normalized)) {
+      continue
+    }
+    uniqueModes.push(normalized)
+  }
+
+  for (const fallbackMode of defaultReviewComparePaneModes) {
+    if (uniqueModes.length >= 2) {
+      break
+    }
+    if (!uniqueModes.includes(fallbackMode)) {
+      uniqueModes.push(fallbackMode)
+    }
+  }
+
+  return reviewComparePaneOrder
+    .filter((mode) => uniqueModes.includes(mode))
+    .slice(0, 3)
 }
 
 function isValidInspectorTab(value) {
@@ -403,7 +455,8 @@ function mergeProjectConfigWithLocalPreferences(projectConfig, localConfig) {
 function createDefaultReviewWorkspacePrefs() {
   return {
     split_ratio: 65,
-    compare_pane_mode: 'saved',
+    compare_pane_mode: 'final',
+    compare_pane_modes: [...defaultReviewComparePaneModes],
     compare_sync_enabled: true,
     inspector_tab: 'inspector',
     show_debug: false,
@@ -427,7 +480,10 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
   const inspectorWidth = Number(rawValue.inspector_width)
   return {
     split_ratio: Number.isFinite(splitRatio) ? Math.min(80, Math.max(50, Math.round(splitRatio))) : defaults.split_ratio,
-    compare_pane_mode: isValidComparePaneMode(rawValue.compare_pane_mode) ? rawValue.compare_pane_mode : defaults.compare_pane_mode,
+    compare_pane_mode: isValidComparePaneMode(rawValue.compare_pane_mode)
+      ? normalizeLegacyComparePaneMode(rawValue.compare_pane_mode)
+      : defaults.compare_pane_mode,
+    compare_pane_modes: normalizeReviewComparePaneModes(rawValue.compare_pane_modes, rawValue.compare_pane_mode),
     compare_sync_enabled: typeof rawValue.compare_sync_enabled === 'boolean'
       ? rawValue.compare_sync_enabled
       : defaults.compare_sync_enabled,
@@ -456,13 +512,21 @@ function normalizeStoredReviewWorkspacePrefs(rawValue) {
   }
 }
 
-function loadStoredReviewWorkspacePrefs() {
+function getReviewWorkspaceStorageKey(projectId = '') {
+  const normalizedProjectId = String(projectId || '').trim()
+  return normalizedProjectId
+    ? `${reviewWorkspaceStorageKey}.${normalizedProjectId}`
+    : reviewWorkspaceStorageKey
+}
+
+function loadStoredReviewWorkspacePrefs(projectId = '') {
   if (typeof window === 'undefined') {
     return createDefaultReviewWorkspacePrefs()
   }
 
   try {
-    const rawValue = window.localStorage.getItem(reviewWorkspaceStorageKey)
+    const rawValue = window.localStorage.getItem(getReviewWorkspaceStorageKey(projectId))
+      || (!projectId ? '' : window.localStorage.getItem(reviewWorkspaceStorageKey))
     if (!rawValue) {
       return createDefaultReviewWorkspacePrefs()
     }
@@ -472,14 +536,14 @@ function loadStoredReviewWorkspacePrefs() {
   }
 }
 
-function saveStoredReviewWorkspacePrefs(value) {
+function saveStoredReviewWorkspacePrefs(value, projectId = '') {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
     window.localStorage.setItem(
-      reviewWorkspaceStorageKey,
+      getReviewWorkspaceStorageKey(projectId),
       JSON.stringify(normalizeStoredReviewWorkspacePrefs(value))
     )
   } catch (error) {
@@ -614,7 +678,6 @@ const v2HistoryModalOpen = ref(false)
 const v2SettingsModalOpen = ref(false)
 const v2UploadDragOver = ref(false)
 const v2SupplementUploading = ref(false)
-const v2SourcePaneMode = ref('source')
 const v2PageSearch = ref('')
 const v2HistorySearch = ref('')
 const v2HistorySort = ref('recent')
@@ -965,28 +1028,6 @@ const selectedEditPageMainImageUrl = computed(() => {
     return ''
   }
   return toApiUrl(page.base_image_url || page.source_image_url || page.image_url || '')
-})
-const selectedEditPageCompareImageUrl = computed(() => {
-  const page = selectedEditPage.value
-  if (!page) {
-    return ''
-  }
-  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
-    return toApiUrl(page.source_image_url || page.image_url || '')
-  }
-  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
-    return getCanvasPreviewImageUrl(page)
-  }
-  return getSavedTranslatedImageUrl(page) || getCanvasPreviewImageUrl(page)
-})
-const selectedEditPageCompareLabel = computed(() => {
-  if (reviewWorkspacePrefs.value.compare_pane_mode === 'source') {
-    return '原图对照'
-  }
-  if (reviewWorkspacePrefs.value.compare_pane_mode === 'preview') {
-    return '当前译图'
-  }
-  return '已嵌字结果'
 })
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
@@ -1350,25 +1391,6 @@ const v2SelectedPageEntry = computed(() => {
   }
   return v2PageEntries.value[0] || null
 })
-const v2SourcePaneImageUrl = computed(() => {
-  const page = selectedEditPage.value
-  const entry = v2SelectedPageEntry.value
-  if (v2SourcePaneMode.value === 'final') {
-    return (
-      getSavedTranslatedImageUrl(page)
-      || entry?.finalUrl
-      || getCanvasPreviewImageUrl(page)
-      || entry?.previewUrl
-      || entry?.blankUrl
-      || entry?.sourceUrl
-      || ''
-    )
-  }
-  if (v2SourcePaneMode.value === 'blank') {
-    return entry?.blankUrl || selectedEditPageMainImageUrl.value || entry?.sourceUrl || ''
-  }
-  return entry?.sourceUrl || selectedEditPageThumbnailUrl.value || selectedEditPageMainImageUrl.value || ''
-})
 const v2EditorPaneImageUrl = computed(() => {
   const entry = v2SelectedPageEntry.value
   return (
@@ -1379,15 +1401,17 @@ const v2EditorPaneImageUrl = computed(() => {
     || ''
   )
 })
-const v2ReviewHeaderLabel = computed(() => {
-  if (v2SourcePaneMode.value === 'blank') {
-    return '空页'
-  }
-  if (v2SourcePaneMode.value === 'final') {
-    return '最终效果'
-  }
-  return '原图'
+const selectedReviewComparePanes = computed(() => {
+  const selectedModes = normalizeReviewComparePaneModes(reviewWorkspacePrefs.value.compare_pane_modes, reviewWorkspacePrefs.value.compare_pane_mode)
+  return reviewComparePaneOptions.filter((option) => selectedModes.includes(option.key))
 })
+const selectedReviewComparePaneCount = computed(() => selectedReviewComparePanes.value.length)
+const v2ReviewPaneStripStyle = computed(() => ({
+  '--review-pane-count': Math.max(2, selectedReviewComparePaneCount.value)
+}))
+const firstReadonlyReviewComparePaneKey = computed(() => (
+  selectedReviewComparePanes.value.find((pane) => pane.key !== 'frame')?.key || ''
+))
 const v2SelectedPageSummary = computed(() => {
   const entry = v2SelectedPageEntry.value
   if (!entry) {
@@ -2184,6 +2208,9 @@ function applySessionPayload(payload, options = {}) {
 
   const payloadConfig = payload?.config && typeof payload.config === 'object' ? payload.config : {}
   config.value = mergeProjectConfigWithLocalPreferences(payloadConfig, config.value)
+  if (sessionChanged || resetInspectors) {
+    reviewWorkspacePrefs.value = loadStoredReviewWorkspacePrefs(nextSessionId)
+  }
 
   const overrides = payload?.overrides || {}
   if (resetEditingState) {
@@ -2882,7 +2909,7 @@ function focusSelectedRegionInViewport(page, pane = 'main') {
   if (!page || !region) {
     return
   }
-  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  const shell = getCanvasShellForPane(pane)
   if (!shell) {
     return
   }
@@ -3464,6 +3491,26 @@ function getCanvasShellForPane(pane = 'main') {
   return pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
 }
 
+function setCompareCanvasShellElement(element) {
+  if (element) {
+    compareCanvasShellRef.value = element
+  }
+}
+
+function setTranslatedPreviewCanvasElement(element) {
+  translatedPreviewCanvasRef.value = element || null
+}
+
+function setReviewPaneCanvasElement(element, mode) {
+  if (isReviewFramePane(mode)) {
+    setTranslatedPreviewCanvasElement(element)
+    return
+  }
+  if (element && mode === firstReadonlyReviewComparePaneKey.value) {
+    setCompareCanvasShellElement(element)
+  }
+}
+
 function readCanvasShellMetric(shell) {
   if (!shell || typeof window === 'undefined') {
     return { width: 0, height: 0 }
@@ -3878,13 +3925,81 @@ function getSavedTranslatedImageUrl(page) {
   return ''
 }
 
-function setComparePaneMode(mode) {
-  if (!isValidComparePaneMode(mode)) {
+function getReviewComparePaneOption(mode) {
+  return reviewComparePaneOptions.find((option) => option.key === mode) || reviewComparePaneOptions[0]
+}
+
+function isReviewFramePane(mode) {
+  return mode === 'frame'
+}
+
+function getReviewComparePaneCanvasRole(mode) {
+  return isReviewFramePane(mode) ? 'main' : 'compare'
+}
+
+function getReviewComparePaneImageUrl(mode) {
+  const page = selectedEditPage.value
+  const entry = v2SelectedPageEntry.value
+  if (mode === 'final') {
+    return (
+      getSavedTranslatedImageUrl(page)
+      || entry?.finalUrl
+      || getCanvasPreviewImageUrl(page)
+      || entry?.previewUrl
+      || entry?.blankUrl
+      || entry?.sourceUrl
+      || ''
+    )
+  }
+  if (mode === 'source') {
+    return entry?.sourceUrl || selectedEditPageThumbnailUrl.value || selectedEditPageMainImageUrl.value || ''
+  }
+  if (mode === 'blank') {
+    return entry?.blankUrl || selectedEditPageMainImageUrl.value || entry?.sourceUrl || ''
+  }
+  return v2EditorPaneImageUrl.value
+}
+
+function getReviewComparePaneLabel(mode) {
+  return getReviewComparePaneOption(mode).label
+}
+
+function getReviewComparePaneAlt(mode) {
+  return `${v2SelectedPageEntry.value?.name || '页面'} ${getReviewComparePaneLabel(mode)}`
+}
+
+function isReviewComparePaneSelected(mode) {
+  return normalizeReviewComparePaneModes(reviewWorkspacePrefs.value.compare_pane_modes, reviewWorkspacePrefs.value.compare_pane_mode).includes(mode)
+}
+
+function isReviewComparePaneToggleDisabled(mode) {
+  const currentModes = normalizeReviewComparePaneModes(reviewWorkspacePrefs.value.compare_pane_modes, reviewWorkspacePrefs.value.compare_pane_mode)
+  const hasMode = currentModes.includes(mode)
+  return (hasMode && currentModes.length <= 2) || (!hasMode && currentModes.length >= 3)
+}
+
+function toggleReviewComparePaneMode(mode) {
+  if (!isValidReviewComparePaneMode(mode)) {
     return
   }
+  const currentModes = normalizeReviewComparePaneModes(reviewWorkspacePrefs.value.compare_pane_modes, reviewWorkspacePrefs.value.compare_pane_mode)
+  const hasMode = currentModes.includes(mode)
+  if (hasMode && currentModes.length <= 2) {
+    status.value = '审校对比至少保留两个页面。'
+    return
+  }
+  if (!hasMode && currentModes.length >= 3) {
+    status.value = '审校对比最多同时显示三个页面。'
+    return
+  }
+  const nextModes = hasMode
+    ? currentModes.filter((item) => item !== mode)
+    : [...currentModes, mode]
+  const normalizedModes = normalizeReviewComparePaneModes(nextModes)
   reviewWorkspacePrefs.value = {
     ...reviewWorkspacePrefs.value,
-    compare_pane_mode: mode
+    compare_pane_mode: normalizedModes[0] || 'final',
+    compare_pane_modes: normalizedModes
   }
 }
 
@@ -4032,7 +4147,7 @@ function startCanvasViewportPan(event, page, pane = 'main') {
   if (!allowPan) {
     return
   }
-  const shell = pane === 'compare' ? compareCanvasShellRef.value : translatedPreviewCanvasRef.value
+  const shell = resolveCanvasInteractionSurface(event.currentTarget) || getCanvasShellForPane(pane)
   if (!shell) {
     return
   }
@@ -4076,7 +4191,7 @@ function handleCanvasWheel(event, page, pane = 'main') {
     return
   }
   event.preventDefault()
-  const shell = getCanvasShellForPane(pane)
+  const shell = resolveCanvasInteractionSurface(event.currentTarget) || getCanvasShellForPane(pane)
   if (!shell) {
     return
   }
@@ -4229,7 +4344,6 @@ function shouldShowSourceCropPreview(region, page) {
   return Boolean(
     isCanvasReviewMode.value
     && page?.stored_name
-    && canvasPreviewDirtyPages.value[page.stored_name]
     && (isRegionSkipEnabled(region) || isRegionDisabled(region))
   )
 }
@@ -4238,7 +4352,6 @@ function shouldShowCanvasTextOverlay(region, page) {
   return Boolean(
     isCanvasReviewMode.value
     && page?.stored_name
-    && canvasPreviewDirtyPages.value[page.stored_name]
     && !isRegionSkipEnabled(region)
     && !isRegionDisabled(region)
     && getCanvasPreviewText(region)
@@ -7509,7 +7622,7 @@ watch(
 watch(
   reviewWorkspacePrefs,
   (nextValue) => {
-    saveStoredReviewWorkspacePrefs(nextValue)
+    saveStoredReviewWorkspacePrefs(nextValue, sessionId.value)
   },
   { deep: true }
 )
@@ -7633,6 +7746,7 @@ watch(
     reviewWorkspacePrefs.value.page_rail_width,
     reviewWorkspacePrefs.value.inspector_width,
     reviewWorkspacePrefs.value.compare_pane_mode,
+    JSON.stringify(reviewWorkspacePrefs.value.compare_pane_modes || []),
     reviewWorkspacePrefs.value.compare_sync_enabled
   ],
   () => {
@@ -7951,28 +8065,24 @@ watch(
           <div class="v2-review-toolbar-left v2-review-toolbar-spacer" aria-hidden="true"></div>
 
           <div class="v2-review-toolbar-center">
-            <div class="v2-mode-switch">
-              <button
-                type="button"
-                :class="['v2-mode-switch-button', v2SourcePaneMode === 'source' ? 'active' : '']"
-                @click="v2SourcePaneMode = 'source'"
+            <div class="v2-compare-selector" role="group" aria-label="审校对比页面">
+              <label
+                v-for="option in reviewComparePaneOptions"
+                :key="option.key"
+                :class="[
+                  'v2-compare-chip',
+                  isReviewComparePaneSelected(option.key) ? 'active' : '',
+                  isReviewComparePaneToggleDisabled(option.key) ? 'disabled' : ''
+                ]"
               >
-                原图
-              </button>
-              <button
-                type="button"
-                :class="['v2-mode-switch-button', v2SourcePaneMode === 'blank' ? 'active' : '']"
-                @click="v2SourcePaneMode = 'blank'"
-              >
-                空页
-              </button>
-              <button
-                type="button"
-                :class="['v2-mode-switch-button', v2SourcePaneMode === 'final' ? 'active' : '']"
-                @click="v2SourcePaneMode = 'final'"
-              >
-                最终效果
-              </button>
+                <input
+                  type="checkbox"
+                  :checked="isReviewComparePaneSelected(option.key)"
+                  :disabled="isReviewComparePaneToggleDisabled(option.key)"
+                  @change="toggleReviewComparePaneMode(option.key)"
+                />
+                <span>{{ option.label }}</span>
+              </label>
             </div>
           </div>
 
@@ -8067,114 +8177,95 @@ watch(
           </aside>
 
           <section class="v2-review-stage">
-            <div class="v2-pane-strip">
-              <article class="v2-pane-card v2-pane-card-compare">
+            <div class="v2-pane-strip" :style="v2ReviewPaneStripStyle">
+              <article
+                v-for="pane in selectedReviewComparePanes"
+                :key="pane.key"
+                :class="[
+                  'v2-pane-card',
+                  isReviewFramePane(pane.key) ? 'v2-pane-card-frame' : 'v2-pane-card-compare'
+                ]"
+              >
                 <header class="v2-pane-head">
-                  <span class="v2-pane-label">{{ v2ReviewHeaderLabel }}</span>
+                  <template v-if="isReviewFramePane(pane.key)">
+                    <div class="v2-pane-head-copy">
+                      <span class="v2-pane-label">框页</span>
+                      <span class="v2-pane-subtle">拖框后自动识别生成</span>
+                    </div>
+                    <div class="v2-pane-actions">
+                      <button
+                        v-if="selectedEditPage"
+                        type="button"
+                        :class="['v2-ghost-button', manualDrawMode ? 'active' : '']"
+                        :disabled="!canActivateManualDraw"
+                        @click="toggleManualDrawMode"
+                      >
+                        {{ manualDrawMode ? '正在画框…' : '手动添加框' }}
+                      </button>
+                      <div v-if="selectedEditPage" class="v2-view-controls" aria-label="画布视图控制">
+                        <button type="button" @click="setCurrentPageViewportPreset('fit', 'main')">适合</button>
+                        <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
+                        <button type="button" @click="setCurrentPageViewportPreset('width', 'main')">适宽</button>
+                      </div>
+                      <button
+                        v-if="selectedEditPage"
+                        type="button"
+                        class="v2-ghost-button"
+                        @click="resetViewportStateForPage(selectedEditPage)"
+                      >
+                        重置视图
+                      </button>
+                      <button
+                        v-if="selectedEditPage && selectedEditRegion"
+                        type="button"
+                        class="v2-ghost-button"
+                        @click="focusSelectedRegionInViewport(selectedEditPage, 'main')"
+                      >
+                        定位当前框
+                      </button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <span class="v2-pane-label">{{ getReviewComparePaneLabel(pane.key) }}</span>
+                  </template>
                 </header>
 
                 <div
-                  ref="compareCanvasShellRef"
+                  :ref="(element) => setReviewPaneCanvasElement(element, pane.key)"
                   :class="[
                     'v2-canvas-shell',
-                    'v2-canvas-shell-compare',
-                    isCanvasViewportPanning('compare') ? 'is-panning' : '',
+                    isReviewFramePane(pane.key) ? '' : 'v2-canvas-shell-compare',
+                    isCanvasViewportPanning(getReviewComparePaneCanvasRole(pane.key)) ? 'is-panning' : '',
                     spacePanPressed ? 'is-space-ready' : ''
                   ]"
                   :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
                   title="滚轮平移，按住 Space 平移，Shift 锁轴，Ctrl/⌘ 缩放"
-                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'compare')"
-                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'compare')"
-                >
-                  <div class="v2-canvas-stage v2-canvas-stage-readonly" :style="selectedEditPage ? getCanvasStageStyle(selectedEditPage, 'compare') : null">
-                    <img
-                      v-if="v2SourcePaneImageUrl"
-                      :alt="`${v2SelectedPageEntry?.name || '页面'} ${v2ReviewHeaderLabel}`"
-                      :src="v2SourcePaneImageUrl"
-                      @load="scheduleCanvasLayoutRefresh"
-                    />
-                    <div v-else class="v2-canvas-empty">
-                      当前没有可展示的页面图像
-                    </div>
-                  </div>
-                  <div v-if="selectedEditPage" class="v2-canvas-hud">
-                    <strong>{{ getCanvasViewportPercent(selectedEditPage, 'compare') }}</strong>
-                    <span>{{ getCanvasHudDetail(selectedEditPage, 'compare') }}</span>
-                  </div>
-                </div>
-              </article>
-
-              <article class="v2-pane-card">
-                <header class="v2-pane-head">
-                  <div class="v2-pane-head-copy">
-                    <span class="v2-pane-label">框选调整</span>
-                    <span class="v2-pane-subtle">拖框后自动识别生成</span>
-                  </div>
-                  <div class="v2-pane-actions">
-                    <button
-                      v-if="selectedEditPage"
-                      type="button"
-                      :class="['v2-ghost-button', manualDrawMode ? 'active' : '']"
-                      :disabled="!canActivateManualDraw"
-                      @click="toggleManualDrawMode"
-                    >
-                      {{ manualDrawMode ? '正在画框…' : '手动添加框' }}
-                    </button>
-                    <div v-if="selectedEditPage" class="v2-view-controls" aria-label="画布视图控制">
-                      <button type="button" @click="setCurrentPageViewportPreset('fit', 'main')">适合</button>
-                      <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
-                      <button type="button" @click="setCurrentPageViewportPreset('width', 'main')">适宽</button>
-                    </div>
-                    <button
-                      v-if="selectedEditPage"
-                      type="button"
-                      class="v2-ghost-button"
-                      @click="resetViewportStateForPage(selectedEditPage)"
-                    >
-                      重置视图
-                    </button>
-                    <button
-                      v-if="selectedEditPage && selectedEditRegion"
-                      type="button"
-                      class="v2-ghost-button"
-                      @click="focusSelectedRegionInViewport(selectedEditPage, 'main')"
-                    >
-                      定位当前框
-                    </button>
-                  </div>
-                </header>
-
-                <div
-                  ref="translatedPreviewCanvasRef"
-                  :class="[
-                    'v2-canvas-shell',
-                    isCanvasViewportPanning('main') ? 'is-panning' : '',
-                    spacePanPressed ? 'is-space-ready' : ''
-                  ]"
-                  :style="{ '--page-aspect': `${Math.max(selectedEditPage?.image_width || 720, 1)} / ${Math.max(selectedEditPage?.image_height || 1024, 1)}` }"
-                  title="滚轮平移，按住 Space 平移，Shift 锁轴，Ctrl/⌘ 缩放"
-                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, 'main')"
-                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, 'main')"
+                  @wheel="selectedEditPage && handleCanvasWheel($event, selectedEditPage, getReviewComparePaneCanvasRole(pane.key))"
+                  @pointerdown="selectedEditPage && startCanvasViewportPan($event, selectedEditPage, getReviewComparePaneCanvasRole(pane.key))"
                 >
                   <div
-                    :class="['v2-canvas-stage', (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : '']"
-                    :style="selectedEditPage ? getCanvasStageStyle(selectedEditPage, 'main') : null"
-                    @pointerdown="selectedEditPage && handleCanvasStagePointerDown($event, selectedEditPage)"
-                    @pointermove="selectedEditPage && handleCanvasStagePointerMove($event, selectedEditPage)"
-                    @pointerup="selectedEditPage && handleCanvasStagePointerUp($event, selectedEditPage)"
-                    @pointercancel="cancelCanvasStagePointerInteraction"
+                    :class="[
+                      'v2-canvas-stage',
+                      isReviewFramePane(pane.key) ? '' : 'v2-canvas-stage-readonly',
+                      isReviewFramePane(pane.key) && (manualDrawMode || isAdjustingRegionBBox) ? 'draw-mode' : ''
+                    ]"
+                    :style="selectedEditPage ? getCanvasStageStyle(selectedEditPage, getReviewComparePaneCanvasRole(pane.key)) : null"
+                    @pointerdown="isReviewFramePane(pane.key) && selectedEditPage && handleCanvasStagePointerDown($event, selectedEditPage)"
+                    @pointermove="isReviewFramePane(pane.key) && selectedEditPage && handleCanvasStagePointerMove($event, selectedEditPage)"
+                    @pointerup="isReviewFramePane(pane.key) && selectedEditPage && handleCanvasStagePointerUp($event, selectedEditPage)"
+                    @pointercancel="isReviewFramePane(pane.key) && cancelCanvasStagePointerInteraction()"
                   >
                     <img
-                      v-if="v2EditorPaneImageUrl"
-                      :alt="`${v2SelectedPageEntry?.name || '页面'} 带框调整图`"
-                      :src="v2EditorPaneImageUrl"
+                      v-if="getReviewComparePaneImageUrl(pane.key)"
+                      :alt="getReviewComparePaneAlt(pane.key)"
+                      :src="getReviewComparePaneImageUrl(pane.key)"
                       @load="scheduleCanvasLayoutRefresh"
                     />
                     <div v-else class="v2-canvas-empty">
                       当前没有可展示的页面图像
                     </div>
 
-                    <template v-if="selectedEditPage">
+                    <template v-if="isReviewFramePane(pane.key) && selectedEditPage">
                       <button
                         v-for="region in selectedEditPage.regions"
                         :key="`main-${region.id}`"
@@ -8276,8 +8367,8 @@ watch(
                     </template>
                   </div>
                   <div v-if="selectedEditPage" class="v2-canvas-hud">
-                    <strong>{{ getCanvasViewportPercent(selectedEditPage, 'main') }}</strong>
-                    <span>{{ getCanvasHudDetail(selectedEditPage, 'main') }}</span>
+                    <strong>{{ getCanvasViewportPercent(selectedEditPage, getReviewComparePaneCanvasRole(pane.key)) }}</strong>
+                    <span>{{ getCanvasHudDetail(selectedEditPage, getReviewComparePaneCanvasRole(pane.key)) }}</span>
                   </div>
                 </div>
               </article>

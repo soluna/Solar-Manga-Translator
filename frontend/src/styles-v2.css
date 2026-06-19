@@ -855,6 +855,50 @@ img {
   flex: 0 0 auto;
 }
 
+.v2-compare-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.v2-compare-chip {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  color: var(--v2-text-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.v2-compare-chip input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--v2-accent);
+}
+
+.v2-compare-chip.active {
+  background: white;
+  border-color: rgba(37, 99, 235, 0.18);
+  color: var(--v2-accent-strong);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.14);
+}
+
+.v2-compare-chip.disabled {
+  cursor: default;
+  opacity: 0.68;
+}
+
 .v2-review-tool-button {
   width: 34px;
   height: 34px;
@@ -1034,7 +1078,7 @@ img {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--review-pane-count, 2), minmax(0, 1fr));
   gap: 0;
   border-radius: var(--v2-radius-lg);
   overflow: hidden;
@@ -1052,8 +1096,8 @@ img {
   background: var(--v2-panel-strong);
 }
 
-.v2-pane-card-compare {
-  border-right: 1px solid var(--v2-line);
+.v2-pane-card + .v2-pane-card {
+  border-left: 1px solid var(--v2-line);
 }
 
 .v2-pane-head {

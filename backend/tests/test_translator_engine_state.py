@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -35,6 +37,17 @@ def make_test_paths(root: Path) -> AppPaths:
 class TranslatorEngineStateTests(unittest.TestCase):
     def make_engine(self, root: Path) -> TranslatorEngine:
         return TranslatorEngine(BACKEND_DIR, app_paths=make_test_paths(root))
+
+    def load_patched_text_mask_utils(self):
+        sys.path.insert(0, str(BACKEND_DIR / "manga-image-translator"))
+        spec = importlib.util.spec_from_file_location(
+            "manga_translator.mask_refinement.patched_text_mask_utils_test",
+            BACKEND_DIR / "patched_text_mask_utils.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        return module
 
     def test_busy_mark_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,6 +326,39 @@ print(json.dumps({
             output_path = root / "nested" / "result.png"
             engine._save_result_atomic(result_image, output_path)
             self.assertTrue(output_path.exists())
+
+    def test_text_mask_completion_catches_symbol_stroke_fragments(self) -> None:
+        mask_utils = self.load_patched_text_mask_utils()
+
+        class DummyAabb:
+            xywh = (10, 10, 28, 28)
+
+        class DummyTextLine:
+            aabb = DummyAabb()
+            font_size = 20
+            area = 28 * 28
+
+        image = np.full((48, 48, 3), 255, dtype=np.uint8)
+        heart_points = np.array(
+            [[13, 21], [16, 15], [22, 18], [28, 15], [34, 21], [24, 34], [13, 21]],
+            dtype=np.int32,
+        )
+        cv2.polylines(image, [heart_points], False, (0, 0, 0), 2, lineType=cv2.LINE_8)
+        cv2.circle(image, (44, 4), 2, (0, 0, 0), -1)
+
+        partial_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.polylines(partial_mask, [heart_points], False, 255, 2, lineType=cv2.LINE_8)
+        partial_mask[:, :18] = 0
+
+        enhanced, added = mask_utils._complete_ink_component_residuals(
+            image,
+            partial_mask,
+            [DummyTextLine()],
+        )
+
+        self.assertGreater(int(added[21, 14]), 0)
+        self.assertGreater(int(enhanced[21, 14]), 0)
+        self.assertEqual(int(enhanced[4, 44]), 0)
 
     def test_single_page_rerender_skips_archive_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

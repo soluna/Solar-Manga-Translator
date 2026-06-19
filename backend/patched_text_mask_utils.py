@@ -24,6 +24,7 @@ def _save_mask_debug_images(
     input_mask: np.ndarray,
     core_mask: np.ndarray,
     box_cleanup_mask: np.ndarray,
+    component_completion_mask: np.ndarray,
     residual_mask: np.ndarray,
     final_mask: np.ndarray,
 ):
@@ -41,6 +42,7 @@ def _save_mask_debug_images(
         cv2.imwrite(str(Path(debug_dir) / f"{prefix}_input_mask.png"), input_mask)
         cv2.imwrite(str(Path(debug_dir) / f"{prefix}_core_mask.png"), core_mask)
         cv2.imwrite(str(Path(debug_dir) / f"{prefix}_box_cleanup_mask.png"), box_cleanup_mask)
+        cv2.imwrite(str(Path(debug_dir) / f"{prefix}_component_completion_mask.png"), component_completion_mask)
         cv2.imwrite(str(Path(debug_dir) / f"{prefix}_edge_residual_mask.png"), residual_mask)
         cv2.imwrite(str(Path(debug_dir) / f"{prefix}_final_mask.png"), final_mask)
     except Exception:
@@ -245,6 +247,115 @@ def _cleanup_edge_residuals(img: np.ndarray, final_mask: np.ndarray):
 
     return cv2.bitwise_or(final_mask, kept), kept
 
+def _complete_ink_component_residuals(img: np.ndarray, final_mask: np.ndarray, textlines: List[Quadrilateral]):
+    if img.ndim == 3 and img.shape[2] == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img
+
+    enhanced_mask = final_mask.copy()
+    added_mask = np.zeros_like(final_mask)
+    image_h, image_w = gray.shape[:2]
+
+    for textline in textlines:
+        tx, ty, tw, th = map(int, textline.aabb.xywh)
+        if tw <= 0 or th <= 0:
+            continue
+
+        font_size = max(float(textline.font_size), 1.0)
+        pad_x = max(4, int(font_size * 0.65), int(tw * 0.18))
+        pad_y = max(4, int(font_size * 0.65), int(th * 0.18))
+        roi_x, roi_y, roi_w, roi_h = clamp_rect(
+            tx - pad_x,
+            ty - pad_y,
+            tw + pad_x * 2,
+            th + pad_y * 2,
+            image_w,
+            image_h,
+        )
+        roi_gray = gray[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+        roi_mask = enhanced_mask[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+        if roi_gray.size == 0:
+            continue
+
+        background_pixels = roi_gray[roi_mask == 0]
+        if background_pixels.size == 0:
+            background_pixels = roi_gray.reshape(-1)
+        median = float(np.median(background_pixels))
+        std = float(np.std(background_pixels))
+        contrast = max(18.0, min(42.0, std * 0.9 + 18.0))
+
+        candidates = np.zeros_like(roi_gray, dtype=np.uint8)
+        dark_cut = int(max(0, min(230, median - contrast)))
+        if dark_cut >= 8:
+            candidates = cv2.bitwise_or(candidates, cv2.inRange(roi_gray, 0, dark_cut))
+        light_cut = int(min(255, max(25, median + contrast)))
+        if light_cut <= 247:
+            candidates = cv2.bitwise_or(candidates, cv2.inRange(roi_gray, light_cut, 255))
+        if cv2.countNonZero(candidates) == 0:
+            continue
+
+        candidates = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
+        touch_radius = max(3, int(round(font_size * 0.35)))
+        if touch_radius % 2 == 0:
+            touch_radius += 1
+        touch_mask = cv2.dilate(
+            roi_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (touch_radius, touch_radius)),
+            iterations=1,
+        )
+
+        local_tx = tx - roi_x
+        local_ty = ty - roi_y
+        max_component_area = max(24, int(tw * th * 0.75), int(font_size * font_size * 2.2))
+        max_component_long_side = max(8, int(max(tw, th) * 1.6), int(font_size * 4.0))
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidates, 8, cv2.CV_32S)
+        for label in range(1, num_labels):
+            x1 = int(stats[label, cv2.CC_STAT_LEFT])
+            y1 = int(stats[label, cv2.CC_STAT_TOP])
+            w1 = int(stats[label, cv2.CC_STAT_WIDTH])
+            h1 = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area1 = int(stats[label, cv2.CC_STAT_AREA])
+            if area1 < 2 or area1 > max_component_area:
+                continue
+            if max(w1, h1) > max_component_long_side:
+                continue
+
+            touches_edges = sum([
+                x1 <= 0,
+                y1 <= 0,
+                x1 + w1 >= roi_w - 1,
+                y1 + h1 >= roi_h - 1,
+            ])
+            if touches_edges >= 2:
+                continue
+
+            component_mask = labels == label
+            outside_existing = int(np.count_nonzero(component_mask & (roi_mask == 0)))
+            if outside_existing < 2:
+                continue
+
+            touches_existing = np.count_nonzero(component_mask & (touch_mask > 0)) > 0
+            overlap = area_overlap(x1, y1, w1, h1, local_tx, local_ty, tw, th)
+            inside_textline = overlap >= max(1, min(area1, tw * th) * 0.08)
+            if not touches_existing and not inside_textline:
+                continue
+
+            added_mask[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w][component_mask] = 255
+
+        enhanced_mask = cv2.bitwise_or(enhanced_mask, added_mask)
+
+    if cv2.countNonZero(added_mask) > 0:
+        added_mask = cv2.morphologyEx(added_mask, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
+        added_mask = cv2.dilate(
+            added_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+        enhanced_mask = cv2.bitwise_or(final_mask, added_mask)
+
+    return enhanced_mask, added_mask
+
 def is_small_adjacent_component(textline: Quadrilateral, cc_rect: Tuple[int, int, int, int], cc_area: int,
                                 poly_dist: float, overlap_ratio: float) -> bool:
     x1, y1, w1, h1 = cc_rect
@@ -405,10 +516,11 @@ def complete_mask(img: np.ndarray, mask: np.ndarray, textlines: List[Quadrilater
         final_mask[y2:y2+h2, x2:x2+w2] = cv2.bitwise_or(final_mask[y2:y2+h2, x2:x2+w2], cc[y2:y2+h2, x2:x2+w2])
     core_mask = final_mask.copy()
     final_mask, box_cleanup_mask = _apply_box_cleanup(img, final_mask, textlines)
+    final_mask, component_completion_mask = _complete_ink_component_residuals(img, final_mask, textlines)
     final_mask, residual_mask = _cleanup_edge_residuals(img, final_mask)
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     final_mask = cv2.dilate(final_mask, kern)
-    _save_mask_debug_images(img, input_mask, core_mask, box_cleanup_mask, residual_mask, final_mask)
+    _save_mask_debug_images(img, input_mask, core_mask, box_cleanup_mask, component_completion_mask, residual_mask, final_mask)
     return final_mask
 
 def unsharp(image):

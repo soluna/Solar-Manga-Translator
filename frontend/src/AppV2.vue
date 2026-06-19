@@ -1374,10 +1374,10 @@ const v2SourcePaneImageUrl = computed(() => {
 const v2EditorPaneImageUrl = computed(() => {
   const entry = v2SelectedPageEntry.value
   return (
-    entry?.sourceUrl
-    || selectedEditPageThumbnailUrl.value
+    entry?.blankUrl
     || selectedEditPageMainImageUrl.value
-    || entry?.blankUrl
+    || entry?.sourceUrl
+    || selectedEditPageThumbnailUrl.value
     || ''
   )
 })
@@ -3020,20 +3020,6 @@ function colorTripletToCss(value, fallback = '#152234') {
   return `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})`
 }
 
-function getCanvasPreviewTextShadow(color, radius) {
-  const spread = Math.max(1, Math.round(Number(radius) || 1))
-  return [
-    `0 ${spread}px 0 ${color}`,
-    `0 -${spread}px 0 ${color}`,
-    `${spread}px 0 0 ${color}`,
-    `-${spread}px 0 0 ${color}`,
-    `${spread}px ${spread}px 0 ${color}`,
-    `-${spread}px ${spread}px 0 ${color}`,
-    `${spread}px -${spread}px 0 ${color}`,
-    `-${spread}px -${spread}px 0 ${color}`
-  ].join(', ')
-}
-
 function getRegionFontSize(region) {
   if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
     return fontSizeInputDrafts.value[region.id]
@@ -4451,8 +4437,6 @@ function getCanvasPreviewTextStyle(region) {
     : Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
   const resolvedAlignment = getResolvedRegionAlignment(region)
   const fgColor = colorTripletToCss(region?.fg_color, '#152234')
-  const strokeColor = colorTripletToCss(region?.bg_color, 'rgba(255, 255, 255, 0.92)')
-  const strokeWidth = Math.max(1, Math.round(scaledFontSize * Math.max(0.04, Math.min(0.12, Number(region?.stroke_width || 0.07)))))
   return {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
@@ -4468,10 +4452,7 @@ function getCanvasPreviewTextStyle(region) {
         ? 'center'
         : resolvedAlignment === 'right'
           ? 'right'
-          : 'left',
-    WebkitTextStroke: `${strokeWidth}px ${strokeColor}`,
-    textShadow: getCanvasPreviewTextShadow(strokeColor, Math.max(1, Math.round(strokeWidth * 0.75))),
-    paintOrder: 'stroke fill'
+          : 'left'
   }
 }
 

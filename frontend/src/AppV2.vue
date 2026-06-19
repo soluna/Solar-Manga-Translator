@@ -696,6 +696,11 @@ let autoFitCanvasPageIds = new Set()
 const pageCommandExecutionQueue = new Map()
 const preloadedImageUrls = new Set()
 let canvasLayoutFrame = null
+const TRANSLATION_COMPLETION_RECOVERY_DELAY_MS = 15000
+const TRANSLATION_COMPLETION_RECOVERY_RETRY_MS = 15000
+const TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS = 20
+let translationCompletionRecoveryTimer = null
+let translationCompletionRecoveryToken = 0
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const {
@@ -1995,6 +2000,135 @@ function closeSocket() {
     socket = null
     expectedClosingSockets.add(socketToClose)
     socketToClose.close()
+  }
+}
+
+function clearTranslationCompletionRecoveryTimer() {
+  if (translationCompletionRecoveryTimer != null) {
+    window.clearTimeout(translationCompletionRecoveryTimer)
+    translationCompletionRecoveryTimer = null
+  }
+}
+
+function resetTranslationCompletionRecovery() {
+  translationCompletionRecoveryToken += 1
+  clearTranslationCompletionRecoveryTimer()
+}
+
+function getCompletedTranslationStatus(completedAction, pageTargetStoredName = '') {
+  if (completedAction === 'detect') {
+    return '文本框识别完成。现在可以先逐框确认、手动加框或保留原文，确认后再继续翻译。'
+  }
+  if (completedAction === 'translate-page') {
+    return '当前页翻译完成，结果已回填到工作台。'
+  }
+  if (completedAction === 'resume-translate') {
+    return `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+  }
+  if (completedAction === 'rerender') {
+    return pageTargetStoredName
+      ? '当前页重嵌字完成。'
+      : `重嵌字完成，共输出 ${progress.value.total} 张图片。`
+  }
+  return `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+}
+
+function markCompletedTranslationAction(completedAction, pageTargetStoredName = '') {
+  if (completedAction === 'rerender') {
+    if (pageTargetStoredName) {
+      clearCanvasPreviewDirty(pageTargetStoredName)
+    } else {
+      clearCanvasPreviewDirty()
+    }
+  } else if (completedAction === 'translate-page') {
+    if (pageTargetStoredName) {
+      clearCanvasPreviewDirty(pageTargetStoredName)
+    }
+  } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
+    clearCanvasPreviewDirty()
+  }
+}
+
+function scheduleTranslationCompletionRecovery(context, delayMs = TRANSLATION_COMPLETION_RECOVERY_DELAY_MS) {
+  if (!translating.value) {
+    return
+  }
+  clearTranslationCompletionRecoveryTimer()
+  const token = translationCompletionRecoveryToken
+  translationCompletionRecoveryTimer = window.setTimeout(() => {
+    translationCompletionRecoveryTimer = null
+    void recoverCompletedTranslationIfIdle(context, token)
+  }, delayMs)
+}
+
+async function recoverCompletedTranslationIfIdle(context = {}, token = translationCompletionRecoveryToken) {
+  if (token !== translationCompletionRecoveryToken || !translating.value) {
+    return
+  }
+
+  const projectId = String(context.sessionId || sessionId.value || '').trim()
+  if (!projectId) {
+    return
+  }
+
+  const attempt = Number(context.attempt || 1)
+  try {
+    const projectsResponse = await fetch(toApiUrl('/api/projects'))
+    const projectsPayload = await projectsResponse.json()
+    if (projectsResponse.ok) {
+      const project = (projectsPayload.projects || []).find((item) => String(item?.project_id || '') === projectId)
+      if (project && project.is_busy) {
+        if (attempt < TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS) {
+          scheduleTranslationCompletionRecovery({ ...context, attempt: attempt + 1 }, TRANSLATION_COMPLETION_RECOVERY_RETRY_MS)
+        }
+        return
+      }
+    }
+
+    const restoreResponse = await fetch(toApiUrl(`/api/projects/${encodeURIComponent(projectId)}/restore`), {
+      method: 'POST'
+    })
+    const payload = await restoreResponse.json()
+    if (!restoreResponse.ok) {
+      throw new Error(payload.detail || '恢复任务完成状态失败')
+    }
+    if (payload?.project?.is_busy) {
+      if (attempt < TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS) {
+        scheduleTranslationCompletionRecovery({ ...context, attempt: attempt + 1 }, TRANSLATION_COMPLETION_RECOVERY_RETRY_MS)
+      }
+      return
+    }
+
+    if (token !== translationCompletionRecoveryToken || !translating.value) {
+      return
+    }
+
+    const completedAction = context.action || activeAction.value
+    const pageTargetStoredName = String(context.pageTargetStoredName || '').trim()
+    resetTranslationCompletionRecovery()
+    translating.value = false
+    errorMessage.value = ''
+    applySessionPayload(payload, {
+      refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
+      refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName)
+    })
+    markCompletedTranslationAction(completedAction, pageTargetStoredName)
+    status.value = getCompletedTranslationStatus(completedAction, pageTargetStoredName)
+    void loadEditInspection({ silent: completedAction !== 'detect' }).catch((error) => {
+      console.warn('[TranslationRecovery] review inspector refresh failed', error)
+    })
+    if (config.value.font_style_mode === 'auto-map') {
+      void loadStyleInspection({ silent: true }).catch((error) => {
+        console.warn('[TranslationRecovery] style inspector refresh failed', error)
+      })
+    }
+    void loadProjectHistory({ silent: true })
+    closeSocket()
+  } catch (error) {
+    console.warn('[TranslationRecovery] completion recovery failed', error)
+    if (token === translationCompletionRecoveryToken && translating.value && attempt < TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS) {
+      scheduleTranslationCompletionRecovery({ ...context, attempt: attempt + 1 }, TRANSLATION_COMPLETION_RECOVERY_RETRY_MS)
+    }
   }
 }
 
@@ -7288,6 +7422,7 @@ function startTranslation(action = 'translate') {
     return
   }
 
+  resetTranslationCompletionRecovery()
   activeAction.value = action
   const pageTargetStoredName = (action === 'rerender' || action === 'translate-page')
     ? (selectedEditPage.value?.stored_name || '')
@@ -7381,9 +7516,17 @@ function startTranslation(action = 'translate') {
           ? `正在识别并准备校对：${payload.current} / ${payload.total}`
           : activeAction.value === 'translate-page'
             ? '当前页翻译进行中…'
-          : activeAction.value === 'resume-translate'
-            ? `继续翻译进行中：${payload.current} / ${payload.total}`
-        : `翻译进行中：${payload.current} / ${payload.total}`
+            : activeAction.value === 'resume-translate'
+              ? `继续翻译进行中：${payload.current} / ${payload.total}`
+              : `翻译进行中：${payload.current} / ${payload.total}`
+      if (Number(payload.total || 0) > 0 && Number(payload.current || 0) >= Number(payload.total || 0)) {
+        scheduleTranslationCompletionRecovery({
+          sessionId: sessionId.value,
+          action: activeAction.value,
+          pageTargetStoredName,
+          attempt: 1
+        })
+      }
       return
     }
 
@@ -7393,36 +7536,15 @@ function startTranslation(action = 'translate') {
     }
 
     if (payload.event === 'completed') {
+      resetTranslationCompletionRecovery()
       translating.value = false
       const completedAction = activeAction.value
       applySessionPayload(payload, {
         refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
         refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName)
       })
-      if (completedAction === 'rerender') {
-        if (pageTargetStoredName) {
-          clearCanvasPreviewDirty(pageTargetStoredName)
-        } else {
-          clearCanvasPreviewDirty()
-        }
-      } else if (completedAction === 'translate-page') {
-        if (pageTargetStoredName) {
-          clearCanvasPreviewDirty(pageTargetStoredName)
-        }
-      } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
-        clearCanvasPreviewDirty()
-      }
-      status.value = completedAction === 'detect'
-        ? '文本框识别完成。现在可以先逐框确认、手动加框或保留原文，确认后再继续翻译。'
-        : completedAction === 'translate-page'
-          ? '当前页翻译完成，结果已回填到工作台。'
-        : completedAction === 'resume-translate'
-          ? `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
-          : completedAction === 'rerender'
-            ? (pageTargetStoredName
-              ? '当前页重嵌字完成。'
-              : `重嵌字完成，共输出 ${progress.value.total} 张图片。`)
-            : `翻译完成，共输出 ${translatedImages.value.length} 张图片。`
+      markCompletedTranslationAction(completedAction, pageTargetStoredName)
+      status.value = getCompletedTranslationStatus(completedAction, pageTargetStoredName)
       await loadEditInspection({ silent: completedAction !== 'detect' })
       if (completedAction === 'detect' && !mergedInspectionPages.value.length) {
         await ensureEditInspectionReadyAfterDetect()
@@ -7436,6 +7558,7 @@ function startTranslation(action = 'translate') {
     }
 
     if (payload.event === 'error') {
+      resetTranslationCompletionRecovery()
       translating.value = false
       errorMessage.value = payload.message || '翻译失败'
       status.value = activeAction.value === 'rerender'
@@ -7455,6 +7578,7 @@ function startTranslation(action = 'translate') {
     if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
       return
     }
+    resetTranslationCompletionRecovery()
     errorMessage.value = `翻译连接中断。${getBackendLogHint()}`
     status.value = activeAction.value === 'rerender'
       ? '重嵌字连接中断。'
@@ -7478,6 +7602,7 @@ function startTranslation(action = 'translate') {
       return
     }
     if (translating.value) {
+      resetTranslationCompletionRecovery()
       errorMessage.value = `翻译任务意外断开。${getBackendLogHint()}`
       status.value = activeAction.value === 'rerender'
         ? '重嵌字未完成。'
@@ -7526,6 +7651,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  resetTranslationCompletionRecovery()
   closeSocket()
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()

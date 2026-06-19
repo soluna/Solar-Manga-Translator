@@ -314,6 +314,70 @@ print(json.dumps({
             engine._save_result_atomic(result_image, output_path)
             self.assertTrue(output_path.exists())
 
+    def test_single_page_rerender_skips_archive_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (4, 4), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (4, 4), (240, 240, 240)).save(source_dir / "page-2.png")
+            existing_archive = root / "existing.zip"
+            existing_archive.write_bytes(b"existing")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "rerender_cache_dir": str(root / "cache"),
+                "source_images": [
+                    {"name": "page-1.png", "stored_name": "page-1.png"},
+                    {"name": "page-2.png", "stored_name": "page-2.png"},
+                ],
+                "translated_output_map": {"page-2.png": "page-2.png"},
+                "download_path": str(existing_archive),
+                "workflow_stage": "translated",
+                "last_config": {"rerender_output_format": "png"},
+            }
+            events: list[dict[str, object]] = []
+            persisted: dict[str, object] = {}
+
+            async def fake_render_cached_page(*_args, **kwargs) -> None:
+                output_path = kwargs.get("output_path") if "output_path" in kwargs else _args[1]
+                Image.new("RGB", (4, 4), (12, 34, 56)).save(output_path)
+
+            async def collect_event(event: dict[str, object]) -> None:
+                events.append(event)
+
+            def fail_archive(*_args, **_kwargs) -> str:
+                raise AssertionError("single-page rerender should not rebuild the archive synchronously")
+
+            def fake_persist_project_state(_project_id, _session, **kwargs) -> None:
+                persisted.update(kwargs)
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._ensure_editable_page_cache = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+            engine._render_cached_page = fake_render_cached_page  # type: ignore[method-assign]
+            engine.build_session_archive = fail_archive  # type: ignore[method-assign]
+            engine.persist_project_state = fake_persist_project_state  # type: ignore[method-assign]
+
+            result = asyncio.run(engine.rerender_session(
+                session_id="project-a",
+                session=session,
+                raw_config={"rerender_output_format": "png"},
+                progress_callback=collect_event,
+                target_stored_name="page-1.png",
+            ))
+
+            self.assertEqual(result["download_url"], "/api/download/project-a")
+            self.assertEqual(result["download_path"], str(existing_archive.resolve()))
+            self.assertEqual(session["workflow_stage"], "translated")
+            self.assertIn("page-1.png", session["translated_output_map"])
+            self.assertEqual(persisted.get("page_ids"), ["page-1.png"])
+            self.assertEqual(events[-1]["event"], "progress")
+            self.assertEqual(events[-1]["current"], 1)
+            self.assertEqual(events[-1]["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

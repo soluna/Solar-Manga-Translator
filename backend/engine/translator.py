@@ -3020,12 +3020,14 @@ class TranslatorEngine:
                 }
             )
 
-        archive_path = self.build_session_archive(
-            session_id=session_id,
-            session=session,
-            preferred_output_format=config["rerender_output_format"],
-        )
-        session["download_path"] = archive_path
+        archive_path = ""
+        if not target_stored_name:
+            archive_path = self.build_session_archive(
+                session_id=session_id,
+                session=session,
+                preferred_output_format=config["rerender_output_format"],
+            )
+            session["download_path"] = archive_path
         session["workflow_stage"] = "translated"
         rerender_scope = "当前页" if target_stored_name else "整组页面"
         self.persist_project_state(
@@ -3039,7 +3041,7 @@ class TranslatorEngine:
 
         return {
             "download_url": f"/api/download/{session_id}",
-            "download_path": str(Path(archive_path).resolve()),
+            "download_path": str(Path(archive_path or session.get("download_path") or "").resolve()) if (archive_path or session.get("download_path")) else "",
             "translated_dir": str(output_dir.resolve()),
             "mask_debug_dir": str(Path(session["mask_debug_dir"]).resolve()) if session.get("mask_debug_dir") else "",
             "workflow_stage": session["workflow_stage"],

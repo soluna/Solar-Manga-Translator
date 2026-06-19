@@ -81,7 +81,6 @@ const textDirectionOptions = [
 const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const canvasZoomMin = 0.2
 const canvasZoomMax = 6
-const canvasSnapScreenThreshold = 8
 const maxCanvasHistoryEntries = 50
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
@@ -548,7 +547,6 @@ const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
 const manualDrawDraft = ref(null)
 const canvasTransformState = ref(null)
-const canvasSnapState = ref(null)
 const canvasRegionSelection = ref({})
 const canvasMarqueeState = ref(null)
 const mergeMode = ref(false)
@@ -1989,7 +1987,6 @@ function resetTranslationReview() {
   translationRegionSkipOverrides.value = {}
   translationRegionDisabledOverrides.value = {}
   translationRegionLayoutOverrides.value = {}
-  canvasSnapState.value = null
   canvasRegionSelection.value = {}
   canvasMarqueeState.value = null
   mergeRegionSelection.value = {}
@@ -2003,7 +2000,6 @@ function resetEditInspectorSelection() {
   manualDrawDraft.value = null
   adjustingRegionId.value = ''
   canvasTransformState.value = null
-  canvasSnapState.value = null
   canvasRegionSelection.value = {}
   canvasMarqueeState.value = null
   viewportPanState.value = null
@@ -2204,7 +2200,6 @@ function applySessionPayload(payload, options = {}) {
     regionCommitStates.value = {}
     canvasPreviewDirtyPages.value = {}
     perPageUiState.value = {}
-    canvasSnapState.value = null
     canvasRegionSelection.value = {}
     canvasMarqueeState.value = null
     autoFitCanvasPageIds = new Set()
@@ -3835,168 +3830,6 @@ function resizeBBoxWithinPage(originBBox, handle, deltaX, deltaY, page, options 
   return normalizeBBoxToPage([x1, y1, x2, y2], page)
 }
 
-function dedupeSnapReferences(references) {
-  const seen = new Set()
-  const nextReferences = []
-  for (const reference of references || []) {
-    const value = Math.round(Number(reference?.value) || 0)
-    const key = `${reference?.axis || ''}:${value}`
-    if (seen.has(key)) {
-      continue
-    }
-    seen.add(key)
-    nextReferences.push({
-      ...reference,
-      value
-    })
-  }
-  return nextReferences
-}
-
-function collectCanvasSnapReferences(page, activeRegionId) {
-  const imageWidth = Math.max(page?.image_width || 1, 1)
-  const imageHeight = Math.max(page?.image_height || 1, 1)
-  const x = [
-    { axis: 'x', value: 0, source: 'page' },
-    { axis: 'x', value: imageWidth / 2, source: 'page' },
-    { axis: 'x', value: imageWidth, source: 'page' }
-  ]
-  const y = [
-    { axis: 'y', value: 0, source: 'page' },
-    { axis: 'y', value: imageHeight / 2, source: 'page' },
-    { axis: 'y', value: imageHeight, source: 'page' }
-  ]
-
-  for (const region of page?.regions || []) {
-    if (!region?.id || region.id === activeRegionId) {
-      continue
-    }
-    const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
-    x.push(
-      { axis: 'x', value: x1, source: 'region' },
-      { axis: 'x', value: (x1 + x2) / 2, source: 'region' },
-      { axis: 'x', value: x2, source: 'region' }
-    )
-    y.push(
-      { axis: 'y', value: y1, source: 'region' },
-      { axis: 'y', value: (y1 + y2) / 2, source: 'region' },
-      { axis: 'y', value: y2, source: 'region' }
-    )
-  }
-
-  return {
-    x: dedupeSnapReferences(x),
-    y: dedupeSnapReferences(y)
-  }
-}
-
-function getCanvasSnapThreshold(page, geometry, axis = 'x') {
-  const imageSize = axis === 'y'
-    ? Math.max(page?.image_height || 1, 1)
-    : Math.max(page?.image_width || 1, 1)
-  const stageSize = axis === 'y'
-    ? Math.max(geometry?.stageHeight || 1, 1)
-    : Math.max(geometry?.stageWidth || 1, 1)
-  const viewport = geometry?.viewport || getViewportState(page?.stored_name || '', 'main')
-  const screenPixelsPerPagePixel = (stageSize * Math.max(viewport.zoom || 1, 0.001)) / imageSize
-  return Math.max(1, canvasSnapScreenThreshold / Math.max(screenPixelsPerPagePixel, 0.001))
-}
-
-function findClosestCanvasSnap(candidates, references, threshold) {
-  let bestSnap = null
-  for (const candidate of candidates || []) {
-    for (const reference of references || []) {
-      const distance = Math.abs(reference.value - candidate.value)
-      if (distance > threshold) {
-        continue
-      }
-      if (!bestSnap || distance < bestSnap.distance) {
-        bestSnap = {
-          distance,
-          delta: reference.value - candidate.value,
-          guide: {
-            axis: reference.axis,
-            value: reference.value,
-            source: reference.source
-          }
-        }
-      }
-    }
-  }
-  return bestSnap
-}
-
-function applyCanvasSnapToBBox(bbox, page, regionId, mode, handle, geometry) {
-  const references = collectCanvasSnapReferences(page, regionId)
-  const thresholdX = getCanvasSnapThreshold(page, geometry, 'x')
-  const thresholdY = getCanvasSnapThreshold(page, geometry, 'y')
-  const [x1, y1, x2, y2] = bbox
-  const guides = []
-
-  if (mode === 'move') {
-    const snapX = findClosestCanvasSnap([
-      { value: x1 },
-      { value: (x1 + x2) / 2 },
-      { value: x2 }
-    ], references.x, thresholdX)
-    const snapY = findClosestCanvasSnap([
-      { value: y1 },
-      { value: (y1 + y2) / 2 },
-      { value: y2 }
-    ], references.y, thresholdY)
-
-    if (snapX?.guide) {
-      guides.push(snapX.guide)
-    }
-    if (snapY?.guide) {
-      guides.push(snapY.guide)
-    }
-
-    return {
-      bbox: translateBBoxWithinPage(bbox, snapX?.delta || 0, snapY?.delta || 0, page),
-      guides
-    }
-  }
-
-  let nextX1 = x1
-  let nextY1 = y1
-  let nextX2 = x2
-  let nextY2 = y2
-
-  if (handle.includes('w')) {
-    const snap = findClosestCanvasSnap([{ value: x1 }], references.x, thresholdX)
-    if (snap?.guide) {
-      nextX1 = snap.guide.value
-      guides.push(snap.guide)
-    }
-  } else if (handle.includes('e')) {
-    const snap = findClosestCanvasSnap([{ value: x2 }], references.x, thresholdX)
-    if (snap?.guide) {
-      nextX2 = snap.guide.value
-      guides.push(snap.guide)
-    }
-  }
-
-  if (handle.includes('n')) {
-    const snap = findClosestCanvasSnap([{ value: y1 }], references.y, thresholdY)
-    if (snap?.guide) {
-      nextY1 = snap.guide.value
-      guides.push(snap.guide)
-    }
-  } else if (handle.includes('s')) {
-    const snap = findClosestCanvasSnap([{ value: y2 }], references.y, thresholdY)
-    if (snap?.guide) {
-      nextY2 = snap.guide.value
-      guides.push(snap.guide)
-    }
-  }
-
-  return {
-    bbox: normalizeBBoxToPage([nextX1, nextY1, nextX2, nextY2], page),
-    guides
-  }
-}
-
 function getCanvasHandleCursor(handle) {
   const cursorMap = {
     nw: 'nwse-resize',
@@ -4556,8 +4389,7 @@ function getCanvasMeasurementOverlay(page) {
       modifiers: [
         transformDraft.axisLocked ? '轴锁定' : '',
         transformDraft.proportional ? '等比' : '',
-        transformDraft.fromCenter ? '中心' : '',
-        transformDraft.snapDisabled ? '吸附暂停' : (canvasSnapState.value?.guides?.length ? '已吸附' : '')
+        transformDraft.fromCenter ? '中心' : ''
       ].filter(Boolean)
     }
   }
@@ -4611,36 +4443,6 @@ function getCanvasHudDetail(page, pane = 'main') {
     return ''
   }
   return pane === 'compare' || reviewWorkspacePrefs.value.compare_sync_enabled ? '联动画布' : '独立画布'
-}
-
-function getCanvasSnapGuides(page) {
-  if (!page?.stored_name || canvasSnapState.value?.pageId !== page.stored_name) {
-    return []
-  }
-  return canvasSnapState.value.guides || []
-}
-
-function getCanvasSnapGuideStyle(guide, page) {
-  const imageWidth = Math.max(page?.image_width || 1, 1)
-  const imageHeight = Math.max(page?.image_height || 1, 1)
-  const viewport = getViewportState(page?.stored_name || '', 'main')
-  const inverseScale = 1 / Math.max(viewport.zoom || 1, 0.001)
-
-  if (guide?.axis === 'x') {
-    return {
-      left: `${(Number(guide.value || 0) / imageWidth) * 100}%`,
-      top: '0',
-      bottom: '0',
-      width: `${inverseScale}px`
-    }
-  }
-
-  return {
-    top: `${(Number(guide?.value || 0) / imageHeight) * 100}%`,
-    left: '0',
-    right: '0',
-    height: `${inverseScale}px`
-  }
 }
 
 function getCanvasSelectionToolbarStyle(page) {
@@ -5857,7 +5659,6 @@ function startCanvasRegionTransform(event, region, page, mode = 'move', handle =
       originBBoxes[dragRegionId] = getEffectiveRegionBBox(dragRegion)
     }
   }
-  canvasSnapState.value = null
   canvasTransformState.value = {
     pointerId: event.pointerId,
     captureTarget,
@@ -5924,20 +5725,6 @@ function updateCanvasRegionTransform(event) {
     })
   }
 
-  const snapDisabled = event.ctrlKey || event.metaKey || event.altKey || (draft.mode !== 'move' && event.shiftKey)
-  if (!snapDisabled) {
-    const snapResult = applyCanvasSnapToBBox(nextBBox, page, draft.regionId, draft.mode, draft.handle, draft.geometry)
-    nextBBox = snapResult.bbox
-    canvasSnapState.value = snapResult.guides.length
-      ? {
-          pageId: draft.pageId,
-          guides: snapResult.guides
-        }
-      : null
-  } else {
-    canvasSnapState.value = null
-  }
-
   const changed = nextBBox.some((value, index) => value !== draft.originBBox[index])
   const effectiveDeltaX = draft.mode === 'move' ? nextBBox[0] - draft.originBBox[0] : 0
   const effectiveDeltaY = draft.mode === 'move' ? nextBBox[1] - draft.originBBox[1] : 0
@@ -5964,7 +5751,6 @@ function updateCanvasRegionTransform(event) {
   draft.proportional = Boolean(draft.mode !== 'move' && event.shiftKey)
   draft.fromCenter = Boolean(event.altKey)
   draft.axisLocked = Boolean(draft.mode === 'move' && event.shiftKey)
-  draft.snapDisabled = snapDisabled
 }
 
 async function finishCanvasRegionTransform(event) {
@@ -5977,7 +5763,6 @@ async function finishCanvasRegionTransform(event) {
   }
 
   canvasTransformState.value = null
-  canvasSnapState.value = null
   if (draft.captureTarget?.releasePointerCapture && draft.pointerId != null) {
     try {
       draft.captureTarget.releasePointerCapture(draft.pointerId)
@@ -6062,7 +5847,6 @@ function cancelCanvasRegionTransform() {
     updateRegionLayoutOverride(regionId, { bbox: originBBox })
   }
   canvasTransformState.value = null
-  canvasSnapState.value = null
 }
 
 function updateRegionFontSize(region, nextValue) {
@@ -8391,12 +8175,6 @@ watch(
                     </div>
 
                     <template v-if="selectedEditPage">
-                      <span
-                        v-for="(guide, guideIndex) in getCanvasSnapGuides(selectedEditPage)"
-                        :key="`snap-${guide.axis}-${guide.value}-${guideIndex}`"
-                        :class="['v2-canvas-snap-guide', guide.axis === 'x' ? 'is-vertical' : 'is-horizontal']"
-                        :style="getCanvasSnapGuideStyle(guide, selectedEditPage)"
-                      ></span>
                       <button
                         v-for="region in selectedEditPage.regions"
                         :key="`main-${region.id}`"

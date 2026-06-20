@@ -224,6 +224,8 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
         return None
 
     _activate_region_font(region, default_font_path)
+    inner_width, inner_height, _ = _inner_text_box_size(box_width, box_height, font_size)
+    alignment = _render_alignment_for_direction(region, direction)
 
     fg = (0, 0, 0)
     # Always reserve border room during layout measurement so the final render
@@ -234,9 +236,9 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
         return text_render.put_text_horizontal(
             font_size,
             text,
-            box_width,
-            box_height,
-            region.alignment,
+            inner_width,
+            inner_height,
+            alignment,
             direction.endswith('r'),
             fg,
             bg,
@@ -249,8 +251,8 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
     return text_render.put_text_vertical(
         font_size,
         text,
-        box_height,
-        region.alignment,
+        inner_height,
+        alignment,
         fg,
         bg,
         line_spacing,
@@ -280,9 +282,9 @@ def _layout_metrics_for_direction(candidate_box: np.ndarray, box_width: int, box
     height_ratio = rendered_height / max(box_height, 1)
 
     if direction.startswith('h'):
-        fits = rendered_width <= box_width
-        overflow = width_ratio
-        fill = min(width_ratio, 1.0)
+        fits = rendered_width <= box_width and rendered_height <= box_height
+        overflow = max(width_ratio, height_ratio)
+        fill = min(width_ratio, 1.0) + min(height_ratio, 1.0)
     else:
         fits = rendered_height <= box_height
         overflow = height_ratio
@@ -308,6 +310,29 @@ def _normalize_alignment(alignment: str) -> str:
     return 'center'
 
 
+def _render_alignment_for_direction(region: TextBlock, direction: str) -> str:
+    normalized_direction = _normalize_direction(direction)
+    if normalized_direction.startswith('h'):
+        return 'right' if normalized_direction.endswith('r') else 'left'
+    return _normalize_alignment(getattr(region, 'alignment', 'left'))
+
+
+def _text_box_padding(font_size: int, target_width: int, target_height: int) -> int:
+    min_side = min(max(int(target_width), 1), max(int(target_height), 1))
+    if min_side <= 3:
+        return 0
+    font_padding = max(1, int(round(max(int(font_size or 0), 1) * 0.12)))
+    side_limit = max(0, min_side // 8)
+    return max(0, min(font_padding, side_limit))
+
+
+def _inner_text_box_size(target_width: int, target_height: int, font_size: int) -> tuple[int, int, int]:
+    padding = _text_box_padding(font_size, target_width, target_height)
+    inner_width = max(1, int(target_width) - padding * 2)
+    inner_height = max(1, int(target_height) - padding * 2)
+    return inner_width, inner_height, padding
+
+
 def _alignment_offset(alignment: str, available_space: int) -> int:
     if available_space <= 0:
         return 0
@@ -325,6 +350,7 @@ def _compose_render_canvas(
     target_height: int,
     alignment: str,
     render_horizontally: bool,
+    padding: int = 0,
 ) -> np.ndarray:
     canvas_width = max(int(target_width), 1)
     canvas_height = max(int(target_height), 1)
@@ -340,12 +366,14 @@ def _compose_render_canvas(
 
     available_x = max(canvas_width - box_width, 0)
     available_y = max(canvas_height - box_height, 0)
+    padding_x = min(max(int(padding), 0), available_x // 2)
+    padding_y = min(max(int(padding), 0), available_y // 2)
     if render_horizontally:
-        offset_x = _alignment_offset(alignment, available_x)
-        offset_y = available_y // 2
+        offset_x = padding_x + _alignment_offset(alignment, max(available_x - padding_x * 2, 0))
+        offset_y = padding_y + max(available_y - padding_y * 2, 0) // 2
     else:
         offset_x = available_x // 2
-        offset_y = 0
+        offset_y = padding_y
 
     canvas[offset_y:offset_y + box_height, offset_x:offset_x + box_width] = temp_box
     return canvas
@@ -429,13 +457,18 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
                           box_width: int, box_height: int, hyphenate: bool, line_spacing: int,
                           default_font_path: str):
     candidate_directions = _get_candidate_directions(region)
-    search_sizes = [max(int(target_font_size), max(int(font_size_minimum), 1))]
+    target_font_size = max(int(target_font_size), max(int(font_size_minimum), 1))
+    if font_size_fixed is not None:
+        search_sizes = [target_font_size]
+    else:
+        search_sizes = list(range(target_font_size, max(int(font_size_minimum), 1) - 1, -1))
 
     best_fit = None
     best_fallback = None
 
     for direction in candidate_directions:
         for font_size in search_sizes:
+            inner_width, inner_height, _ = _inner_text_box_size(box_width, box_height, font_size)
             candidate_box = _render_candidate_box(
                 region,
                 direction,
@@ -446,7 +479,7 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
                 line_spacing,
                 default_font_path,
             )
-            fits, overflow, fill = _layout_metrics_for_direction(candidate_box, box_width, box_height, direction)
+            fits, overflow, fill = _layout_metrics_for_direction(candidate_box, inner_width, inner_height, direction)
             direction_priority = _direction_priority(region, direction)
 
             if best_fallback is None or overflow < best_fallback[0] or (
@@ -593,15 +626,19 @@ def render(
     )
     render_horizontally = render_direction.startswith('h') if render_direction != 'auto' else region.horizontal
     reversed_direction = render_direction.endswith('r')
+    render_alignment = _render_alignment_for_direction(region, render_direction if render_direction != 'auto' else region.direction)
     render_text = _convert_text_for_rendering(region, region.get_translation_for_rendering())
+    target_width = max(int(round(norm_h[0])), 1)
+    target_height = max(int(round(norm_v[0])), 1)
+    inner_width, inner_height, text_padding = _inner_text_box_size(target_width, target_height, region.font_size)
 
     if render_horizontally:
         temp_box = text_render.put_text_horizontal(
             region.font_size,
             render_text,
-            round(norm_h[0]),
-            round(norm_v[0]),
-            region.alignment,
+            inner_width,
+            inner_height,
+            render_alignment,
             reversed_direction,
             fg,
             bg,
@@ -614,21 +651,20 @@ def render(
         temp_box = text_render.put_text_vertical(
             region.font_size,
             render_text,
-            round(norm_v[0]),
-            region.alignment,
+            inner_height,
+            render_alignment,
             fg,
             bg,
             line_spacing,
             getattr(region, 'letter_spacing', 1.0),
         )
-    target_width = max(int(round(norm_h[0])), 1)
-    target_height = max(int(round(norm_v[0])), 1)
     box = _compose_render_canvas(
         temp_box,
         target_width,
         target_height,
-        region.alignment,
+        render_alignment,
         render_horizontally,
+        text_padding,
     )
     expanded_dst_points = _expand_destination_quad(
         np.array(dst_points, dtype=np.float32),
@@ -637,7 +673,7 @@ def render(
         target_width,
         target_height,
         render_horizontally,
-        region.alignment,
+        render_alignment,
     )
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 

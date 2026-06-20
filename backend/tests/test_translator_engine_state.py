@@ -49,6 +49,21 @@ class TranslatorEngineStateTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def load_patched_rendering(self):
+        vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
+        if not vendor_root.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        sys.path.insert(0, str(BACKEND_DIR / "manga-image-translator"))
+        sys.path.insert(0, str(BACKEND_DIR))
+        from patch_pydensecrf import patch_mask_refinement
+
+        self.assertTrue(patch_mask_refinement())
+        sys.modules.pop("manga_translator.rendering", None)
+        import manga_translator.rendering as rendering
+
+        return rendering
+
     def test_busy_mark_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -310,6 +325,56 @@ print(json.dumps({
                 content = render_file.read_text(encoding="utf-8")
                 self.assertNotIn("pen_line[1] += (max(line_height_list) - line_height) // 2", content)
                 self.assertNotIn("pen_line[1] += max(line_height_list) - line_height", content)
+
+    def test_horizontal_renderer_uses_left_aligned_inner_text_box(self) -> None:
+        rendering = self.load_patched_rendering()
+
+        class DummyRegion:
+            alignment = "center"
+
+        region = DummyRegion()
+        self.assertEqual(rendering._render_alignment_for_direction(region, "h"), "left")
+        self.assertEqual(rendering._render_alignment_for_direction(region, "horizontal"), "left")
+        self.assertEqual(rendering._render_alignment_for_direction(region, "hr"), "right")
+
+        padding = rendering._text_box_padding(32, 100, 60)
+        self.assertGreater(padding, 0)
+        inner_width, inner_height, inner_padding = rendering._inner_text_box_size(100, 60, 32)
+        self.assertEqual(inner_padding, padding)
+        self.assertEqual(inner_width, 100 - padding * 2)
+        self.assertEqual(inner_height, 60 - padding * 2)
+
+        temp_box = np.zeros((20, 40, 4), dtype=np.uint8)
+        temp_box[:, :, 3] = 255
+        canvas = rendering._compose_render_canvas(temp_box, 100, 60, "left", True, padding)
+        ys, xs = np.where(canvas[:, :, 3] > 0)
+
+        self.assertEqual(int(xs.min()), padding)
+        self.assertGreaterEqual(int(ys.min()), padding)
+        self.assertLessEqual(int(xs.max()), 100 - padding - 1)
+        self.assertLessEqual(int(ys.max()), 60 - padding - 1)
+
+    def test_page_payload_exposes_font_size_override_for_preview_parity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            page_document = {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 100, "height": 200},
+                "regions": [{
+                    "region_id": "region-1",
+                    "bbox": [1, 2, 30, 40],
+                    "direction": "h",
+                    "source_text": "original",
+                    "translation": {"machine": "translated"},
+                    "style": {"font_size": 24, "font_size_override": 24},
+                }],
+            }
+
+            translation_page = engine._page_document_to_translation_page(page_document, "page-1.png")
+            style_page = engine._page_document_to_style_page(page_document, "page-1.png")
+
+            self.assertEqual(translation_page["regions"][0]["font_size_override"], 24)
+            self.assertEqual(style_page["regions"][0]["font_size_override"], 24)
 
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

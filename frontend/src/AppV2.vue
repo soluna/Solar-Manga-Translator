@@ -85,6 +85,8 @@ const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const canvasZoomMin = 0.2
 const canvasZoomMax = 6
 const maxCanvasHistoryEntries = 50
+const renderFontSizeOffset = -6
+const renderTextPaddingRatio = 0.12
 const reviewComparePaneOptions = [
   { key: 'final', label: '嵌后', shortLabel: '嵌后' },
   { key: 'source', label: '原图', shortLabel: '原图' },
@@ -3545,6 +3547,9 @@ function isVerticalRegion(region) {
 }
 
 function getResolvedRegionAlignment(region) {
+  if (!isVerticalRegion(region)) {
+    return 'left'
+  }
   const normalized = String(region?.alignment || config.value.render_alignment || 'left')
     .trim()
     .toLowerCase()
@@ -3577,6 +3582,22 @@ function getRegionFontSize(region) {
     return override.font_size
   }
   return Number(region.font_size || 12)
+}
+
+function hasRegionExplicitFontSize(region) {
+  return Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+    || getRegionExplicitFontSizeOverride(region.id) !== null
+    || Number(region?.font_size_override || 0) > 0
+}
+
+function getCanvasPreviewRenderFontSize(region) {
+  const baseFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
+  if (!Number.isFinite(baseFontSize)) {
+    return 12
+  }
+  return Math.max(8, Math.round(hasRegionExplicitFontSize(region)
+    ? baseFontSize
+    : baseFontSize + renderFontSizeOffset))
 }
 
 function getRegionExplicitFontSizeOverride(regionId) {
@@ -4912,7 +4933,7 @@ function getSourceCropImageStyle(region, page) {
 }
 
 function getCanvasPreviewTextStyle(region) {
-  const rawFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
+  const rawFontSize = getCanvasPreviewRenderFontSize(region)
   const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
   const spacingMultiplier = Math.max(0.85, Math.min(1.35, Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)))
   const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
@@ -4941,9 +4962,23 @@ function getCanvasPreviewTextStyle(region) {
   }
 }
 
+function getCanvasPreviewTextPadding(region) {
+  const [x1, y1, x2, y2] = getEffectiveRegionBBox(region)
+  const minSide = Math.max(0, Math.min(x2 - x1, y2 - y1))
+  if (minSide <= 3) {
+    return 0
+  }
+  const rawFontSize = getCanvasPreviewRenderFontSize(region)
+  const fontPadding = Math.max(1, Math.round(rawFontSize * renderTextPaddingRatio))
+  const sideLimit = Math.max(0, Math.floor(minSide / 8))
+  return Math.max(0, Math.min(fontPadding, sideLimit)) * Math.max(translatedPreviewScale.value || 1, 0.1)
+}
+
 function getCanvasPreviewTextContainerStyle(region) {
+  const padding = getCanvasPreviewTextPadding(region)
   if (isVerticalRegion(region)) {
     return {
+      padding: `${padding.toFixed(2)}px`,
       justifyContent: 'center',
       alignItems: 'flex-start'
     }
@@ -4951,6 +4986,7 @@ function getCanvasPreviewTextContainerStyle(region) {
 
   const resolvedAlignment = getResolvedRegionAlignment(region)
   return {
+    padding: `${padding.toFixed(2)}px`,
     justifyContent: resolvedAlignment === 'right' ? 'flex-end'
       : resolvedAlignment === 'center' ? 'center'
       : 'flex-start',

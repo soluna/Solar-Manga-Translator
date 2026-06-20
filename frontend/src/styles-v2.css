@@ -827,6 +827,7 @@ img {
 .v2-review-toolbar-center,
 .v2-page-rail-copy,
 .v2-region-card-title,
+.v2-region-card-actions,
 .v2-region-card-toggles,
 .v2-snapshot-card {
   display: flex;
@@ -835,6 +836,7 @@ img {
 
 .v2-review-toolbar-left,
 .v2-review-toolbar-right,
+.v2-region-card-actions,
 .v2-region-card-toggles {
   gap: 8px;
 }
@@ -1635,6 +1637,11 @@ img {
   flex-wrap: wrap;
 }
 
+.v2-region-card-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
 .v2-region-card-preview {
   margin-top: 8px;
   display: grid;
@@ -1794,6 +1801,16 @@ img {
 
 .v2-stepper input {
   text-align: center;
+}
+
+.v2-stepper input::-webkit-outer-spin-button,
+.v2-stepper input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.v2-stepper input[type='number'] {
+  appearance: textfield;
 }
 
 .v2-region-card-footer {
@@ -2153,27 +2170,89 @@ img {
   white-space: nowrap;
 }
 
-.v2-region-commit-state {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  margin-top: 6px;
-  padding: 0 8px;
-  border-radius: 8px;
-  background: rgba(37, 99, 235, 0.08);
-  color: var(--v2-accent-strong);
-  font-size: 0.7rem;
-  font-weight: 800;
+.v2-region-commit-icon {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  flex: 0 0 20px;
+  place-items: center;
+  border-radius: 999px;
+  opacity: 0;
+  color: var(--v2-text-muted);
+  transform: scale(0.92);
+  transition: opacity 0.16s ease, transform 0.16s ease, background-color 0.16s ease, color 0.16s ease;
 }
 
-.v2-region-commit-state.is-dirty {
+.v2-region-commit-icon.is-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.v2-region-commit-icon-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.v2-region-commit-icon.is-dirty {
   background: rgba(217, 119, 6, 0.1);
   color: var(--v2-warning);
 }
 
-.v2-region-commit-state.is-failed {
+.v2-region-commit-icon.is-saving {
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--v2-accent-strong);
+}
+
+.v2-region-commit-icon.is-saving .v2-region-commit-icon-mark {
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(37, 99, 235, 0.22);
+  border-top-color: currentColor;
+  background: transparent;
+  animation: v2-region-commit-spin 0.8s linear infinite;
+}
+
+.v2-region-commit-icon.is-failed {
   background: rgba(213, 59, 82, 0.1);
   color: var(--v2-danger);
+}
+
+.v2-region-commit-icon.is-failed .v2-region-commit-icon-mark {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  background: transparent;
+}
+
+.v2-region-commit-icon.is-failed .v2-region-commit-icon-mark::before,
+.v2-region-commit-icon.is-failed .v2-region-commit-icon-mark::after {
+  position: absolute;
+  left: 50%;
+  content: '';
+  transform: translateX(-50%);
+  background: currentColor;
+}
+
+.v2-region-commit-icon.is-failed .v2-region-commit-icon-mark::before {
+  top: 1px;
+  width: 2px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.v2-region-commit-icon.is-failed .v2-region-commit-icon-mark::after {
+  bottom: 1px;
+  width: 2px;
+  height: 2px;
+  border-radius: 999px;
+}
+
+@keyframes v2-region-commit-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .v2-settings-group header {

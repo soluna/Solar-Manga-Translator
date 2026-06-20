@@ -294,6 +294,16 @@ async function main() {
     const translationInput = page.locator('.v2-region-card .translation-review-input').first()
     const originalTranslation = await translationInput.inputValue()
     const editedTranslation = `${originalTranslation || 'E2E translation'} / stable edit`
+    const translationField = page.locator('.v2-region-card.active label.v2-field').first()
+    const fontSizeInput = page.locator('.v2-region-card.active .v2-stepper input').first()
+    const fontSizeInputType = await fontSizeInput.getAttribute('type')
+    if (fontSizeInputType !== 'text') {
+      throw new Error(`字号输入框仍然会显示浏览器数字上下控件：type=${fontSizeInputType}`)
+    }
+    const fieldHeightBeforeEdit = (await translationField.boundingBox())?.height
+    if (!fieldHeightBeforeEdit) {
+      throw new Error('无法读取译文字段高度，无法验证保存状态不会造成跳变')
+    }
     const editSave = page.waitForResponse((response) => (
       response.url().includes(`/api/pages/${FIXTURE_PROJECT_ID}/`)
       && response.url().includes('/commands')
@@ -301,10 +311,18 @@ async function main() {
       && response.ok()
     ))
     await translationInput.fill(editedTranslation)
+    await page.locator('.v2-region-card.active .v2-region-commit-icon.is-dirty.is-visible').waitFor({ state: 'visible', timeout: 20000 })
+    if (await page.locator('.v2-region-card.active .v2-region-commit-state').count()) {
+      throw new Error('右侧栏仍然渲染会改变高度的保存状态文字标签')
+    }
+    const fieldHeightWithDirtyIcon = (await translationField.boundingBox())?.height
+    if (Math.abs((fieldHeightWithDirtyIcon || 0) - fieldHeightBeforeEdit) > 1) {
+      throw new Error(`保存状态图标仍然导致译文字段高度跳变：before=${fieldHeightBeforeEdit} after=${fieldHeightWithDirtyIcon}`)
+    }
     await translationInput.blur()
     await editSave
     await page.waitForTimeout(150)
-    if (await page.locator('.v2-region-commit-state.is-failed').count()) {
+    if (await page.locator('.v2-region-commit-icon.is-failed.is-visible').count()) {
       throw new Error('译文编辑提交后出现失败状态')
     }
     const previewCentering = await readPreviewTextCentering(activeBox)

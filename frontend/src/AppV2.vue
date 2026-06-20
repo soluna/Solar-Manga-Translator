@@ -8586,21 +8586,36 @@ watch(
                     <span v-if="isManualRegion(region)" class="v2-inline-badge">手动框</span>
                   </div>
 
-                  <div class="v2-region-card-toggles" @click.stop @mousedown.stop>
-                    <button
-                      type="button"
-                      :class="['v2-toggle-chip', !isRegionDisabled(region) ? 'active' : '']"
-                      @click.stop="toggleRegionEnabledV2(region)"
+                  <div class="v2-region-card-actions" @click.stop @mousedown.stop>
+                    <span
+                      :class="[
+                        'v2-region-commit-icon',
+                        getRegionCommitStatusLabel(region) ? 'is-visible' : '',
+                        getRegionCommitStatusClass(region)
+                      ]"
+                      :title="getRegionCommitStatusLabel(region)"
+                      :aria-label="getRegionCommitStatusLabel(region) || undefined"
+                      :role="getRegionCommitStatusLabel(region) ? 'status' : undefined"
                     >
-                      {{ isRegionDisabled(region) ? '已停用' : '已启用' }}
-                    </button>
-                    <button
-                      type="button"
-                      :class="['v2-toggle-chip', isVerticalRegion(region) ? 'active' : '']"
-                      @click.stop="toggleRegionDirectionV2(region)"
-                    >
-                      {{ isVerticalRegion(region) ? '纵排' : '横排' }}
-                    </button>
+                      <span class="v2-region-commit-icon-mark" aria-hidden="true"></span>
+                    </span>
+
+                    <div class="v2-region-card-toggles">
+                      <button
+                        type="button"
+                        :class="['v2-toggle-chip', !isRegionDisabled(region) ? 'active' : '']"
+                        @click.stop="toggleRegionEnabledV2(region)"
+                      >
+                        {{ isRegionDisabled(region) ? '已停用' : '已启用' }}
+                      </button>
+                      <button
+                        type="button"
+                        :class="['v2-toggle-chip', isVerticalRegion(region) ? 'active' : '']"
+                        @click.stop="toggleRegionDirectionV2(region)"
+                      >
+                        {{ isVerticalRegion(region) ? '纵排' : '横排' }}
+                      </button>
+                    </div>
                   </div>
                 </header>
 
@@ -8637,12 +8652,6 @@ watch(
                       @keydown.enter.ctrl.prevent="commitRegionTextDraft(region)"
                       @blur="commitRegionTextDraft(region)"
                     ></textarea>
-                    <span
-                      v-if="getRegionCommitStatusLabel(region)"
-                      :class="['v2-region-commit-state', getRegionCommitStatusClass(region)]"
-                    >
-                      {{ getRegionCommitStatusLabel(region) }}
-                    </span>
                   </label>
 
                   <div class="v2-region-setting-stack">
@@ -8680,11 +8689,10 @@ watch(
                           <button type="button" class="v2-stepper-button" @click="adjustRegionFontSizeV2(region, -1)">−</button>
                           <input
                             :value="getRegionFontSize(region)"
-                            type="number"
-                            min="8"
-                            max="240"
-                            step="1"
+                            type="text"
                             inputmode="numeric"
+                            pattern="[0-9]*"
+                            aria-label="字号"
                             @input="handleRegionFontSizeInput(region, $event.target.value)"
                             @keydown.enter.prevent="commitRegionFontSize(region)"
                             @blur="commitRegionFontSize(region)"

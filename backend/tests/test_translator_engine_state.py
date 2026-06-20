@@ -517,6 +517,70 @@ print(json.dumps({
             self.assertEqual(result["glossary"]["entries"][0]["translation"], "山田先生")
             self.assertEqual(len(rerender_calls), 1)
 
+    def test_project_glossary_extraction_uses_direct_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {"entries": []},
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [{
+                    "region_id": "r1",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "山田去了星见町",
+                    "translation": {},
+                }],
+            })
+
+            async def fail_translation_dispatcher(*_args, **_kwargs):
+                raise AssertionError("glossary extraction should not use the translation dispatcher")
+
+            async def fake_completion(config, prompt):
+                self.assertEqual(config["selected_translator"], "openai-compatible")
+                self.assertIn("山田去了星见町", prompt)
+                return '[{"source":"山田","translation":"山田","category":"人名"}]'
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._translate_text_batch = fail_translation_dispatcher  # type: ignore[method-assign]
+            engine._request_project_glossary_extraction = fake_completion  # type: ignore[method-assign]
+            glossary = asyncio.run(engine.extract_project_glossary(project_id, session, {
+                "translator": "custom_openai",
+                "selected_translator": "openai-compatible",
+                "target_lang": "CHS",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }))
+
+            self.assertEqual(glossary["entries"][0]["source"], "山田")
+            self.assertEqual(glossary["entries"][0]["category"], "人名")
+
+    def test_project_glossary_extraction_skips_translation_only_doubao_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+
+            result = asyncio.run(engine._request_project_glossary_extraction({
+                "translator": "custom_openai",
+                "selected_translator": "doubao-ark",
+                "translator_model": "doubao-seed-translation-250915",
+                "api_key": "secret",
+            }, "项目 OCR 原文"))
+
+            self.assertEqual(result, "")
+
     def test_text_mask_completion_catches_symbol_stroke_fragments(self) -> None:
         mask_utils = self.load_patched_text_mask_utils()
 

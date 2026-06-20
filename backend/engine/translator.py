@@ -244,6 +244,77 @@ class TranslatorEngine:
         )
         return self._extract_chat_completions_preview(response)
 
+    def _request_chat_completions_text_sync(
+        self,
+        *,
+        provider_label: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1600,
+    ) -> str:
+        if not str(base_url or "").strip():
+            raise ValueError(f"缺少 {provider_label} API Base URL。")
+        if not str(model or "").strip():
+            raise ValueError(f"缺少 {provider_label} 模型名称。")
+        if not str(api_key or "").strip():
+            raise ValueError(f"缺少 {provider_label} API Key。")
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "stream": False,
+        }
+        response = self._post_validation_json(
+            provider_label=provider_label,
+            url=self._chat_completions_url(base_url),
+            api_key=api_key,
+            payload=payload,
+        )
+        return self._extract_chat_completions_preview(response)
+
+    def _request_gemini_text_sync(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        if not str(api_key or "").strip():
+            raise ValueError("缺少 Gemini API Key。")
+        try:
+            from google import genai
+            from google.genai import types
+        except Exception as exc:
+            raise RuntimeError("当前环境缺少 Gemini SDK，无法提取专有名词。") from exc
+
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model or "gemini-3.1-pro-preview",
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0,
+            ),
+        )
+        text = getattr(response, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        raise RuntimeError("Gemini 已响应，但没有返回可读取的文本。")
+
     def _request_responses_validation_sync(
         self,
         *,
@@ -1652,6 +1723,12 @@ class TranslatorEngine:
         else:
             config.pop("project_glossary_context", None)
 
+    def _project_glossary_extraction_system_prompt(self) -> str:
+        return (
+            "You are a terminology editor for manga translation projects. "
+            "Extract only project-specific proper nouns and domain terms, and return only a valid JSON array."
+        )
+
     def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str) -> str:
         categories = "、".join(sorted(self.PROJECT_GLOSSARY_CATEGORIES))
         return (
@@ -1664,6 +1741,51 @@ class TranslatorEngine:
             "不要收录普通助词、语气词、整句台词或过短且无专名意义的词。\n\n"
             f"项目 OCR 原文：\n{project_context}"
         )
+
+    async def _request_project_glossary_extraction(
+        self,
+        config: dict[str, Any],
+        prompt: str,
+    ) -> str:
+        selected_translator = str(config.get("selected_translator") or config.get("translator") or "").strip()
+        api_key = str(config.get("api_key") or "").strip()
+        system_prompt = self._project_glossary_extraction_system_prompt()
+
+        if selected_translator == "openai-compatible":
+            return await asyncio.to_thread(
+                self._request_chat_completions_text_sync,
+                provider_label="OpenAI Compatible",
+                base_url=str(config.get("openai_base_url") or "").strip(),
+                model=str(config.get("openai_model") or config.get("translator_model") or "").strip(),
+                api_key=api_key,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+            )
+
+        if selected_translator == "doubao-ark":
+            model = str(config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL).strip()
+            if model.startswith("doubao-seed-translation"):
+                return ""
+            return await asyncio.to_thread(
+                self._request_chat_completions_text_sync,
+                provider_label="Doubao Ark",
+                base_url=self.DOUBAO_ARK_BASE_URL,
+                model=model,
+                api_key=api_key,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+            )
+
+        if selected_translator == "gemini":
+            return await asyncio.to_thread(
+                self._request_gemini_text_sync,
+                model="gemini-3.1-pro-preview",
+                api_key=api_key,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+            )
+
+        return ""
 
     def _parse_glossary_extraction_response(self, text: str) -> list[dict[str, Any]]:
         raw_text = str(text or "").strip()
@@ -1712,14 +1834,14 @@ class TranslatorEngine:
             await progress_callback({"event": "status", "message": "正在根据全项目原文提取专有名词库…"})
         prompt = self._build_glossary_extraction_prompt(project_context, str(config.get("target_lang") or ""))
         try:
-            responses = await self._translate_text_batch([prompt], {**config, "project_glossary_context": ""}, project_id)
+            response_text = await self._request_project_glossary_extraction(config, prompt)
         except Exception as exc:
             print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": "专有名词库自动提取失败，已继续使用现有名词库翻译。"})
             return self.get_project_glossary(project_id, session)
 
-        extracted_entries = self._parse_glossary_extraction_response(responses[0] if responses else "")
+        extracted_entries = self._parse_glossary_extraction_response(response_text)
         if not extracted_entries:
             return self.get_project_glossary(project_id, session)
 

@@ -17,6 +17,57 @@ def patch_gemini_translator(target_file: Path) -> bool:
 
     updated, did_change = _replace_once(
         updated,
+        "import re\n",
+        "import os\nimport re\n",
+        "Gemini project glossary environment import",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "NRML='\\033[0m' # Revert to Normal formatting\n",
+        "NRML='\\033[0m' # Revert to Normal formatting\n\n"
+        "def _project_glossary_instruction() -> str:\n"
+        "    glossary_text = str(os.getenv(\"MT_PROJECT_GLOSSARY_TEXT\", \"\") or \"\").strip()\n"
+        "    return f\"\\n\\n{glossary_text}\" if glossary_text else \"\"\n",
+        "Gemini project glossary instruction helper",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        sysTemplate=self.chat_system_template.format(to_lang=to_lang)\n",
+        "        sysTemplate=self.chat_system_template.format(to_lang=to_lang) + _project_glossary_instruction()\n",
+        "Gemini cached system glossary injection",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            config_kwargs['system_instruction'] = self.chat_system_template.format(to_lang=to_lang)\n",
+        "            config_kwargs['system_instruction'] = self.chat_system_template.format(to_lang=to_lang) + _project_glossary_instruction()\n",
+        "Gemini system glossary injection",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "        sysTemplate=self.translator.chat_system_template.format(to_lang=to_lang)\n",
+        "        sysTemplate=self.translator.chat_system_template.format(to_lang=to_lang) + _project_glossary_instruction()\n",
+        "Gemini JSON cached system glossary injection",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
+        "            config_kwargs['system_instruction'] = self.translator.chat_system_template.format(to_lang=to_lang)\n",
+        "            config_kwargs['system_instruction'] = self.translator.chat_system_template.format(to_lang=to_lang) + _project_glossary_instruction()\n",
+        "Gemini JSON system glossary injection",
+    )
+    changed = changed or did_change
+
+    updated, did_change = _replace_once(
+        updated,
         "        RETRY_ATTEMPTS = self._RETRY_ATTEMPTS  \n",
         "        RETRY_ATTEMPTS = self._RETRY_ATTEMPTS  \n        server_error_attempt = 0\n",
         "Gemini server error retry counter",

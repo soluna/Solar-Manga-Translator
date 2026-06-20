@@ -75,6 +75,7 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
+const projectGlossaryCategoryOptions = ['人名', '组织/团体', '地点', '作品/道具/技能', '行业术语', '其他']
 const textDirectionOptions = [
   { value: 'auto', label: '自动（中文默认竖排）' },
   { value: 'vertical', label: '竖排' },
@@ -645,6 +646,16 @@ const translatedPreviewScale = ref(1)
 const exportingOcrDebug = ref(false)
 const exportingTranslationInputDebug = ref(false)
 const exportingTranslationRequestDebug = ref(false)
+const projectGlossary = ref({ version: 1, entries: [] })
+const glossaryDrawerOpen = ref(false)
+const glossaryLoading = ref(false)
+const glossarySaving = ref(false)
+const glossaryExtracting = ref(false)
+const glossaryPreviewing = ref(false)
+const glossaryApplying = ref(false)
+const glossaryDraftEntries = ref([])
+const glossaryPreview = ref({ changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 })
+const glossaryError = ref('')
 const topbarTaskProgress = ref({
   label: '',
   current: 0,
@@ -751,6 +762,20 @@ const canRerender = computed(
 const canRetranslate = computed(
   () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
 )
+const canUseProjectGlossary = computed(() => Boolean(sessionId.value) && !translating.value)
+const projectGlossaryEntryCount = computed(() => glossaryDraftEntries.value.length)
+const projectGlossaryOccurrenceCount = computed(() => (
+  glossaryDraftEntries.value.reduce((total, entry) => total + Number(entry.occurrence_count || 0), 0)
+))
+const glossaryBusy = computed(() => (
+  glossaryLoading.value
+  || glossarySaving.value
+  || glossaryExtracting.value
+  || glossaryPreviewing.value
+  || glossaryApplying.value
+))
+const canSaveProjectGlossary = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
+const canApplyProjectGlossary = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
 const v2ExportArchiveUrl = computed(() => {
   const activeSessionId = String(sessionId.value || '').trim()
   if (!activeSessionId) {
@@ -2351,6 +2376,78 @@ function formatBytes(value) {
   return `${formatted >= 100 || exponent === 0 ? Math.round(formatted) : formatted.toFixed(1)} ${units[exponent]}`
 }
 
+function normalizeProjectGlossaryCategory(value) {
+  const normalized = String(value || '').trim()
+  return projectGlossaryCategoryOptions.includes(normalized) ? normalized : '其他'
+}
+
+function createEmptyGlossaryEntry() {
+  return {
+    id: `local-term-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    source: '',
+    translation: '',
+    category: '其他',
+    replacement: '',
+    note: '',
+    source_kind: 'user',
+    occurrence_count: 0,
+    occurrences: []
+  }
+}
+
+function normalizeProjectGlossaryEntry(entry = {}) {
+  return {
+    id: String(entry.id || `local-term-${Date.now()}-${Math.random().toString(16).slice(2)}`).trim(),
+    source: String(entry.source || entry.term || '').trim(),
+    translation: String(entry.translation || entry.target || '').trim(),
+    category: normalizeProjectGlossaryCategory(entry.category),
+    replacement: String(entry.replacement || entry.replace_text || '').trim(),
+    note: String(entry.note || '').trim(),
+    source_kind: String(entry.source_kind || entry.kind || 'user').trim() || 'user',
+    occurrence_count: Number(entry.occurrence_count || 0),
+    occurrences: Array.isArray(entry.occurrences) ? entry.occurrences : []
+  }
+}
+
+function normalizeProjectGlossary(value = {}) {
+  const entries = Array.isArray(value?.entries)
+    ? value.entries.map((entry) => normalizeProjectGlossaryEntry(entry)).filter((entry) => entry.source || entry.translation)
+    : []
+  return {
+    version: Number(value?.version || 1),
+    updated_at: value?.updated_at || '',
+    entries
+  }
+}
+
+function syncGlossaryDraftFromProject(nextGlossary = projectGlossary.value) {
+  glossaryDraftEntries.value = normalizeProjectGlossary(nextGlossary).entries.map((entry) => ({ ...entry }))
+}
+
+function getGlossaryRequestEntries() {
+  return glossaryDraftEntries.value
+    .map((entry) => normalizeProjectGlossaryEntry(entry))
+    .filter((entry) => entry.source && entry.translation)
+}
+
+function getGlossaryEntrySourceKindLabel(entry) {
+  return entry?.source_kind === 'system' ? '系统提取' : '用户维护'
+}
+
+function getGlossaryOccurrenceLabel(entry) {
+  const count = Number(entry?.occurrence_count || 0)
+  return count > 0 ? `${count} 处` : '未匹配'
+}
+
+function getGlossaryPreviewSummary() {
+  const changeCount = Number(glossaryPreview.value?.change_count || 0)
+  const pageCount = Number(glossaryPreview.value?.affected_page_count || 0)
+  if (changeCount <= 0) {
+    return '当前没有可应用的明确替换。'
+  }
+  return `将修改 ${changeCount} 个文本框，影响 ${pageCount} 页。`
+}
+
 function isProjectBusy(project) {
   const projectId = String(project?.project_id || '').trim()
   if (!projectId) {
@@ -2372,6 +2469,9 @@ function getBusyActionLabel(project) {
   }
   if (action === 'resume-translate') {
     return '继续翻译中'
+  }
+  if (action === 'glossary') {
+    return '名词库处理中'
   }
   return '翻译中'
 }
@@ -2416,6 +2516,12 @@ function applySessionPayload(payload, options = {}) {
     url: getVersionedPageImageUrl(image.url, image.stored_name),
     stored_name: image.stored_name
   }))
+  projectGlossary.value = normalizeProjectGlossary(payload?.glossary || {})
+  if (!glossaryDrawerOpen.value || resetEditingState) {
+    syncGlossaryDraftFromProject(projectGlossary.value)
+    glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
+    glossaryError.value = ''
+  }
 
   const payloadConfig = payload?.config && typeof payload.config === 'object' ? payload.config : {}
   config.value = mergeProjectConfigWithLocalPreferences(payloadConfig, config.value)
@@ -2735,6 +2841,215 @@ function buildRuntimeConfig() {
     translation_region_disabled_overrides: { ...translationRegionDisabledOverrides.value },
     translation_region_layout_overrides: { ...translationRegionLayoutOverrides.value }
   }
+}
+
+async function loadProjectGlossary(options = {}) {
+  if (!sessionId.value) {
+    projectGlossary.value = { version: 1, entries: [] }
+    syncGlossaryDraftFromProject(projectGlossary.value)
+    return
+  }
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    glossaryLoading.value = true
+  }
+  glossaryError.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary`))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取专有名词库失败')
+    }
+    projectGlossary.value = normalizeProjectGlossary(payload.glossary || {})
+    syncGlossaryDraftFromProject(projectGlossary.value)
+  } catch (error) {
+    glossaryError.value = error instanceof Error ? error.message : '读取专有名词库失败'
+  } finally {
+    if (!silent) {
+      glossaryLoading.value = false
+    }
+  }
+}
+
+async function openProjectGlossaryDrawer() {
+  if (!sessionId.value) {
+    return
+  }
+  glossaryDrawerOpen.value = true
+  syncGlossaryDraftFromProject(projectGlossary.value)
+  glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
+  await loadProjectGlossary()
+}
+
+function closeProjectGlossaryDrawer() {
+  glossaryDrawerOpen.value = false
+  glossaryError.value = ''
+}
+
+function addGlossaryEntry() {
+  glossaryDraftEntries.value = [...glossaryDraftEntries.value, createEmptyGlossaryEntry()]
+}
+
+function removeGlossaryEntry(entryId) {
+  glossaryDraftEntries.value = glossaryDraftEntries.value.filter((entry) => entry.id !== entryId)
+  glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
+}
+
+async function saveProjectGlossaryDraft(options = {}) {
+  if (!sessionId.value) {
+    return null
+  }
+  const silent = Boolean(options.silent)
+  if (!silent) {
+    glossarySaving.value = true
+  }
+  glossaryError.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary`), {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ entries: getGlossaryRequestEntries() })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '保存专有名词库失败')
+    }
+    projectGlossary.value = normalizeProjectGlossary(payload.glossary || {})
+    syncGlossaryDraftFromProject(projectGlossary.value)
+    if (!silent) {
+      status.value = '已保存专有名词库。'
+    }
+    return projectGlossary.value
+  } catch (error) {
+    glossaryError.value = error instanceof Error ? error.message : '保存专有名词库失败'
+    return null
+  } finally {
+    if (!silent) {
+      glossarySaving.value = false
+    }
+  }
+}
+
+async function extractProjectGlossary() {
+  if (!sessionId.value || glossaryExtracting.value) {
+    return
+  }
+  glossaryExtracting.value = true
+  glossaryError.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/extract`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ config: buildRuntimeConfig() })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '提取专有名词失败')
+    }
+    projectGlossary.value = normalizeProjectGlossary(payload.glossary || {})
+    syncGlossaryDraftFromProject(projectGlossary.value)
+    glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
+    status.value = `已更新专有名词库，共 ${projectGlossary.value.entries.length} 个词条。`
+  } catch (error) {
+    glossaryError.value = error instanceof Error ? error.message : '提取专有名词失败'
+  } finally {
+    glossaryExtracting.value = false
+  }
+}
+
+async function previewProjectGlossaryApplication() {
+  if (!sessionId.value || glossaryPreviewing.value) {
+    return
+  }
+  glossaryPreviewing.value = true
+  glossaryError.value = ''
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/preview`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ entries: getGlossaryRequestEntries() })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '预览专有名词应用失败')
+    }
+    glossaryPreview.value = {
+      changes: Array.isArray(payload.changes) ? payload.changes : [],
+      change_count: Number(payload.change_count || 0),
+      affected_pages: Array.isArray(payload.affected_pages) ? payload.affected_pages : [],
+      affected_page_count: Number(payload.affected_page_count || 0)
+    }
+    status.value = getGlossaryPreviewSummary()
+  } catch (error) {
+    glossaryError.value = error instanceof Error ? error.message : '预览专有名词应用失败'
+  } finally {
+    glossaryPreviewing.value = false
+  }
+}
+
+async function applyProjectGlossary() {
+  if (!sessionId.value || glossaryApplying.value || translating.value) {
+    return
+  }
+  glossaryApplying.value = true
+  glossaryError.value = ''
+  status.value = '正在应用专有名词库并重新嵌字…'
+  try {
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/apply`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ entries: getGlossaryRequestEntries() })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '应用专有名词库失败')
+    }
+    glossaryPreview.value = {
+      changes: Array.isArray(payload.changes) ? payload.changes : [],
+      change_count: Number(payload.change_count || 0),
+      affected_pages: Array.isArray(payload.affected_pages) ? payload.affected_pages : [],
+      affected_page_count: Number(payload.affected_page_count || 0)
+    }
+    applySessionPayload(payload, {
+      refreshAllTranslatedImages: true,
+      resetEditingState: false
+    })
+    syncGlossaryDraftFromProject(projectGlossary.value)
+    await loadEditInspection({ silent: true })
+    void loadProjectHistory({ silent: true })
+    status.value = Number(payload.change_count || 0) > 0
+      ? `已应用专有名词库并重新嵌字，更新 ${payload.change_count} 个文本框。`
+      : '已保存专有名词库，没有发现需要替换的文本框。'
+  } catch (error) {
+    glossaryError.value = error instanceof Error ? error.message : '应用专有名词库失败'
+    status.value = glossaryError.value
+  } finally {
+    glossaryApplying.value = false
+  }
+}
+
+async function jumpToGlossaryOccurrence(occurrence) {
+  const pageId = String(occurrence?.page_id || '').trim()
+  if (!pageId) {
+    return
+  }
+  await selectEditPageForReview(pageId)
+  const regionId = String(occurrence?.region_id || '').trim()
+  if (regionId) {
+    selectedEditRegionKey.value = regionId
+    void scrollSelectedRegionCardIntoView()
+  }
+  closeProjectGlossaryDrawer()
+  await nextTick()
+  scheduleCanvasLayoutRefresh()
 }
 
 function getResolvedTranslatorModel(value = config.value) {
@@ -7473,6 +7788,10 @@ async function submitFile() {
   downloadPath.value = ''
   translatedDirPath.value = ''
   maskDebugDirPath.value = ''
+  projectGlossary.value = { version: 1, entries: [] }
+  glossaryDraftEntries.value = []
+  glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
+  glossaryError.value = ''
   workflowStage.value = 'idle'
   progress.value = { current: 0, total: 0 }
   resetTranslationReview()
@@ -8092,6 +8411,14 @@ watch(
               <span>{{ v2TopbarProgressCurrent }} / {{ v2TopbarProgressTotal }}</span>
             </div>
           </div>
+          <button
+            type="button"
+            class="v2-topbar-button"
+            :disabled="!sessionId"
+            @click="openProjectGlossaryDrawer"
+          >
+            专有名词库
+          </button>
           <button
             type="button"
             class="v2-topbar-button"
@@ -9080,6 +9407,155 @@ watch(
         <div v-else class="v2-empty-panel">
           <strong>{{ historyLoading ? '正在读取历史项目…' : '暂时没有历史项目' }}</strong>
           <p>先上传一组漫画素材，系统就会开始为你建立可恢复的项目记录。</p>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="glossaryDrawerOpen" class="v2-settings-layer as-drawer v2-glossary-layer">
+      <div class="v2-settings-scrim" @click="closeProjectGlossaryDrawer"></div>
+      <section class="v2-settings-panel v2-glossary-panel" data-testid="v2-glossary-panel" @click.stop>
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">项目</p>
+            <h2 class="v2-section-title">专有名词库</h2>
+          </div>
+
+          <button type="button" class="v2-icon-button" aria-label="关闭专有名词库" @click="closeProjectGlossaryDrawer">✕</button>
+        </header>
+
+        <div class="v2-glossary-summary">
+          <div class="v2-readonly-field">
+            <span>词条</span>
+            <strong>{{ projectGlossaryEntryCount }}</strong>
+          </div>
+          <div class="v2-readonly-field">
+            <span>匹配</span>
+            <strong>{{ projectGlossaryOccurrenceCount }}</strong>
+          </div>
+        </div>
+
+        <div class="v2-inline-actions v2-glossary-actions">
+          <button type="button" class="v2-secondary-button" :disabled="glossaryBusy" @click="addGlossaryEntry">
+            新增
+          </button>
+          <button type="button" class="v2-secondary-button" :disabled="!canSaveProjectGlossary" @click="saveProjectGlossaryDraft">
+            {{ glossarySaving ? '保存中…' : '保存' }}
+          </button>
+          <button type="button" class="v2-secondary-button" :disabled="!canSaveProjectGlossary" @click="extractProjectGlossary">
+            {{ glossaryExtracting ? '提取中…' : '提取/补充' }}
+          </button>
+          <button type="button" class="v2-secondary-button" :disabled="!canSaveProjectGlossary" @click="previewProjectGlossaryApplication">
+            {{ glossaryPreviewing ? '预览中…' : '预览应用' }}
+          </button>
+          <button type="button" class="v2-primary-button" :disabled="!canApplyProjectGlossary" @click="applyProjectGlossary">
+            {{ glossaryApplying ? '应用中…' : '应用并重嵌字' }}
+          </button>
+        </div>
+
+        <p v-if="glossaryError" class="v2-settings-inline-note is-error">{{ glossaryError }}</p>
+
+        <div class="v2-settings-content v2-glossary-content">
+          <section class="v2-settings-group">
+            <header>
+              <strong>词条</strong>
+              <span>{{ glossaryLoading ? '读取中…' : `${projectGlossaryEntryCount} 个` }}</span>
+            </header>
+
+            <div v-if="!glossaryDraftEntries.length" class="v2-empty-panel v2-glossary-empty">
+              <strong>暂无词条</strong>
+              <p>可以先提取，也可以直接新增。</p>
+            </div>
+
+            <article
+              v-for="entry in glossaryDraftEntries"
+              :key="entry.id"
+              class="v2-glossary-entry"
+            >
+              <header class="v2-glossary-entry-head">
+                <div>
+                  <strong>{{ entry.source || '未填写原文' }}</strong>
+                  <div class="v2-glossary-entry-meta">
+                    <span class="v2-inline-badge">{{ entry.category || '其他' }}</span>
+                    <span class="v2-inline-badge style">{{ getGlossaryEntrySourceKindLabel(entry) }}</span>
+                    <span class="v2-inline-badge">{{ getGlossaryOccurrenceLabel(entry) }}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="v2-danger-link"
+                  :disabled="glossaryBusy"
+                  @click="removeGlossaryEntry(entry.id)"
+                >
+                  删除
+                </button>
+              </header>
+
+              <div class="v2-glossary-fields">
+                <label class="v2-field">
+                  <span>原文</span>
+                  <input v-model="entry.source" type="text" autocomplete="off" />
+                </label>
+                <label class="v2-field">
+                  <span>译名</span>
+                  <input v-model="entry.translation" type="text" autocomplete="off" />
+                </label>
+                <label class="v2-field">
+                  <span>分类</span>
+                  <select v-model="entry.category">
+                    <option
+                      v-for="category in projectGlossaryCategoryOptions"
+                      :key="category"
+                      :value="category"
+                    >
+                      {{ category }}
+                    </option>
+                  </select>
+                </label>
+                <label class="v2-field">
+                  <span>当前译法</span>
+                  <input v-model="entry.replacement" type="text" autocomplete="off" placeholder="可选" />
+                </label>
+                <label class="v2-field v2-glossary-note-field">
+                  <span>备注</span>
+                  <input v-model="entry.note" type="text" autocomplete="off" />
+                </label>
+              </div>
+
+              <details v-if="entry.occurrences && entry.occurrences.length" class="v2-glossary-occurrences">
+                <summary>出现位置</summary>
+                <button
+                  v-for="occurrence in entry.occurrences.slice(0, 8)"
+                  :key="`${entry.id}-${occurrence.page_id}-${occurrence.region_id}`"
+                  type="button"
+                  class="v2-glossary-occurrence"
+                  @click="jumpToGlossaryOccurrence(occurrence)"
+                >
+                  <strong>{{ occurrence.page_name || occurrence.page_id }}</strong>
+                  <span>{{ occurrence.source_text }}</span>
+                </button>
+              </details>
+            </article>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>替换预览</strong>
+              <span>{{ getGlossaryPreviewSummary() }}</span>
+            </header>
+
+            <div v-if="glossaryPreview.changes.length" class="v2-glossary-preview-list">
+              <article
+                v-for="change in glossaryPreview.changes.slice(0, 12)"
+                :key="`${change.page_id}-${change.region_id}`"
+                class="v2-glossary-preview-item"
+              >
+                <strong>{{ change.page_name || change.page_id }}</strong>
+                <p>{{ change.before }}</p>
+                <p>{{ change.after }}</p>
+              </article>
+            </div>
+            <p v-else class="v2-settings-inline-note">暂无替换预览。</p>
+          </section>
         </div>
       </section>
     </div>

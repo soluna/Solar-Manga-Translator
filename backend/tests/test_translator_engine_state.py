@@ -377,6 +377,146 @@ print(json.dumps({
                 engine.get_page_image_response_path(source_path, "project-a", "page-1.png", "source", 480),
             )
 
+    def test_project_glossary_preview_uses_previous_translation_as_replacement_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "translated_output_map": {},
+                "workflow_stage": "translated",
+                "last_config": {},
+                "translation_region_overrides": {},
+                "translation_region_skip_overrides": {},
+                "translation_region_disabled_overrides": {},
+                "translation_region_layout_overrides": {},
+                "style_region_overrides": {},
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-yamada",
+                        "source": "山田",
+                        "translation": "Yamada",
+                        "category": "人名",
+                    }]
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [
+                    {
+                        "region_id": "r1",
+                        "bbox": [0, 0, 8, 8],
+                        "source_text": "山田来了",
+                        "translation": {"machine": "Yamada来了", "resolved": "Yamada来了"},
+                    },
+                    {
+                        "region_id": "r2",
+                        "bbox": [8, 0, 8, 8],
+                        "source_text": "山田也在",
+                        "translation": {"machine": "山田先生也在", "resolved": "山田先生也在"},
+                    },
+                    {
+                        "region_id": "r3",
+                        "bbox": [0, 8, 8, 8],
+                        "source_text": "普通对白",
+                        "translation": {"machine": "Yamada", "resolved": "Yamada"},
+                    },
+                ],
+            })
+
+            preview = engine.preview_project_glossary_application(project_id, session, [{
+                "id": "term-yamada",
+                "source": "山田",
+                "translation": "山田先生",
+                "category": "人名",
+            }])
+
+            self.assertEqual(preview["change_count"], 1)
+            self.assertEqual(preview["changes"][0]["region_id"], "r1")
+            self.assertEqual(preview["changes"][0]["before"], "Yamada来了")
+            self.assertEqual(preview["changes"][0]["after"], "山田先生来了")
+
+    def test_project_glossary_apply_sets_overrides_and_rerenders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "translated_output_map": {},
+                "download_path": "",
+                "workflow_stage": "translated",
+                "last_config": {"translator": "custom_openai", "target_lang": "CHS"},
+                "translation_region_overrides": {},
+                "translation_region_skip_overrides": {},
+                "translation_region_disabled_overrides": {},
+                "translation_region_layout_overrides": {},
+                "style_region_overrides": {},
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-yamada",
+                        "source": "山田",
+                        "translation": "Yamada",
+                        "category": "人名",
+                    }]
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [{
+                    "region_id": "r1",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "山田来了",
+                    "translation": {"machine": "Yamada来了", "resolved": "Yamada来了"},
+                }],
+            })
+            rerender_calls: list[dict[str, object]] = []
+
+            async def fake_rerender_session(**kwargs):
+                rerender_calls.append(kwargs)
+                Image.new("RGB", (16, 16), (240, 240, 240)).save(output_dir / "page-1.png")
+                session["translated_output_map"] = {"page-1.png": "page-1.png"}
+                session["download_path"] = str(root / "translated.zip")
+                return {
+                    "download_url": f"/api/download/{project_id}",
+                    "download_path": session["download_path"],
+                    "translated_dir": str(output_dir),
+                    "workflow_stage": "translated",
+                }
+
+            engine.rerender_session = fake_rerender_session  # type: ignore[method-assign]
+
+            result = asyncio.run(engine.apply_project_glossary(project_id, session, [{
+                "id": "term-yamada",
+                "source": "山田",
+                "translation": "山田先生",
+                "category": "人名",
+            }]))
+
+            self.assertEqual(session["translation_region_overrides"]["r1"], "山田先生来了")
+            self.assertEqual(result["change_count"], 1)
+            self.assertEqual(result["glossary"]["entries"][0]["translation"], "山田先生")
+            self.assertEqual(len(rerender_calls), 1)
+
     def test_text_mask_completion_catches_symbol_stroke_fragments(self) -> None:
         mask_utils = self.load_patched_text_mask_utils()
 

@@ -47,6 +47,15 @@ class TranslatorEngine:
     IMAGE_PREVIEW_MIN_SIDE = 96
     IMAGE_PREVIEW_MAX_SIDE = 4096
     IMAGE_PREVIEW_FORMATS = (".webp", ".jpg", ".png")
+    PROJECT_GLOSSARY_VERSION = 1
+    PROJECT_GLOSSARY_CATEGORIES = {
+        "人名",
+        "组织/团体",
+        "地点",
+        "作品/道具/技能",
+        "行业术语",
+        "其他",
+    }
     DOUBAO_CURATED_MODELS = {
         "doubao-seed-translation-250915",
         "doubao-seed-2-0-pro-260215",
@@ -488,6 +497,7 @@ class TranslatorEngine:
             "translated_output_map": dict(session.get("translated_output_map") or {}),
             "rerender_generation": int(session.get("rerender_generation") or 0),
             "manual_regions": dict(session.get("manual_regions") or {}),
+            "project_glossary": self._normalize_project_glossary(session.get("project_glossary")),
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
             "mask_debug_dir": str(session.get("mask_debug_dir") or ""),
             "rerender_cache_dir": str(session.get("rerender_cache_dir") or ""),
@@ -769,6 +779,7 @@ class TranslatorEngine:
             "review_mode": self._session_review_mode(session),
             "last_config": self._sanitize_config_for_storage(session.get("last_config") or {}),
             "manual_regions": dict(session.get("manual_regions") or {}),
+            "project_glossary": self._normalize_project_glossary(session.get("project_glossary")),
             "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
             "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
             "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
@@ -797,6 +808,7 @@ class TranslatorEngine:
             "latest_snapshot_kind": str((latest or {}).get("kind") or ""),
             "latest_snapshot_summary": str((latest or {}).get("summary") or ""),
             "snapshot_count": len(manifests),
+            "glossary_count": len(self._normalize_project_glossary(session.get("project_glossary")).get("entries") or []),
             "archived": bool(session.get("project_archived", False)),
             "is_busy": self.is_session_busy(project_id),
             "busy_action": self.get_session_busy_action(project_id),
@@ -1101,6 +1113,7 @@ class TranslatorEngine:
             "translated_output_map": dict(state.get("translated_output_map") or {}),
             "rerender_generation": int(state.get("rerender_generation") or 0),
             "manual_regions": dict(state.get("manual_regions") or {}),
+            "project_glossary": self._normalize_project_glossary(state.get("project_glossary")),
             "workflow_stage": str(state.get("workflow_stage") or "idle"),
             "mask_debug_dir": str(state.get("mask_debug_dir") or ""),
             "rerender_cache_dir": str(state.get("rerender_cache_dir") or ""),
@@ -1295,6 +1308,7 @@ class TranslatorEngine:
             "download_path": "",
             "translated_output_map": copied_output_map,
             "manual_regions": dict(snapshot.get("manual_regions") or source_session.get("manual_regions") or {}),
+            "project_glossary": self._normalize_project_glossary(snapshot.get("project_glossary") or source_session.get("project_glossary")),
             "workflow_stage": str(snapshot.get("workflow_stage") or source_session.get("workflow_stage") or "idle"),
             "mask_debug_dir": "",
             "rerender_cache_dir": str(new_cache_dir),
@@ -1416,6 +1430,7 @@ class TranslatorEngine:
             "translated_dir": str(Path(session.get("translated_dir") or "").resolve()) if session.get("translated_dir") else "",
             "mask_debug_dir": str(Path(session.get("mask_debug_dir") or "").resolve()) if session.get("mask_debug_dir") else "",
             "project": self._build_project_summary(project_id, session),
+            "glossary": self.get_project_glossary(project_id, session),
             "config": self._sanitize_config_for_storage(session.get("last_config") or {}),
             "overrides": {
                 "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
@@ -1424,6 +1439,434 @@ class TranslatorEngine:
                 "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
                 "style_region_overrides": dict(session.get("style_region_overrides") or {}),
             },
+        }
+
+    def _normalize_glossary_category(self, raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        return value if value in self.PROJECT_GLOSSARY_CATEGORIES else "其他"
+
+    def _normalize_project_glossary_entry(self, raw_entry: Any, existing_entry: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not isinstance(raw_entry, dict):
+            return None
+        source = str(raw_entry.get("source") or raw_entry.get("term") or "").strip()
+        translation = str(raw_entry.get("translation") or raw_entry.get("target") or "").strip()
+        if not source or not translation:
+            return None
+
+        now = self._now_iso()
+        entry_id = str(raw_entry.get("id") or (existing_entry or {}).get("id") or "").strip()
+        if not entry_id:
+            entry_id = f"term_{uuid.uuid4().hex[:12]}"
+        source_kind = str(raw_entry.get("source_kind") or raw_entry.get("kind") or (existing_entry or {}).get("source_kind") or "user").strip()
+        if source_kind not in {"system", "user"}:
+            source_kind = "user"
+
+        created_at = str(raw_entry.get("created_at") or (existing_entry or {}).get("created_at") or now)
+        if "replacement" in raw_entry:
+            replacement_raw = raw_entry.get("replacement")
+        elif "replace_text" in raw_entry:
+            replacement_raw = raw_entry.get("replace_text")
+        else:
+            replacement_raw = (existing_entry or {}).get("replacement")
+        note_raw = raw_entry.get("note") if "note" in raw_entry else (existing_entry or {}).get("note")
+        return {
+            "id": entry_id,
+            "source": source,
+            "translation": translation,
+            "category": self._normalize_glossary_category(raw_entry.get("category") or (existing_entry or {}).get("category")),
+            "replacement": str(replacement_raw or "").strip(),
+            "note": str(note_raw or "").strip(),
+            "source_kind": source_kind,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def _normalize_project_glossary(self, raw_value: Any) -> dict[str, Any]:
+        raw_entries: list[Any]
+        if isinstance(raw_value, dict):
+            raw_entries = list(raw_value.get("entries") or [])
+        elif isinstance(raw_value, list):
+            raw_entries = raw_value
+        else:
+            raw_entries = []
+
+        entries: list[dict[str, Any]] = []
+        seen_sources: set[str] = set()
+        seen_ids: set[str] = set()
+        for raw_entry in raw_entries:
+            entry = self._normalize_project_glossary_entry(raw_entry)
+            if not entry:
+                continue
+            source_key = entry["source"]
+            if source_key in seen_sources:
+                continue
+            while entry["id"] in seen_ids:
+                entry["id"] = f"term_{uuid.uuid4().hex[:12]}"
+            seen_sources.add(source_key)
+            seen_ids.add(entry["id"])
+            entries.append(entry)
+
+        return {
+            "version": self.PROJECT_GLOSSARY_VERSION,
+            "entries": entries,
+            "updated_at": str((raw_value or {}).get("updated_at") or self._now_iso()) if isinstance(raw_value, dict) else self._now_iso(),
+        }
+
+    def _project_glossary_occurrences(self, project_id: str, session: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
+        occurrences: dict[str, list[dict[str, Any]]] = {str(entry.get("id") or ""): [] for entry in entries}
+        terms = [
+            (str(entry.get("id") or ""), str(entry.get("source") or ""))
+            for entry in sorted(entries, key=lambda item: len(str(item.get("source") or "")), reverse=True)
+            if str(entry.get("id") or "") and str(entry.get("source") or "")
+        ]
+        if not terms:
+            return occurrences
+
+        for segment in self._iter_project_text_segments(project_id, session):
+            source_text = str(segment.get("source_text") or "")
+            if not source_text:
+                continue
+            for entry_id, source in terms:
+                if source not in source_text:
+                    continue
+                occurrences.setdefault(entry_id, []).append({
+                    "page_id": str(segment.get("page_id") or ""),
+                    "page_name": str(segment.get("page_name") or ""),
+                    "region_id": str(segment.get("region_id") or ""),
+                    "source_text": source_text,
+                    "translation": str(segment.get("translation") or ""),
+                })
+
+        return occurrences
+
+    def get_project_glossary(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        session["project_glossary"] = glossary
+        entries = list(glossary.get("entries") or [])
+        occurrences = self._project_glossary_occurrences(project_id, session, entries)
+        return {
+            **glossary,
+            "entries": [
+                {
+                    **entry,
+                    "occurrence_count": len(occurrences.get(str(entry.get("id") or ""), [])),
+                    "occurrences": occurrences.get(str(entry.get("id") or ""), []),
+                }
+                for entry in entries
+            ],
+        }
+
+    def save_project_glossary(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        raw_entries: list[Any],
+        *,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        existing_glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        existing_by_id = {str(entry.get("id") or ""): entry for entry in existing_glossary.get("entries") or []}
+        existing_by_source = {str(entry.get("source") or ""): entry for entry in existing_glossary.get("entries") or []}
+        entries: list[dict[str, Any]] = []
+        for raw_entry in raw_entries or []:
+            if not isinstance(raw_entry, dict):
+                continue
+            existing_entry = existing_by_id.get(str(raw_entry.get("id") or "")) or existing_by_source.get(str(raw_entry.get("source") or raw_entry.get("term") or ""))
+            entry = self._normalize_project_glossary_entry(raw_entry, existing_entry=existing_entry)
+            if entry:
+                entries.append(entry)
+
+        glossary = self._normalize_project_glossary({"entries": entries, "updated_at": self._now_iso()})
+        session["project_glossary"] = glossary
+        if persist:
+            self.persist_project_state(project_id, session, persist_page_documents=False)
+        return self.get_project_glossary(project_id, session)
+
+    def _iter_project_text_segments(self, project_id: str, session: dict[str, Any]):
+        for image in session.get("source_images") or []:
+            stored_name = str(image.get("stored_name") or "")
+            if not stored_name:
+                continue
+            try:
+                document = self.get_page_document(project_id, session, stored_name)
+            except Exception:
+                continue
+            page_name = str(image.get("name") or stored_name)
+            for region in document.get("regions") or []:
+                if not isinstance(region, dict):
+                    continue
+                region_id = str(region.get("region_id") or "").strip()
+                source_text = str(region.get("source_text") or "").strip()
+                translation_payload = region.get("translation") if isinstance(region.get("translation"), dict) else {}
+                translation = str(
+                    translation_payload.get("resolved")
+                    or translation_payload.get("edited")
+                    or translation_payload.get("machine")
+                    or ""
+                ).strip()
+                if not region_id or not source_text:
+                    continue
+                yield {
+                    "page_id": stored_name,
+                    "page_name": page_name,
+                    "region_id": region_id,
+                    "source_text": source_text,
+                    "translation": translation,
+                }
+
+    def _project_text_context_for_glossary(self, project_id: str, session: dict[str, Any], max_chars: int = 24000) -> str:
+        lines: list[str] = []
+        char_count = 0
+        for index, segment in enumerate(self._iter_project_text_segments(project_id, session), start=1):
+            source_text = str(segment.get("source_text") or "").replace("\n", " ").strip()
+            if not source_text:
+                continue
+            line = f"{index}. [{segment.get('page_name')}] {source_text}"
+            if char_count + len(line) + 1 > max_chars:
+                lines.append("...")
+                break
+            lines.append(line)
+            char_count += len(line) + 1
+        return "\n".join(lines)
+
+    def _format_project_glossary_context(self, session: dict[str, Any]) -> str:
+        glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        entries = [
+            entry for entry in glossary.get("entries") or []
+            if str(entry.get("source") or "").strip() and str(entry.get("translation") or "").strip()
+        ]
+        if not entries:
+            return ""
+        lines = [
+            "Use the following project terminology exactly when translating. Preserve these mappings consistently:",
+        ]
+        for entry in sorted(entries, key=lambda item: len(str(item.get("source") or "")), reverse=True):
+            category = str(entry.get("category") or "其他")
+            lines.append(f"- {entry['source']} => {entry['translation']} ({category})")
+        return "\n".join(lines)
+
+    def _attach_project_glossary_context(self, session: dict[str, Any], config: dict[str, Any]) -> None:
+        glossary_context = self._format_project_glossary_context(session)
+        if glossary_context:
+            config["project_glossary_context"] = glossary_context
+        else:
+            config.pop("project_glossary_context", None)
+
+    def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str) -> str:
+        categories = "、".join(sorted(self.PROJECT_GLOSSARY_CATEGORIES))
+        return (
+            "你是漫画翻译项目的专有名词编辑。请阅读全项目 OCR 原文，提取会影响翻译一致性的专有名词。"
+            "包括角色名、组织/团体、地点、作品/道具/技能、行业术语和其他需要固定译法的词。"
+            f"目标语言是 {target_lang}。"
+            "请只返回 JSON 数组，不要解释；每个元素格式为："
+            "{\"source\":\"原文\",\"translation\":\"建议译文\",\"category\":\"分类\",\"note\":\"可选备注\"}。"
+            f"分类只能从这些值选择：{categories}。"
+            "不要收录普通助词、语气词、整句台词或过短且无专名意义的词。\n\n"
+            f"项目 OCR 原文：\n{project_context}"
+        )
+
+    def _parse_glossary_extraction_response(self, text: str) -> list[dict[str, Any]]:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return []
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", raw_text, flags=re.DOTALL | re.IGNORECASE)
+        if fenced:
+            raw_text = fenced.group(1).strip()
+        start = raw_text.find("[")
+        end = raw_text.rfind("]")
+        if start >= 0 and end > start:
+            raw_text = raw_text[start:end + 1]
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, dict):
+            payload = payload.get("entries") or payload.get("terms") or []
+        if not isinstance(payload, list):
+            return []
+        entries: list[dict[str, Any]] = []
+        for item in payload:
+            entry = self._normalize_project_glossary_entry({
+                **item,
+                "source_kind": "system",
+            } if isinstance(item, dict) else item)
+            if entry:
+                entries.append(entry)
+        return entries
+
+    async def extract_project_glossary(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        config: dict[str, Any],
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_runtime_patches()
+        project_context = self._project_text_context_for_glossary(project_id, session)
+        if not project_context:
+            return self.get_project_glossary(project_id, session)
+        if config.get("translator") == "none":
+            return self.get_project_glossary(project_id, session)
+
+        if progress_callback is not None:
+            await progress_callback({"event": "status", "message": "正在根据全项目原文提取专有名词库…"})
+        prompt = self._build_glossary_extraction_prompt(project_context, str(config.get("target_lang") or ""))
+        try:
+            responses = await self._translate_text_batch([prompt], {**config, "project_glossary_context": ""}, project_id)
+        except Exception as exc:
+            print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
+            if progress_callback is not None:
+                await progress_callback({"event": "status", "message": "专有名词库自动提取失败，已继续使用现有名词库翻译。"})
+            return self.get_project_glossary(project_id, session)
+
+        extracted_entries = self._parse_glossary_extraction_response(responses[0] if responses else "")
+        if not extracted_entries:
+            return self.get_project_glossary(project_id, session)
+
+        current = self._normalize_project_glossary(session.get("project_glossary"))
+        existing_sources = {str(entry.get("source") or "") for entry in current.get("entries") or []}
+        merged_entries = list(current.get("entries") or [])
+        added_count = 0
+        for entry in extracted_entries:
+            if entry["source"] in existing_sources:
+                continue
+            merged_entries.append(entry)
+            existing_sources.add(entry["source"])
+            added_count += 1
+        if added_count:
+            self.save_project_glossary(project_id, session, merged_entries, persist=True)
+            if progress_callback is not None:
+                await progress_callback({"event": "status", "message": f"已补充 {added_count} 个项目专有名词，继续翻译。"})
+        return self.get_project_glossary(project_id, session)
+
+    def _glossary_replacement_source(self, entry: dict[str, Any], previous_entries: dict[str, dict[str, Any]]) -> str:
+        explicit = str(entry.get("replacement") or "").strip()
+        if explicit:
+            return explicit
+        previous = previous_entries.get(str(entry.get("id") or "")) or previous_entries.get(str(entry.get("source") or ""))
+        previous_translation = str((previous or {}).get("translation") or "").strip()
+        if previous_translation and previous_translation != str(entry.get("translation") or "").strip():
+            return previous_translation
+        return ""
+
+    def preview_project_glossary_application(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        raw_entries: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        current_glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        previous_entries: dict[str, dict[str, Any]] = {}
+        for entry in current_glossary.get("entries") or []:
+            previous_entries[str(entry.get("id") or "")] = entry
+            previous_entries[str(entry.get("source") or "")] = entry
+
+        if raw_entries is None:
+            glossary = current_glossary
+        else:
+            normalized_entries = []
+            for raw_entry in raw_entries or []:
+                existing = previous_entries.get(str((raw_entry or {}).get("id") or "")) if isinstance(raw_entry, dict) else None
+                entry = self._normalize_project_glossary_entry(raw_entry, existing_entry=existing)
+                if entry:
+                    normalized_entries.append(entry)
+            glossary = self._normalize_project_glossary({"entries": normalized_entries})
+
+        entries = [
+            entry for entry in glossary.get("entries") or []
+            if str(entry.get("source") or "").strip() and str(entry.get("translation") or "").strip()
+        ]
+        entries.sort(
+            key=lambda item: (
+                len(str(item.get("source") or "")),
+                len(self._glossary_replacement_source(item, previous_entries)),
+            ),
+            reverse=True,
+        )
+
+        changes: list[dict[str, Any]] = []
+        for segment in self._iter_project_text_segments(project_id, session):
+            source_text = str(segment.get("source_text") or "")
+            current_translation = str(segment.get("translation") or "")
+            next_translation = current_translation
+            applied_terms: list[dict[str, str]] = []
+            if not source_text or not current_translation:
+                continue
+            for entry in entries:
+                source = str(entry.get("source") or "")
+                target = str(entry.get("translation") or "")
+                if not source or not target or source not in source_text or target in next_translation:
+                    continue
+                replacement_source = self._glossary_replacement_source(entry, previous_entries)
+                if not replacement_source or replacement_source not in next_translation:
+                    continue
+                next_translation = next_translation.replace(replacement_source, target)
+                applied_terms.append({
+                    "entry_id": str(entry.get("id") or ""),
+                    "source": source,
+                    "from": replacement_source,
+                    "to": target,
+                })
+            if next_translation == current_translation:
+                continue
+            changes.append({
+                "page_id": str(segment.get("page_id") or ""),
+                "page_name": str(segment.get("page_name") or ""),
+                "region_id": str(segment.get("region_id") or ""),
+                "source_text": source_text,
+                "before": current_translation,
+                "after": next_translation,
+                "terms": applied_terms,
+            })
+
+        affected_pages = sorted({str(change.get("page_id") or "") for change in changes if str(change.get("page_id") or "")})
+        return {
+            "changes": changes,
+            "change_count": len(changes),
+            "affected_pages": affected_pages,
+            "affected_page_count": len(affected_pages),
+        }
+
+    async def apply_project_glossary(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        raw_entries: list[Any],
+    ) -> dict[str, Any]:
+        preview = self.preview_project_glossary_application(project_id, session, raw_entries)
+        self.save_project_glossary(project_id, session, raw_entries, persist=False)
+        for change in preview.get("changes") or []:
+            region_id = str(change.get("region_id") or "")
+            after_text = str(change.get("after") or "")
+            if region_id and after_text:
+                self._set_region_translation_override_value(session, region_id, after_text)
+
+        if preview.get("changes"):
+            raw_config = {
+                **dict(session.get("last_config") or {}),
+                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            }
+
+            async def ignore_progress(_event: dict[str, Any]) -> None:
+                return None
+
+            await self.rerender_session(
+                session_id=project_id,
+                session=session,
+                raw_config=raw_config,
+                progress_callback=ignore_progress,
+            )
+        else:
+            self.persist_project_state(project_id, session, persist_page_documents=False)
+
+        return {
+            **preview,
+            "glossary": self.get_project_glossary(project_id, session),
+            **self.build_client_session_payload(project_id, session),
         }
 
     def _prepare_regions_for_page_document(
@@ -2633,168 +3076,26 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
-        self._ensure_runtime_patches()
-        config = self.capture_session_config(session, raw_config)
-        source_dir = Path(session["source_dir"])
-        output_dir = Path(session["translated_dir"])
-        cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
-        session["rerender_cache_dir"] = str(cache_dir)
-        mask_debug_dir = self._prepare_mask_debug_dir(session_id, reset=True) if config["export_mask_debug"] else None
-        session["mask_debug_dir"] = str(mask_debug_dir) if mask_debug_dir is not None else None
-        with contextlib.suppress(FileNotFoundError):
-            self._translation_request_debug_path(session_id).unlink()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        self._clear_directory(output_dir)
-        session["translated_output_map"] = {}
-        session["download_path"] = None
-        session["workflow_stage"] = "translating"
-        session["deferred_output_names"] = set()
-
-        config_path = self._write_config(session_id, config)
-        log_path = self.temp_dir / f"{session_id}_translation.log"
-
-        expected_outputs = [
-            output_dir / Path(image["stored_name"])
-            for image in session["source_images"]
-        ]
-        complex_images = self._select_complex_repair_images(session, source_dir, config)
-        deferred_output_names = {image["stored_name"] for image in complex_images}
-        should_apply_font_style_map = self._has_style_font_overrides(config)
-        if should_apply_font_style_map:
-            deferred_output_names = {image["stored_name"] for image in session["source_images"]}
-            await progress_callback(
-                {
-                    "event": "status",
-                    "message": "已启用字体样式映射，翻译完成后会自动按黑体 / 宋体 / 圆体 / 卡通 / 手写 / 拟声重新嵌字。",
-                }
-            )
-        selected_model = str(config.get("translator_model") or "").strip()
-        if (
-            str(config.get("selected_translator") or "").strip() == "doubao-ark"
-            and selected_model
-            and not selected_model.startswith("doubao-seed-translation")
-        ):
-            await progress_callback(
-                {
-                    "event": "status",
-                    "message": (
-                        f"当前使用 {selected_model}。这类 Doubao 通用模型在 OCR 噪声较重的漫画翻译场景下可能不稳定；"
-                        "若出现乱码或大量重试，建议改用 doubao-seed-translation-250915。"
-                    ),
-                }
-            )
-        session["deferred_output_names"] = deferred_output_names
-
-        command = self._build_command(source_dir, output_dir, config_path, config)
-
-        reported: set[Path] = set()
-        total = len(expected_outputs)
-        await progress_callback({"event": "start", "total_pages": total})
-
-        process_returncode = await self._run_translation_command(
-            command=command,
-            log_path=log_path,
-            config=config,
+        await self.detect_session(
             session_id=session_id,
             session=session,
-            expected_outputs=expected_outputs,
-            reported=reported,
+            raw_config=raw_config,
+            progress_callback=progress_callback,
+            auto_continue=True,
+        )
+        return await self.resume_translation_session(
+            session_id=session_id,
+            session=session,
+            raw_config={
+                **dict(raw_config or session.get("last_config") or {}),
+                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            },
             progress_callback=progress_callback,
         )
-
-        if process_returncode != 0:
-            raise RuntimeError(self._format_failure(log_path))
-
-        quality_failure = self._format_quality_failure(log_path, config.get("target_lang"))
-        if quality_failure:
-            self._clear_directory(output_dir)
-            session["translated_output_map"] = {}
-            session["download_path"] = None
-            raise RuntimeError(quality_failure)
-
-        rerenderable_pages = self._count_rerenderable_pages(session_id, session)
-        if rerenderable_pages == 0:
-            raise RuntimeError(
-                self._format_missing_rerender_cache_failure(
-                    log_path=log_path,
-                    stage_label="翻译",
-                    default_message="翻译已完成，但没有生成任何可校对缓存，请检查后端日志中的 rerender cache 写入情况。",
-                )
-            )
-        if rerenderable_pages < total:
-            print(
-                f"[WARN] Rerender cache only generated for {rerenderable_pages}/{total} page(s) "
-                f"during translation session {session_id}."
-            )
-
-        if should_apply_font_style_map:
-            await self._apply_font_style_rerender(
-                session_id=session_id,
-                session=session,
-                config=config,
-                progress_callback=progress_callback,
-            )
-
-        if complex_images:
-            if self._wants_ai_image_cleanup(config):
-                if self._has_image_cleanup_key(config):
-                    enhanced_count = await self._ai_clean_complex_pages(
-                        session_id=session_id,
-                        session=session,
-                        config=config,
-                        complex_images=complex_images,
-                        progress_callback=progress_callback,
-                    )
-                else:
-                    enhanced_count = 0
-                    await progress_callback(
-                        {
-                            "event": "status",
-                            "message": "已启用 Gemini 图像去字，但没有可用 API Key，已保留稳定版输出。",
-                        }
-                    )
-            else:
-                enhanced_count = await self._enhance_complex_pages(
-                    session_id=session_id,
-                    session=session,
-                    config=config,
-                    complex_images=complex_images,
-                    progress_callback=progress_callback,
-                )
-            if enhanced_count:
-                print(f"[DEBUG] Enhanced repair finished for {enhanced_count} complex page(s).")
-        if session.get("deferred_output_names"):
-            session["deferred_output_names"] = set()
-            await self._emit_completed_images(
-                session_id,
-                session,
-                expected_outputs,
-                reported,
-                progress_callback,
-            )
-
-        archive_path = self.build_session_archive(
-            session_id=session_id,
-            session=session,
-            preferred_output_format=config["rerender_output_format"],
-        )
-        session["download_path"] = archive_path
-        session["workflow_stage"] = "translated"
-        self.persist_project_state(
-            session_id,
-            session,
-            snapshot_kind="initial_translation",
-            snapshot_summary="完整翻译完成",
-            persist_page_documents=True,
-        )
-
-        return {
-            "download_url": f"/api/download/{session_id}",
-            "download_path": str(Path(archive_path).resolve()),
-            "translated_dir": str(output_dir.resolve()),
-            "mask_debug_dir": str(mask_debug_dir.resolve()) if mask_debug_dir is not None else "",
-            "workflow_stage": session["workflow_stage"],
-        }
 
     async def detect_session(
         self,
@@ -2802,6 +3103,7 @@ class TranslatorEngine:
         session: dict[str, Any],
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
+        auto_continue: bool = False,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
@@ -2830,7 +3132,11 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
-                "message": "正在先识别文本框并建立可校对缓存，翻译会在你确认后再继续。",
+                "message": (
+                    "正在先识别全项目文本框，为专有名词库和翻译建立上下文。"
+                    if auto_continue
+                    else "正在先识别文本框并建立可校对缓存，翻译会在你确认后再继续。"
+                ),
             }
         )
 
@@ -2892,6 +3198,10 @@ class TranslatorEngine:
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
+        existing_glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        if target_stored_name is None or not existing_glossary.get("entries"):
+            await self.extract_project_glossary(session_id, session, config, progress_callback=progress_callback)
+        self._attach_project_glossary_context(session, config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -3043,6 +3353,7 @@ class TranslatorEngine:
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
+        self._attach_project_glossary_context(session, config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -3896,6 +4207,9 @@ class TranslatorEngine:
             env["CUSTOM_OPENAI_USE_RESPONSES"] = "0"
             if api_key:
                 env["CUSTOM_OPENAI_API_KEY"] = api_key
+        glossary_context = str(config.get("project_glossary_context") or "").strip()
+        if glossary_context:
+            env["MT_PROJECT_GLOSSARY_TEXT"] = glossary_context
         if session_id and config.get("export_mask_debug"):
             env["MT_MASK_DEBUG_DIR"] = str(self._prepare_mask_debug_dir(session_id, reset=False))
         if session_id:

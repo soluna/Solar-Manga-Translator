@@ -419,6 +419,63 @@ async def upload_project_base_images(project_id: str, file: UploadFile = File(..
     }
 
 
+@app.get("/api/projects/{project_id}/glossary")
+async def get_project_glossary(project_id: str):
+    session = get_or_restore_session(project_id)
+    return {"glossary": translator_engine.get_project_glossary(project_id, session)}
+
+
+@app.put("/api/projects/{project_id}/glossary")
+async def save_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(project_id)
+    payload = payload or {}
+    entries = payload.get("entries") or []
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
+    glossary = translator_engine.save_project_glossary(project_id, session, entries)
+    return {"glossary": glossary}
+
+
+@app.post("/api/projects/{project_id}/glossary/extract")
+async def extract_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(project_id)
+    if translator_engine.is_session_busy(project_id):
+        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再提取专有名词。")
+
+    config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
+    glossary = await translator_engine.extract_project_glossary(project_id, session, config)
+    return {"glossary": glossary}
+
+
+@app.post("/api/projects/{project_id}/glossary/preview")
+async def preview_project_glossary_application(project_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(project_id)
+    payload = payload or {}
+    entries = payload.get("entries")
+    if entries is not None and not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
+    return translator_engine.preview_project_glossary_application(project_id, session, entries)
+
+
+@app.post("/api/projects/{project_id}/glossary/apply")
+async def apply_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(project_id)
+    payload = payload or {}
+    entries = payload.get("entries") or []
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
+    if not translator_engine.try_mark_session_busy(project_id, "glossary"):
+        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再应用专有名词。")
+    try:
+        return await translator_engine.apply_project_glossary(project_id, session, entries)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        translator_engine.clear_session_busy(project_id)
+
+
 @app.get("/api/projects/{project_id}/snapshots")
 async def list_project_snapshots(project_id: str):
     return {"snapshots": translator_engine.list_project_snapshots(project_id)}

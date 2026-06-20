@@ -383,7 +383,11 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return translations
 
     def _build_messages(self, to_lang: str, prompt: str):
-        messages = [{"role": "system", "content": self.chat_system_template.format(to_lang=to_lang)}]
+        system_content = self.chat_system_template.format(to_lang=to_lang)
+        glossary_text = str(os.getenv("MT_PROJECT_GLOSSARY_TEXT", "") or "").strip()
+        if glossary_text:
+            system_content += "\n\n" + glossary_text
+        messages = [{"role": "system", "content": system_content}]
         lang_chat_samples = self.get_chat_sample(to_lang)
         if lang_chat_samples:
             messages.append({"role": "user", "content": lang_chat_samples[0]})
@@ -507,6 +511,14 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return mapping.get(normalized)
 
     def _translation_responses_prompt_input(self, from_lang: str, to_lang: str, prompt: str):
+        glossary_text = str(os.getenv("MT_PROJECT_GLOSSARY_TEXT", "") or "").strip()
+        prompt_text = prompt
+        if glossary_text:
+            prompt_text = (
+                f"{glossary_text}\n\n"
+                "Translate only the manga text below. Keep the output aligned to the requested translation format.\n"
+                f"{prompt}"
+            )
         translation_options = {
             "target_language": self._map_translation_language_code(to_lang) or "zh-Hant",
         }
@@ -519,7 +531,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
                 "content": [
                     {
                         "type": "input_text",
-                        "text": prompt,
+                        "text": prompt_text,
                         "translation_options": translation_options,
                     }
                 ],

@@ -327,6 +327,56 @@ print(json.dumps({
             engine._save_result_atomic(result_image, output_path)
             self.assertTrue(output_path.exists())
 
+    def test_page_image_response_path_generates_size_limited_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_path = root / "large-source.png"
+            Image.new("RGB", (1200, 800), (12, 34, 56)).save(source_path)
+
+            preview_path = engine.get_page_image_response_path(
+                source_path,
+                "project-a",
+                "page-1.png",
+                "source",
+                320,
+            )
+
+            self.assertNotEqual(source_path, preview_path)
+            self.assertTrue(preview_path.exists())
+            with Image.open(preview_path) as preview_image:
+                self.assertLessEqual(max(preview_image.size), 320)
+                self.assertEqual(preview_image.size, (320, 213))
+
+            cached_preview_path = engine.get_page_image_response_path(
+                source_path,
+                "project-a",
+                "page-1.png",
+                "source",
+                320,
+            )
+            self.assertEqual(preview_path, cached_preview_path)
+
+    def test_page_image_response_path_keeps_original_when_preview_is_unneeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_path = root / "small-source.png"
+            Image.new("RGB", (160, 120), (255, 255, 255)).save(source_path)
+
+            self.assertEqual(
+                source_path,
+                engine.get_page_image_response_path(source_path, "project-a", "page-1.png", "source"),
+            )
+            self.assertEqual(
+                source_path,
+                engine.get_page_image_response_path(source_path, "project-a", "page-1.png", "source", 0),
+            )
+            self.assertEqual(
+                source_path,
+                engine.get_page_image_response_path(source_path, "project-a", "page-1.png", "source", 480),
+            )
+
     def test_text_mask_completion_catches_symbol_stroke_fragments(self) -> None:
         mask_utils = self.load_patched_text_mask_utils()
 

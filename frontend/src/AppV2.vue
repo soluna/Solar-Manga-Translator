@@ -13,6 +13,8 @@ const runtimeApiBaseUrl = String(desktopBridge?.runtime?.apiBaseUrl || '').trim(
 const defaultApiBaseUrl = (runtimeApiBaseUrl || import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const configStorageKey = 'manga-translator.ui-config'
 const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
+const IMAGE_THUMBNAIL_MAX_SIDE = 480
+const IMAGE_REVIEW_MAX_SIDE = 2400
 const browserConfigKeys = [
   'translator',
   'translator_model',
@@ -1025,14 +1027,20 @@ const selectedEditPageThumbnailUrl = computed(() => {
   if (!page) {
     return ''
   }
-  return toApiUrl(page.source_image_url || page.image_url || page.base_image_url || '')
+  return getThumbnailPageImageUrl(
+    page.source_image_url || page.image_url || page.base_image_url || '',
+    page.stored_name
+  )
 })
 const selectedEditPageMainImageUrl = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
     return ''
   }
-  return toApiUrl(page.base_image_url || page.source_image_url || page.image_url || '')
+  return getReviewPageImageUrl(
+    page.base_image_url || page.source_image_url || page.image_url || '',
+    page.stored_name
+  )
 })
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
@@ -1060,7 +1068,10 @@ const pageRailItems = computed(() => (
   mergedInspectionPages.value.map((page, index) => ({
     ...page,
     pageNumber: index + 1,
-    thumbnailUrl: toApiUrl(page.source_image_url || page.image_url || page.base_image_url || ''),
+    thumbnailUrl: getThumbnailPageImageUrl(
+      page.source_image_url || page.image_url || page.base_image_url || '',
+      page.stored_name
+    ),
     selected: page.stored_name === selectedEditPageKey.value
   }))
 ))
@@ -1308,6 +1319,10 @@ const v2PageEntries = computed(() => {
         blankUrl: payload.blankUrl || '',
         finalUrl: payload.finalUrl || '',
         previewUrl: payload.previewUrl || '',
+        sourceThumbUrl: payload.sourceThumbUrl || '',
+        blankThumbUrl: payload.blankThumbUrl || '',
+        finalThumbUrl: payload.finalThumbUrl || '',
+        previewThumbUrl: payload.previewThumbUrl || '',
         pageNumber: payload.pageNumber || order.length,
         regionCount: Number(payload.regionCount || 0),
         reviewReady: Boolean(payload.reviewReady)
@@ -1324,21 +1339,34 @@ const v2PageEntries = computed(() => {
       continue
     }
     seen.add(key)
+    const sourceUrl = getReviewPageImageUrl(image?.url || '', key)
+    const sourceThumbUrl = getThumbnailPageImageUrl(image?.url || '', key)
     ensureEntry(key, {
       name: image?.name || key,
-      sourceUrl: image?.url || '',
-      blankUrl: image?.url || '',
+      sourceUrl,
+      blankUrl: sourceUrl,
+      sourceThumbUrl,
+      blankThumbUrl: sourceThumbUrl,
       pageNumber: order.length + 1
     })
   }
 
   for (const page of mergedInspectionPages.value) {
+    const sourceImagePath = page?.source_image_url || page?.image_url || page?.base_image_url || ''
+    const blankImagePath = page?.base_image_url || page?.source_image_url || page?.image_url || ''
+    const translatedImagePath = page?.translated_image_url || page?.image_url || ''
+    const finalUrl = getSavedTranslatedImageUrl(page) || getReviewPageImageUrl(translatedImagePath, page?.stored_name)
+    const previewUrl = getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || getReviewPageImageUrl(translatedImagePath, page?.stored_name)
     ensureEntry(page?.stored_name, {
       name: page?.name || page?.stored_name || '未命名页面',
-      sourceUrl: toApiUrl(page?.source_image_url || page?.image_url || page?.base_image_url || ''),
-      blankUrl: toApiUrl(page?.base_image_url || page?.source_image_url || page?.image_url || ''),
-      finalUrl: getSavedTranslatedImageUrl(page) || getVersionedPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name),
-      previewUrl: getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || getVersionedPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name),
+      sourceUrl: getReviewPageImageUrl(sourceImagePath, page?.stored_name),
+      blankUrl: getReviewPageImageUrl(blankImagePath, page?.stored_name),
+      finalUrl,
+      previewUrl,
+      sourceThumbUrl: getThumbnailPageImageUrl(sourceImagePath, page?.stored_name),
+      blankThumbUrl: getThumbnailPageImageUrl(blankImagePath, page?.stored_name),
+      finalThumbUrl: getSavedTranslatedImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getThumbnailPageImageUrl(translatedImagePath, page?.stored_name),
+      previewThumbUrl: getCanvasPreviewImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getSavedTranslatedImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getThumbnailPageImageUrl(translatedImagePath, page?.stored_name),
       regionCount: Number(page?.regions?.length || 0),
       reviewReady: true
     })
@@ -1346,19 +1374,36 @@ const v2PageEntries = computed(() => {
 
   for (const image of translatedImages.value) {
     const key = String(image?.stored_name || image?.name || '').trim()
+    const finalUrl = getReviewPageImageUrl(image?.url || '', key)
+    const finalThumbUrl = getThumbnailPageImageUrl(image?.url || '', key)
     const entry = ensureEntry(key, {
       name: image?.name || key,
-      finalUrl: image?.url || '',
-      previewUrl: image?.url || ''
+      finalUrl,
+      previewUrl: finalUrl,
+      finalThumbUrl,
+      previewThumbUrl: finalThumbUrl
     })
     if (entry && !entry.blankUrl) {
       entry.blankUrl = entry.sourceUrl || entry.finalUrl
+    }
+    if (entry && !entry.blankThumbUrl) {
+      entry.blankThumbUrl = entry.sourceThumbUrl || entry.finalThumbUrl
     }
   }
 
   return order.map((key) => {
     const entry = mapped.get(key)
-    const fallback = entry?.sourceUrl || entry?.blankUrl || entry?.finalUrl || entry?.previewUrl || ''
+    const fallback = (
+      entry?.sourceThumbUrl
+      || entry?.blankThumbUrl
+      || entry?.finalThumbUrl
+      || entry?.previewThumbUrl
+      || entry?.sourceUrl
+      || entry?.blankUrl
+      || entry?.finalUrl
+      || entry?.previewUrl
+      || ''
+    )
     const status = entry?.finalUrl
       ? '已完成'
       : entry?.reviewReady
@@ -1556,22 +1601,45 @@ function toWebSocketUrl(path) {
   return url.toString()
 }
 
+function withUrlQueryParam(url, key, value) {
+  if (!url || value === undefined || value === null || value === '') {
+    return url || ''
+  }
+
+  try {
+    const parsedUrl = new URL(url, typeof window !== 'undefined' ? window.location.origin : 'http://localhost')
+    parsedUrl.searchParams.set(key, String(value))
+    return parsedUrl.toString()
+  } catch (_error) {
+    const [pathAndQuery, hash = ''] = String(url).split('#')
+    const [path, query = ''] = pathAndQuery.split('?')
+    const params = new URLSearchParams(query)
+    params.set(key, String(value))
+    const nextQuery = params.toString()
+    return `${path}${nextQuery ? `?${nextQuery}` : ''}${hash ? `#${hash}` : ''}`
+  }
+}
+
+function withImagePreviewSize(url, maxSide) {
+  const normalizedMaxSide = Number(maxSide || 0)
+  if (!url || !Number.isFinite(normalizedMaxSide) || normalizedMaxSide <= 0) {
+    return url || ''
+  }
+  return withUrlQueryParam(url, 'max_side', Math.round(normalizedMaxSide))
+}
+
 function withCacheBust(url) {
   if (!url) {
     return ''
   }
-
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}t=${renderNonce.value}`
+  return withUrlQueryParam(url, 't', renderNonce.value)
 }
 
 function withExplicitCacheBust(url, nonce) {
   if (!url || !nonce) {
     return url || ''
   }
-
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}t=${nonce}`
+  return withUrlQueryParam(url, 't', nonce)
 }
 
 function getPageImageNonce(pageId) {
@@ -1579,12 +1647,21 @@ function getPageImageNonce(pageId) {
   return normalizedPageId ? pageImageNonces.value[normalizedPageId] : ''
 }
 
-function getVersionedPageImageUrl(path, pageId) {
-  const url = toApiUrl(String(path || '').trim())
+function getVersionedPageImageUrl(path, pageId, options = {}) {
+  const maxSide = typeof options === 'number' ? options : options?.maxSide
+  const url = withImagePreviewSize(toApiUrl(String(path || '').trim()), maxSide)
   if (!url) {
     return ''
   }
   return withExplicitCacheBust(url, getPageImageNonce(pageId))
+}
+
+function getThumbnailPageImageUrl(path, pageId) {
+  return getVersionedPageImageUrl(path, pageId, { maxSide: IMAGE_THUMBNAIL_MAX_SIDE })
+}
+
+function getReviewPageImageUrl(path, pageId) {
+  return getVersionedPageImageUrl(path, pageId, { maxSide: IMAGE_REVIEW_MAX_SIDE })
 }
 
 function markPageImageUpdated(pageId, timestamp = Date.now()) {
@@ -4025,35 +4102,35 @@ function getCanvasHandleCursor(handle) {
   return cursorMap[handle] || 'move'
 }
 
-function getCanvasPreviewImageUrl(page) {
+function getCanvasPreviewImageUrl(page, maxSide = IMAGE_REVIEW_MAX_SIDE) {
   const dirty = Boolean(page?.stored_name && canvasPreviewDirtyPages.value[page.stored_name])
   if (isCanvasReviewMode.value && dirty) {
     const baseImagePath = page?.base_image_url || page?.translated_image_url || page?.image_url || ''
-    return toApiUrl(baseImagePath)
+    return getVersionedPageImageUrl(baseImagePath, page?.stored_name, { maxSide })
   }
 
   const latestTranslatedUrl = page?.stored_name
     ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
     : ''
   if (latestTranslatedUrl) {
-    return latestTranslatedUrl
+    return getVersionedPageImageUrl(latestTranslatedUrl, page?.stored_name, { maxSide })
   }
 
   const imagePath = page?.translated_image_url || page?.image_url || page?.base_image_url || ''
-  return getVersionedPageImageUrl(imagePath, page?.stored_name)
+  return getVersionedPageImageUrl(imagePath, page?.stored_name, { maxSide })
 }
 
-function getSavedTranslatedImageUrl(page) {
+function getSavedTranslatedImageUrl(page, maxSide = IMAGE_REVIEW_MAX_SIDE) {
   const latestTranslatedUrl = page?.stored_name
     ? String(latestTranslatedImageUrlByPage.value[page.stored_name] || '').trim()
     : ''
   if (latestTranslatedUrl) {
-    return latestTranslatedUrl
+    return getVersionedPageImageUrl(latestTranslatedUrl, page?.stored_name, { maxSide })
   }
 
   const translatedPath = String(page?.translated_image_url || '').trim()
   if (translatedPath) {
-    return getVersionedPageImageUrl(translatedPath, page?.stored_name)
+    return getVersionedPageImageUrl(translatedPath, page?.stored_name, { maxSide })
   }
 
   return ''
@@ -4076,9 +4153,10 @@ function getReviewComparePaneImageUrl(mode) {
   const entry = v2SelectedPageEntry.value
   if (mode === 'final') {
     return (
-      getSavedTranslatedImageUrl(page)
+      getSavedTranslatedImageUrl(page, IMAGE_REVIEW_MAX_SIDE)
+      || getReviewPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name)
       || entry?.finalUrl
-      || getCanvasPreviewImageUrl(page)
+      || getCanvasPreviewImageUrl(page, IMAGE_REVIEW_MAX_SIDE)
       || entry?.previewUrl
       || entry?.blankUrl
       || entry?.sourceUrl
@@ -4086,12 +4164,24 @@ function getReviewComparePaneImageUrl(mode) {
     )
   }
   if (mode === 'source') {
-    return entry?.sourceUrl || selectedEditPageThumbnailUrl.value || selectedEditPageMainImageUrl.value || ''
+    return (
+      getReviewPageImageUrl(page?.source_image_url || page?.image_url || page?.base_image_url || '', page?.stored_name)
+      || entry?.sourceUrl
+      || selectedEditPageMainImageUrl.value
+      || selectedEditPageThumbnailUrl.value
+      || ''
+    )
   }
   if (mode === 'blank') {
-    return entry?.blankUrl || selectedEditPageMainImageUrl.value || entry?.sourceUrl || ''
+    return (
+      getReviewPageImageUrl(page?.base_image_url || page?.source_image_url || page?.image_url || '', page?.stored_name)
+      || entry?.blankUrl
+      || selectedEditPageMainImageUrl.value
+      || entry?.sourceUrl
+      || ''
+    )
   }
-  return v2EditorPaneImageUrl.value
+  return getReviewPageImageUrl(page?.base_image_url || page?.source_image_url || page?.image_url || '', page?.stored_name) || v2EditorPaneImageUrl.value
 }
 
 function getReviewComparePaneLabel(mode) {
@@ -7489,7 +7579,7 @@ function startTranslation(action = 'translate') {
         markPageImageUpdated(payload.stored_name)
       }
       const nextImageUrl = getVersionedPageImageUrl(payload.image_url, payload.stored_name)
-      preloadImageUrl(nextImageUrl)
+      preloadImageUrl(getReviewPageImageUrl(nextImageUrl, payload.stored_name))
       translatedImages.value = upsertTranslatedImage(
         translatedImages.value,
         payload,
@@ -8415,7 +8505,7 @@ watch(
                           class="style-box-source-crop"
                         >
                           <img
-                            :src="toApiUrl(selectedEditPage.source_image_url || selectedEditPage.image_url)"
+                            :src="getReviewPageImageUrl(selectedEditPage.source_image_url || selectedEditPage.image_url, selectedEditPage.stored_name)"
                             :style="getSourceCropImageStyle(region, selectedEditPage)"
                             alt=""
                           />

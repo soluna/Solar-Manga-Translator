@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import importlib
 import json
 import shutil
@@ -43,6 +44,9 @@ class TranslatorEngine:
     REVIEW_MODES = ("classic", "canvas_beta")
     DEFAULT_REVIEW_MODE = "classic"
     PAGE_DOCUMENT_VERSION = 1
+    IMAGE_PREVIEW_MIN_SIDE = 96
+    IMAGE_PREVIEW_MAX_SIDE = 4096
+    IMAGE_PREVIEW_FORMATS = (".webp", ".jpg", ".png")
     DOUBAO_CURATED_MODELS = {
         "doubao-seed-translation-250915",
         "doubao-seed-2-0-pro-260215",
@@ -1776,6 +1780,129 @@ class TranslatorEngine:
             return self.get_page_translated_image_path(project_id, session, page_id)
         return self.get_page_source_image_path(project_id, session, page_id)
 
+    def get_page_image_response_path(
+        self,
+        image_path: Path,
+        project_id: str,
+        page_id: str,
+        image_kind: str,
+        max_side: int | None = None,
+    ) -> Path:
+        normalized_max_side = self._normalize_image_preview_max_side(max_side)
+        if normalized_max_side is None:
+            return image_path
+        return self._get_resized_image_path(image_path, project_id, page_id, image_kind, normalized_max_side)
+
+    def _normalize_image_preview_max_side(self, max_side: int | None) -> int | None:
+        if max_side is None:
+            return None
+        try:
+            parsed_max_side = int(max_side)
+        except (TypeError, ValueError):
+            return None
+        if parsed_max_side <= 0:
+            return None
+        return max(self.IMAGE_PREVIEW_MIN_SIDE, min(self.IMAGE_PREVIEW_MAX_SIDE, parsed_max_side))
+
+    def _get_resized_image_path(
+        self,
+        source_path: Path,
+        project_id: str,
+        page_id: str,
+        image_kind: str,
+        max_side: int,
+    ) -> Path:
+        source_path = Path(source_path)
+        source_stat = source_path.stat()
+
+        from PIL import Image, ImageOps
+
+        with Image.open(source_path) as source_image:
+            source_image.load()
+            normalized_image = ImageOps.exif_transpose(source_image)
+            source_width, source_height = normalized_image.size
+            source_long_side = max(source_width, source_height)
+            if source_long_side <= max_side:
+                return source_path
+
+            scale = max_side / source_long_side
+            target_size = (
+                max(1, round(source_width * scale)),
+                max(1, round(source_height * scale)),
+            )
+            has_alpha = (
+                normalized_image.mode in {"RGBA", "LA"}
+                or (normalized_image.mode == "P" and "transparency" in normalized_image.info)
+            )
+            resampling_namespace = getattr(Image, "Resampling", Image)
+            resampling_filter = getattr(resampling_namespace, "LANCZOS", getattr(Image, "LANCZOS", 1))
+            resized_image = normalized_image.resize(target_size, resampling_filter)
+
+        preview_dir = self._image_preview_cache_dir(project_id, page_id)
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        safe_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(image_kind or "image")).strip("-") or "image"
+        source_identity = "|".join([
+            str(source_path.resolve()),
+            str(source_stat.st_size),
+            str(source_stat.st_mtime_ns),
+            str(source_stat.st_ctime_ns),
+            str(source_width),
+            str(source_height),
+            str(max_side),
+        ])
+        fingerprint = hashlib.sha1(source_identity.encode("utf-8")).hexdigest()[:16]
+        output_base = preview_dir / f"{safe_kind}-{max_side}-{fingerprint}"
+
+        for extension in self.IMAGE_PREVIEW_FORMATS:
+            candidate_path = output_base.with_suffix(extension)
+            if candidate_path.exists():
+                return candidate_path
+
+        for stale_path in preview_dir.glob(f"{safe_kind}-{max_side}-*"):
+            with contextlib.suppress(OSError):
+                stale_path.unlink()
+
+        return self._save_image_preview_atomic(resized_image, output_base, has_alpha)
+
+    def _image_preview_cache_dir(self, project_id: str, page_id: str) -> Path:
+        project_key = hashlib.sha1(str(project_id or "").encode("utf-8")).hexdigest()[:12]
+        page_key = hashlib.sha1(str(page_id or "").encode("utf-8")).hexdigest()[:12]
+        return self.temp_dir / "image_previews" / project_key / page_key
+
+    def _save_image_preview_atomic(self, image: Any, output_base: Path, has_alpha: bool) -> Path:
+        candidates: list[tuple[str, str, dict[str, Any], str]] = [
+            ("WEBP", ".webp", {"quality": 88, "method": 4}, "RGBA" if has_alpha else "RGB"),
+        ]
+        if has_alpha:
+            candidates.append(("PNG", ".png", {"optimize": True}, "RGBA"))
+        else:
+            candidates.append(("JPEG", ".jpg", {"quality": 90, "subsampling": 0, "optimize": True}, "RGB"))
+            candidates.append(("PNG", ".png", {"optimize": True}, "RGB"))
+
+        last_error: Exception | None = None
+        for image_format, extension, save_kwargs, target_mode in candidates:
+            output_path = output_base.with_suffix(extension)
+            fd, temp_name = tempfile.mkstemp(
+                dir=str(output_path.parent),
+                suffix=extension,
+            )
+            os.close(fd)
+            temp_path = Path(temp_name)
+            try:
+                image.convert(target_mode).save(temp_path, format=image_format, **save_kwargs)
+                self._replace_file_with_retry(temp_path, output_path)
+                return output_path
+            except Exception as exc:
+                last_error = exc
+            finally:
+                if temp_path.exists():
+                    with contextlib.suppress(OSError):
+                        temp_path.unlink()
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("无法生成图片预览缓存。")
+
     def _normalize_page_document_image_urls(
         self,
         project_id: str,
@@ -2841,7 +2968,7 @@ class TranslatorEngine:
                     "event": "progress",
                     "current": index,
                     "total": total,
-                    "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "image_url": f"/api/pages/{session_id}/{stored_name}/translated-image",
                     "stored_name": stored_name,
                     "name": image["name"],
                 }
@@ -3014,7 +3141,7 @@ class TranslatorEngine:
                     "event": "progress",
                     "current": index,
                     "total": total,
-                    "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "image_url": f"/api/pages/{session_id}/{image['stored_name']}/translated-image",
                     "stored_name": image["stored_name"],
                     "name": image["name"],
                 }
@@ -3230,7 +3357,7 @@ class TranslatorEngine:
                     "event": "progress",
                     "current": len(reported),
                     "total": total,
-                    "image_url": f"/output/{session_id}/translated/{output_path.name}",
+                    "image_url": f"/api/pages/{session_id}/{source_meta['stored_name']}/translated-image",
                     "stored_name": source_meta["stored_name"],
                     "name": source_meta["name"],
                 }

@@ -31,6 +31,7 @@ from runtime_paths import AppPaths, resolve_app_paths
 from .image_cleanup import (
     ADVANCED_IMAGE_ERASE_PROMPT,
     DEFAULT_IMAGE_CLEANUP_PROMPT,
+    SEEDREAM_IMAGE_API_URL,
     create_image_cleanup_client,
 )
 
@@ -42,6 +43,10 @@ class TranslatorEngine:
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
     ADVANCED_ERASE_MAX_CHANGED_RATIO = 0.42
+    ADVANCED_ERASE_DEFAULT_PROVIDER = "volcengine-ark"
+    ADVANCED_ERASE_DEFAULT_MODEL = "doubao-seedream-5-0-lite-260128"
+    ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
+    ADVANCED_ERASE_MAX_TIMEOUT_SECONDS = 300
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
@@ -528,7 +533,7 @@ class TranslatorEngine:
         selected_translator = str(sanitized.get("selected_translator") or "").strip()
         if selected_translator:
             sanitized["translator"] = selected_translator
-        for secret_key in ("api_key", "image_cleanup_api_key"):
+        for secret_key in ("api_key", "image_cleanup_api_key", "advanced_erase_api_key"):
             if secret_key in sanitized:
                 sanitized[secret_key] = ""
         return sanitized
@@ -1032,10 +1037,14 @@ class TranslatorEngine:
             }
 
         config = self.capture_page_command_config(session, raw_config)
-        if config.get("image_cleanup_mode") != "seedream-image":
-            raise ValueError("高级擦除第一版需要在“图像处理”里选择 Seedream Image。")
-        if not str(config.get("image_cleanup_api_key") or "").strip():
-            raise ValueError("缺少 Seedream / Ark API Key，请先在图像处理配置里填写。")
+        if config.get("advanced_erase_provider") != self.ADVANCED_ERASE_DEFAULT_PROVIDER:
+            raise ValueError("高级擦除第一版仅支持火山引擎 Ark / Seedream。")
+        if not str(config.get("advanced_erase_api_key") or "").strip():
+            raise ValueError("缺少高级擦除 API Key，请先在高级擦除 API 配置里填写。")
+        if not str(config.get("advanced_erase_model") or "").strip():
+            raise ValueError("缺少高级擦除模型名称。")
+        if not str(config.get("advanced_erase_base_url") or "").strip():
+            raise ValueError("缺少高级擦除接口地址。")
 
         source_path = self.get_page_source_image_path(project_id, session, page_id)
         page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
@@ -1050,17 +1059,20 @@ class TranslatorEngine:
 
         client = create_image_cleanup_client(
             mode="seedream-image",
-            api_key=config["image_cleanup_api_key"],
-            model=config["image_cleanup_model"],
+            api_key=config["advanced_erase_api_key"],
+            model=config["advanced_erase_model"],
+            api_url=config["advanced_erase_base_url"],
+            timeout_seconds=config["advanced_erase_timeout_seconds"],
         )
         print(
             "[DEBUG] Advanced erase request "
-            f"file={source_path.name} model={config['image_cleanup_model']} "
+            f"file={source_path.name} provider={config['advanced_erase_provider']} "
+            f"model={config['advanced_erase_model']} "
             f"size={source_rgb.shape[1]}x{source_rgb.shape[0]}"
         )
         edited_rgb = await asyncio.wait_for(
             client.remove_text(source_rgb, None, ADVANCED_IMAGE_ERASE_PROMPT),
-            timeout=self.IMAGE_CLEANUP_TIMEOUT_SECONDS,
+            timeout=int(config["advanced_erase_timeout_seconds"]) + 10,
         )
         composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(source_rgb, edited_rgb)
 
@@ -1076,7 +1088,9 @@ class TranslatorEngine:
             "attempt_id": attempt_id,
             "created_at": self._now_iso(),
             "page_id": page_id,
-            "model": config["image_cleanup_model"],
+            "provider": config["advanced_erase_provider"],
+            "api_url": config["advanced_erase_base_url"],
+            "model": config["advanced_erase_model"],
             "changed_ratio": changed_ratio,
             "traditional_backup": str(backup_path),
         })
@@ -1090,7 +1104,8 @@ class TranslatorEngine:
                 "mode": "advanced",
                 "updated_at": self._now_iso(),
                 "attempt_id": attempt_id,
-                "model": config["image_cleanup_model"],
+                "provider": config["advanced_erase_provider"],
+                "model": config["advanced_erase_model"],
                 "changed_ratio": changed_ratio,
             },
         )
@@ -4429,6 +4444,19 @@ class TranslatorEngine:
             raw_config.get("image_cleanup_model"),
         )
         image_cleanup_api_key = str(raw_config.get("image_cleanup_api_key", "")).strip()
+        advanced_erase_provider = self._normalize_advanced_erase_provider(
+            raw_config.get("advanced_erase_provider")
+        )
+        advanced_erase_base_url = self._normalize_advanced_erase_base_url(
+            raw_config.get("advanced_erase_base_url")
+        )
+        advanced_erase_model = self._normalize_advanced_erase_model(
+            raw_config.get("advanced_erase_model")
+        )
+        advanced_erase_api_key = str(raw_config.get("advanced_erase_api_key", "")).strip()
+        advanced_erase_timeout_seconds = self._normalize_advanced_erase_timeout_seconds(
+            raw_config.get("advanced_erase_timeout_seconds")
+        )
         mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
         rerender_output_format = self._normalize_rerender_output_format(raw_config.get("rerender_output_format"))
@@ -4481,6 +4509,11 @@ class TranslatorEngine:
             "image_cleanup_mode": image_cleanup_mode,
             "image_cleanup_model": image_cleanup_model,
             "image_cleanup_api_key": image_cleanup_api_key,
+            "advanced_erase_provider": advanced_erase_provider,
+            "advanced_erase_base_url": advanced_erase_base_url,
+            "advanced_erase_model": advanced_erase_model,
+            "advanced_erase_api_key": advanced_erase_api_key,
+            "advanced_erase_timeout_seconds": advanced_erase_timeout_seconds,
         }
 
     def _normalize_advanced_text_repair(self, raw_value: Any) -> str:
@@ -4488,6 +4521,30 @@ class TranslatorEngine:
         if value not in {"auto", "off", "force"}:
             return "auto"
         return value
+
+    def _normalize_advanced_erase_provider(self, raw_value: Any) -> str:
+        value = str(raw_value or self.ADVANCED_ERASE_DEFAULT_PROVIDER).strip().lower()
+        if value not in {self.ADVANCED_ERASE_DEFAULT_PROVIDER}:
+            return self.ADVANCED_ERASE_DEFAULT_PROVIDER
+        return value
+
+    def _normalize_advanced_erase_base_url(self, raw_value: Any) -> str:
+        value = str(raw_value or SEEDREAM_IMAGE_API_URL).strip()
+        return value or SEEDREAM_IMAGE_API_URL
+
+    def _normalize_advanced_erase_model(self, raw_value: Any) -> str:
+        value = str(raw_value or self.ADVANCED_ERASE_DEFAULT_MODEL).strip()
+        return value or self.ADVANCED_ERASE_DEFAULT_MODEL
+
+    def _normalize_advanced_erase_timeout_seconds(self, raw_value: Any) -> int:
+        try:
+            value = int(round(float(raw_value)))
+        except (TypeError, ValueError):
+            value = self.IMAGE_CLEANUP_TIMEOUT_SECONDS
+        return max(
+            self.ADVANCED_ERASE_MIN_TIMEOUT_SECONDS,
+            min(self.ADVANCED_ERASE_MAX_TIMEOUT_SECONDS, value),
+        )
 
     def _normalize_translator_model(
         self,

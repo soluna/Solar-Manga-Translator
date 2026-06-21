@@ -1114,6 +1114,30 @@ print(json.dumps({
             self.assertIsNotNone(backup_bgr)
             self.assertEqual(int(backup_bgr[0, 0, 0]), 240)
 
+    def test_advanced_erase_config_is_independent_from_image_cleanup_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            config = engine.normalize_user_config({
+                "image_cleanup_mode": "off",
+                "image_cleanup_api_key": "old-cleanup-key",
+                "advanced_erase_provider": "volcengine-ark",
+                "advanced_erase_base_url": "https://ark.example.com/api/v3",
+                "advanced_erase_model": "custom-seedream-model",
+                "advanced_erase_api_key": "advanced-key",
+                "advanced_erase_timeout_seconds": 12,
+            })
+            sanitized = engine._sanitize_config_for_storage(config)
+
+            self.assertEqual(config["image_cleanup_mode"], "off")
+            self.assertEqual(config["advanced_erase_provider"], "volcengine-ark")
+            self.assertEqual(config["advanced_erase_base_url"], "https://ark.example.com/api/v3")
+            self.assertEqual(config["advanced_erase_model"], "custom-seedream-model")
+            self.assertEqual(config["advanced_erase_api_key"], "advanced-key")
+            self.assertEqual(config["advanced_erase_timeout_seconds"], 30)
+            self.assertEqual(sanitized["advanced_erase_api_key"], "")
+            self.assertEqual(sanitized["image_cleanup_api_key"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

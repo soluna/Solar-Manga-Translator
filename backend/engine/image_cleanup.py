@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 
+SEEDREAM_IMAGE_API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 DEFAULT_IMAGE_CLEANUP_PROMPT = "去除覆盖在图片上的文字"
 ADVANCED_IMAGE_ERASE_PROMPT = """
 You are editing a manga/comic page.
@@ -101,13 +102,21 @@ class GeminiImageCleanupClient:
 
 
 class SeedreamImageCleanupClient:
-    API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+    API_URL = SEEDREAM_IMAGE_API_URL
     MIN_PIXELS = 2560 * 1440
     MAX_PIXELS = int(3072 * 3072 * 1.1025)
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        api_url: str | None = None,
+        timeout_seconds: int = 120,
+    ):
         self.api_key = api_key
         self.model = model
+        self.api_url = self._normalize_api_url(api_url)
+        self.timeout_seconds = max(30, min(300, int(timeout_seconds or 120)))
 
     async def remove_text(
         self,
@@ -133,7 +142,7 @@ class SeedreamImageCleanupClient:
             "watermark": False,
         }
         request = urllib_request.Request(
-            self.API_URL,
+            self.api_url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -144,7 +153,7 @@ class SeedreamImageCleanupClient:
         )
 
         try:
-            with urllib_request.urlopen(request, timeout=120) as response:
+            with urllib_request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw_body = response.read().decode("utf-8")
         except urllib_error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
@@ -217,11 +226,30 @@ class SeedreamImageCleanupClient:
             _, encoded = url.split(",", 1)
             return self._decode_base64_image(encoded)
 
-        with urllib_request.urlopen(url, timeout=120) as response:
+        with urllib_request.urlopen(url, timeout=self.timeout_seconds) as response:
             return np.array(Image.open(BytesIO(response.read())).convert("RGB"))
 
+    def _normalize_api_url(self, raw_url: str | None) -> str:
+        normalized = str(raw_url or self.API_URL).strip().rstrip("/")
+        if not normalized:
+            return self.API_URL
+        if normalized.endswith("/images/generations"):
+            return normalized
+        return f"{normalized}/images/generations"
 
-def create_image_cleanup_client(mode: str, api_key: str, model: str):
+
+def create_image_cleanup_client(
+    mode: str,
+    api_key: str,
+    model: str,
+    api_url: str | None = None,
+    timeout_seconds: int = 120,
+):
     if mode == "seedream-image":
-        return SeedreamImageCleanupClient(api_key=api_key, model=model)
+        return SeedreamImageCleanupClient(
+            api_key=api_key,
+            model=model,
+            api_url=api_url,
+            timeout_seconds=timeout_seconds,
+        )
     return GeminiImageCleanupClient(api_key=api_key, model=model)

@@ -39,7 +39,11 @@ const browserConfigKeys = [
   'export_mask_debug',
   'advanced_text_repair',
   'image_cleanup_mode',
-  'image_cleanup_model'
+  'image_cleanup_model',
+  'advanced_erase_provider',
+  'advanced_erase_base_url',
+  'advanced_erase_model',
+  'advanced_erase_timeout_seconds'
 ]
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
@@ -67,6 +71,15 @@ const imageCleanupAllowedModels = {
     'doubao-seedream-5-0-lite-260128'
   ])
 }
+const advancedEraseDefaultConfig = {
+  provider: 'volcengine-ark',
+  baseUrl: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+  model: 'doubao-seedream-5-0-lite-260128',
+  timeoutSeconds: 120
+}
+const advancedEraseProviderOptions = [
+  { value: 'volcengine-ark', label: '火山引擎 Ark / Seedream' }
+]
 const styleBucketOptions = [
   { value: 'gothic', label: '黑体' },
   { value: 'mincho', label: '宋体 / 明体' },
@@ -187,6 +200,21 @@ function isValidImageCleanupModel(mode, model) {
   return Boolean(imageCleanupAllowedModels[mode]?.has(model))
 }
 
+function normalizeAdvancedEraseProvider(value) {
+  const normalized = String(value || advancedEraseDefaultConfig.provider).trim().toLowerCase()
+  return advancedEraseProviderOptions.some((option) => option.value === normalized)
+    ? normalized
+    : advancedEraseDefaultConfig.provider
+}
+
+function normalizeAdvancedEraseTimeoutSeconds(value) {
+  const numericValue = Number(value)
+  const rounded = Number.isFinite(numericValue)
+    ? Math.round(numericValue)
+    : advancedEraseDefaultConfig.timeoutSeconds
+  return Math.min(300, Math.max(30, rounded))
+}
+
 function isValidMaskCleanupStrength(value) {
   return ['standard', 'clean', 'aggressive'].includes(value)
 }
@@ -288,7 +316,12 @@ function createDefaultConfig() {
     advanced_text_repair: 'auto',
     image_cleanup_mode: 'off',
     image_cleanup_model: 'gemini-2.5-flash-image',
-    image_cleanup_api_key: ''
+    image_cleanup_api_key: '',
+    advanced_erase_provider: advancedEraseDefaultConfig.provider,
+    advanced_erase_base_url: advancedEraseDefaultConfig.baseUrl,
+    advanced_erase_model: advancedEraseDefaultConfig.model,
+    advanced_erase_api_key: '',
+    advanced_erase_timeout_seconds: advancedEraseDefaultConfig.timeoutSeconds
   }
 }
 
@@ -328,6 +361,14 @@ function normalizeStoredConfig(rawValue) {
   const imageCleanupModel = isValidImageCleanupModel(imageCleanupMode, storedImageCleanupModel)
     ? storedImageCleanupModel
     : getDefaultImageCleanupModel(imageCleanupMode)
+  const advancedEraseProvider = normalizeAdvancedEraseProvider(rawValue.advanced_erase_provider)
+  const advancedEraseBaseUrl = typeof rawValue.advanced_erase_base_url === 'string' && rawValue.advanced_erase_base_url.trim()
+    ? rawValue.advanced_erase_base_url.trim()
+    : defaults.advanced_erase_base_url
+  const advancedEraseModel = typeof rawValue.advanced_erase_model === 'string' && rawValue.advanced_erase_model.trim()
+    ? rawValue.advanced_erase_model.trim()
+    : defaults.advanced_erase_model
+  const advancedEraseTimeoutSeconds = normalizeAdvancedEraseTimeoutSeconds(rawValue.advanced_erase_timeout_seconds)
   const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
     ? rawValue.mask_cleanup_strength
     : defaults.mask_cleanup_strength
@@ -394,7 +435,14 @@ function normalizeStoredConfig(rawValue) {
     image_cleanup_model: imageCleanupModel,
     image_cleanup_api_key: typeof rawValue.image_cleanup_api_key === 'string'
       ? rawValue.image_cleanup_api_key
-      : defaults.image_cleanup_api_key
+      : defaults.image_cleanup_api_key,
+    advanced_erase_provider: advancedEraseProvider,
+    advanced_erase_base_url: advancedEraseBaseUrl,
+    advanced_erase_model: advancedEraseModel,
+    advanced_erase_api_key: typeof rawValue.advanced_erase_api_key === 'string'
+      ? rawValue.advanced_erase_api_key
+      : defaults.advanced_erase_api_key,
+    advanced_erase_timeout_seconds: advancedEraseTimeoutSeconds
   }
 }
 
@@ -1247,6 +1295,10 @@ const imageCleanupApiKeyPlaceholder = computed(() => (
   config.value.image_cleanup_mode === 'seedream-image'
     ? '输入火山方舟 Ark API Key'
     : '输入 Gemini Image API Key'
+))
+const advancedEraseProviderLabel = computed(() => (
+  advancedEraseProviderOptions.find((option) => option.value === config.value.advanced_erase_provider)?.label
+  || advancedEraseProviderOptions[0].label
 ))
 const v2HasProject = computed(() => Boolean(sessionId.value || currentProject.value))
 const isDesktopRuntime = computed(() => Boolean(appRuntime.value?.desktop_mode))
@@ -7420,6 +7472,12 @@ function clearStoredImageApiKey() {
   status.value = '已清除本机浏览器里保存的图像去字 API Key。'
 }
 
+function clearStoredAdvancedEraseApiKey() {
+  config.value.advanced_erase_api_key = ''
+  saveStoredConfig(config.value)
+  status.value = '已清除本机浏览器里保存的高级擦除 API Key。'
+}
+
 function clearTranslatorApiKey() {
   clearStoredApiKey()
   appSettingsValidation.value = { ok: null, message: '', preview: '' }
@@ -7427,6 +7485,11 @@ function clearTranslatorApiKey() {
 
 function clearImageCleanupApiKey() {
   clearStoredImageApiKey()
+  appSettingsValidation.value = { ok: null, message: '', preview: '' }
+}
+
+function clearAdvancedEraseApiKey() {
+  clearStoredAdvancedEraseApiKey()
   appSettingsValidation.value = { ok: null, message: '', preview: '' }
 }
 
@@ -7957,11 +8020,17 @@ function runV2RetranslateAction() {
 }
 
 function getAdvancedEraseConfigError() {
-  if (config.value.image_cleanup_mode !== 'seedream-image') {
-    return '高级擦除第一版需要在“图像处理”里选择 Seedream Image。'
+  if (config.value.advanced_erase_provider !== 'volcengine-ark') {
+    return '高级擦除第一版仅支持火山引擎 Ark / Seedream。'
   }
-  if (!String(config.value.image_cleanup_api_key || '').trim()) {
-    return '请先在“图像处理”里填写 Seedream / Ark API Key。'
+  if (!String(config.value.advanced_erase_api_key || '').trim()) {
+    return '请先在“高级擦除 API”里填写火山引擎 Ark API Key。'
+  }
+  if (!String(config.value.advanced_erase_base_url || '').trim()) {
+    return '请先填写高级擦除接口地址。'
+  }
+  if (!String(config.value.advanced_erase_model || '').trim()) {
+    return '请先填写高级擦除模型名称。'
   }
   return ''
 }
@@ -10411,7 +10480,7 @@ watch(
           <section class="v2-settings-group">
             <header>
               <strong>图像处理</strong>
-              <span>高级擦除与底图生成相关能力</span>
+              <span>擦字与底图生成相关能力</span>
             </header>
 
             <label class="v2-field">
@@ -10419,7 +10488,7 @@ watch(
               <select v-model="config.image_cleanup_mode">
                 <option value="off">稳定流程</option>
                 <option value="gemini-image">Gemini Image</option>
-                <option value="seedream-image">Seedream Image（高级擦除）</option>
+                <option value="seedream-image">Seedream Image</option>
               </select>
             </label>
 
@@ -10456,6 +10525,82 @@ watch(
               <input v-model="config.export_mask_debug" type="checkbox" />
               <span>输出擦字调试目录</span>
             </label>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>高级擦除 API</strong>
+              <span>单页高级擦除专用配置</span>
+            </header>
+
+            <label class="v2-field">
+              <span>Provider</span>
+              <select v-model="config.advanced_erase_provider">
+                <option
+                  v-for="provider in advancedEraseProviderOptions"
+                  :key="provider.value"
+                  :value="provider.value"
+                >
+                  {{ provider.label }}
+                </option>
+              </select>
+            </label>
+
+            <label class="v2-field">
+              <span>API Endpoint</span>
+              <input
+                v-model="config.advanced_erase_base_url"
+                placeholder="https://ark.cn-beijing.volces.com/api/v3/images/generations"
+                type="text"
+                autocomplete="off"
+              />
+            </label>
+
+            <label class="v2-field">
+              <span>模型名称</span>
+              <input
+                v-model="config.advanced_erase_model"
+                placeholder="doubao-seedream-5-0-lite-260128"
+                type="text"
+                autocomplete="off"
+              />
+            </label>
+
+            <label class="v2-field">
+              <span>{{ advancedEraseProviderLabel }} API Key</span>
+              <input
+                v-model="config.advanced_erase_api_key"
+                placeholder="输入火山引擎 Ark API Key"
+                type="password"
+                autocomplete="off"
+              />
+            </label>
+
+            <label class="v2-field">
+              <span>请求超时（秒）</span>
+              <input
+                v-model.number="config.advanced_erase_timeout_seconds"
+                type="number"
+                min="30"
+                max="300"
+                step="10"
+                autocomplete="off"
+              />
+            </label>
+
+            <div class="v2-inline-actions">
+              <button
+                type="button"
+                class="v2-ghost-button"
+                @click="clearAdvancedEraseApiKey"
+              >
+                清除高级擦除密钥
+              </button>
+            </div>
+
+            <p class="v2-settings-inline-note">
+              固定参数：size 自动计算，response_format=b64_json，output_format=png，watermark=false。
+            </p>
           </section>
         </div>
       </section>

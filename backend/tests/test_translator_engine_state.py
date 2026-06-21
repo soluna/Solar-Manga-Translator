@@ -1072,6 +1072,48 @@ print(json.dumps({
             self.assertEqual(events[-1]["current"], 1)
             self.assertEqual(events[-1]["total"], 1)
 
+    def test_advanced_erase_composite_preserves_pixels_outside_change_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((80, 80, 3), 255, dtype=np.uint8)
+            source[30:46, 20:62] = 0
+            edited = np.full((80, 80, 3), 255, dtype=np.uint8)
+
+            composite, mask, changed_ratio = engine._composite_advanced_erase_result(source, edited)
+
+            self.assertGreater(int(mask[38, 36]), 0)
+            self.assertGreater(changed_ratio, 0)
+            self.assertLess(changed_ratio, 0.2)
+            self.assertTrue(np.array_equal(composite[5, 5], source[5, 5]))
+            self.assertGreater(int(composite[38, 36, 0]), 200)
+
+    def test_advanced_erase_rejects_full_page_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((80, 80, 3), 255, dtype=np.uint8)
+            edited = np.full((80, 80, 3), 120, dtype=np.uint8)
+
+            with self.assertRaises(RuntimeError):
+                engine._composite_advanced_erase_result(source, edited)
+
+    def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            cache_dir = Path(tmp) / "cache" / "page-1"
+            cache_dir.mkdir(parents=True)
+            first_base = np.full((8, 8, 3), 240, dtype=np.uint8)
+            second_base = np.full((8, 8, 3), 32, dtype=np.uint8)
+            cv2.imwrite(str(cache_dir / "inpainted.png"), first_base)
+
+            backup_path = engine._ensure_advanced_erase_traditional_backup(cache_dir)
+            cv2.imwrite(str(cache_dir / "inpainted.png"), second_base)
+            same_backup_path = engine._ensure_advanced_erase_traditional_backup(cache_dir)
+
+            self.assertEqual(backup_path, same_backup_path)
+            backup_bgr = cv2.imread(str(backup_path), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(backup_bgr)
+            self.assertEqual(int(backup_bgr[0, 0, 0]), 240)
+
 
 if __name__ == "__main__":
     unittest.main()

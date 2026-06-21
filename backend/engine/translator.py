@@ -28,7 +28,11 @@ import numpy as np
 
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
-from .image_cleanup import DEFAULT_IMAGE_CLEANUP_PROMPT, create_image_cleanup_client
+from .image_cleanup import (
+    ADVANCED_IMAGE_ERASE_PROMPT,
+    DEFAULT_IMAGE_CLEANUP_PROMPT,
+    create_image_cleanup_client,
+)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -37,6 +41,7 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 class TranslatorEngine:
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
+    ADVANCED_ERASE_MAX_CHANGED_RATIO = 0.42
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
@@ -576,6 +581,7 @@ class TranslatorEngine:
             "translated_output_map": dict(session.get("translated_output_map") or {}),
             "rerender_generation": int(session.get("rerender_generation") or 0),
             "manual_regions": dict(session.get("manual_regions") or {}),
+            "advanced_erase_pages": dict(session.get("advanced_erase_pages") or {}),
             "project_glossary": self._normalize_project_glossary(session.get("project_glossary")),
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
             "mask_debug_dir": str(session.get("mask_debug_dir") or ""),
@@ -1006,6 +1012,186 @@ class TranslatorEngine:
             "invalid_files": invalid_files,
         }
 
+    async def advanced_erase_page(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        raw_config: dict[str, Any] | None,
+        action: str = "erase",
+    ) -> dict[str, Any]:
+        if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
+            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
+
+        normalized_action = str(action or "erase").strip().lower()
+        if normalized_action in {"restore", "traditional", "rollback"}:
+            result = self._restore_traditional_erase_page(project_id, session, page_id)
+            return {
+                **self.build_client_session_payload(project_id, session),
+                "advanced_erase": result,
+            }
+
+        config = self.capture_page_command_config(session, raw_config)
+        if config.get("image_cleanup_mode") != "seedream-image":
+            raise ValueError("高级擦除第一版需要在“图像处理”里选择 Seedream Image。")
+        if not str(config.get("image_cleanup_api_key") or "").strip():
+            raise ValueError("缺少 Seedream / Ark API Key，请先在图像处理配置里填写。")
+
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+        backup_path = self._ensure_advanced_erase_traditional_backup(page_cache_dir)
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图: {source_path}")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+
+        client = create_image_cleanup_client(
+            mode="seedream-image",
+            api_key=config["image_cleanup_api_key"],
+            model=config["image_cleanup_model"],
+        )
+        print(
+            "[DEBUG] Advanced erase request "
+            f"file={source_path.name} model={config['image_cleanup_model']} "
+            f"size={source_rgb.shape[1]}x{source_rgb.shape[0]}"
+        )
+        edited_rgb = await asyncio.wait_for(
+            client.remove_text(source_rgb, None, ADVANCED_IMAGE_ERASE_PROMPT),
+            timeout=self.IMAGE_CLEANUP_TIMEOUT_SECONDS,
+        )
+        composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(source_rgb, edited_rgb)
+
+        attempt_id = self._advanced_erase_attempt_id()
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        output_path = attempt_dir / f"{attempt_id}.png"
+        mask_path = attempt_dir / f"{attempt_id}.mask.png"
+        metadata_path = attempt_dir / f"{attempt_id}.json"
+        self._save_rgb_image_atomic(output_path, composite_rgb)
+        cv2.imwrite(str(mask_path), mask)
+        self._write_json_file(metadata_path, {
+            "attempt_id": attempt_id,
+            "created_at": self._now_iso(),
+            "page_id": page_id,
+            "model": config["image_cleanup_model"],
+            "changed_ratio": changed_ratio,
+            "traditional_backup": str(backup_path),
+        })
+
+        inpainted_path = page_cache_dir / "inpainted.png"
+        self._save_rgb_image_atomic(inpainted_path, composite_rgb)
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "advanced",
+                "updated_at": self._now_iso(),
+                "attempt_id": attempt_id,
+                "model": config["image_cleanup_model"],
+                "changed_ratio": changed_ratio,
+            },
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="advanced_erase",
+            snapshot_summary=f"高级擦除 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "advanced_erase": {
+                "action": "erase",
+                "page_id": page_id,
+                "attempt_id": attempt_id,
+                "changed_ratio": changed_ratio,
+            },
+        }
+
+    def _restore_traditional_erase_page(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+    ) -> dict[str, Any]:
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+
+        backup_path = self._advanced_erase_traditional_backup_path(page_cache_dir)
+        if not backup_path.exists():
+            raise FileNotFoundError("当前页没有可恢复的传统空页备份。请先重新识别，或重新上传无字图。")
+
+        inpainted_path = page_cache_dir / "inpainted.png"
+        shutil.copy2(backup_path, inpainted_path)
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "traditional",
+                "updated_at": self._now_iso(),
+            },
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="advanced_erase_restore",
+            snapshot_summary=f"恢复传统空页 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+        return {
+            "action": "restore",
+            "page_id": page_id,
+        }
+
+    def _ensure_advanced_erase_traditional_backup(self, page_cache_dir: Path) -> Path:
+        inpainted_path = page_cache_dir / "inpainted.png"
+        backup_path = self._advanced_erase_traditional_backup_path(page_cache_dir)
+        if not backup_path.exists():
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(inpainted_path, backup_path)
+        return backup_path
+
+    def _advanced_erase_traditional_backup_path(self, page_cache_dir: Path) -> Path:
+        return self._advanced_erase_attempt_dir(page_cache_dir) / "traditional_inpainted.png"
+
+    def _advanced_erase_attempt_dir(self, page_cache_dir: Path) -> Path:
+        return page_cache_dir / "advanced_erase"
+
+    def _advanced_erase_attempt_id(self) -> str:
+        timestamp = self._now_iso().replace(":", "").replace("-", "").replace("+", "z")
+        return f"{timestamp}_{uuid.uuid4().hex[:8]}"
+
+    def _record_advanced_erase_page_state(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        pages = dict(session.get("advanced_erase_pages") or {})
+        pages[page_id] = dict(payload)
+        session["advanced_erase_pages"] = pages
+
+    def _save_rgb_image_atomic(self, output_path: Path, image_rgb: np.ndarray) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=f"{output_path.stem}_", suffix=output_path.suffix, dir=str(output_path.parent))
+        os.close(fd)
+        try:
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            if not cv2.imwrite(temp_path, image_bgr):
+                raise RuntimeError(f"无法写入图片: {output_path}")
+            os.replace(temp_path, output_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(temp_path)
+
     def capture_session_config(self, session: dict[str, Any], raw_config: dict[str, Any] | None) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
         session["last_config"] = config
@@ -1192,6 +1378,7 @@ class TranslatorEngine:
             "translated_output_map": dict(state.get("translated_output_map") or {}),
             "rerender_generation": int(state.get("rerender_generation") or 0),
             "manual_regions": dict(state.get("manual_regions") or {}),
+            "advanced_erase_pages": dict(state.get("advanced_erase_pages") or {}),
             "project_glossary": self._normalize_project_glossary(state.get("project_glossary")),
             "workflow_stage": str(state.get("workflow_stage") or "idle"),
             "mask_debug_dir": str(state.get("mask_debug_dir") or ""),
@@ -1387,6 +1574,7 @@ class TranslatorEngine:
             "download_path": "",
             "translated_output_map": copied_output_map,
             "manual_regions": dict(snapshot.get("manual_regions") or source_session.get("manual_regions") or {}),
+            "advanced_erase_pages": dict(snapshot.get("advanced_erase_pages") or source_session.get("advanced_erase_pages") or {}),
             "project_glossary": self._normalize_project_glossary(snapshot.get("project_glossary") or source_session.get("project_glossary")),
             "workflow_stage": str(snapshot.get("workflow_stage") or source_session.get("workflow_stage") or "idle"),
             "mask_debug_dir": "",
@@ -5369,6 +5557,103 @@ class TranslatorEngine:
                 interpolation=cv2.INTER_LINEAR,
             )
         return edited_rgb
+
+    def _composite_advanced_erase_result(
+        self,
+        source_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        if edited_rgb.shape[:2] != source_rgb.shape[:2]:
+            edited_rgb = cv2.resize(
+                edited_rgb,
+                (source_rgb.shape[1], source_rgb.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        if edited_rgb.ndim == 2:
+            edited_rgb = cv2.cvtColor(edited_rgb, cv2.COLOR_GRAY2RGB)
+        if edited_rgb.shape[2] > 3:
+            edited_rgb = edited_rgb[:, :, :3]
+
+        mask = self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
+        changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
+        if changed_ratio <= 0:
+            raise RuntimeError("高级擦除没有检测到可替换的文字区域。")
+        if changed_ratio > self.ADVANCED_ERASE_MAX_CHANGED_RATIO:
+            raise RuntimeError(
+                "高级擦除返回图与原图差异过大，已拒绝覆盖空页。"
+                "请重试，或换一张图/更保守的提示后再试。"
+            )
+
+        alpha = self._advanced_erase_alpha_from_mask(mask)
+        alpha_f = alpha[:, :, None].astype(np.float32) / 255.0
+        composite = (
+            source_rgb.astype(np.float32) * (1.0 - alpha_f)
+            + edited_rgb.astype(np.float32) * alpha_f
+        )
+        return np.clip(composite, 0, 255).astype(np.uint8), mask, changed_ratio
+
+    def _build_advanced_erase_change_mask(self, source_rgb: np.ndarray, edited_rgb: np.ndarray) -> np.ndarray:
+        source_rgb = np.asarray(source_rgb)
+        edited_rgb = np.asarray(edited_rgb)
+        if source_rgb.shape[:2] != edited_rgb.shape[:2]:
+            edited_rgb = cv2.resize(
+                edited_rgb,
+                (source_rgb.shape[1], source_rgb.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        if source_rgb.ndim != 3 or edited_rgb.ndim != 3:
+            raise RuntimeError("高级擦除输入图片格式异常。")
+
+        diff_rgb = cv2.absdiff(source_rgb[:, :, :3], edited_rgb[:, :, :3])
+        gray_diff = cv2.cvtColor(diff_rgb, cv2.COLOR_RGB2GRAY)
+        max_diff = np.max(diff_rgb, axis=2).astype(np.uint8)
+        diff = np.maximum(gray_diff, max_diff)
+        diff = cv2.GaussianBlur(diff, (5, 5), 0)
+
+        mask = self._threshold_advanced_erase_diff(diff, 12)
+        changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
+        if changed_ratio > self.ADVANCED_ERASE_MAX_CHANGED_RATIO:
+            for threshold in (20, 28, 36, 48):
+                stricter_mask = self._threshold_advanced_erase_diff(diff, threshold)
+                stricter_ratio = float(cv2.countNonZero(stricter_mask)) / float(stricter_mask.size or 1)
+                mask = stricter_mask
+                changed_ratio = stricter_ratio
+                if changed_ratio <= self.ADVANCED_ERASE_MAX_CHANGED_RATIO:
+                    break
+
+        return mask
+
+    def _threshold_advanced_erase_diff(self, diff: np.ndarray, threshold: int) -> np.ndarray:
+        _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+        mask = mask.astype(np.uint8)
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        mask = self._filter_advanced_erase_mask_components(mask)
+
+        min_side = max(1, min(mask.shape[:2]))
+        dilate_size = max(3, min(21, int(round(min_side * 0.008)) | 1))
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
+        return cv2.dilate(mask, dilate_kernel, iterations=1)
+
+    def _filter_advanced_erase_mask_components(self, mask: np.ndarray) -> np.ndarray:
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if component_count <= 1:
+            return mask
+        min_area = max(8, int(mask.size * 0.000004))
+        filtered = np.zeros(mask.shape, dtype=np.uint8)
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area >= min_area:
+                filtered[labels == label] = 255
+        return filtered
+
+    def _advanced_erase_alpha_from_mask(self, mask: np.ndarray) -> np.ndarray:
+        min_side = max(1, min(mask.shape[:2]))
+        blur_size = max(3, min(17, int(round(min_side * 0.006)) | 1))
+        alpha = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+        alpha[mask == 0] = 0
+        alpha[mask > 0] = np.maximum(alpha[mask > 0], 224)
+        return alpha.astype(np.uint8)
 
     def _prepare_ai_cleanup_inputs(
         self,

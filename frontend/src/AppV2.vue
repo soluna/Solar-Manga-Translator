@@ -580,6 +580,7 @@ const status = ref('正在检查后端状态...')
 const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
+const advancedEraseBusy = ref(false)
 const historyLoading = ref(false)
 const deletingProjectId = ref('')
 const restoringProjectId = ref('')
@@ -768,6 +769,9 @@ const canRerender = computed(
 )
 const canRetranslate = computed(
   () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
+)
+const canRunAdvancedErase = computed(
+  () => Boolean(sessionId.value && selectedEditPage.value && !translating.value && !advancedEraseBusy.value)
 )
 const canUseProjectGlossary = computed(() => Boolean(sessionId.value) && !translating.value)
 const projectGlossaryEntryCount = computed(() => glossaryDraftEntries.value.length)
@@ -7952,6 +7956,75 @@ function runV2RetranslateAction() {
   startTranslation('translate')
 }
 
+function getAdvancedEraseConfigError() {
+  if (config.value.image_cleanup_mode !== 'seedream-image') {
+    return '高级擦除第一版需要在“图像处理”里选择 Seedream Image。'
+  }
+  if (!String(config.value.image_cleanup_api_key || '').trim()) {
+    return '请先在“图像处理”里填写 Seedream / Ark API Key。'
+  }
+  return ''
+}
+
+async function runV2AdvancedEraseAction(action = 'erase') {
+  const page = selectedEditPage.value
+  if (!sessionId.value || !page || translating.value || advancedEraseBusy.value) {
+    return
+  }
+
+  const normalizedAction = String(action || 'erase').trim().toLowerCase()
+  if (normalizedAction !== 'restore') {
+    const configError = getAdvancedEraseConfigError()
+    if (configError) {
+      errorMessage.value = configError
+      status.value = '高级擦除未启动。'
+      return
+    }
+  }
+
+  advancedEraseBusy.value = true
+  activeAction.value = 'advanced-erase'
+  errorMessage.value = ''
+  const pageId = page.stored_name
+  status.value = normalizedAction === 'restore'
+    ? '正在恢复传统空页…'
+    : '正在进行高级擦除，等待 Seedream 返回图片…'
+
+  try {
+    const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: normalizedAction,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '高级擦除失败')
+    }
+
+    markPageImageUpdated(pageId)
+    applySessionPayload(payload, { refreshTranslatedPageId: pageId })
+    await loadEditInspection({ silent: true })
+    preloadReviewImagesAroundPage(pageId)
+    scheduleCanvasLayoutRefresh()
+    void loadProjectHistory({ silent: true })
+    status.value = normalizedAction === 'restore'
+      ? '已恢复传统空页。'
+      : '高级擦除完成，空页与框页已刷新。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '高级擦除失败'
+    status.value = normalizedAction === 'restore'
+      ? '恢复传统空页失败。'
+      : '高级擦除失败。'
+  } finally {
+    advancedEraseBusy.value = false
+  }
+}
+
 function toggleRegionEnabledV2(region) {
   updateRegionDisabledOverride(region, !isRegionDisabled(region))
 }
@@ -9036,6 +9109,24 @@ watch(
               @click="runV2RerenderAction"
             >
               重新嵌字
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canRunAdvancedErase"
+              title="用 Seedream 对当前页做高级擦除，生成新的空页"
+              @click="runV2AdvancedEraseAction('erase')"
+            >
+              {{ advancedEraseBusy ? '擦除中…' : '高级擦除' }}
+            </button>
+            <button
+              type="button"
+              class="v2-ghost-button"
+              :disabled="!canRunAdvancedErase"
+              title="恢复高级擦除前的传统空页"
+              @click="runV2AdvancedEraseAction('restore')"
+            >
+              恢复传统空页
             </button>
             <button
               type="button"
@@ -10320,7 +10411,7 @@ watch(
           <section class="v2-settings-group">
             <header>
               <strong>图像处理</strong>
-              <span>擦字与底图生成相关能力</span>
+              <span>高级擦除与底图生成相关能力</span>
             </header>
 
             <label class="v2-field">
@@ -10328,7 +10419,7 @@ watch(
               <select v-model="config.image_cleanup_mode">
                 <option value="off">稳定流程</option>
                 <option value="gemini-image">Gemini Image</option>
-                <option value="seedream-image">Seedream Image</option>
+                <option value="seedream-image">Seedream Image（高级擦除）</option>
               </select>
             </label>
 

@@ -761,6 +761,35 @@ async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, 
     return result
 
 
+@app.post("/api/pages/{session_id}/{page_id}/advanced-erase")
+async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(session_id)
+    payload = payload or {}
+    action = str(payload.get("action") or "erase").strip().lower() or "erase"
+
+    if not translator_engine.try_mark_session_busy(session_id, "advanced-erase"):
+        raise HTTPException(status_code=409, detail="该项目已有任务在运行，请等待当前任务完成。")
+
+    try:
+        result = await translator_engine.advanced_erase_page(
+            project_id=session_id,
+            session=session,
+            page_id=page_id,
+            raw_config=payload.get("config", {}),
+            action=action,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        translator_engine.clear_session_busy(session_id)
+
+    return result
+
+
 @app.post("/api/upload")
 async def upload_comic(
     file: UploadFile = File(...),

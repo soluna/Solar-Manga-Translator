@@ -13,6 +13,16 @@ from PIL import Image
 
 
 DEFAULT_IMAGE_CLEANUP_PROMPT = "去除覆盖在图片上的文字"
+ADVANCED_IMAGE_ERASE_PROMPT = """
+You are editing a manga/comic page.
+Remove every visible text mark from the image, including speech-bubble text,
+captions, sound effects, decorative lettering, handwriting, stylized text, and
+text embedded in backgrounds. Reconstruct the background naturally where text
+was removed. Preserve all non-text artwork, line art, panels, characters,
+objects, tones, colors, and composition unchanged. Do not translate, add text,
+redraw non-text content, crop, rotate, or change the page layout. Return only
+the cleaned image.
+""".strip()
 
 
 class GeminiImageCleanupClient:
@@ -23,12 +33,12 @@ class GeminiImageCleanupClient:
     async def remove_text(
         self,
         source_rgb: np.ndarray,
-        guide_rgb: np.ndarray,
+        guide_rgb: np.ndarray | None = None,
         prompt: str = DEFAULT_IMAGE_CLEANUP_PROMPT,
     ) -> np.ndarray:
         return await asyncio.to_thread(self._remove_text_sync, source_rgb, guide_rgb, prompt)
 
-    def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray, prompt: str) -> np.ndarray:
+    def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray | None, prompt: str) -> np.ndarray:
         try:
             from google import genai
             from google.genai import types
@@ -39,13 +49,13 @@ class GeminiImageCleanupClient:
         config = types.GenerateContentConfig(
             response_modalities=["IMAGE"],
         )
+        contents: list[Any] = [prompt, Image.fromarray(source_rgb)]
+        if guide_rgb is not None:
+            contents.append(Image.fromarray(guide_rgb))
+
         response = client.models.generate_content(
             model=self.model,
-            contents=[
-                prompt,
-                Image.fromarray(source_rgb),
-                Image.fromarray(guide_rgb),
-            ],
+            contents=contents,
             config=config,
         )
 
@@ -102,20 +112,21 @@ class SeedreamImageCleanupClient:
     async def remove_text(
         self,
         source_rgb: np.ndarray,
-        guide_rgb: np.ndarray,
+        guide_rgb: np.ndarray | None = None,
         prompt: str = DEFAULT_IMAGE_CLEANUP_PROMPT,
     ) -> np.ndarray:
         return await asyncio.to_thread(self._remove_text_sync, source_rgb, guide_rgb, prompt)
 
-    def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray, prompt: str) -> np.ndarray:
+    def _remove_text_sync(self, source_rgb: np.ndarray, guide_rgb: np.ndarray | None, prompt: str) -> np.ndarray:
         source_rgb, guide_rgb, size_value = self._prepare_request_images(source_rgb, guide_rgb)
+        images = [self._image_to_data_uri(source_rgb)]
+        if guide_rgb is not None:
+            images.append(self._image_to_data_uri(guide_rgb))
+
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "image": [
-                self._image_to_data_uri(source_rgb),
-                self._image_to_data_uri(guide_rgb),
-            ],
+            "image": images,
             "size": size_value,
             "response_format": "b64_json",
             "output_format": "png",
@@ -173,8 +184,8 @@ class SeedreamImageCleanupClient:
     def _prepare_request_images(
         self,
         source_rgb: np.ndarray,
-        guide_rgb: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, str]:
+        guide_rgb: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray | None, str]:
         height, width = source_rgb.shape[:2]
         current_pixels = height * width
         target_pixels = min(max(current_pixels, self.MIN_PIXELS), self.MAX_PIXELS)
@@ -191,9 +202,10 @@ class SeedreamImageCleanupClient:
             source_rgb = np.array(
                 Image.fromarray(source_rgb).resize(target_size, resample=Image.Resampling.LANCZOS)
             )
-            guide_rgb = np.array(
-                Image.fromarray(guide_rgb).resize(target_size, resample=Image.Resampling.BILINEAR)
-            )
+            if guide_rgb is not None:
+                guide_rgb = np.array(
+                    Image.fromarray(guide_rgb).resize(target_size, resample=Image.Resampling.BILINEAR)
+                )
 
         return source_rgb, guide_rgb, f"{target_width}x{target_height}"
 

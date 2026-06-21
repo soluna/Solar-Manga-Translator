@@ -3787,6 +3787,14 @@ function getRegionStrokeColorHex(region) {
   )
 }
 
+function shouldPreserveRegionBackground(region) {
+  const override = getRegionLayoutOverride(region)
+  if (Object.prototype.hasOwnProperty.call(override, 'preserve_background')) {
+    return Boolean(override.preserve_background)
+  }
+  return Boolean(region?.preserve_background)
+}
+
 function hasRegionExplicitFontSize(region) {
   return Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
     || getRegionExplicitFontSizeOverride(region.id) !== null
@@ -6237,6 +6245,13 @@ function updateRegionLayoutOverride(regionId, patch) {
   if (Object.prototype.hasOwnProperty.call(patch, 'bg_color')) {
     currentOverride.bg_color = hexToColorTriplet(patch.bg_color, [255, 255, 255])
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'preserve_background')) {
+    if (patch.preserve_background) {
+      currentOverride.preserve_background = true
+    } else {
+      delete currentOverride.preserve_background
+    }
+  }
   if (!Object.keys(currentOverride).length) {
     delete nextOverrides[regionId]
   } else {
@@ -6868,7 +6883,8 @@ function getRegionAdvancedStyleSnapshot(region) {
     letter_spacing: getRegionLetterSpacing(region),
     line_spacing: getRegionLineSpacing(region),
     fg_color: hexToColorTriplet(getRegionTextColorHex(region), [21, 34, 52]),
-    bg_color: hexToColorTriplet(getRegionStrokeColorHex(region), [255, 255, 255])
+    bg_color: hexToColorTriplet(getRegionStrokeColorHex(region), [255, 255, 255]),
+    preserve_background: shouldPreserveRegionBackground(region)
   }
 }
 
@@ -6891,6 +6907,9 @@ function normalizeAdvancedStylePatch(patch) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'bg_color')) {
     normalized.bg_color = hexToColorTriplet(patch.bg_color, [255, 255, 255])
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'preserve_background')) {
+    normalized.preserve_background = Boolean(patch.preserve_background)
   }
   return normalized
 }
@@ -9555,6 +9574,15 @@ watch(
                                 />
                               </div>
                             </div>
+
+                            <label class="style-preserve-background-toggle v2-inline-checkbox">
+                              <input
+                                type="checkbox"
+                                :checked="shouldPreserveRegionBackground(region)"
+                                @change="updateRegionAdvancedStyle(region, { preserve_background: $event.target.checked }, '切换保留底图')"
+                              />
+                              <span>保留底图</span>
+                            </label>
                           </section>
                         </Teleport>
                       </template>

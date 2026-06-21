@@ -390,6 +390,9 @@ print(json.dumps({
                         "fg_color": "#123456",
                         "bg_color": [250, 251, 252],
                     },
+                    "flags": {
+                        "preserve_background": True,
+                    },
                 }],
             }
 
@@ -406,6 +409,8 @@ print(json.dumps({
             self.assertEqual(style_page["regions"][0]["line_spacing"], 1.35)
             self.assertEqual(translation_page["regions"][0]["fg_color"], [18, 52, 86])
             self.assertEqual(style_page["regions"][0]["bg_color"], [250, 251, 252])
+            self.assertTrue(translation_page["regions"][0]["preserve_background"])
+            self.assertTrue(style_page["regions"][0]["preserve_background"])
 
     def test_translation_layout_overrides_normalize_advanced_style(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -418,6 +423,7 @@ print(json.dumps({
                     "line_spacing": 0.1,
                     "fg_color": "#abc",
                     "bg_color": "#123456",
+                    "preserve_background": True,
                 }
             })
 
@@ -427,6 +433,7 @@ print(json.dumps({
             self.assertEqual(normalized["region-1"]["line_spacing"], 0.5)
             self.assertEqual(normalized["region-1"]["fg_color"], [170, 187, 204])
             self.assertEqual(normalized["region-1"]["bg_color"], [18, 52, 86])
+            self.assertTrue(normalized["region-1"]["preserve_background"])
 
     def test_auto_text_background_color_falls_back_from_black_on_black(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1097,6 +1104,30 @@ print(json.dumps({
             with self.assertRaises(RuntimeError):
                 engine._composite_advanced_erase_result(source, edited)
 
+    def test_advanced_erase_region_mask_limits_full_page_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((80, 80, 3), 255, dtype=np.uint8)
+            edited = np.full((80, 80, 3), 120, dtype=np.uint8)
+            allowed_mask = np.zeros((80, 80), dtype=np.uint8)
+            allowed_mask[30:50, 20:60] = 255
+            final_mask = engine._advanced_erase_final_mask(
+                engine._build_advanced_erase_change_mask(source, edited),
+                allowed_mask,
+            )
+
+            composite, mask, changed_ratio = engine._composite_advanced_erase_result(
+                source,
+                edited,
+                change_mask=final_mask,
+            )
+
+            self.assertGreater(int(mask[40, 30]), 0)
+            self.assertEqual(int(mask[10, 10]), 0)
+            self.assertLess(changed_ratio, engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
+            self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
+            self.assertLess(int(composite[40, 30, 0]), 180)
+
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -1180,16 +1211,23 @@ print(json.dumps({
             attempt_dir = engine._advanced_erase_attempt_dir(
                 engine._session_page_cache_dir(session, "project-a", "page-1.png")
             )
+            input_images = list(attempt_dir.glob("*.input.png"))
             seedream_outputs = list(attempt_dir.glob("*.seedream.png"))
+            diff_outputs = list(attempt_dir.glob("*.diff.png"))
             mask_outputs = list(attempt_dir.glob("*.mask.png"))
             metadata_outputs = list(attempt_dir.glob("*.json"))
+            self.assertEqual(len(input_images), 1)
             self.assertEqual(len(seedream_outputs), 1)
+            self.assertEqual(len(diff_outputs), 1)
             self.assertEqual(len(mask_outputs), 1)
             self.assertEqual(len(metadata_outputs), 1)
             metadata = json.loads(metadata_outputs[0].read_text(encoding="utf-8"))
             self.assertTrue(metadata["rejected"])
             self.assertGreater(metadata["changed_ratio"], engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
+            self.assertEqual(Path(metadata["input_image"]).name, input_images[0].name)
             self.assertEqual(Path(metadata["seedream_output"]).name, seedream_outputs[0].name)
+            self.assertEqual(Path(metadata["diff_mask"]).name, diff_outputs[0].name)
+            self.assertEqual(Path(metadata["final_mask"]).name, mask_outputs[0].name)
 
 
 if __name__ == "__main__":

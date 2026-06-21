@@ -1070,36 +1070,64 @@ class TranslatorEngine:
             f"model={config['advanced_erase_model']} "
             f"size={source_rgb.shape[1]}x{source_rgb.shape[0]}"
         )
+        attempt_id = self._advanced_erase_attempt_id()
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        input_path = attempt_dir / f"{attempt_id}.input.png"
+        seedream_output_path = attempt_dir / f"{attempt_id}.seedream.png"
+        output_path = attempt_dir / f"{attempt_id}.png"
+        diff_mask_path = attempt_dir / f"{attempt_id}.diff.png"
+        allowed_mask_path = attempt_dir / f"{attempt_id}.allowed.png"
+        mask_path = attempt_dir / f"{attempt_id}.mask.png"
+        metadata_path = attempt_dir / f"{attempt_id}.json"
+        self._save_rgb_image_atomic(input_path, source_rgb)
+
         edited_rgb = await asyncio.wait_for(
             client.remove_text(source_rgb, None, ADVANCED_IMAGE_ERASE_PROMPT),
             timeout=int(config["advanced_erase_timeout_seconds"]) + 10,
         )
-        attempt_id = self._advanced_erase_attempt_id()
-        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
-        attempt_dir.mkdir(parents=True, exist_ok=True)
-        seedream_output_path = attempt_dir / f"{attempt_id}.seedream.png"
-        output_path = attempt_dir / f"{attempt_id}.png"
-        mask_path = attempt_dir / f"{attempt_id}.mask.png"
-        metadata_path = attempt_dir / f"{attempt_id}.json"
         edited_debug_rgb = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
         self._save_rgb_image_atomic(seedream_output_path, edited_debug_rgb)
-        debug_mask = self._build_advanced_erase_change_mask(source_rgb, edited_debug_rgb)
+        raw_diff_mask = self._build_advanced_erase_change_mask(source_rgb, edited_debug_rgb)
+        raw_changed_ratio = float(cv2.countNonZero(raw_diff_mask)) / float(raw_diff_mask.size or 1)
+        cv2.imwrite(str(diff_mask_path), raw_diff_mask)
+        allowed_mask, allowed_region_count = self._build_advanced_erase_allowed_mask(
+            source_rgb,
+            page_cache_dir,
+            config,
+            page_id,
+            session,
+        )
+        if allowed_mask is not None:
+            cv2.imwrite(str(allowed_mask_path), allowed_mask)
+        debug_mask = self._advanced_erase_final_mask(raw_diff_mask, allowed_mask)
         debug_changed_ratio = float(cv2.countNonZero(debug_mask)) / float(debug_mask.size or 1)
         cv2.imwrite(str(mask_path), debug_mask)
         metadata = {
             "attempt_id": attempt_id,
             "created_at": self._now_iso(),
             "page_id": page_id,
+            "source_path": str(source_path),
             "provider": config["advanced_erase_provider"],
             "api_url": config["advanced_erase_base_url"],
             "model": config["advanced_erase_model"],
             "changed_ratio": debug_changed_ratio,
+            "raw_changed_ratio": raw_changed_ratio,
             "traditional_backup": str(backup_path),
+            "input_image": str(input_path),
             "seedream_output": str(seedream_output_path),
-            "diff_mask": str(mask_path),
+            "diff_mask": str(diff_mask_path),
+            "allowed_mask": str(allowed_mask_path) if allowed_mask is not None else "",
+            "final_mask": str(mask_path),
+            "allowed_region_count": allowed_region_count,
+            "mask_mode": "region_limited" if allowed_mask is not None else "diff_only",
         }
         try:
-            composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(source_rgb, edited_debug_rgb)
+            composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(
+                source_rgb,
+                edited_debug_rgb,
+                change_mask=debug_mask,
+            )
         except RuntimeError as exc:
             self._write_json_file(metadata_path, {
                 **metadata,
@@ -1108,8 +1136,9 @@ class TranslatorEngine:
             })
             raise RuntimeError(
                 f"{exc} 调试文件已保存到: {attempt_dir}；"
-                f"AI 返回图: {seedream_output_path.name}；差异 mask: {mask_path.name}；"
-                f"差异比例约 {debug_changed_ratio:.2%}。"
+                f"输入图: {input_path.name}；AI 返回图: {seedream_output_path.name}；"
+                f"原始差异 mask: {diff_mask_path.name}；最终 mask: {mask_path.name}；"
+                f"最终差异比例约 {debug_changed_ratio:.2%}，原始差异比例约 {raw_changed_ratio:.2%}。"
             ) from exc
 
         self._save_rgb_image_atomic(output_path, composite_rgb)
@@ -2576,6 +2605,10 @@ class TranslatorEngine:
             region.line_spacing_override_active = False
 
             layout_override = layout_overrides.get(region_key) or {}
+            region.preserve_background = bool(
+                layout_override.get("preserve_background")
+                or layout_override.get("skip_background_erase")
+            )
             bbox = layout_override.get("bbox")
             if isinstance(bbox, list) and len(bbox) == 4:
                 self._set_region_bbox(region, bbox)
@@ -2695,6 +2728,7 @@ class TranslatorEngine:
                 "disabled": bool(getattr(region, "disabled_region", False)),
                 "keep_original": bool(getattr(region, "skip_translation", False)),
                 "translation_enabled": not bool(getattr(region, "disabled_region", False)) and not bool(getattr(region, "skip_translation", False)),
+                "preserve_background": bool(getattr(region, "preserve_background", False)),
             },
             "audit": {
                 "created_by": "user" if bool(getattr(region, "manual_region", False)) else "auto",
@@ -3127,6 +3161,12 @@ class TranslatorEngine:
             if not isinstance(layout_override, dict) or not layout_override:
                 continue
 
+            if "preserve_background" in layout_override or "skip_background_erase" in layout_override:
+                flags_payload["preserve_background"] = bool(
+                    layout_override.get("preserve_background")
+                    or layout_override.get("skip_background_erase")
+                )
+
             bbox = layout_override.get("bbox")
             if isinstance(bbox, list) and len(bbox) == 4:
                 try:
@@ -3401,6 +3441,7 @@ class TranslatorEngine:
                     "machine_translation": str(translation.get("machine") or ""),
                     "override_translation": str(translation.get("edited") or ""),
                     "override_skip": bool(flags.get("keep_original")),
+                    "preserve_background": bool(flags.get("preserve_background")),
                     "current_translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
                     "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
                     "font_size": int(style.get("font_size") or 12),
@@ -3450,6 +3491,7 @@ class TranslatorEngine:
                     "resolved_style": str(style.get("font_style") or ""),
                     "font_family": str(style.get("font_family") or ""),
                     "font_key_override": str(style.get("font_key_override") or ""),
+                    "preserve_background": bool((region.get("flags") or {}).get("preserve_background")),
                     "direction": str(region.get("direction") or "auto"),
                     "source_text": str(region.get("source_text") or ""),
                     "translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
@@ -3584,6 +3626,17 @@ class TranslatorEngine:
 
         if "bg_color" in patch or "stroke_color" in patch:
             current["bg_color"] = self._rgb_color_payload(patch.get("bg_color", patch.get("stroke_color")), (255, 255, 255))
+
+        if "preserve_background" in patch or "skip_background_erase" in patch:
+            preserve_background = bool(
+                patch.get("preserve_background")
+                if "preserve_background" in patch
+                else patch.get("skip_background_erase")
+            )
+            if preserve_background:
+                current["preserve_background"] = True
+            else:
+                current.pop("preserve_background", None)
 
         if current:
             overrides[region_id] = current
@@ -4745,6 +4798,9 @@ class TranslatorEngine:
             if "bg_color" in value or "stroke_color" in value:
                 entry["bg_color"] = self._rgb_color_payload(value.get("bg_color", value.get("stroke_color")), (255, 255, 255))
 
+            if bool(value.get("preserve_background") or value.get("skip_background_erase")):
+                entry["preserve_background"] = True
+
             if entry:
                 normalized[key] = entry
         return normalized
@@ -5645,10 +5701,15 @@ class TranslatorEngine:
         self,
         source_rgb: np.ndarray,
         edited_rgb: np.ndarray,
+        change_mask: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, float]:
         edited_rgb = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
 
-        mask = self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
+        mask = (
+            self._normalize_advanced_erase_mask(change_mask, source_rgb.shape)
+            if change_mask is not None
+            else self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
+        )
         changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
         if changed_ratio <= 0:
             raise RuntimeError("高级擦除没有检测到可替换的文字区域。")
@@ -5665,6 +5726,27 @@ class TranslatorEngine:
             + edited_rgb.astype(np.float32) * alpha_f
         )
         return np.clip(composite, 0, 255).astype(np.uint8), mask, changed_ratio
+
+    def _normalize_advanced_erase_mask(
+        self,
+        mask: np.ndarray,
+        image_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        normalized = np.asarray(mask)
+        if normalized.ndim == 3:
+            normalized = cv2.cvtColor(normalized[:, :, :3], cv2.COLOR_RGB2GRAY)
+        if normalized.ndim != 2:
+            raise RuntimeError("高级擦除差异 mask 格式异常。")
+        target_shape = image_shape[:2]
+        if normalized.shape[:2] != target_shape:
+            normalized = cv2.resize(
+                normalized,
+                (target_shape[1], target_shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        normalized = normalized.astype(np.uint8, copy=False)
+        _, normalized = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY)
+        return normalized.astype(np.uint8)
 
     def _normalize_advanced_erase_edited_image(
         self,
@@ -5718,6 +5800,65 @@ class TranslatorEngine:
                     break
 
         return mask
+
+    def _build_advanced_erase_allowed_mask(
+        self,
+        source_rgb: np.ndarray,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+        stored_name: str,
+        session: dict[str, Any] | None,
+    ) -> tuple[np.ndarray | None, int]:
+        regions: list[Any] = []
+        with contextlib.suppress(Exception):
+            regions = self._prepare_cached_regions_for_edit(
+                source_rgb,
+                page_cache_dir,
+                config,
+                stored_name,
+                session=session,
+            )
+        if not regions:
+            with contextlib.suppress(Exception):
+                regions = self._load_cached_regions(page_cache_dir)
+                self._assign_region_keys(regions, stored_name)
+
+        if not regions:
+            return None, 0
+
+        allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        allowed_region_count = 0
+        for region in regions:
+            if bool(getattr(region, "skip_translation", False)) or bool(getattr(region, "disabled_region", False)):
+                continue
+            region_mask = self._build_region_mask(
+                region,
+                source_rgb.shape,
+                dilation_scale=0.22,
+                dilation_min=4,
+                dilation_max=32,
+            )
+            if np.any(region_mask):
+                allowed = cv2.bitwise_or(allowed, region_mask)
+                allowed_region_count += 1
+
+        if not np.any(allowed):
+            return allowed, 0
+
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        allowed = cv2.morphologyEx(allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        return allowed, allowed_region_count
+
+    def _advanced_erase_final_mask(
+        self,
+        raw_diff_mask: np.ndarray,
+        allowed_mask: np.ndarray | None,
+    ) -> np.ndarray:
+        raw_diff_mask = self._normalize_advanced_erase_mask(raw_diff_mask, raw_diff_mask.shape)
+        if allowed_mask is None:
+            return raw_diff_mask
+        allowed_mask = self._normalize_advanced_erase_mask(allowed_mask, raw_diff_mask.shape)
+        return cv2.bitwise_and(raw_diff_mask, allowed_mask)
 
     def _threshold_advanced_erase_diff(self, diff: np.ndarray, threshold: int) -> np.ndarray:
         _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
@@ -5984,6 +6125,7 @@ class TranslatorEngine:
         region.translation = resolved_translation
         region.skip_translation = bool((region_payload.get("flags") or {}).get("keep_original"))
         region.disabled_region = bool((region_payload.get("flags") or {}).get("disabled"))
+        region.preserve_background = bool((region_payload.get("flags") or {}).get("preserve_background"))
         return region
 
     def _ensure_editable_page_cache(
@@ -6357,6 +6499,7 @@ class TranslatorEngine:
         region.text_raw = source_text
         region.machine_translation = str(payload.get("machine_translation") or translation or "")
         region.translation_override = ""
+        region.preserve_background = bool(payload.get("preserve_background"))
         return region
 
     def _merge_manual_regions(
@@ -6408,6 +6551,8 @@ class TranslatorEngine:
         normalized["target_lang"] = str(payload.get("target_lang") or "")
         normalized["manual"] = True
         normalized["created_at"] = float(payload.get("created_at") or time.time())
+        if bool(payload.get("preserve_background")):
+            normalized["preserve_background"] = True
         if "merged_from" in payload:
             normalized["merged_from"] = [str(item) for item in (payload.get("merged_from") or []) if str(item)]
         return normalized
@@ -7239,6 +7384,10 @@ class TranslatorEngine:
             region.disabled_region = bool(disabled_overrides.get(region_key))
 
             layout_override = layout_overrides.get(region_key) or {}
+            region.preserve_background = bool(
+                layout_override.get("preserve_background")
+                or layout_override.get("skip_background_erase")
+            )
             region.font_size_override_active = False
             region.direction_override_active = False
             region.letter_spacing_override_active = False
@@ -7361,6 +7510,8 @@ class TranslatorEngine:
             region.adjust_bg_color = bool(payload["adjust_bg_color"])
         if "font_style" in payload:
             region.font_style = payload["font_style"]
+        if "preserve_background" in payload:
+            region.preserve_background = bool(payload["preserve_background"])
         source_text = str(payload.get("source_text") or payload.get("text_raw") or payload.get("text") or "").strip()
         if source_text:
             region.source_text = source_text
@@ -7764,6 +7915,7 @@ class TranslatorEngine:
                 bool(getattr(region, "manual_region", False))
                 and not bool(getattr(region, "skip_translation", False))
                 and not bool(getattr(region, "disabled_region", False))
+                and not bool(getattr(region, "preserve_background", False))
             )
         ]
         render_regions = [

@@ -1601,6 +1601,12 @@ img {
   font-size: 0.78rem;
 }
 
+.style-preserve-background-toggle {
+  width: fit-content;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
 .v2-canvas-stage.draw-mode .style-box,
 .v2-canvas-stage.draw-mode .style-box-handle {
   pointer-events: none;

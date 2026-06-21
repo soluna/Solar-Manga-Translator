@@ -1522,37 +1522,142 @@ class TranslatorEngine:
 
     def _normalize_glossary_category(self, raw_value: Any) -> str:
         value = str(raw_value or "").strip()
+        normalized = value.lower().replace(" ", "").replace("-", "_")
+        aliases = {
+            "人物": "人名",
+            "角色": "人名",
+            "角色名": "人名",
+            "姓名": "人名",
+            "person": "人名",
+            "people": "人名",
+            "name": "人名",
+            "character": "人名",
+            "character_name": "人名",
+            "组织": "组织/团体",
+            "团体": "组织/团体",
+            "机构": "组织/团体",
+            "organization": "组织/团体",
+            "organisation": "组织/团体",
+            "org": "组织/团体",
+            "地名": "地点",
+            "地点名": "地点",
+            "place": "地点",
+            "location": "地点",
+            "作品": "作品/道具/技能",
+            "道具": "作品/道具/技能",
+            "技能": "作品/道具/技能",
+            "物品": "作品/道具/技能",
+            "title": "作品/道具/技能",
+            "work": "作品/道具/技能",
+            "item": "作品/道具/技能",
+            "skill": "作品/道具/技能",
+            "术语": "行业术语",
+            "行业词": "行业术语",
+            "专业术语": "行业术语",
+            "term": "行业术语",
+            "domain_term": "行业术语",
+            "industry_term": "行业术语",
+            "misc": "其他",
+            "other": "其他",
+        }
+        value = aliases.get(normalized, value)
         return value if value in self.PROJECT_GLOSSARY_CATEGORIES else "其他"
+
+    def _first_glossary_entry_value(
+        self,
+        raw_entry: dict[str, Any],
+        keys: tuple[str, ...],
+        fallback: Any = "",
+    ) -> str:
+        for key in keys:
+            if key not in raw_entry:
+                continue
+            value = raw_entry.get(key)
+            if isinstance(value, (dict, list, tuple, set)):
+                continue
+            text = str(value or "").strip()
+            if text:
+                return text
+        return str(fallback or "").strip()
 
     def _normalize_project_glossary_entry(self, raw_entry: Any, existing_entry: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not isinstance(raw_entry, dict):
             return None
-        source = str(raw_entry.get("source") or raw_entry.get("term") or "").strip()
-        translation = str(raw_entry.get("translation") or raw_entry.get("target") or "").strip()
+        existing_entry = existing_entry or {}
+        source = self._first_glossary_entry_value(
+            raw_entry,
+            (
+                "source",
+                "term",
+                "original",
+                "original_text",
+                "source_text",
+                "raw",
+                "name",
+                "原文",
+                "源文",
+                "词条",
+                "术语",
+                "名词",
+                "名称",
+                "日文",
+                "原名",
+            ),
+            existing_entry.get("source"),
+        )
+        translation = self._first_glossary_entry_value(
+            raw_entry,
+            (
+                "translation",
+                "target",
+                "translated",
+                "target_text",
+                "localized",
+                "value",
+                "译文",
+                "翻译",
+                "建议译文",
+                "译名",
+                "中文",
+                "目标译文",
+            ),
+            existing_entry.get("translation"),
+        )
         if not source or not translation:
             return None
 
         now = self._now_iso()
-        entry_id = str(raw_entry.get("id") or (existing_entry or {}).get("id") or "").strip()
+        entry_id = str(raw_entry.get("id") or existing_entry.get("id") or "").strip()
         if not entry_id:
             entry_id = f"term_{uuid.uuid4().hex[:12]}"
-        source_kind = str(raw_entry.get("source_kind") or raw_entry.get("kind") or (existing_entry or {}).get("source_kind") or "user").strip()
+        source_kind = str(raw_entry.get("source_kind") or raw_entry.get("kind") or existing_entry.get("source_kind") or "user").strip()
         if source_kind not in {"system", "user"}:
             source_kind = "user"
 
-        created_at = str(raw_entry.get("created_at") or (existing_entry or {}).get("created_at") or now)
+        created_at = str(raw_entry.get("created_at") or existing_entry.get("created_at") or now)
         if "replacement" in raw_entry:
             replacement_raw = raw_entry.get("replacement")
         elif "replace_text" in raw_entry:
             replacement_raw = raw_entry.get("replace_text")
+        elif "替换源" in raw_entry:
+            replacement_raw = raw_entry.get("替换源")
         else:
-            replacement_raw = (existing_entry or {}).get("replacement")
-        note_raw = raw_entry.get("note") if "note" in raw_entry else (existing_entry or {}).get("note")
+            replacement_raw = existing_entry.get("replacement")
+        note_raw = self._first_glossary_entry_value(
+            raw_entry,
+            ("note", "notes", "description", "reason", "备注", "说明", "注释"),
+            existing_entry.get("note"),
+        )
+        category_raw = self._first_glossary_entry_value(
+            raw_entry,
+            ("category", "type", "kind", "分类", "类别", "类型"),
+            existing_entry.get("category"),
+        )
         return {
             "id": entry_id,
             "source": source,
             "translation": translation,
-            "category": self._normalize_glossary_category(raw_entry.get("category") or (existing_entry or {}).get("category")),
+            "category": self._normalize_glossary_category(category_raw),
             "replacement": str(replacement_raw or "").strip(),
             "note": str(note_raw or "").strip(),
             "source_kind": source_kind,
@@ -1734,19 +1839,28 @@ class TranslatorEngine:
     def _project_glossary_extraction_system_prompt(self) -> str:
         return (
             "You are a terminology editor for manga translation projects. "
-            "Extract only project-specific proper nouns and domain terms, and return only a valid JSON array."
+            "Extract project-specific proper nouns and domain terms for consistent manga translation. "
+            "Return only valid JSON. Include short character names when they are name-like."
         )
 
-    def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str) -> str:
+    def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str, *, retry: bool = False) -> str:
         categories = "、".join(sorted(self.PROJECT_GLOSSARY_CATEGORIES))
+        retry_instruction = ""
+        if retry:
+            retry_instruction = (
+                "上一次没有得到可用词条。请重新检查，不要因为词条只有 2 到 4 个字就跳过；"
+                "只要像角色名、昵称、称号、地点、组织、技能、道具、作品名或重复出现的关键行业词，就必须收录。"
+            )
         return (
             "你是漫画翻译项目的专有名词编辑。请阅读全项目 OCR 原文，提取会影响翻译一致性的专有名词。"
             "包括角色名、组织/团体、地点、作品/道具/技能、行业术语和其他需要固定译法的词。"
+            "短人名、昵称、称号即使只有 2 到 4 个字，也应该收录；只排除没有专名意义的普通短词。"
             f"目标语言是 {target_lang}。"
             "请只返回 JSON 数组，不要解释；每个元素格式为："
             "{\"source\":\"原文\",\"translation\":\"建议译文\",\"category\":\"分类\",\"note\":\"可选备注\"}。"
             f"分类只能从这些值选择：{categories}。"
-            "不要收录普通助词、语气词、整句台词或过短且无专名意义的词。\n\n"
+            "不要收录普通助词、语气词、整句台词或没有专名意义的普通短词。"
+            f"{retry_instruction}\n\n"
             f"项目 OCR 原文：\n{project_context}"
         )
 
@@ -1768,6 +1882,7 @@ class TranslatorEngine:
                 api_key=api_key,
                 system_prompt=system_prompt,
                 user_prompt=prompt,
+                max_tokens=3200,
             )
 
         if selected_translator == "doubao-ark":
@@ -1782,6 +1897,7 @@ class TranslatorEngine:
                 api_key=api_key,
                 system_prompt=system_prompt,
                 user_prompt=prompt,
+                max_tokens=3200,
             )
 
         if selected_translator == "gemini":
@@ -1795,27 +1911,125 @@ class TranslatorEngine:
 
         return ""
 
-    def _parse_glossary_extraction_response(self, text: str) -> list[dict[str, Any]]:
+    def _parse_json_payload_from_model_text(self, text: str) -> Any:
         raw_text = str(text or "").strip()
         if not raw_text:
-            return []
+            return None
         fenced = re.search(r"```(?:json)?\s*(.*?)```", raw_text, flags=re.DOTALL | re.IGNORECASE)
         if fenced:
             raw_text = fenced.group(1).strip()
-        start = raw_text.find("[")
-        end = raw_text.rfind("]")
-        if start >= 0 and end > start:
-            raw_text = raw_text[start:end + 1]
-        try:
-            payload = json.loads(raw_text)
-        except json.JSONDecodeError:
+
+        candidates = [raw_text]
+        array_start = raw_text.find("[")
+        array_end = raw_text.rfind("]")
+        if array_start >= 0 and array_end > array_start:
+            candidates.append(raw_text[array_start:array_end + 1])
+        object_start = raw_text.find("{")
+        object_end = raw_text.rfind("}")
+        if object_start >= 0 and object_end > object_start:
+            candidates.append(raw_text[object_start:object_end + 1])
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _glossary_items_from_mapping(self, payload: dict[str, Any]) -> list[Any]:
+        items: list[Any] = []
+        for source, value in payload.items():
+            if source in {
+                "version",
+                "updated_at",
+                "created_at",
+                "metadata",
+                "meta",
+                "language",
+                "target_lang",
+                "目标语言",
+                "source_kind",
+            }:
+                continue
+            if isinstance(value, str):
+                items.append({"source": source, "translation": value})
+            elif isinstance(value, dict):
+                item = dict(value)
+                item.setdefault("source", source)
+                items.append(item)
+        return items
+
+    def _glossary_items_from_payload(self, payload: Any) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
             return []
-        if isinstance(payload, dict):
-            payload = payload.get("entries") or payload.get("terms") or []
-        if not isinstance(payload, list):
+        source_keys = {
+            "source",
+            "term",
+            "original",
+            "original_text",
+            "source_text",
+            "raw",
+            "name",
+            "原文",
+            "源文",
+            "词条",
+            "术语",
+            "名词",
+            "名称",
+            "日文",
+            "原名",
+        }
+        translation_keys = {
+            "translation",
+            "target",
+            "translated",
+            "target_text",
+            "localized",
+            "value",
+            "译文",
+            "翻译",
+            "建议译文",
+            "译名",
+            "中文",
+            "目标译文",
+        }
+        if source_keys.intersection(payload) and translation_keys.intersection(payload):
+            return [payload]
+        wrapper_keys = (
+            "entries",
+            "terms",
+            "items",
+            "glossary",
+            "terminology",
+            "data",
+            "result",
+            "results",
+            "专有名词",
+            "词条",
+            "名词库",
+        )
+        for key in wrapper_keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                return self._glossary_items_from_mapping(value)
+        return self._glossary_items_from_mapping(payload)
+
+    def _parse_glossary_extraction_response(self, text: str) -> list[dict[str, Any]]:
+        payload = self._parse_json_payload_from_model_text(text)
+        items = self._glossary_items_from_payload(payload)
+        if not items:
             return []
         entries: list[dict[str, Any]] = []
-        for item in payload:
+        for item in items:
             entry = self._normalize_project_glossary_entry({
                 **item,
                 "source_kind": "system",
@@ -1851,6 +2065,21 @@ class TranslatorEngine:
 
         extracted_entries = self._parse_glossary_extraction_response(response_text)
         if not extracted_entries:
+            if progress_callback is not None:
+                await progress_callback({"event": "status", "message": "第一次未解析到专有名词，正在用更严格规则重试…"})
+            retry_prompt = self._build_glossary_extraction_prompt(
+                project_context,
+                str(config.get("target_lang") or ""),
+                retry=True,
+            )
+            try:
+                retry_response_text = await self._request_project_glossary_extraction(config, retry_prompt)
+                extracted_entries = self._parse_glossary_extraction_response(retry_response_text)
+            except Exception as exc:
+                print(f"[WARN] Project glossary extraction retry failed for {project_id}: {exc}")
+        if not extracted_entries:
+            if progress_callback is not None:
+                await progress_callback({"event": "status", "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。"})
             return self.get_project_glossary(project_id, session)
 
         current = self._normalize_project_glossary(session.get("project_glossary"))

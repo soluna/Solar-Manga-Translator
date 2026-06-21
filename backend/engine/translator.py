@@ -5926,8 +5926,8 @@ class TranslatorEngine:
             "angle": 0.0,
             "letter_spacing": 1.0,
             "line_spacing": 1.0,
-            "fg_color": [int(v) for v in (fg_color or (0, 0, 0))],
-            "bg_color": [int(v) for v in (bg_color or (255, 255, 255))],
+            "fg_color": self._rgb_color_payload(fg_color, (0, 0, 0)),
+            "bg_color": self._rgb_color_payload(bg_color, (255, 255, 255)),
             "stroke_width": 0.2,
             "target_lang": target_lang,
             "manual": True,
@@ -5953,8 +5953,8 @@ class TranslatorEngine:
             font_size=payload.get("font_size", max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14)),
             angle=payload.get("angle", 0),
             translation=translation,
-            fg_color=tuple(payload.get("fg_color") or (0, 0, 0)),
-            bg_color=tuple(payload.get("bg_color") or (255, 255, 255)),
+            fg_color=tuple(self._rgb_color_payload(payload.get("fg_color"), (0, 0, 0))),
+            bg_color=tuple(self._rgb_color_payload(payload.get("bg_color"), (255, 255, 255))),
             line_spacing=payload.get("line_spacing", 1.0),
             letter_spacing=payload.get("letter_spacing", 1.0),
             font_family=payload.get("font_family", ""),
@@ -6021,8 +6021,8 @@ class TranslatorEngine:
         normalized["angle"] = self._normalize_rotation_degrees(payload.get("angle", payload.get("rotation"))) or 0.0
         normalized["letter_spacing"] = self._normalize_letter_spacing(payload.get("letter_spacing")) or 1.0
         normalized["line_spacing"] = self._normalize_line_spacing(payload.get("line_spacing")) or 1.0
-        normalized["fg_color"] = [int(v) for v in (payload.get("fg_color") or (0, 0, 0))]
-        normalized["bg_color"] = [int(v) for v in (payload.get("bg_color") or (255, 255, 255))]
+        normalized["fg_color"] = self._rgb_color_payload(payload.get("fg_color"), (0, 0, 0))
+        normalized["bg_color"] = self._rgb_color_payload(payload.get("bg_color"), (255, 255, 255))
         normalized["stroke_width"] = self._normalize_stroke_strength(payload.get("stroke_width")) if payload.get("stroke_width") is not None else 0.2
         normalized["target_lang"] = str(payload.get("target_lang") or "")
         normalized["manual"] = True
@@ -6374,8 +6374,8 @@ class TranslatorEngine:
             target_lang=config["target_lang"],
             direction=str(getattr(sample_region, "direction", "") or self._direction_from_bbox(merged_bbox)),
             font_size=merged_font_size,
-            fg_color=tuple(getattr(sample_region, "fg_colors", getattr(sample_region, "fg_color", (0, 0, 0))) or (0, 0, 0)),
-            bg_color=tuple(getattr(sample_region, "bg_colors", getattr(sample_region, "bg_color", (255, 255, 255))) or (255, 255, 255)),
+            fg_color=tuple(self._rgb_color_payload(getattr(sample_region, "fg_colors", getattr(sample_region, "fg_color", None)), (0, 0, 0))),
+            bg_color=tuple(self._rgb_color_payload(getattr(sample_region, "bg_colors", getattr(sample_region, "bg_color", None)), (255, 255, 255))),
         )
         payload["merged_from"] = [str(getattr(region, "translation_region_key", "") or "") for region in ordered_regions]
         manual_regions = self._ensure_manual_regions_store(session)
@@ -6943,6 +6943,9 @@ class TranslatorEngine:
                 except (TypeError, ValueError):
                     lines = []
 
+        fg_payload = payload.get("fg_colors") if payload.get("fg_colors") is not None else payload.get("fg_color")
+        bg_payload = payload.get("bg_colors") if payload.get("bg_colors") is not None else payload.get("bg_color")
+
         region = TextBlock(
             lines=lines,
             texts=texts,
@@ -6950,8 +6953,8 @@ class TranslatorEngine:
             font_size=payload.get("font_size", -1),
             angle=payload.get("angle", 0),
             translation=payload.get("translation", ""),
-            fg_color=tuple(payload.get("fg_colors") or payload.get("fg_color") or (0, 0, 0)),
-            bg_color=tuple(payload.get("bg_colors") or payload.get("bg_color") or (0, 0, 0)),
+            fg_color=tuple(self._rgb_color_payload(fg_payload, (0, 0, 0))),
+            bg_color=tuple(self._rgb_color_payload(bg_payload, (0, 0, 0))),
             line_spacing=payload.get("line_spacing", 1.0),
             letter_spacing=payload.get("letter_spacing", 1.0),
             font_family=payload.get("font_family", ""),
@@ -7042,8 +7045,8 @@ class TranslatorEngine:
         except Exception:
             polygon_mask[:, :] = 255
 
-        fg_color = tuple(getattr(region, "fg_colors", getattr(region, "fg_color", (0, 0, 0))) or (0, 0, 0))
-        bg_color = tuple(getattr(region, "bg_colors", getattr(region, "bg_color", (255, 255, 255))) or (255, 255, 255))
+        fg_color = tuple(self._rgb_color_payload(getattr(region, "fg_colors", getattr(region, "fg_color", None)), (0, 0, 0)))
+        bg_color = tuple(self._rgb_color_payload(getattr(region, "bg_colors", getattr(region, "bg_color", None)), (255, 255, 255)))
         fg_brightness = float(np.mean(fg_color))
         bg_brightness = float(np.mean(bg_color))
 

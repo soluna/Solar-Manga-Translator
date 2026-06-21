@@ -445,6 +445,39 @@ print(json.dumps({
             engine._sanitize_auto_text_background_color(region, {"bg_color": [0, 0, 0]})
             self.assertEqual(engine._rgb_color_payload(region.bg_colors, (255, 255, 255)), [0, 0, 0])
 
+    def test_numpy_region_colors_do_not_break_style_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            class Region:
+                pass
+
+            region = Region()
+            region.xyxy = [8, 8, 42, 34]
+            region.min_rect = [np.array([[8, 8], [42, 8], [42, 34], [8, 34]], dtype=np.float32)]
+            region.fg_colors = np.array([8, 8, 8], dtype=np.uint8)
+            region.bg_colors = np.array([255, 255, 255], dtype=np.uint8)
+            region.font_size = 18
+            region.text = "测试"
+            region.translation = "测试"
+
+            source_rgb = np.full((48, 56, 3), 255, dtype=np.uint8)
+            source_rgb[14:28, 16:32] = 0
+            features = engine._extract_region_style_features(source_rgb, region, 18)
+            self.assertGreaterEqual(features["fill_ratio"], 0.0)
+
+            payload = engine._build_manual_region_payload(
+                stored_name="page-1.png",
+                bbox=[8, 8, 42, 34],
+                source_text="测试",
+                translation="test",
+                target_lang="CHS",
+                fg_color=region.fg_colors,
+                bg_color=region.bg_colors,
+            )
+            self.assertEqual(payload["fg_color"], [8, 8, 8])
+            self.assertEqual(payload["bg_color"], [255, 255, 255])
+
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

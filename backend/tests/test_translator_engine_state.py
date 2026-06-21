@@ -366,7 +366,16 @@ print(json.dumps({
                     "direction": "h",
                     "source_text": "original",
                     "translation": {"machine": "translated"},
-                    "style": {"font_size": 24, "font_size_override": 24},
+                    "style": {
+                        "font_size": 24,
+                        "font_size_override": 24,
+                        "rotation": -12,
+                        "stroke_width": 0,
+                        "letter_spacing": 1.25,
+                        "line_spacing": 1.35,
+                        "fg_color": "#123456",
+                        "bg_color": [250, 251, 252],
+                    },
                 }],
             }
 
@@ -375,6 +384,35 @@ print(json.dumps({
 
             self.assertEqual(translation_page["regions"][0]["font_size_override"], 24)
             self.assertEqual(style_page["regions"][0]["font_size_override"], 24)
+            self.assertEqual(translation_page["regions"][0]["rotation"], -12)
+            self.assertEqual(style_page["regions"][0]["rotation"], -12)
+            self.assertEqual(translation_page["regions"][0]["stroke_width"], 0)
+            self.assertEqual(style_page["regions"][0]["stroke_width"], 0)
+            self.assertEqual(translation_page["regions"][0]["letter_spacing"], 1.25)
+            self.assertEqual(style_page["regions"][0]["line_spacing"], 1.35)
+            self.assertEqual(translation_page["regions"][0]["fg_color"], [18, 52, 86])
+            self.assertEqual(style_page["regions"][0]["bg_color"], [250, 251, 252])
+
+    def test_translation_layout_overrides_normalize_advanced_style(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            normalized = engine._normalize_translation_region_layout_overrides({
+                "region-1": {
+                    "rotation": 240,
+                    "stroke_width": -1,
+                    "letter_spacing": 4,
+                    "line_spacing": 0.1,
+                    "fg_color": "#abc",
+                    "bg_color": "#123456",
+                }
+            })
+
+            self.assertEqual(normalized["region-1"]["rotation"], 180)
+            self.assertEqual(normalized["region-1"]["stroke_width"], 0)
+            self.assertEqual(normalized["region-1"]["letter_spacing"], 2.5)
+            self.assertEqual(normalized["region-1"]["line_spacing"], 0.5)
+            self.assertEqual(normalized["region-1"]["fg_color"], [170, 187, 204])
+            self.assertEqual(normalized["region-1"]["bg_color"], [18, 52, 86])
 
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

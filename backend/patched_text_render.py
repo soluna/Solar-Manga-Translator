@@ -560,13 +560,14 @@ def put_char_vertical(font_size: int, cdpt: str, pen_l: Tuple[int, int], canvas_
     # Return vertical advance value  
     return char_offset_y  
 
-def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int, letter_spacing: float = 1.0):
+def put_text_vertical(font_size: int, text: str, h: int, alignment: str, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]], line_spacing: int, letter_spacing: float = 1.0, stroke_width: float = 0.2):
     text = compact_special_symbols(text)
     if not text :
         return
     font_size = max(int(font_size or 0), 1)
     h = max(int(h or 0), font_size)
-    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0
+    stroke_width = max(float(stroke_width or 0.0), 0.0)
+    bg_size = int(max(font_size * stroke_width * 0.35, 1)) if bg is not None and stroke_width > 0 else 0
     spacing_x = int(font_size * (line_spacing or 0.2))
     letter_spacing = max(float(letter_spacing or 1.0), 0.85)
 
@@ -1146,14 +1147,15 @@ def put_char_horizontal(font_size: int, cdpt: str, pen_l: Tuple[int, int], canva
 
 def put_text_horizontal(font_size: int, text: str, width: int, height: int, alignment: str,
                         reversed_direction: bool, fg: Tuple[int, int, int], bg: Tuple[int, int, int],
-                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0, letter_spacing: float = 1.0):
+                        lang: str = 'en_US', hyphenate: bool = True, line_spacing: int = 0, letter_spacing: float = 1.0, stroke_width: float = 0.2):
     text = compact_special_symbols(text)
     if not text :
         return
     font_size = max(int(font_size or 0), 1)
     width = max(int(width or 0), font_size)
     height = max(int(height or 0), font_size)
-    bg_size = int(max(font_size * 0.07, 1)) if bg is not None else 0
+    stroke_width = max(float(stroke_width or 0.0), 0.0)
+    bg_size = int(max(font_size * stroke_width * 0.35, 1)) if bg is not None and stroke_width > 0 else 0
     spacing_y = int(font_size * (line_spacing or 0.01))
     letter_spacing = max(float(letter_spacing or 1.0), 0.85)
     compact_line_ratio = 0.88 if str(lang or '').upper() in {'CHS', 'CHT', 'JPN', 'JA', 'JP', 'ZH'} else 1.0

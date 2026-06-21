@@ -47,6 +47,14 @@ class TranslatorEngine:
     IMAGE_PREVIEW_MIN_SIDE = 96
     IMAGE_PREVIEW_MAX_SIDE = 4096
     IMAGE_PREVIEW_FORMATS = (".webp", ".jpg", ".png")
+    STYLE_ROTATION_MIN = -180.0
+    STYLE_ROTATION_MAX = 180.0
+    STYLE_STROKE_MIN = 0.0
+    STYLE_STROKE_MAX = 1.0
+    STYLE_LETTER_SPACING_MIN = 0.5
+    STYLE_LETTER_SPACING_MAX = 2.5
+    STYLE_LINE_SPACING_MIN = 0.5
+    STYLE_LINE_SPACING_MAX = 2.5
     PROJECT_GLOSSARY_VERSION = 1
     PROJECT_GLOSSARY_CATEGORIES = {
         "人名",
@@ -2026,6 +2034,7 @@ class TranslatorEngine:
         for region in regions:
             region_key = str(getattr(region, "translation_region_key", "") or "")
             region.disabled_region = bool(disabled_overrides.get(region_key))
+            region.line_spacing_override_active = False
 
             layout_override = layout_overrides.get(region_key) or {}
             bbox = layout_override.get("bbox")
@@ -2038,6 +2047,31 @@ class TranslatorEngine:
                     region.font_size = max(8, int(round(float(font_size))))
                 except (TypeError, ValueError):
                     pass
+
+            rotation = self._normalize_rotation_degrees(layout_override.get("rotation", layout_override.get("angle")))
+            if rotation is not None:
+                region.angle = rotation
+                self._invalidate_region_geometry_cache(region)
+
+            stroke_width = self._normalize_stroke_strength(layout_override.get("stroke_width"))
+            if stroke_width is not None:
+                region.default_stroke_width = stroke_width
+
+            letter_spacing = self._normalize_letter_spacing(layout_override.get("letter_spacing"))
+            if letter_spacing is not None:
+                region.letter_spacing = letter_spacing
+
+            line_spacing = self._normalize_line_spacing(layout_override.get("line_spacing"))
+            if line_spacing is not None:
+                region.line_spacing = line_spacing
+                region.line_spacing_override_active = True
+
+            if "fg_color" in layout_override:
+                region.fg_colors = np.array(self._rgb_color_payload(layout_override.get("fg_color"), (0, 0, 0)))
+
+            if "bg_color" in layout_override:
+                region.bg_colors = np.array(self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255)))
+                region.adjust_bg_color = False
 
             self._assign_region_direction(
                 region,
@@ -2113,7 +2147,8 @@ class TranslatorEngine:
                 "alignment": str(getattr(region, "_alignment", getattr(region, "alignment", "auto")) or "auto"),
                 "fg_color": self._rgb_color_payload(getattr(region, "fg_colors", None), (0, 0, 0)),
                 "bg_color": self._rgb_color_payload(getattr(region, "bg_colors", None), (255, 255, 255)),
-                "stroke_width": float(getattr(region, "default_stroke_width", 0.2) or 0.2),
+                "stroke_width": float(getattr(region, "default_stroke_width", 0.2) if getattr(region, "default_stroke_width", None) is not None else 0.2),
+                "rotation": float(getattr(region, "angle", 0.0) or 0.0),
             },
             "flags": {
                 "disabled": bool(getattr(region, "disabled_region", False)),
@@ -2594,6 +2629,20 @@ class TranslatorEngine:
                 except (TypeError, ValueError):
                     pass
 
+            stroke_width = self._normalize_stroke_strength(layout_override.get("stroke_width"))
+            if stroke_width is not None:
+                style_payload["stroke_width"] = stroke_width
+
+            rotation = self._normalize_rotation_degrees(layout_override.get("rotation", layout_override.get("angle")))
+            if rotation is not None:
+                style_payload["rotation"] = rotation
+
+            if "fg_color" in layout_override:
+                style_payload["fg_color"] = self._rgb_color_payload(layout_override.get("fg_color"), (0, 0, 0))
+
+            if "bg_color" in layout_override:
+                style_payload["bg_color"] = self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255))
+
         return normalized
 
     def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
@@ -2821,7 +2870,8 @@ class TranslatorEngine:
                     "line_spacing": float(style.get("line_spacing") or 1.0),
                     "fg_color": self._rgb_color_payload(style.get("fg_color"), (0, 0, 0)),
                     "bg_color": self._rgb_color_payload(style.get("bg_color"), (255, 255, 255)),
-                    "stroke_width": float(style.get("stroke_width") or 0.2),
+                    "stroke_width": float(style.get("stroke_width") if style.get("stroke_width") is not None else 0.2),
+                    "rotation": float(style.get("rotation") if style.get("rotation") is not None else style.get("angle") or 0.0),
                 }
             )
 
@@ -2870,7 +2920,8 @@ class TranslatorEngine:
                     "line_spacing": float(style.get("line_spacing") or 1.0),
                     "fg_color": self._rgb_color_payload(style.get("fg_color"), (0, 0, 0)),
                     "bg_color": self._rgb_color_payload(style.get("bg_color"), (255, 255, 255)),
-                    "stroke_width": float(style.get("stroke_width") or 0.2),
+                    "stroke_width": float(style.get("stroke_width") if style.get("stroke_width") is not None else 0.2),
+                    "rotation": float(style.get("rotation") if style.get("rotation") is not None else style.get("angle") or 0.0),
                 }
             )
 
@@ -2957,6 +3008,42 @@ class TranslatorEngine:
             current["font_key"] = normalized_font_key
         else:
             current.pop("font_key", None)
+        if current:
+            overrides[region_id] = current
+        else:
+            overrides.pop(region_id, None)
+        session["translation_region_layout_overrides"] = overrides
+
+    def _set_region_advanced_style_override(self, session: dict[str, Any], region_id: str, patch: dict[str, Any]) -> None:
+        overrides = dict(session.get("translation_region_layout_overrides") or {})
+        current = dict(overrides.get(region_id) or {})
+
+        if "rotation" in patch or "angle" in patch:
+            rotation = self._normalize_rotation_degrees(patch.get("rotation", patch.get("angle")))
+            if rotation is not None:
+                current["rotation"] = rotation
+
+        if "stroke_width" in patch or "stroke" in patch:
+            stroke_width = self._normalize_stroke_strength(patch.get("stroke_width", patch.get("stroke")))
+            if stroke_width is not None:
+                current["stroke_width"] = stroke_width
+
+        if "letter_spacing" in patch:
+            letter_spacing = self._normalize_letter_spacing(patch.get("letter_spacing"))
+            if letter_spacing is not None:
+                current["letter_spacing"] = letter_spacing
+
+        if "line_spacing" in patch:
+            line_spacing = self._normalize_line_spacing(patch.get("line_spacing"))
+            if line_spacing is not None:
+                current["line_spacing"] = line_spacing
+
+        if "fg_color" in patch or "font_color" in patch:
+            current["fg_color"] = self._rgb_color_payload(patch.get("fg_color", patch.get("font_color")), (0, 0, 0))
+
+        if "bg_color" in patch or "stroke_color" in patch:
+            current["bg_color"] = self._rgb_color_payload(patch.get("bg_color", patch.get("stroke_color")), (255, 255, 255))
+
         if current:
             overrides[region_id] = current
         else:
@@ -3099,6 +3186,13 @@ class TranslatorEngine:
                 self._set_region_font_key_override(session, region_id, str(command.get("font_key") or command.get("font") or ""))
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("font_family_updated")
+                continue
+
+            if command_type == "update_region_style":
+                region_id = require_existing_region_id(command)
+                self._set_region_advanced_style_override(session, region_id, command)
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("advanced_style_updated")
                 continue
 
             if command_type == "update_font_style":
@@ -4045,6 +4139,28 @@ class TranslatorEngine:
             )
             if direction != "auto":
                 entry["direction"] = direction
+
+            rotation = self._normalize_rotation_degrees(value.get("rotation", value.get("angle")))
+            if rotation is not None:
+                entry["rotation"] = rotation
+
+            stroke_width = self._normalize_stroke_strength(value.get("stroke_width", value.get("stroke")))
+            if stroke_width is not None:
+                entry["stroke_width"] = stroke_width
+
+            letter_spacing = self._normalize_letter_spacing(value.get("letter_spacing"))
+            if letter_spacing is not None:
+                entry["letter_spacing"] = letter_spacing
+
+            line_spacing = self._normalize_line_spacing(value.get("line_spacing"))
+            if line_spacing is not None:
+                entry["line_spacing"] = line_spacing
+
+            if "fg_color" in value or "font_color" in value:
+                entry["fg_color"] = self._rgb_color_payload(value.get("fg_color", value.get("font_color")), (0, 0, 0))
+
+            if "bg_color" in value or "stroke_color" in value:
+                entry["bg_color"] = self._rgb_color_payload(value.get("bg_color", value.get("stroke_color")), (255, 255, 255))
 
             if entry:
                 normalized[key] = entry
@@ -5284,6 +5400,19 @@ class TranslatorEngine:
         compatible = self._to_json_compatible(value)
         if compatible is None:
             compatible = fallback
+        if isinstance(compatible, str):
+            hex_value = compatible.strip().lstrip("#")
+            if len(hex_value) == 3:
+                hex_value = "".join(char * 2 for char in hex_value)
+            if len(hex_value) == 6:
+                try:
+                    compatible = [
+                        int(hex_value[0:2], 16),
+                        int(hex_value[2:4], 16),
+                        int(hex_value[4:6], 16),
+                    ]
+                except ValueError:
+                    compatible = fallback
         if isinstance(compatible, np.ndarray):
             compatible = compatible.tolist()
         if not isinstance(compatible, (list, tuple)) or len(compatible) < 3:
@@ -5299,6 +5428,56 @@ class TranslatorEngine:
         while len(channel_values) < 3:
             channel_values.append(0)
         return channel_values
+
+    def _normalize_float_range(
+        self,
+        raw_value: Any,
+        minimum: float,
+        maximum: float,
+        *,
+        digits: int = 3,
+    ) -> float | None:
+        if raw_value is None:
+            return None
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(value):
+            return None
+        return round(float(np.clip(value, minimum, maximum)), digits)
+
+    def _normalize_rotation_degrees(self, raw_value: Any) -> float | None:
+        return self._normalize_float_range(
+            raw_value,
+            self.STYLE_ROTATION_MIN,
+            self.STYLE_ROTATION_MAX,
+            digits=2,
+        )
+
+    def _normalize_stroke_strength(self, raw_value: Any) -> float | None:
+        return self._normalize_float_range(
+            raw_value,
+            self.STYLE_STROKE_MIN,
+            self.STYLE_STROKE_MAX,
+            digits=3,
+        )
+
+    def _normalize_letter_spacing(self, raw_value: Any) -> float | None:
+        return self._normalize_float_range(
+            raw_value,
+            self.STYLE_LETTER_SPACING_MIN,
+            self.STYLE_LETTER_SPACING_MAX,
+            digits=3,
+        )
+
+    def _normalize_line_spacing(self, raw_value: Any) -> float | None:
+        return self._normalize_float_range(
+            raw_value,
+            self.STYLE_LINE_SPACING_MIN,
+            self.STYLE_LINE_SPACING_MAX,
+            digits=3,
+        )
 
     def _save_cached_regions(self, page_cache_dir: Path, regions: list[Any]) -> None:
         serialized_regions: list[dict[str, Any]] = []
@@ -5417,8 +5596,12 @@ class TranslatorEngine:
             "direction": resolved_direction,
             "alignment": "auto",
             "font_size": max(resolved_font_size, 8),
+            "angle": 0.0,
+            "letter_spacing": 1.0,
+            "line_spacing": 1.0,
             "fg_color": [int(v) for v in (fg_color or (0, 0, 0))],
             "bg_color": [int(v) for v in (bg_color or (255, 255, 255))],
+            "stroke_width": 0.2,
             "target_lang": target_lang,
             "manual": True,
             "created_at": time.time(),
@@ -5453,6 +5636,7 @@ class TranslatorEngine:
             italic=payload.get("italic", False),
             direction=direction,
             alignment=payload.get("alignment", "auto"),
+            default_stroke_width=payload.get("stroke_width", payload.get("default_stroke_width", 0.2)),
             source_lang=payload.get("source_lang", ""),
             target_lang=payload.get("target_lang", ""),
             prob=payload.get("prob", 1.0),
@@ -5507,8 +5691,12 @@ class TranslatorEngine:
         )
         normalized["alignment"] = str(payload.get("alignment") or "auto")
         normalized["font_size"] = max(8, int(round(float(payload.get("font_size") or 14))))
+        normalized["angle"] = self._normalize_rotation_degrees(payload.get("angle", payload.get("rotation"))) or 0.0
+        normalized["letter_spacing"] = self._normalize_letter_spacing(payload.get("letter_spacing")) or 1.0
+        normalized["line_spacing"] = self._normalize_line_spacing(payload.get("line_spacing")) or 1.0
         normalized["fg_color"] = [int(v) for v in (payload.get("fg_color") or (0, 0, 0))]
         normalized["bg_color"] = [int(v) for v in (payload.get("bg_color") or (255, 255, 255))]
+        normalized["stroke_width"] = self._normalize_stroke_strength(payload.get("stroke_width")) if payload.get("stroke_width") is not None else 0.2
         normalized["target_lang"] = str(payload.get("target_lang") or "")
         normalized["manual"] = True
         normalized["created_at"] = float(payload.get("created_at") or time.time())
@@ -6345,6 +6533,7 @@ class TranslatorEngine:
             layout_override = layout_overrides.get(region_key) or {}
             region.font_size_override_active = False
             region.direction_override_active = False
+            region.line_spacing_override_active = False
             bbox = layout_override.get("bbox")
             if isinstance(bbox, list) and len(bbox) == 4:
                 self._set_region_bbox(region, bbox)
@@ -6356,6 +6545,31 @@ class TranslatorEngine:
                     region.font_size_override_active = True
                 except (TypeError, ValueError):
                     pass
+
+            rotation = self._normalize_rotation_degrees(layout_override.get("rotation", layout_override.get("angle")))
+            if rotation is not None:
+                region.angle = rotation
+                self._invalidate_region_geometry_cache(region)
+
+            stroke_width = self._normalize_stroke_strength(layout_override.get("stroke_width"))
+            if stroke_width is not None:
+                region.default_stroke_width = stroke_width
+
+            letter_spacing = self._normalize_letter_spacing(layout_override.get("letter_spacing"))
+            if letter_spacing is not None:
+                region.letter_spacing = letter_spacing
+
+            line_spacing = self._normalize_line_spacing(layout_override.get("line_spacing"))
+            if line_spacing is not None:
+                region.line_spacing = line_spacing
+                region.line_spacing_override_active = True
+
+            if "fg_color" in layout_override:
+                region.fg_colors = np.array(self._rgb_color_payload(layout_override.get("fg_color"), (0, 0, 0)))
+
+            if "bg_color" in layout_override:
+                region.bg_colors = np.array(self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255)))
+                region.adjust_bg_color = False
 
             resolved_direction = self._resolve_region_direction(
                 self._region_bbox(region),

@@ -226,6 +226,8 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
     _activate_region_font(region, default_font_path)
     inner_width, inner_height, _ = _inner_text_box_size(box_width, box_height, font_size)
     alignment = _render_alignment_for_direction(region, direction)
+    stroke_width = _stroke_width_strength(region)
+    candidate_line_spacing = _region_line_spacing(region, line_spacing)
 
     fg = (0, 0, 0)
     # Always reserve border room during layout measurement so the final render
@@ -244,8 +246,9 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
             bg,
             region.target_lang,
             hyphenate,
-            line_spacing,
+            candidate_line_spacing,
             getattr(region, 'letter_spacing', 1.0),
+            stroke_width,
         )
 
     return text_render.put_text_vertical(
@@ -255,8 +258,9 @@ def _render_candidate_box(region: TextBlock, direction: str, font_size: int, box
         alignment,
         fg,
         bg,
-        line_spacing,
+        candidate_line_spacing,
         getattr(region, 'letter_spacing', 1.0),
+        stroke_width,
     )
 
 
@@ -331,6 +335,24 @@ def _inner_text_box_size(target_width: int, target_height: int, font_size: int) 
     inner_width = max(1, int(target_width) - padding * 2)
     inner_height = max(1, int(target_height) - padding * 2)
     return inner_width, inner_height, padding
+
+
+def _stroke_width_strength(region: TextBlock) -> float:
+    try:
+        stroke_width = float(getattr(region, 'stroke_width', getattr(region, 'default_stroke_width', 0.2)) or 0.0)
+    except (TypeError, ValueError):
+        stroke_width = 0.2
+    return max(0.0, min(1.0, stroke_width))
+
+
+def _region_line_spacing(region: TextBlock, fallback_line_spacing: int | float | None) -> int | float | None:
+    if not getattr(region, 'line_spacing_override_active', False):
+        return fallback_line_spacing
+    try:
+        line_spacing = float(getattr(region, 'line_spacing', 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return fallback_line_spacing
+    return max(0.0, line_spacing - 1.0)
 
 
 def _alignment_offset(alignment: str, available_space: int) -> int:
@@ -631,6 +653,8 @@ def render(
     target_width = max(int(round(norm_h[0])), 1)
     target_height = max(int(round(norm_v[0])), 1)
     inner_width, inner_height, text_padding = _inner_text_box_size(target_width, target_height, region.font_size)
+    stroke_width = _stroke_width_strength(region)
+    region_line_spacing = _region_line_spacing(region, line_spacing)
 
     if render_horizontally:
         temp_box = text_render.put_text_horizontal(
@@ -644,8 +668,9 @@ def render(
             bg,
             region.target_lang,
             hyphenate,
-            line_spacing,
+            region_line_spacing,
             getattr(region, 'letter_spacing', 1.0),
+            stroke_width,
         )
     else:
         temp_box = text_render.put_text_vertical(
@@ -655,8 +680,9 @@ def render(
             render_alignment,
             fg,
             bg,
-            line_spacing,
+            region_line_spacing,
             getattr(region, 'letter_spacing', 1.0),
+            stroke_width,
         )
     box = _compose_render_canvas(
         temp_box,

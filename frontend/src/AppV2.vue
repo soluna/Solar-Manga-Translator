@@ -87,6 +87,9 @@ const canvasZoomMax = 6
 const maxCanvasHistoryEntries = 50
 const renderFontSizeOffset = -6
 const renderTextPaddingRatio = 0.12
+const defaultStrokeStrength = 0.2
+const styleColorSwatches = ['#000000', '#ffffff', '#152234', '#ef4444', '#f59e0b', '#2563eb']
+const strokeStrengthOptions = [0, 0.1, 0.2, 0.35, 0.5, 0.75, 1]
 const reviewComparePaneOptions = [
   { key: 'final', label: '嵌后', shortLabel: '嵌后' },
   { key: 'source', label: '原图', shortLabel: '原图' },
@@ -618,6 +621,7 @@ const manualDrawDraft = ref(null)
 const canvasTransformState = ref(null)
 const canvasRegionSelection = ref({})
 const canvasMarqueeState = ref(null)
+const advancedStylePopover = ref({ pageId: '', regionId: '' })
 const mergeMode = ref(false)
 const mergeRegionSelection = ref({})
 const selectedEditPageKey = ref('')
@@ -3573,6 +3577,58 @@ function colorTripletToCss(value, fallback = '#152234') {
   return `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})`
 }
 
+function clampNumber(value, min, max, fallback = min) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+  return Math.min(max, Math.max(min, parsed))
+}
+
+function normalizeHexColor(value, fallback = '#000000') {
+  let normalized = String(value || '').trim()
+  if (!normalized) {
+    return fallback
+  }
+  if (!normalized.startsWith('#')) {
+    normalized = `#${normalized}`
+  }
+  if (/^#[0-9a-fA-F]{3}$/.test(normalized)) {
+    normalized = `#${normalized.slice(1).split('').map((char) => char + char).join('')}`
+  }
+  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) {
+    return fallback
+  }
+  return normalized.toLowerCase()
+}
+
+function colorTripletToHex(value, fallback = '#000000') {
+  if (!Array.isArray(value) || value.length < 3) {
+    return fallback
+  }
+  const channels = value.slice(0, 3).map((channel) => {
+    const parsed = Number(channel)
+    const normalized = Number.isFinite(parsed) ? Math.max(0, Math.min(255, Math.round(parsed))) : 0
+    return normalized.toString(16).padStart(2, '0')
+  })
+  return `#${channels.join('')}`
+}
+
+function hexToColorTriplet(value, fallback = [0, 0, 0]) {
+  if (Array.isArray(value) && value.length >= 3) {
+    return value.slice(0, 3).map((channel) => {
+      const parsed = Number(channel)
+      return Number.isFinite(parsed) ? Math.max(0, Math.min(255, Math.round(parsed))) : 0
+    })
+  }
+  const normalized = normalizeHexColor(value, colorTripletToHex(fallback))
+  return [
+    Number.parseInt(normalized.slice(1, 3), 16),
+    Number.parseInt(normalized.slice(3, 5), 16),
+    Number.parseInt(normalized.slice(5, 7), 16)
+  ]
+}
+
 function getRegionFontSize(region) {
   if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
     return fontSizeInputDrafts.value[region.id]
@@ -3582,6 +3638,58 @@ function getRegionFontSize(region) {
     return override.font_size
   }
   return Number(region.font_size || 12)
+}
+
+function getRegionLayoutOverride(region) {
+  return translationRegionLayoutOverrides.value[region?.id] || {}
+}
+
+function getRegionRotation(region) {
+  const override = getRegionLayoutOverride(region)
+  const rawValue = Object.prototype.hasOwnProperty.call(override, 'rotation')
+    ? override.rotation
+    : region?.rotation
+  return Math.round(clampNumber(rawValue, -180, 180, 0) * 100) / 100
+}
+
+function getRegionStrokeStrength(region) {
+  const override = getRegionLayoutOverride(region)
+  const rawValue = Object.prototype.hasOwnProperty.call(override, 'stroke_width')
+    ? override.stroke_width
+    : region?.stroke_width
+  return Math.round(clampNumber(rawValue, 0, 1, defaultStrokeStrength) * 1000) / 1000
+}
+
+function getRegionLetterSpacing(region) {
+  const override = getRegionLayoutOverride(region)
+  const rawValue = Object.prototype.hasOwnProperty.call(override, 'letter_spacing')
+    ? override.letter_spacing
+    : region?.letter_spacing
+  return Math.round(clampNumber(rawValue, 0.5, 2.5, 1) * 1000) / 1000
+}
+
+function getRegionLineSpacing(region) {
+  const override = getRegionLayoutOverride(region)
+  const rawValue = Object.prototype.hasOwnProperty.call(override, 'line_spacing')
+    ? override.line_spacing
+    : region?.line_spacing
+  return Math.round(clampNumber(rawValue, 0.5, 2.5, 1.08) * 1000) / 1000
+}
+
+function getRegionTextColorHex(region) {
+  const override = getRegionLayoutOverride(region)
+  return colorTripletToHex(
+    Object.prototype.hasOwnProperty.call(override, 'fg_color') ? override.fg_color : region?.fg_color,
+    '#152234'
+  )
+}
+
+function getRegionStrokeColorHex(region) {
+  const override = getRegionLayoutOverride(region)
+  return colorTripletToHex(
+    Object.prototype.hasOwnProperty.call(override, 'bg_color') ? override.bg_color : region?.bg_color,
+    '#ffffff'
+  )
 }
 
 function hasRegionExplicitFontSize(region) {
@@ -3990,11 +4098,37 @@ function getStyleRegionBoxStyle(region, page) {
   const top = Math.max(0, (y1 / height) * 100)
   const boxWidth = Math.max(0.6, ((x2 - x1) / width) * 100)
   const boxHeight = Math.max(1, ((y2 - y1) / height) * 100)
+  const rotation = getRegionRotation(region)
   return {
     left: `${left}%`,
     top: `${top}%`,
     width: `${boxWidth}%`,
-    height: `${boxHeight}%`
+    height: `${boxHeight}%`,
+    '--region-rotation': `${rotation}deg`,
+    transform: rotation ? `rotate(${rotation}deg)` : 'none',
+    transformOrigin: 'center center'
+  }
+}
+
+function getAdvancedStylePopoverStyle(region, page) {
+  const [, y1, x2] = getEffectiveRegionBBox(region)
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  const left = Math.min(76, Math.max(2, (x2 / width) * 100 + 1))
+  const top = Math.min(76, Math.max(2, (y1 / height) * 100))
+  return {
+    left: `${left}%`,
+    top: `${top}%`
+  }
+}
+
+function getStyleRegionSettingsButtonStyle(region, page) {
+  const [, y1, x2] = getEffectiveRegionBBox(region)
+  const width = Math.max(page?.image_width || 1, 1)
+  const height = Math.max(page?.image_height || 1, 1)
+  return {
+    left: `${Math.max(0, Math.min(100, (x2 / width) * 100))}%`,
+    top: `${Math.max(0, Math.min(100, (y1 / height) * 100))}%`
   }
 }
 
@@ -4868,6 +5002,7 @@ async function selectEditPageForReview(pageKey) {
   }
   canvasRegionSelection.value = {}
   canvasMarqueeState.value = null
+  closeAdvancedStylePopover()
   selectedEditPageKey.value = normalizedPageKey
 }
 
@@ -4935,20 +5070,22 @@ function getSourceCropImageStyle(region, page) {
 function getCanvasPreviewTextStyle(region) {
   const rawFontSize = getCanvasPreviewRenderFontSize(region)
   const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
-  const spacingMultiplier = Math.max(0.85, Math.min(1.35, Number(region?.letter_spacing || config.value.render_letter_spacing || 1.08)))
-  const normalizedLineSpacing = Number(region?.line_spacing || 1.08)
+  const spacingMultiplier = getRegionLetterSpacing(region)
+  const normalizedLineSpacing = getRegionLineSpacing(region)
   const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize)
-  const lineHeight = isVerticalRegion(region)
-    ? 1.2
-    : Math.max(0.92, Math.min(1.6, normalizedLineSpacing || 1.08))
+  const lineHeight = Math.max(0.5, Math.min(2.5, normalizedLineSpacing || 1.08))
   const resolvedAlignment = getResolvedRegionAlignment(region)
-  const fgColor = colorTripletToCss(region?.fg_color, '#152234')
+  const fgColor = getRegionTextColorHex(region)
+  const strokeColor = getRegionStrokeColorHex(region)
+  const strokeWidth = Math.max(0, scaledFontSize * getRegionStrokeStrength(region) * 0.35)
   return {
     fontFamily: getRegionPreviewFontFamily(region),
     fontSize: `${scaledFontSize}px`,
     letterSpacing: `${letterSpacing.toFixed(2)}px`,
     lineHeight: String(lineHeight),
     color: fgColor,
+    WebkitTextStroke: strokeWidth > 0 ? `${strokeWidth.toFixed(2)}px ${strokeColor}` : '0 transparent',
+    paintOrder: 'stroke fill',
     fontSynthesis: 'none',
     writingMode: isVerticalRegion(region) ? 'vertical-rl' : 'horizontal-tb',
     textOrientation: isVerticalRegion(region) ? 'mixed' : 'initial',
@@ -5947,6 +6084,24 @@ function updateRegionLayoutOverride(regionId, patch) {
       currentOverride.font_key = normalizedFontKey
     }
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'rotation')) {
+    currentOverride.rotation = Math.round(clampNumber(patch.rotation, -180, 180, 0) * 100) / 100
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'stroke_width')) {
+    currentOverride.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, 1, defaultStrokeStrength) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'letter_spacing')) {
+    currentOverride.letter_spacing = Math.round(clampNumber(patch.letter_spacing, 0.5, 2.5, 1) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'line_spacing')) {
+    currentOverride.line_spacing = Math.round(clampNumber(patch.line_spacing, 0.5, 2.5, 1.08) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'fg_color')) {
+    currentOverride.fg_color = hexToColorTriplet(patch.fg_color, [21, 34, 52])
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'bg_color')) {
+    currentOverride.bg_color = hexToColorTriplet(patch.bg_color, [255, 255, 255])
+  }
   if (!Object.keys(currentOverride).length) {
     delete nextOverrides[regionId]
   } else {
@@ -6544,6 +6699,114 @@ function updateRegionFontSize(region, nextValue) {
   }
   updateRegionLayoutOverride(region.id, { font_size: parsed })
   selectedEditRegionKey.value = region.id
+}
+
+function isAdvancedStylePopoverOpen(region, page) {
+  return Boolean(
+    region?.id
+    && page?.stored_name
+    && advancedStylePopover.value.regionId === region.id
+    && advancedStylePopover.value.pageId === page.stored_name
+  )
+}
+
+function toggleAdvancedStylePopover(region, page) {
+  if (!region?.id || !page?.stored_name) {
+    return
+  }
+  selectedEditRegionKey.value = region.id
+  if (isAdvancedStylePopoverOpen(region, page)) {
+    advancedStylePopover.value = { pageId: '', regionId: '' }
+    return
+  }
+  advancedStylePopover.value = { pageId: page.stored_name, regionId: region.id }
+}
+
+function closeAdvancedStylePopover() {
+  advancedStylePopover.value = { pageId: '', regionId: '' }
+}
+
+function getRegionAdvancedStyleSnapshot(region) {
+  return {
+    rotation: getRegionRotation(region),
+    stroke_width: getRegionStrokeStrength(region),
+    letter_spacing: getRegionLetterSpacing(region),
+    line_spacing: getRegionLineSpacing(region),
+    fg_color: hexToColorTriplet(getRegionTextColorHex(region), [21, 34, 52]),
+    bg_color: hexToColorTriplet(getRegionStrokeColorHex(region), [255, 255, 255])
+  }
+}
+
+function normalizeAdvancedStylePatch(patch) {
+  const normalized = {}
+  if (Object.prototype.hasOwnProperty.call(patch, 'rotation')) {
+    normalized.rotation = Math.round(clampNumber(patch.rotation, -180, 180, 0) * 100) / 100
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'stroke_width')) {
+    normalized.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, 1, defaultStrokeStrength) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'letter_spacing')) {
+    normalized.letter_spacing = Math.round(clampNumber(patch.letter_spacing, 0.5, 2.5, 1) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'line_spacing')) {
+    normalized.line_spacing = Math.round(clampNumber(patch.line_spacing, 0.5, 2.5, 1.08) * 1000) / 1000
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'fg_color')) {
+    normalized.fg_color = hexToColorTriplet(patch.fg_color, [21, 34, 52])
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'bg_color')) {
+    normalized.bg_color = hexToColorTriplet(patch.bg_color, [255, 255, 255])
+  }
+  return normalized
+}
+
+function updateRegionAdvancedStyle(region, patch, label = '修改样式') {
+  const page = selectedEditPage.value
+  const normalizedPatch = normalizeAdvancedStylePatch(patch)
+  if (!region?.id || !Object.keys(normalizedPatch).length) {
+    return
+  }
+  const previousSnapshot = getRegionAdvancedStyleSnapshot(region)
+  const undoPatch = Object.fromEntries(
+    Object.keys(normalizedPatch).map((key) => [key, previousSnapshot[key]])
+  )
+  const sameValue = Object.entries(normalizedPatch).every(([key, value]) => {
+    const previousValue = previousSnapshot[key]
+    return JSON.stringify(value) === JSON.stringify(previousValue)
+  })
+  if (sameValue) {
+    return
+  }
+
+  updateRegionLayoutOverride(region.id, normalizedPatch)
+  selectedEditRegionKey.value = region.id
+
+  if (!isCanvasReviewMode.value || !page) {
+    return
+  }
+
+  void runCanvasCommand(page, {
+    label,
+    redoCommands: [
+      {
+        type: 'update_region_style',
+        region_id: region.id,
+        ...normalizedPatch
+      }
+    ],
+    undoCommands: [
+      {
+        type: 'update_region_style',
+        region_id: region.id,
+        ...undoPatch
+      }
+    ],
+    successMessage: '已更新文本框样式。',
+    focusRegionId: region.id,
+    rollback: () => {
+      updateRegionLayoutOverride(region.id, undoPatch)
+    }
+  })
 }
 
 function updateRegionFontOverride(region, nextFontId) {
@@ -8845,58 +9108,201 @@ watch(
                     </div>
 
                     <template v-if="isReviewFramePane(pane.key) && selectedEditPage">
-                      <button
+                      <template
                         v-for="region in selectedEditPage.regions"
-                        :key="`main-${region.id}`"
-                        type="button"
-                        :class="[
-                          'style-box',
-                          isManualRegion(region) ? 'manual' : '',
-                          mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
-                          isRegionSelectedOnCanvas(region) ? 'multi-selected' : '',
-                          selectedEditRegionKey === region.id ? 'active' : '',
-                          canDirectManipulateCanvas ? 'canvas-editable' : '',
-                          getStyleRegionLabelClass(region, selectedEditPage)
-                        ]"
-                        :style="getStyleRegionBoxStyle(region, selectedEditPage)"
-                        @click="handleCanvasRegionClick($event, region)"
-                        @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
+                        :key="`main-shell-${region.id}`"
                       >
-                        <span class="style-box-label">{{ region.index + 1 }}</span>
-                        <span
-                          v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
-                          class="style-box-source-crop"
+                        <button
+                          type="button"
+                          :class="[
+                            'style-box',
+                            isManualRegion(region) ? 'manual' : '',
+                            mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
+                            isRegionSelectedOnCanvas(region) ? 'multi-selected' : '',
+                            selectedEditRegionKey === region.id ? 'active' : '',
+                            canDirectManipulateCanvas ? 'canvas-editable' : '',
+                            getStyleRegionLabelClass(region, selectedEditPage)
+                          ]"
+                          :style="getStyleRegionBoxStyle(region, selectedEditPage)"
+                          @click="handleCanvasRegionClick($event, region)"
+                          @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'move')"
                         >
-                          <img
-                            :src="getReviewPageImageUrl(selectedEditPage.source_image_url || selectedEditPage.image_url, selectedEditPage.stored_name)"
-                            :style="getSourceCropImageStyle(region, selectedEditPage)"
-                            alt=""
-                          />
-                        </span>
-                        <span
-                          v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
-                          class="style-box-preview-text"
-                          :class="{ vertical: isVerticalRegion(region) }"
-                          :style="getCanvasPreviewTextContainerStyle(region)"
-                        >
+                          <span class="style-box-label">{{ region.index + 1 }}</span>
                           <span
-                            class="style-box-preview-text-content"
-                            :class="{ vertical: isVerticalRegion(region) }"
-                            :data-region-id="region.id"
-                            :style="getCanvasPreviewTextStyle(region)"
+                            v-if="shouldShowSourceCropPreview(region, selectedEditPage)"
+                            class="style-box-source-crop"
                           >
-                            {{ getCanvasPreviewText(region) }}
+                            <img
+                              :src="getReviewPageImageUrl(selectedEditPage.source_image_url || selectedEditPage.image_url, selectedEditPage.stored_name)"
+                              :style="getSourceCropImageStyle(region, selectedEditPage)"
+                              alt=""
+                            />
                           </span>
-                        </span>
-                        <span
-                          v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
-                          v-for="handle in canvasHandleOptions"
-                          :key="`main-${region.id}-${handle}`"
-                          :class="['style-box-handle', `handle-${handle}`]"
-                          :style="{ cursor: getCanvasHandleCursor(handle) }"
-                          @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
-                        ></span>
-                      </button>
+                          <span
+                            v-else-if="shouldShowCanvasTextOverlay(region, selectedEditPage)"
+                            class="style-box-preview-text"
+                            :class="{ vertical: isVerticalRegion(region) }"
+                            :style="getCanvasPreviewTextContainerStyle(region)"
+                          >
+                            <span
+                              class="style-box-preview-text-content"
+                              :class="{ vertical: isVerticalRegion(region) }"
+                              :data-region-id="region.id"
+                              :style="getCanvasPreviewTextStyle(region)"
+                            >
+                              {{ getCanvasPreviewText(region) }}
+                            </span>
+                          </span>
+                          <span
+                            v-if="canDirectManipulateCanvas && selectedEditRegionKey === region.id"
+                            v-for="handle in canvasHandleOptions"
+                            :key="`main-${region.id}-${handle}`"
+                            :class="['style-box-handle', `handle-${handle}`]"
+                            :style="{ cursor: getCanvasHandleCursor(handle) }"
+                            @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
+                          ></span>
+                        </button>
+                        <button
+                          v-if="canDirectManipulateCanvas"
+                          type="button"
+                          :class="['style-box-settings-button', isAdvancedStylePopoverOpen(region, selectedEditPage) ? 'active' : '']"
+                          :style="getStyleRegionSettingsButtonStyle(region, selectedEditPage)"
+                          :aria-label="`打开第 ${region.index + 1} 个文本框样式设置`"
+                          @pointerdown.stop
+                          @click.stop="toggleAdvancedStylePopover(region, selectedEditPage)"
+                        >
+                          ⚙
+                        </button>
+                        <section
+                          v-if="isAdvancedStylePopoverOpen(region, selectedEditPage)"
+                          class="style-advanced-popover"
+                          :style="getAdvancedStylePopoverStyle(region, selectedEditPage)"
+                          @pointerdown.stop
+                          @click.stop
+                        >
+                          <header class="style-advanced-popover-head">
+                            <strong>#{{ region.index + 1 }} 样式</strong>
+                            <button type="button" class="v2-icon-button" aria-label="关闭样式设置" @click="closeAdvancedStylePopover">✕</button>
+                          </header>
+
+                          <div class="style-advanced-grid">
+                            <label class="v2-field">
+                              <span>旋转</span>
+                              <input
+                                :value="getRegionRotation(region)"
+                                type="number"
+                                min="-180"
+                                max="180"
+                                step="1"
+                                @change="updateRegionAdvancedStyle(region, { rotation: $event.target.value }, '调整旋转')"
+                              />
+                            </label>
+                            <label class="v2-field">
+                              <span>描边</span>
+                              <input
+                                :value="getRegionStrokeStrength(region)"
+                                type="number"
+                                min="0"
+                                max="1"
+                                step="0.05"
+                                @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
+                              />
+                            </label>
+                            <label class="v2-field">
+                              <span>字距</span>
+                              <input
+                                :value="getRegionLetterSpacing(region)"
+                                type="number"
+                                min="0.5"
+                                max="2.5"
+                                step="0.05"
+                                @change="updateRegionAdvancedStyle(region, { letter_spacing: $event.target.value }, '调整字距')"
+                              />
+                            </label>
+                            <label class="v2-field">
+                              <span>行距</span>
+                              <input
+                                :value="getRegionLineSpacing(region)"
+                                type="number"
+                                min="0.5"
+                                max="2.5"
+                                step="0.05"
+                                @change="updateRegionAdvancedStyle(region, { line_spacing: $event.target.value }, '调整行距')"
+                              />
+                            </label>
+                          </div>
+
+                          <div class="style-stroke-options" role="group" aria-label="描边强度">
+                            <button
+                              v-for="option in strokeStrengthOptions"
+                              :key="`stroke-${region.id}-${option}`"
+                              type="button"
+                              :class="['style-chip-button', getRegionStrokeStrength(region) === option ? 'active' : '']"
+                              @click="updateRegionAdvancedStyle(region, { stroke_width: option }, '调整描边')"
+                            >
+                              {{ option }}
+                            </button>
+                          </div>
+
+                          <div class="style-color-editor">
+                            <span>文字色</span>
+                            <div class="style-color-row">
+                              <button
+                                v-for="color in styleColorSwatches"
+                                :key="`fg-${region.id}-${color}`"
+                                type="button"
+                                class="style-color-swatch"
+                                :class="{ active: getRegionTextColorHex(region) === color }"
+                                :style="{ backgroundColor: color }"
+                                :aria-label="`文字色 ${color}`"
+                                @click="updateRegionAdvancedStyle(region, { fg_color: color }, '调整文字色')"
+                              ></button>
+                              <input
+                                :value="getRegionTextColorHex(region)"
+                                type="color"
+                                aria-label="文字色"
+                                @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                              />
+                              <input
+                                :value="getRegionTextColorHex(region)"
+                                type="text"
+                                inputmode="text"
+                                aria-label="文字色 Hex"
+                                @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                              />
+                            </div>
+                          </div>
+
+                          <div class="style-color-editor">
+                            <span>描边色</span>
+                            <div class="style-color-row">
+                              <button
+                                v-for="color in styleColorSwatches"
+                                :key="`bg-${region.id}-${color}`"
+                                type="button"
+                                class="style-color-swatch"
+                                :class="{ active: getRegionStrokeColorHex(region) === color }"
+                                :style="{ backgroundColor: color }"
+                                :aria-label="`描边色 ${color}`"
+                                @click="updateRegionAdvancedStyle(region, { bg_color: color }, '调整描边色')"
+                              ></button>
+                              <input
+                                :value="getRegionStrokeColorHex(region)"
+                                type="color"
+                                aria-label="描边色"
+                                @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整描边色')"
+                              />
+                              <input
+                                :value="getRegionStrokeColorHex(region)"
+                                type="text"
+                                inputmode="text"
+                                aria-label="描边色 Hex"
+                                @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整描边色')"
+                              />
+                            </div>
+                          </div>
+                        </section>
+                      </template>
                       <span
                         v-if="canvasMarqueeState?.pageId === selectedEditPage.stored_name"
                         class="v2-canvas-marquee"
@@ -9040,6 +9446,14 @@ watch(
                   </div>
 
                   <div class="v2-region-card-actions" @click.stop @mousedown.stop>
+                    <button
+                      type="button"
+                      class="v2-icon-button"
+                      :aria-label="`打开第 ${region.index + 1} 个文本框样式设置`"
+                      @click.stop="toggleAdvancedStylePopover(region, selectedEditPage)"
+                    >
+                      ⚙
+                    </button>
                     <span
                       :class="[
                         'v2-region-commit-icon',

@@ -2383,6 +2383,7 @@ class TranslatorEngine:
             if "bg_color" in layout_override:
                 region.bg_colors = np.array(self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255)))
                 region.adjust_bg_color = False
+            self._sanitize_auto_text_background_color(region, layout_override)
 
             self._assign_region_direction(
                 region,
@@ -5740,6 +5741,21 @@ class TranslatorEngine:
             channel_values.append(0)
         return channel_values
 
+    def _sanitize_auto_text_background_color(
+        self,
+        region: Any,
+        layout_override: dict[str, Any] | None = None,
+    ) -> None:
+        layout_override = layout_override or {}
+        if "bg_color" in layout_override or "stroke_color" in layout_override:
+            return
+
+        fg_color = self._rgb_color_payload(getattr(region, "fg_colors", None), (0, 0, 0))
+        bg_color = self._rgb_color_payload(getattr(region, "bg_colors", None), (255, 255, 255))
+        if max(fg_color) <= 88 and max(bg_color) <= 64:
+            region.bg_colors = np.array((255, 255, 255), dtype=np.uint8)
+            region.adjust_bg_color = False
+
     def _normalize_float_range(
         self,
         raw_value: Any,
@@ -6883,6 +6899,7 @@ class TranslatorEngine:
             if "bg_color" in layout_override:
                 region.bg_colors = np.array(self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255)))
                 region.adjust_bg_color = False
+            self._sanitize_auto_text_background_color(region, layout_override)
 
             resolved_direction = self._resolve_region_direction(
                 self._region_bbox(region),

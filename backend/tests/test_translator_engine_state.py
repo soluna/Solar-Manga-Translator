@@ -427,6 +427,24 @@ print(json.dumps({
             self.assertEqual(normalized["region-1"]["fg_color"], [170, 187, 204])
             self.assertEqual(normalized["region-1"]["bg_color"], [18, 52, 86])
 
+    def test_auto_text_background_color_falls_back_from_black_on_black(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            class Region:
+                pass
+
+            region = Region()
+            region.fg_colors = np.array([8, 8, 8], dtype=np.uint8)
+            region.bg_colors = np.array([0, 0, 0], dtype=np.uint8)
+
+            engine._sanitize_auto_text_background_color(region, {})
+            self.assertEqual(engine._rgb_color_payload(region.bg_colors, (0, 0, 0)), [255, 255, 255])
+
+            region.bg_colors = np.array([0, 0, 0], dtype=np.uint8)
+            engine._sanitize_auto_text_background_color(region, {"bg_color": [0, 0, 0]})
+            self.assertEqual(engine._rgb_color_payload(region.bg_colors, (255, 255, 255)), [0, 0, 0])
+
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

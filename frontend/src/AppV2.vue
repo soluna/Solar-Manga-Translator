@@ -4164,14 +4164,40 @@ function getStyleRegionBoxStyle(region, page) {
 }
 
 function getAdvancedStylePopoverStyle(region, page) {
-  const [, y1, x2] = getEffectiveRegionBBox(region)
-  const width = Math.max(page?.image_width || 1, 1)
-  const height = Math.max(page?.image_height || 1, 1)
-  const left = Math.min(76, Math.max(2, (x2 / width) * 100 + 1))
-  const top = Math.min(76, Math.max(2, (y1 / height) * 100))
+  const [x1, y1, x2] = getEffectiveRegionBBox(region)
+  const imageWidth = Math.max(page?.image_width || 1, 1)
+  const imageHeight = Math.max(page?.image_height || 1, 1)
+  const shell = getCanvasShellForPane('main')
+  const stage = shell?.querySelector?.('.v2-canvas-stage') || null
+  const stageRect = stage?.getBoundingClientRect?.()
+  const viewportWidth = Math.max(typeof window !== 'undefined' ? window.innerWidth : 0, 1)
+  const viewportHeight = Math.max(typeof window !== 'undefined' ? window.innerHeight : 0, 1)
+  const popoverWidth = Math.min(340, Math.max(260, viewportWidth - 24))
+  const popoverMaxHeight = Math.max(220, viewportHeight - 24)
+  if (!stageRect) {
+    return {
+      left: '12px',
+      top: '12px',
+      '--popover-max-height': `${popoverMaxHeight}px`
+    }
+  }
+  const anchorRight = stageRect.left + (x2 / imageWidth) * stageRect.width
+  const anchorLeft = stageRect.left + (x1 / imageWidth) * stageRect.width
+  const anchorTop = stageRect.top + (y1 / imageHeight) * stageRect.height
+  let left = anchorRight + 12
+  if (left + popoverWidth > viewportWidth - 12) {
+    left = anchorLeft - popoverWidth - 12
+  }
+  left = Math.min(Math.max(12, left), Math.max(12, viewportWidth - popoverWidth - 12))
+  const top = Math.min(
+    Math.max(12, anchorTop),
+    Math.max(12, viewportHeight - Math.min(popoverMaxHeight, 520) - 12)
+  )
   return {
-    left: `${left}%`,
-    top: `${top}%`
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+    width: `${popoverWidth}px`,
+    '--popover-max-height': `${popoverMaxHeight}px`
   }
 }
 
@@ -9226,135 +9252,151 @@ watch(
                         >
                           ⚙
                         </button>
-                        <section
-                          v-if="isAdvancedStylePopoverOpen(region, selectedEditPage)"
-                          class="style-advanced-popover"
-                          :style="getAdvancedStylePopoverStyle(region, selectedEditPage)"
-                          @pointerdown.stop
-                          @click.stop
-                        >
-                          <header class="style-advanced-popover-head">
-                            <strong>#{{ region.index + 1 }} 样式</strong>
-                            <button type="button" class="v2-icon-button" aria-label="关闭样式设置" @click="closeAdvancedStylePopover">✕</button>
-                          </header>
+                        <Teleport to="body">
+                          <section
+                            v-if="isAdvancedStylePopoverOpen(region, selectedEditPage)"
+                            class="style-advanced-popover"
+                            :style="getAdvancedStylePopoverStyle(region, selectedEditPage)"
+                            @pointerdown.stop
+                            @click.stop
+                          >
+                            <header class="style-advanced-popover-head">
+                              <strong>#{{ region.index + 1 }} 样式</strong>
+                              <button type="button" class="v2-icon-button" aria-label="关闭样式设置" @click="closeAdvancedStylePopover">✕</button>
+                            </header>
 
-                          <div class="style-advanced-grid">
-                            <label class="v2-field">
-                              <span>旋转</span>
-                              <input
-                                :value="getRegionRotation(region)"
-                                type="number"
-                                min="-180"
-                                max="180"
-                                step="1"
-                                @change="updateRegionAdvancedStyle(region, { rotation: $event.target.value }, '调整旋转')"
-                              />
-                            </label>
-                            <label class="v2-field">
-                              <span>描边</span>
-                              <input
-                                :value="getRegionStrokeStrength(region)"
-                                type="number"
-                                min="0"
-                                max="1"
-                                step="0.05"
-                                @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
-                              />
-                            </label>
-                            <label class="v2-field">
-                              <span>字距</span>
-                              <input
-                                :value="getRegionLetterSpacing(region)"
-                                type="number"
-                                min="0.5"
-                                max="2.5"
-                                step="0.05"
-                                @change="updateRegionAdvancedStyle(region, { letter_spacing: $event.target.value }, '调整字距')"
-                              />
-                            </label>
-                            <label class="v2-field">
-                              <span>行距</span>
-                              <input
-                                :value="getRegionLineSpacing(region)"
-                                type="number"
-                                min="0.5"
-                                max="2.5"
-                                step="0.05"
-                                @change="updateRegionAdvancedStyle(region, { line_spacing: $event.target.value }, '调整行距')"
-                              />
-                            </label>
-                          </div>
-
-                          <div class="style-stroke-options" role="group" aria-label="描边强度">
-                            <button
-                              v-for="option in strokeStrengthOptions"
-                              :key="`stroke-${region.id}-${option}`"
-                              type="button"
-                              :class="['style-chip-button', getRegionStrokeStrength(region) === option ? 'active' : '']"
-                              @click="updateRegionAdvancedStyle(region, { stroke_width: option }, '调整描边')"
-                            >
-                              {{ option }}
-                            </button>
-                          </div>
-
-                          <div class="style-color-editor">
-                            <span>文字色</span>
-                            <div class="style-color-row">
-                              <button
-                                v-for="color in styleColorSwatches"
-                                :key="`fg-${region.id}-${color}`"
-                                type="button"
-                                class="style-color-swatch"
-                                :class="{ active: getRegionTextColorHex(region) === color }"
-                                :style="{ backgroundColor: color }"
-                                :aria-label="`文字色 ${color}`"
-                                @click="updateRegionAdvancedStyle(region, { fg_color: color }, '调整文字色')"
-                              ></button>
-                              <input
-                                :value="getRegionTextColorHex(region)"
-                                type="color"
-                                aria-label="文字色"
-                                @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
-                              />
-                              <input
-                                :value="getRegionTextColorHex(region)"
-                                type="text"
-                                inputmode="text"
-                                aria-label="文字色 Hex"
-                                @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
-                              />
+                            <div class="style-advanced-grid">
+                              <label class="v2-field">
+                                <span>旋转</span>
+                                <input
+                                  :value="getRegionRotation(region)"
+                                  type="number"
+                                  min="-180"
+                                  max="180"
+                                  step="1"
+                                  @change="updateRegionAdvancedStyle(region, { rotation: $event.target.value }, '调整旋转')"
+                                />
+                              </label>
+                              <label class="v2-field">
+                                <span>描边</span>
+                                <input
+                                  :value="getRegionStrokeStrength(region)"
+                                  type="number"
+                                  min="0"
+                                  max="1"
+                                  step="0.05"
+                                  @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
+                                />
+                              </label>
+                              <label class="v2-field">
+                                <span>字距</span>
+                                <input
+                                  :value="getRegionLetterSpacing(region)"
+                                  type="number"
+                                  min="0.5"
+                                  max="2.5"
+                                  step="0.05"
+                                  @change="updateRegionAdvancedStyle(region, { letter_spacing: $event.target.value }, '调整字距')"
+                                />
+                              </label>
+                              <label class="v2-field">
+                                <span>行距</span>
+                                <input
+                                  :value="getRegionLineSpacing(region)"
+                                  type="number"
+                                  min="0.5"
+                                  max="2.5"
+                                  step="0.05"
+                                  @change="updateRegionAdvancedStyle(region, { line_spacing: $event.target.value }, '调整行距')"
+                                />
+                              </label>
                             </div>
-                          </div>
 
-                          <div class="style-color-editor">
-                            <span>描边色</span>
-                            <div class="style-color-row">
+                            <div class="style-stroke-options" role="group" aria-label="描边强度">
                               <button
-                                v-for="color in styleColorSwatches"
-                                :key="`bg-${region.id}-${color}`"
+                                v-for="option in strokeStrengthOptions"
+                                :key="`stroke-${region.id}-${option}`"
                                 type="button"
-                                class="style-color-swatch"
-                                :class="{ active: getRegionStrokeColorHex(region) === color }"
-                                :style="{ backgroundColor: color }"
-                                :aria-label="`描边色 ${color}`"
-                                @click="updateRegionAdvancedStyle(region, { bg_color: color }, '调整描边色')"
-                              ></button>
-                              <input
-                                :value="getRegionStrokeColorHex(region)"
-                                type="color"
-                                aria-label="描边色"
-                                @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整描边色')"
-                              />
-                              <input
-                                :value="getRegionStrokeColorHex(region)"
-                                type="text"
-                                inputmode="text"
-                                aria-label="描边色 Hex"
-                                @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整描边色')"
-                              />
+                                :class="['style-chip-button', getRegionStrokeStrength(region) === option ? 'active' : '']"
+                                @click="updateRegionAdvancedStyle(region, { stroke_width: option }, '调整描边')"
+                              >
+                                {{ option }}
+                              </button>
                             </div>
-                          </div>
-                        </section>
+
+                            <div class="style-color-editor">
+                              <span>文字色</span>
+                              <div class="style-color-row">
+                                <button
+                                  v-for="color in styleColorSwatches"
+                                  :key="`fg-${region.id}-${color}`"
+                                  type="button"
+                                  class="style-color-swatch"
+                                  :class="{ active: getRegionTextColorHex(region) === color }"
+                                  :style="{ backgroundColor: color }"
+                                  :aria-label="`文字色 ${color}`"
+                                  @click="updateRegionAdvancedStyle(region, { fg_color: color }, '调整文字色')"
+                                ></button>
+                                <input
+                                  :value="getRegionTextColorHex(region)"
+                                  type="color"
+                                  aria-label="文字色"
+                                  @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                                />
+                                <input
+                                  :value="getRegionTextColorHex(region)"
+                                  type="text"
+                                  inputmode="text"
+                                  aria-label="文字色 Hex"
+                                  @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                                />
+                              </div>
+                            </div>
+
+                            <div class="style-color-editor">
+                              <span>底/描边色</span>
+                              <div class="style-color-row">
+                                <button
+                                  v-for="color in styleColorSwatches"
+                                  :key="`bg-${region.id}-${color}`"
+                                  type="button"
+                                  class="style-color-swatch"
+                                  :class="{ active: getRegionStrokeColorHex(region) === color }"
+                                  :style="{ backgroundColor: color }"
+                                  :aria-label="`底/描边色 ${color}`"
+                                  @click="updateRegionAdvancedStyle(region, { bg_color: color }, '调整底色')"
+                                ></button>
+                                <button
+                                  type="button"
+                                  class="style-chip-button"
+                                  @click="updateRegionAdvancedStyle(region, { bg_color: '#ffffff' }, '设为白底')"
+                                >
+                                  白
+                                </button>
+                                <button
+                                  type="button"
+                                  class="style-chip-button"
+                                  @click="updateRegionAdvancedStyle(region, { bg_color: '#000000' }, '设为黑底')"
+                                >
+                                  黑
+                                </button>
+                                <input
+                                  :value="getRegionStrokeColorHex(region)"
+                                  type="color"
+                                  aria-label="底/描边色"
+                                  @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
+                                />
+                                <input
+                                  :value="getRegionStrokeColorHex(region)"
+                                  type="text"
+                                  inputmode="text"
+                                  aria-label="底/描边色 Hex"
+                                  @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
+                                />
+                              </div>
+                            </div>
+                          </section>
+                        </Teleport>
                       </template>
                       <span
                         v-if="canvasMarqueeState?.pageId === selectedEditPage.stored_name"

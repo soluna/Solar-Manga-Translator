@@ -1501,9 +1501,11 @@ img {
 }
 
 .style-advanced-popover {
-  position: absolute;
-  z-index: 20;
+  position: fixed;
+  z-index: 10000;
   width: min(320px, calc(100vw - 24px));
+  max-height: min(var(--popover-max-height, calc(100vh - 24px)), calc(100vh - 24px));
+  overflow: auto;
   display: grid;
   gap: 12px;
   padding: 12px;

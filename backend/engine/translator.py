@@ -2034,6 +2034,7 @@ class TranslatorEngine:
         for region in regions:
             region_key = str(getattr(region, "translation_region_key", "") or "")
             region.disabled_region = bool(disabled_overrides.get(region_key))
+            region.letter_spacing_override_active = False
             region.line_spacing_override_active = False
 
             layout_override = layout_overrides.get(region_key) or {}
@@ -2060,6 +2061,7 @@ class TranslatorEngine:
             letter_spacing = self._normalize_letter_spacing(layout_override.get("letter_spacing"))
             if letter_spacing is not None:
                 region.letter_spacing = letter_spacing
+                region.letter_spacing_override_active = True
 
             line_spacing = self._normalize_line_spacing(layout_override.get("line_spacing"))
             if line_spacing is not None:
@@ -6533,6 +6535,7 @@ class TranslatorEngine:
             layout_override = layout_overrides.get(region_key) or {}
             region.font_size_override_active = False
             region.direction_override_active = False
+            region.letter_spacing_override_active = False
             region.line_spacing_override_active = False
             bbox = layout_override.get("bbox")
             if isinstance(bbox, list) and len(bbox) == 4:
@@ -6558,6 +6561,7 @@ class TranslatorEngine:
             letter_spacing = self._normalize_letter_spacing(layout_override.get("letter_spacing"))
             if letter_spacing is not None:
                 region.letter_spacing = letter_spacing
+                region.letter_spacing_override_active = True
 
             line_spacing = self._normalize_line_spacing(layout_override.get("line_spacing"))
             if line_spacing is not None:
@@ -7064,7 +7068,8 @@ class TranslatorEngine:
 
         for region in render_regions:
             region._alignment = config["render_alignment"]
-            region.letter_spacing = config["render_letter_spacing"]
+            if not getattr(region, "letter_spacing_override_active", False):
+                region.letter_spacing = config["render_letter_spacing"]
 
         if debug_output_dir is None:
             rendered_rgb = await dispatch_rendering(

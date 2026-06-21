@@ -330,12 +330,25 @@ print(json.dumps({
         rendering = self.load_patched_rendering()
 
         class DummyRegion:
+            _direction = "auto"
             alignment = "center"
+            direction = "h"
+            horizontal = True
 
         region = DummyRegion()
         self.assertEqual(rendering._render_alignment_for_direction(region, "h"), "left")
         self.assertEqual(rendering._render_alignment_for_direction(region, "horizontal"), "left")
         self.assertEqual(rendering._render_alignment_for_direction(region, "hr"), "right")
+        self.assertEqual(
+            rendering._select_region_layout(region, 48, 8, None, 120, 12, True, None, ""),
+            ("h", 48),
+        )
+
+        tall_candidate = np.zeros((200, 50, 4), dtype=np.uint8)
+        fits, overflow, fill = rendering._layout_metrics_for_direction(tall_candidate, 60, 12, "h")
+        self.assertTrue(fits)
+        self.assertLessEqual(overflow, 1.0)
+        self.assertGreater(fill, 0)
 
         padding = rendering._text_box_padding(32, 100, 60)
         self.assertGreater(padding, 0)

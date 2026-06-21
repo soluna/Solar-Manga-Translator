@@ -286,9 +286,9 @@ def _layout_metrics_for_direction(candidate_box: np.ndarray, box_width: int, box
     height_ratio = rendered_height / max(box_height, 1)
 
     if direction.startswith('h'):
-        fits = rendered_width <= box_width and rendered_height <= box_height
-        overflow = max(width_ratio, height_ratio)
-        fill = min(width_ratio, 1.0) + min(height_ratio, 1.0)
+        fits = rendered_width <= box_width
+        overflow = width_ratio
+        fill = min(width_ratio, 1.0)
     else:
         fits = rendered_height <= box_height
         overflow = height_ratio
@@ -480,52 +480,7 @@ def _select_region_layout(region: TextBlock, target_font_size: int, font_size_mi
                           default_font_path: str):
     candidate_directions = _get_candidate_directions(region)
     target_font_size = max(int(target_font_size), max(int(font_size_minimum), 1))
-    if font_size_fixed is not None:
-        search_sizes = [target_font_size]
-    else:
-        search_sizes = list(range(target_font_size, max(int(font_size_minimum), 1) - 1, -1))
-
-    best_fit = None
-    best_fallback = None
-
-    for direction in candidate_directions:
-        for font_size in search_sizes:
-            inner_width, inner_height, _ = _inner_text_box_size(box_width, box_height, font_size)
-            candidate_box = _render_candidate_box(
-                region,
-                direction,
-                font_size,
-                box_width,
-                box_height,
-                hyphenate,
-                line_spacing,
-                default_font_path,
-            )
-            fits, overflow, fill = _layout_metrics_for_direction(candidate_box, inner_width, inner_height, direction)
-            direction_priority = _direction_priority(region, direction)
-
-            if best_fallback is None or overflow < best_fallback[0] or (
-                np.isclose(overflow, best_fallback[0]) and (
-                    font_size > best_fallback[1] or
-                    (font_size == best_fallback[1] and (fill > best_fallback[2] or direction_priority > best_fallback[3]))
-                )
-            ):
-                best_fallback = (overflow, font_size, fill, direction_priority, direction)
-
-            if not fits:
-                continue
-
-            if best_fit is None or font_size > best_fit[0] or (
-                font_size == best_fit[0] and (fill > best_fit[1] or direction_priority > best_fit[2])
-            ):
-                best_fit = (font_size, fill, direction_priority, direction)
-            break
-
-    if best_fit is not None:
-        return best_fit[3], best_fit[0]
-    if best_fallback is not None:
-        return best_fallback[4], best_fallback[1]
-    return _normalize_direction(region.direction), target_font_size
+    return (candidate_directions[0] if candidate_directions else _normalize_direction(region.direction)), target_font_size
 
 
 def resize_regions_to_font_size(img: np.ndarray, text_regions: List['TextBlock'], font_size_fixed: int, font_size_offset: int,

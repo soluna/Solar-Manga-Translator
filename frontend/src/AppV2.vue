@@ -659,6 +659,7 @@ const glossarySaving = ref(false)
 const glossaryExtracting = ref(false)
 const glossaryPreviewing = ref(false)
 const glossaryApplying = ref(false)
+const glossaryOccurrencesLoading = ref(false)
 const glossaryDraftEntries = ref([])
 const glossaryPreview = ref({ changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 })
 const glossaryError = ref('')
@@ -770,8 +771,11 @@ const canRetranslate = computed(
 )
 const canUseProjectGlossary = computed(() => Boolean(sessionId.value) && !translating.value)
 const projectGlossaryEntryCount = computed(() => glossaryDraftEntries.value.length)
+const projectGlossaryOccurrencesLoaded = computed(() => Boolean(projectGlossary.value?.occurrences_loaded))
 const projectGlossaryOccurrenceCount = computed(() => (
-  glossaryDraftEntries.value.reduce((total, entry) => total + Number(entry.occurrence_count || 0), 0)
+  projectGlossaryOccurrencesLoaded.value
+    ? glossaryDraftEntries.value.reduce((total, entry) => total + Number(entry.occurrence_count || 0), 0)
+    : '未扫描'
 ))
 const glossaryBusy = computed(() => (
   glossaryLoading.value
@@ -779,9 +783,11 @@ const glossaryBusy = computed(() => (
   || glossaryExtracting.value
   || glossaryPreviewing.value
   || glossaryApplying.value
+  || glossaryOccurrencesLoading.value
 ))
 const canSaveProjectGlossary = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
 const canApplyProjectGlossary = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
+const canRefreshProjectGlossaryOccurrences = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
 const v2ExportArchiveUrl = computed(() => {
   const activeSessionId = String(sessionId.value || '').trim()
   if (!activeSessionId) {
@@ -2410,7 +2416,9 @@ function normalizeProjectGlossaryEntry(entry = {}) {
     replacement: String(entry.replacement || entry.replace_text || '').trim(),
     note: String(entry.note || '').trim(),
     source_kind: String(entry.source_kind || entry.kind || 'user').trim() || 'user',
-    occurrence_count: Number(entry.occurrence_count || 0),
+    occurrence_count: entry.occurrence_count === null || typeof entry.occurrence_count === 'undefined'
+      ? null
+      : Number(entry.occurrence_count || 0),
     occurrences: Array.isArray(entry.occurrences) ? entry.occurrences : []
   }
 }
@@ -2422,6 +2430,7 @@ function normalizeProjectGlossary(value = {}) {
   return {
     version: Number(value?.version || 1),
     updated_at: value?.updated_at || '',
+    occurrences_loaded: Boolean(value?.occurrences_loaded),
     entries
   }
 }
@@ -2441,6 +2450,9 @@ function getGlossaryEntrySourceKindLabel(entry) {
 }
 
 function getGlossaryOccurrenceLabel(entry) {
+  if (!projectGlossaryOccurrencesLoaded.value) {
+    return '未扫描'
+  }
   const count = Number(entry?.occurrence_count || 0)
   return count > 0 ? `${count} 处` : '未匹配'
 }
@@ -2499,6 +2511,9 @@ function applySessionPayload(payload, options = {}) {
   const nextSessionId = payload?.session_id || ''
   const sessionChanged = String(nextSessionId || '') !== String(sessionId.value || '')
   const resetEditingState = options.resetEditingState ?? (sessionChanged || resetInspectors)
+  const forceRegionIds = Array.isArray(options.forceRegionIds)
+    ? options.forceRegionIds.map((regionId) => String(regionId || '').trim()).filter(Boolean)
+    : []
   renderNonce.value = Date.now()
   sessionId.value = nextSessionId
   workflowStage.value = payload?.workflow_stage || 'idle'
@@ -2556,7 +2571,12 @@ function applySessionPayload(payload, options = {}) {
     regionListSearch.value = ''
     regionListFilter.value = 'all'
   } else {
-    applyInspectionOverrides(overrides)
+    if (forceRegionIds.length) {
+      translationInputDrafts.value = omitRegionDrafts(translationInputDrafts.value, forceRegionIds)
+      fontSizeInputDrafts.value = omitRegionDrafts(fontSizeInputDrafts.value, forceRegionIds)
+      fontSizeDraftOriginOverrides.value = omitRegionDrafts(fontSizeDraftOriginOverrides.value, forceRegionIds)
+    }
+    applyInspectionOverrides(overrides, { forceRegionIds })
   }
 
   currentProject.value = payload?.project ? normalizeHistoryProject(payload.project) : null
@@ -2856,12 +2876,17 @@ async function loadProjectGlossary(options = {}) {
     return
   }
   const silent = Boolean(options.silent)
-  if (!silent) {
+  const includeOccurrences = Boolean(options.includeOccurrences)
+  const occurrenceRefresh = Boolean(options.occurrenceRefresh)
+  if (occurrenceRefresh) {
+    glossaryOccurrencesLoading.value = true
+  } else if (!silent) {
     glossaryLoading.value = true
   }
   glossaryError.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary`))
+    const suffix = includeOccurrences ? '?include_occurrences=1' : '?include_occurrences=0'
+    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary${suffix}`))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取专有名词库失败')
@@ -2871,10 +2896,19 @@ async function loadProjectGlossary(options = {}) {
   } catch (error) {
     glossaryError.value = error instanceof Error ? error.message : '读取专有名词库失败'
   } finally {
-    if (!silent) {
+    if (occurrenceRefresh) {
+      glossaryOccurrencesLoading.value = false
+    } else if (!silent) {
       glossaryLoading.value = false
     }
   }
+}
+
+async function refreshProjectGlossaryOccurrences() {
+  await loadProjectGlossary({
+    includeOccurrences: true,
+    occurrenceRefresh: true
+  })
 }
 
 async function openProjectGlossaryDrawer() {
@@ -3024,9 +3058,13 @@ async function applyProjectGlossary() {
       affected_pages: Array.isArray(payload.affected_pages) ? payload.affected_pages : [],
       affected_page_count: Number(payload.affected_page_count || 0)
     }
+    const changedRegionIds = glossaryPreview.value.changes
+      .map((change) => String(change?.region_id || '').trim())
+      .filter(Boolean)
     applySessionPayload(payload, {
       refreshAllTranslatedImages: true,
-      resetEditingState: false
+      resetEditingState: false,
+      forceRegionIds: changedRegionIds
     })
     syncGlossaryDraftFromProject(projectGlossary.value)
     await loadEditInspection({ silent: true })
@@ -3654,9 +3692,10 @@ function getRegionRotation(region) {
 
 function getRegionStrokeStrength(region) {
   const override = getRegionLayoutOverride(region)
-  const rawValue = Object.prototype.hasOwnProperty.call(override, 'stroke_width')
-    ? override.stroke_width
-    : region?.stroke_width
+  if (!Object.prototype.hasOwnProperty.call(override, 'stroke_width')) {
+    return 0
+  }
+  const rawValue = override.stroke_width
   return Math.round(clampNumber(rawValue, 0, 1, defaultStrokeStrength) * 1000) / 1000
 }
 
@@ -4076,6 +4115,20 @@ function pruneRegionDraftMap(draftMap, pages) {
   const nextDrafts = {}
   for (const [regionId, value] of Object.entries(draftMap || {})) {
     if (validRegionIds.has(regionId)) {
+      nextDrafts[regionId] = value
+    }
+  }
+  return nextDrafts
+}
+
+function omitRegionDrafts(draftMap, regionIds = []) {
+  const removeIds = new Set((regionIds || []).map((regionId) => String(regionId || '').trim()).filter(Boolean))
+  if (!removeIds.size) {
+    return draftMap || {}
+  }
+  const nextDrafts = {}
+  for (const [regionId, value] of Object.entries(draftMap || {})) {
+    if (!removeIds.has(regionId)) {
       nextDrafts[regionId] = value
     }
   }
@@ -9896,6 +9949,9 @@ watch(
           </button>
           <button type="button" class="v2-secondary-button" :disabled="!canSaveProjectGlossary" @click="previewProjectGlossaryApplication">
             {{ glossaryPreviewing ? '预览中…' : '预览应用' }}
+          </button>
+          <button type="button" class="v2-secondary-button" :disabled="!canRefreshProjectGlossaryOccurrences" @click="refreshProjectGlossaryOccurrences">
+            {{ glossaryOccurrencesLoading ? '刷新中…' : '刷新匹配' }}
           </button>
           <button type="button" class="v2-primary-button" :disabled="!canApplyProjectGlossary" @click="applyProjectGlossary">
             {{ glossaryApplying ? '应用中…' : '应用并重嵌字' }}

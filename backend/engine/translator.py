@@ -1696,15 +1696,23 @@ class TranslatorEngine:
             "updated_at": str((raw_value or {}).get("updated_at") or self._now_iso()) if isinstance(raw_value, dict) else self._now_iso(),
         }
 
-    def _project_glossary_occurrences(self, project_id: str, session: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
+    def _project_glossary_occurrences(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        entries: list[dict[str, Any]],
+        *,
+        occurrence_limit_per_entry: int = 8,
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
         occurrences: dict[str, list[dict[str, Any]]] = {str(entry.get("id") or ""): [] for entry in entries}
+        occurrence_counts: dict[str, int] = {str(entry.get("id") or ""): 0 for entry in entries}
         terms = [
             (str(entry.get("id") or ""), str(entry.get("source") or ""))
             for entry in sorted(entries, key=lambda item: len(str(item.get("source") or "")), reverse=True)
             if str(entry.get("id") or "") and str(entry.get("source") or "")
         ]
         if not terms:
-            return occurrences
+            return occurrences, occurrence_counts
 
         for segment in self._iter_project_text_segments(project_id, session):
             source_text = str(segment.get("source_text") or "")
@@ -1713,28 +1721,45 @@ class TranslatorEngine:
             for entry_id, source in terms:
                 if source not in source_text:
                     continue
-                occurrences.setdefault(entry_id, []).append({
-                    "page_id": str(segment.get("page_id") or ""),
-                    "page_name": str(segment.get("page_name") or ""),
-                    "region_id": str(segment.get("region_id") or ""),
-                    "source_text": source_text,
-                    "translation": str(segment.get("translation") or ""),
-                })
+                occurrence_counts[entry_id] = occurrence_counts.get(entry_id, 0) + 1
+                entry_occurrences = occurrences.setdefault(entry_id, [])
+                if len(entry_occurrences) < occurrence_limit_per_entry:
+                    entry_occurrences.append({
+                        "page_id": str(segment.get("page_id") or ""),
+                        "page_name": str(segment.get("page_name") or ""),
+                        "region_id": str(segment.get("region_id") or ""),
+                        "source_text": source_text,
+                        "translation": str(segment.get("translation") or ""),
+                    })
 
-        return occurrences
+        return occurrences, occurrence_counts
 
-    def get_project_glossary(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+    def get_project_glossary(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        *,
+        include_occurrences: bool = False,
+    ) -> dict[str, Any]:
         glossary = self._normalize_project_glossary(session.get("project_glossary"))
         session["project_glossary"] = glossary
         entries = list(glossary.get("entries") or [])
-        occurrences = self._project_glossary_occurrences(project_id, session, entries)
+        occurrences: dict[str, list[dict[str, Any]]] = {}
+        occurrence_counts: dict[str, int] = {}
+        if include_occurrences:
+            occurrences, occurrence_counts = self._project_glossary_occurrences(project_id, session, entries)
         return {
             **glossary,
+            "occurrences_loaded": include_occurrences,
             "entries": [
                 {
                     **entry,
-                    "occurrence_count": len(occurrences.get(str(entry.get("id") or ""), [])),
-                    "occurrences": occurrences.get(str(entry.get("id") or ""), []),
+                    "occurrence_count": (
+                        occurrence_counts.get(str(entry.get("id") or ""), 0)
+                        if include_occurrences
+                        else None
+                    ),
+                    "occurrences": occurrences.get(str(entry.get("id") or ""), []) if include_occurrences else [],
                 }
                 for entry in entries
             ],
@@ -1758,6 +1783,9 @@ class TranslatorEngine:
             existing_entry = existing_by_id.get(str(raw_entry.get("id") or "")) or existing_by_source.get(str(raw_entry.get("source") or raw_entry.get("term") or ""))
             entry = self._normalize_project_glossary_entry(raw_entry, existing_entry=existing_entry)
             if entry:
+                previous_translation = str((existing_entry or {}).get("translation") or "").strip()
+                if previous_translation and previous_translation != entry["translation"] and not entry.get("replacement"):
+                    entry["replacement"] = previous_translation
                 entries.append(entry)
 
         glossary = self._normalize_project_glossary({"entries": entries, "updated_at": self._now_iso()})
@@ -2098,15 +2126,31 @@ class TranslatorEngine:
                 await progress_callback({"event": "status", "message": f"已补充 {added_count} 个项目专有名词，继续翻译。"})
         return self.get_project_glossary(project_id, session)
 
-    def _glossary_replacement_source(self, entry: dict[str, Any], previous_entries: dict[str, dict[str, Any]]) -> str:
+    def _glossary_replacement_candidates(
+        self,
+        entry: dict[str, Any],
+        previous_entries: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        candidates: list[str] = []
+
+        def add_candidate(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+
         explicit = str(entry.get("replacement") or "").strip()
         if explicit:
-            return explicit
+            add_candidate(explicit)
         previous = previous_entries.get(str(entry.get("id") or "")) or previous_entries.get(str(entry.get("source") or ""))
         previous_translation = str((previous or {}).get("translation") or "").strip()
         if previous_translation and previous_translation != str(entry.get("translation") or "").strip():
-            return previous_translation
-        return ""
+            add_candidate(previous_translation)
+        add_candidate(entry.get("source"))
+        return candidates
+
+    def _glossary_replacement_source(self, entry: dict[str, Any], previous_entries: dict[str, dict[str, Any]]) -> str:
+        candidates = self._glossary_replacement_candidates(entry, previous_entries)
+        return candidates[0] if candidates else ""
 
     def preview_project_glossary_application(
         self,
@@ -2156,8 +2200,14 @@ class TranslatorEngine:
                 target = str(entry.get("translation") or "")
                 if not source or not target or source not in source_text or target in next_translation:
                     continue
-                replacement_source = self._glossary_replacement_source(entry, previous_entries)
-                if not replacement_source or replacement_source not in next_translation:
+                replacement_source = ""
+                for candidate in self._glossary_replacement_candidates(entry, previous_entries):
+                    if candidate == target:
+                        continue
+                    if candidate in next_translation:
+                        replacement_source = candidate
+                        break
+                if not replacement_source:
                     continue
                 next_translation = next_translation.replace(replacement_source, target)
                 applied_terms.append({
@@ -2201,6 +2251,11 @@ class TranslatorEngine:
                 self._set_region_translation_override_value(session, region_id, after_text)
 
         if preview.get("changes"):
+            affected_pages = [
+                str(page_id or "")
+                for page_id in (preview.get("affected_pages") or [])
+                if str(page_id or "")
+            ]
             raw_config = {
                 **dict(session.get("last_config") or {}),
                 "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
@@ -2213,12 +2268,37 @@ class TranslatorEngine:
             async def ignore_progress(_event: dict[str, Any]) -> None:
                 return None
 
-            await self.rerender_session(
-                session_id=project_id,
-                session=session,
-                raw_config=raw_config,
-                progress_callback=ignore_progress,
-            )
+            source_page_count = len(session.get("source_images") or [])
+            if affected_pages and len(set(affected_pages)) < source_page_count:
+                for page_id in dict.fromkeys(affected_pages):
+                    await self.rerender_session(
+                        session_id=project_id,
+                        session=session,
+                        raw_config=raw_config,
+                        progress_callback=ignore_progress,
+                        target_stored_name=page_id,
+                    )
+                config = self._normalize_config(raw_config)
+                session["download_path"] = self.build_session_archive(
+                    project_id,
+                    session,
+                    preferred_output_format=config["rerender_output_format"],
+                )
+                self.persist_project_state(
+                    project_id,
+                    session,
+                    snapshot_kind="glossary_apply",
+                    snapshot_summary=f"应用专有名词库并重嵌 {len(set(affected_pages))} 页",
+                    persist_page_documents=True,
+                    page_ids=list(dict.fromkeys(affected_pages)),
+                )
+            else:
+                await self.rerender_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=raw_config,
+                    progress_callback=ignore_progress,
+                )
         else:
             self.persist_project_state(project_id, session, persist_page_documents=False)
 

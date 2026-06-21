@@ -420,9 +420,15 @@ async def upload_project_base_images(project_id: str, file: UploadFile = File(..
 
 
 @app.get("/api/projects/{project_id}/glossary")
-async def get_project_glossary(project_id: str):
+async def get_project_glossary(project_id: str, include_occurrences: bool = False):
     session = get_or_restore_session(project_id)
-    return {"glossary": translator_engine.get_project_glossary(project_id, session)}
+    return {
+        "glossary": translator_engine.get_project_glossary(
+            project_id,
+            session,
+            include_occurrences=include_occurrences,
+        )
+    }
 
 
 @app.put("/api/projects/{project_id}/glossary")

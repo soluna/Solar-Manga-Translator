@@ -633,6 +633,155 @@ print(json.dumps({
             self.assertEqual(result["glossary"]["entries"][0]["translation"], "山田先生")
             self.assertEqual(len(rerender_calls), 1)
 
+    def test_project_glossary_save_preserves_previous_translation_for_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-2.png")
+
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [
+                    {"name": "page-1.png", "stored_name": "page-1.png"},
+                    {"name": "page-2.png", "stored_name": "page-2.png"},
+                ],
+                "translated_output_map": {},
+                "download_path": "",
+                "workflow_stage": "translated",
+                "last_config": {"translator": "custom_openai", "target_lang": "CHS"},
+                "translation_region_overrides": {},
+                "translation_region_skip_overrides": {},
+                "translation_region_disabled_overrides": {},
+                "translation_region_layout_overrides": {},
+                "style_region_overrides": {},
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-yamada",
+                        "source": "山田",
+                        "translation": "Yamada",
+                        "category": "人名",
+                    }]
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [{
+                    "region_id": "r1",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "山田来了",
+                    "translation": {"machine": "Yamada来了", "resolved": "Yamada来了"},
+                }],
+            })
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-2.png"), {
+                "page_id": "page-2.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [{
+                    "region_id": "r2",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "普通对白",
+                    "translation": {"machine": "普通对白", "resolved": "普通对白"},
+                }],
+            })
+            saved_glossary = engine.save_project_glossary(project_id, session, [{
+                "id": "term-yamada",
+                "source": "山田",
+                "translation": "山田先生",
+                "category": "人名",
+            }])
+            self.assertEqual(saved_glossary["entries"][0]["replacement"], "Yamada")
+
+            rerender_targets: list[str | None] = []
+
+            async def fake_rerender_session(**kwargs):
+                target = kwargs.get("target_stored_name")
+                rerender_targets.append(target)
+                stored_name = str(target or "page-1.png")
+                Image.new("RGB", (16, 16), (240, 240, 240)).save(output_dir / stored_name)
+                session["translated_output_map"][stored_name] = stored_name
+                return {
+                    "download_url": f"/api/download/{project_id}",
+                    "download_path": session.get("download_path", ""),
+                    "translated_dir": str(output_dir),
+                    "workflow_stage": "translated",
+                }
+
+            engine.rerender_session = fake_rerender_session  # type: ignore[method-assign]
+            engine.build_session_archive = lambda *_args, **_kwargs: str(root / "translated.zip")  # type: ignore[method-assign]
+
+            result = asyncio.run(engine.apply_project_glossary(project_id, session, saved_glossary["entries"]))
+
+            self.assertEqual(session["translation_region_overrides"]["r1"], "山田先生来了")
+            self.assertEqual(result["change_count"], 1)
+            self.assertEqual(rerender_targets, ["page-1.png"])
+
+    def test_project_glossary_apply_can_replace_untranslated_source_term(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-ren",
+                        "source": "蓮",
+                        "translation": "莲",
+                        "category": "人名",
+                    }]
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [{
+                    "region_id": "r1",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "蓮来了",
+                    "translation": {"machine": "蓮来了", "resolved": "蓮来了"},
+                }],
+            })
+
+            preview = engine.preview_project_glossary_application(project_id, session)
+
+            self.assertEqual(preview["change_count"], 1)
+            self.assertEqual(preview["changes"][0]["after"], "莲来了")
+
+    def test_project_glossary_lightweight_read_skips_occurrence_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            session = {
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-yamada",
+                        "source": "山田",
+                        "translation": "山田",
+                        "category": "人名",
+                    }]
+                },
+            }
+            engine.get_page_document = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not scan pages"))  # type: ignore[method-assign]
+
+            glossary = engine.get_project_glossary("project-glossary", session)
+
+            self.assertFalse(glossary["occurrences_loaded"])
+            self.assertIsNone(glossary["entries"][0]["occurrence_count"])
+
     def test_project_glossary_extraction_uses_direct_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

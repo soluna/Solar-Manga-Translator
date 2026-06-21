@@ -18,6 +18,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+import engine.translator as translator_module
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
 
@@ -1137,6 +1138,58 @@ print(json.dumps({
             self.assertEqual(config["advanced_erase_timeout_seconds"], 30)
             self.assertEqual(sanitized["advanced_erase_api_key"], "")
             self.assertEqual(sanitized["image_cleanup_api_key"], "")
+
+    def test_advanced_erase_rejection_saves_debug_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (80, 80), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+
+            class FakeClient:
+                async def remove_text(self, *_args, **_kwargs):
+                    return np.full((80, 80, 3), 120, dtype=np.uint8)
+
+            original_factory = translator_module.create_image_cleanup_client
+            translator_module.create_image_cleanup_client = lambda **_kwargs: FakeClient()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "调试文件已保存到"):
+                    asyncio.run(engine.advanced_erase_page(
+                        project_id="project-a",
+                        session=session,
+                        page_id="page-1.png",
+                        raw_config={
+                            "advanced_erase_provider": "volcengine-ark",
+                            "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
+                            "advanced_erase_model": "custom-seedream-model",
+                            "advanced_erase_api_key": "secret",
+                        },
+                    ))
+            finally:
+                translator_module.create_image_cleanup_client = original_factory
+
+            attempt_dir = engine._advanced_erase_attempt_dir(
+                engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            )
+            seedream_outputs = list(attempt_dir.glob("*.seedream.png"))
+            mask_outputs = list(attempt_dir.glob("*.mask.png"))
+            metadata_outputs = list(attempt_dir.glob("*.json"))
+            self.assertEqual(len(seedream_outputs), 1)
+            self.assertEqual(len(mask_outputs), 1)
+            self.assertEqual(len(metadata_outputs), 1)
+            metadata = json.loads(metadata_outputs[0].read_text(encoding="utf-8"))
+            self.assertTrue(metadata["rejected"])
+            self.assertGreater(metadata["changed_ratio"], engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
+            self.assertEqual(Path(metadata["seedream_output"]).name, seedream_outputs[0].name)
 
 
 if __name__ == "__main__":

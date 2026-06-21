@@ -1074,25 +1074,51 @@ class TranslatorEngine:
             client.remove_text(source_rgb, None, ADVANCED_IMAGE_ERASE_PROMPT),
             timeout=int(config["advanced_erase_timeout_seconds"]) + 10,
         )
-        composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(source_rgb, edited_rgb)
-
         attempt_id = self._advanced_erase_attempt_id()
         attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
         attempt_dir.mkdir(parents=True, exist_ok=True)
+        seedream_output_path = attempt_dir / f"{attempt_id}.seedream.png"
         output_path = attempt_dir / f"{attempt_id}.png"
         mask_path = attempt_dir / f"{attempt_id}.mask.png"
         metadata_path = attempt_dir / f"{attempt_id}.json"
-        self._save_rgb_image_atomic(output_path, composite_rgb)
-        cv2.imwrite(str(mask_path), mask)
-        self._write_json_file(metadata_path, {
+        edited_debug_rgb = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
+        self._save_rgb_image_atomic(seedream_output_path, edited_debug_rgb)
+        debug_mask = self._build_advanced_erase_change_mask(source_rgb, edited_debug_rgb)
+        debug_changed_ratio = float(cv2.countNonZero(debug_mask)) / float(debug_mask.size or 1)
+        cv2.imwrite(str(mask_path), debug_mask)
+        metadata = {
             "attempt_id": attempt_id,
             "created_at": self._now_iso(),
             "page_id": page_id,
             "provider": config["advanced_erase_provider"],
             "api_url": config["advanced_erase_base_url"],
             "model": config["advanced_erase_model"],
-            "changed_ratio": changed_ratio,
+            "changed_ratio": debug_changed_ratio,
             "traditional_backup": str(backup_path),
+            "seedream_output": str(seedream_output_path),
+            "diff_mask": str(mask_path),
+        }
+        try:
+            composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(source_rgb, edited_debug_rgb)
+        except RuntimeError as exc:
+            self._write_json_file(metadata_path, {
+                **metadata,
+                "rejected": True,
+                "error": str(exc),
+            })
+            raise RuntimeError(
+                f"{exc} 调试文件已保存到: {attempt_dir}；"
+                f"AI 返回图: {seedream_output_path.name}；差异 mask: {mask_path.name}；"
+                f"差异比例约 {debug_changed_ratio:.2%}。"
+            ) from exc
+
+        self._save_rgb_image_atomic(output_path, composite_rgb)
+        cv2.imwrite(str(mask_path), mask)
+        self._write_json_file(metadata_path, {
+            **metadata,
+            "changed_ratio": changed_ratio,
+            "composited_output": str(output_path),
+            "rejected": False,
         })
 
         inpainted_path = page_cache_dir / "inpainted.png"
@@ -5620,16 +5646,7 @@ class TranslatorEngine:
         source_rgb: np.ndarray,
         edited_rgb: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        if edited_rgb.shape[:2] != source_rgb.shape[:2]:
-            edited_rgb = cv2.resize(
-                edited_rgb,
-                (source_rgb.shape[1], source_rgb.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        if edited_rgb.ndim == 2:
-            edited_rgb = cv2.cvtColor(edited_rgb, cv2.COLOR_GRAY2RGB)
-        if edited_rgb.shape[2] > 3:
-            edited_rgb = edited_rgb[:, :, :3]
+        edited_rgb = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
 
         mask = self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
         changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
@@ -5648,6 +5665,28 @@ class TranslatorEngine:
             + edited_rgb.astype(np.float32) * alpha_f
         )
         return np.clip(composite, 0, 255).astype(np.uint8), mask, changed_ratio
+
+    def _normalize_advanced_erase_edited_image(
+        self,
+        source_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+    ) -> np.ndarray:
+        normalized = np.asarray(edited_rgb)
+        if normalized.ndim == 2:
+            normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2RGB)
+        if normalized.ndim != 3:
+            raise RuntimeError("高级擦除返回图片格式异常。")
+        if normalized.shape[2] > 3:
+            normalized = normalized[:, :, :3]
+        if normalized.dtype != np.uint8:
+            normalized = np.clip(normalized, 0, 255).astype(np.uint8)
+        if normalized.shape[:2] != source_rgb.shape[:2]:
+            normalized = cv2.resize(
+                normalized,
+                (source_rgb.shape[1], source_rgb.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return normalized.copy()
 
     def _build_advanced_erase_change_mask(self, source_rgb: np.ndarray, edited_rgb: np.ndarray) -> np.ndarray:
         source_rgb = np.asarray(source_rgb)

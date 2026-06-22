@@ -19,6 +19,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import engine.translator as translator_module
+from engine.image_cleanup import SeedreamImageCleanupClient
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
 
@@ -1103,6 +1104,17 @@ print(json.dumps({
 
             with self.assertRaises(RuntimeError):
                 engine._composite_advanced_erase_result(source, edited)
+
+    def test_seedream_request_size_rounds_up_to_min_pixels(self) -> None:
+        client = SeedreamImageCleanupClient(api_key="secret", model="seedream-test")
+        source = np.full((1400, 900, 3), 255, dtype=np.uint8)
+
+        prepared_source, prepared_guide, size_value = client._prepare_request_images(source, None)
+
+        width, height = [int(part) for part in size_value.split("x")]
+        self.assertIsNone(prepared_guide)
+        self.assertGreaterEqual(width * height, client.MIN_PIXELS)
+        self.assertEqual(prepared_source.shape[:2], (height, width))
 
     def test_advanced_erase_region_mask_limits_full_page_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

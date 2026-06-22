@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 from io import BytesIO
 from typing import Any
 from urllib import error as urllib_error
@@ -237,9 +238,14 @@ class SeedreamImageCleanupClient:
         if current_pixels == 0:
             raise RuntimeError("Seedream 图像编辑输入为空。")
 
-        scale = max(1.0, (target_pixels / float(current_pixels)) ** 0.5)
-        target_width = max(width, int(round(width * scale)))
-        target_height = max(height, int(round(height * scale)))
+        scale = max(1.0, math.sqrt(target_pixels / float(current_pixels)))
+        target_width = max(width, int(math.ceil(width * scale)))
+        target_height = max(height, int(math.ceil(height * scale)))
+        while target_width * target_height < self.MIN_PIXELS:
+            if target_width <= target_height:
+                target_width += 1
+            else:
+                target_height += 1
 
         if target_width != width or target_height != height:
             target_size = (target_width, target_height)

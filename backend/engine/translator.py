@@ -1289,6 +1289,9 @@ class TranslatorEngine:
         output_path = attempt_dir / f"{attempt_id}.png"
         selection_mask_path = attempt_dir / f"{attempt_id}.selection-mask.png"
         diff_mask_path = attempt_dir / f"{attempt_id}.selection-diff.png"
+        text_mask_path = attempt_dir / f"{attempt_id}.selection-text-mask.png"
+        precise_mask_path = attempt_dir / f"{attempt_id}.selection-precise-mask.png"
+        residual_mask_path = attempt_dir / f"{attempt_id}.selection-residual-mask.png"
         metadata_path = attempt_dir / f"{attempt_id}.json"
 
         self._save_rgb_image_atomic(input_path, selection_input_rgb)
@@ -1301,16 +1304,22 @@ class TranslatorEngine:
         edited_debug_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
         self._save_rgb_image_atomic(seedream_output_path, edited_debug_rgb)
 
-        composite_rgb, changed_ratio = self._composite_selection_erase_result(
+        (
+            composite_rgb,
+            changed_ratio,
+            precise_mask,
+            model_change_mask,
+            text_mask,
+            residual_mask,
+        ) = self._composite_selection_erase_result(
             base_rgb,
             edited_debug_rgb,
             selection_mask,
         )
-        diff_mask = self._advanced_erase_final_mask(
-            self._build_advanced_erase_change_mask(base_rgb, edited_debug_rgb),
-            selection_mask,
-        )
-        cv2.imwrite(str(diff_mask_path), diff_mask)
+        cv2.imwrite(str(diff_mask_path), model_change_mask)
+        cv2.imwrite(str(text_mask_path), text_mask)
+        cv2.imwrite(str(precise_mask_path), precise_mask)
+        cv2.imwrite(str(residual_mask_path), residual_mask)
         self._save_rgb_image_atomic(output_path, composite_rgb)
         self._save_rgb_image_atomic(base_path, composite_rgb)
 
@@ -1336,6 +1345,13 @@ class TranslatorEngine:
             "seedream_output": str(seedream_output_path),
             "selection_mask": str(selection_mask_path),
             "diff_mask": str(diff_mask_path),
+            "text_mask": str(text_mask_path),
+            "precise_mask": str(precise_mask_path),
+            "residual_mask": str(residual_mask_path),
+            "precise_ratio": float(cv2.countNonZero(precise_mask)) / float(precise_mask.size or 1),
+            "model_change_ratio": float(cv2.countNonZero(model_change_mask)) / float(model_change_mask.size or 1),
+            "text_mask_ratio": float(cv2.countNonZero(text_mask)) / float(text_mask.size or 1),
+            "residual_ratio": float(cv2.countNonZero(residual_mask)) / float(residual_mask.size or 1),
             "composited_output": str(output_path),
             "rejected": False,
         }
@@ -5996,22 +6012,239 @@ class TranslatorEngine:
         selected_input[mask > 0] = base_rgb[mask > 0]
         return selected_input
 
+    def _build_selection_erase_text_mask(
+        self,
+        base_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> np.ndarray:
+        selection = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        if not np.any(selection):
+            return np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+
+        gray = cv2.cvtColor(base_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        local_delta = cv2.absdiff(gray, blurred)
+        gradient_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, gradient_kernel)
+        edges = cv2.Canny(gray, 40, 120)
+
+        high_contrast = (local_delta >= 14) | (gradient >= 18) | (edges > 0)
+        selected = selection > 0
+        candidate = (
+            selected
+            & (
+                (gray <= 76)
+                | ((gray <= 162) & high_contrast)
+                | ((gray >= 210) & high_contrast)
+            )
+        ).astype(np.uint8) * 255
+
+        filtered = self._filter_selection_erase_text_components(
+            candidate,
+            selection,
+            local_delta=local_delta,
+            before_dilation=True,
+        )
+        if not np.any(filtered):
+            return filtered
+
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        closed = cv2.morphologyEx(filtered, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        filled = self._fill_selection_erase_small_enclosures(closed, selection)
+        text_mask = cv2.bitwise_or(closed, filled)
+
+        min_side = max(1, min(base_rgb.shape[:2]))
+        dilate_size = max(5, min(31, int(round(min_side * 0.006)) | 1))
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
+        text_mask = cv2.dilate(text_mask, dilate_kernel, iterations=1)
+        text_mask = cv2.bitwise_and(text_mask, selection)
+        text_mask = self._filter_selection_erase_text_components(
+            text_mask,
+            selection,
+            before_dilation=False,
+        )
+        return cv2.bitwise_and(text_mask, selection)
+
+    def _fill_selection_erase_small_enclosures(
+        self,
+        mask: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> np.ndarray:
+        selection_area = max(int(cv2.countNonZero(selection_mask)), 1)
+        fill_limit = max(256, int(selection_area * 0.28))
+        filled = np.zeros(mask.shape, dtype=np.uint8)
+        contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            if cv2.contourArea(contour) < 6:
+                continue
+            x, y, width, height = cv2.boundingRect(contour)
+            bbox_area = width * height
+            if bbox_area <= fill_limit:
+                cv2.drawContours(filled, [contour], -1, 255, thickness=cv2.FILLED)
+        return cv2.bitwise_and(filled, selection_mask)
+
+    def _filter_selection_erase_text_components(
+        self,
+        mask: np.ndarray,
+        selection_mask: np.ndarray,
+        *,
+        local_delta: np.ndarray | None = None,
+        before_dilation: bool,
+    ) -> np.ndarray:
+        mask = self._normalize_advanced_erase_mask(mask, mask.shape)
+        selection = self._normalize_advanced_erase_mask(selection_mask, mask.shape)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if component_count <= 1:
+            return cv2.bitwise_and(mask, selection)
+
+        selection_area = max(int(cv2.countNonZero(selection)), 1)
+        page_area = max(mask.shape[0] * mask.shape[1], 1)
+        min_area = max(3, int(page_area * 0.0000008)) if before_dilation else max(6, int(page_area * 0.0000012))
+        filtered = np.zeros(mask.shape, dtype=np.uint8)
+
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < min_area:
+                continue
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            bbox_area = max(width * height, 1)
+            fill_ratio = float(area) / float(bbox_area)
+
+            # Large sparse contours are usually speech/SFX frames. They should be
+            # preserved unless the model itself changes only nearby text pixels.
+            if bbox_area > max(512, int(selection_area * 0.36)) and fill_ratio < 0.16:
+                continue
+            if area > int(selection_area * 0.68) and fill_ratio > 0.18:
+                continue
+            if bbox_area > int(selection_area * 0.86) and fill_ratio > 0.14:
+                continue
+
+            if before_dilation and local_delta is not None and area < 12:
+                component = labels == label
+                component_delta = local_delta[component]
+                if component_delta.size and float(np.median(component_delta)) < 7.0:
+                    continue
+
+            filtered[labels == label] = 255
+        return cv2.bitwise_and(filtered, selection)
+
+    def _clip_advanced_erase_mask(
+        self,
+        mask: np.ndarray,
+        allowed_mask: np.ndarray,
+    ) -> np.ndarray:
+        normalized = self._normalize_advanced_erase_mask(mask, mask.shape)
+        allowed = self._normalize_advanced_erase_mask(allowed_mask, normalized.shape)
+        return cv2.bitwise_and(normalized, allowed)
+
+    def _filter_selection_erase_residual_mask(
+        self,
+        residual_mask: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> np.ndarray:
+        residual = self._normalize_advanced_erase_mask(residual_mask, residual_mask.shape)
+        selection = self._normalize_advanced_erase_mask(selection_mask, residual.shape)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(residual, connectivity=8)
+        if component_count <= 1:
+            return cv2.bitwise_and(residual, selection)
+
+        selection_area = max(int(cv2.countNonZero(selection)), 1)
+        filtered = np.zeros(residual.shape, dtype=np.uint8)
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            bbox_area = max(width * height, 1)
+            fill_ratio = float(area) / float(bbox_area)
+            if bbox_area > max(512, int(selection_area * 0.32)) and fill_ratio < 0.20:
+                continue
+            if area > int(selection_area * 0.48):
+                continue
+            filtered[labels == label] = 255
+        return cv2.bitwise_and(filtered, selection)
+
     def _composite_selection_erase_result(
         self,
         base_rgb: np.ndarray,
         edited_rgb: np.ndarray,
         selection_mask: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
+    ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         edited_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
-        mask = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
-        composite_rgb = base_rgb.copy()
-        composite_rgb[mask > 0] = edited_rgb[mask > 0]
-        diff_mask = self._advanced_erase_final_mask(
+        selection = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        model_change_mask = self._clip_advanced_erase_mask(
             self._build_advanced_erase_change_mask(base_rgb, edited_rgb),
-            mask,
+            selection,
         )
-        changed_ratio = float(cv2.countNonZero(diff_mask)) / float(diff_mask.size or 1)
-        return composite_rgb, changed_ratio
+        text_mask = self._build_selection_erase_text_mask(base_rgb, selection)
+
+        if np.any(text_mask):
+            min_side = max(1, min(base_rgb.shape[:2]))
+            near_size = max(7, min(43, int(round(min_side * 0.014)) | 1))
+            near_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_size, near_size))
+            near_text_mask = cv2.dilate(text_mask, near_kernel, iterations=1)
+            precise_mask = cv2.bitwise_or(
+                text_mask,
+                cv2.bitwise_and(model_change_mask, near_text_mask),
+            )
+        else:
+            precise_mask = model_change_mask
+        precise_mask = cv2.bitwise_and(
+            self._normalize_advanced_erase_mask(precise_mask, base_rgb.shape),
+            selection,
+        )
+
+        if not np.any(precise_mask):
+            empty = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+            return base_rgb.copy(), 0.0, empty, model_change_mask, text_mask, empty
+
+        alpha = self._advanced_erase_alpha_from_mask(precise_mask)
+        alpha_f = alpha[:, :, None].astype(np.float32) / 255.0
+        composite = (
+            base_rgb.astype(np.float32) * (1.0 - alpha_f)
+            + edited_rgb.astype(np.float32) * alpha_f
+        )
+        composite_rgb = np.clip(composite, 0, 255).astype(np.uint8)
+
+        residual_mask = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+        if np.any(text_mask):
+            diff_rgb = cv2.absdiff(base_rgb[:, :, :3], edited_rgb[:, :, :3])
+            diff_gray = cv2.cvtColor(diff_rgb, cv2.COLOR_RGB2GRAY)
+            base_gray = cv2.cvtColor(base_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+            edited_gray = cv2.cvtColor(edited_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+            unchanged = (diff_gray <= 10) & (text_mask > 0)
+            stubborn_dark = (
+                (diff_gray <= 28)
+                & (base_gray <= 170)
+                & (edited_gray <= 128)
+                & (text_mask > 0)
+            )
+            residual_mask = np.where(unchanged | stubborn_dark, 255, 0).astype(np.uint8)
+            residual_mask = self._filter_selection_erase_residual_mask(residual_mask, selection)
+            if np.any(residual_mask):
+                min_side = max(1, min(base_rgb.shape[:2]))
+                close_size = max(3, min(13, int(round(min_side * 0.004)) | 1))
+                close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_size, close_size))
+                residual_mask = cv2.morphologyEx(residual_mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+                residual_mask = cv2.bitwise_and(residual_mask, selection)
+                radius = int(max(3, min(11, round(min_side * 0.006))))
+                inpainted_rgb = cv2.inpaint(base_rgb, residual_mask, radius, cv2.INPAINT_TELEA)
+                residual_alpha = self._advanced_erase_alpha_from_mask(residual_mask)
+                residual_alpha_f = residual_alpha[:, :, None].astype(np.float32) / 255.0
+                composite_rgb = np.clip(
+                    composite_rgb.astype(np.float32) * (1.0 - residual_alpha_f)
+                    + inpainted_rgb.astype(np.float32) * residual_alpha_f,
+                    0,
+                    255,
+                ).astype(np.uint8)
+                precise_mask = cv2.bitwise_or(precise_mask, residual_mask)
+
+        changed_ratio = float(cv2.countNonZero(precise_mask)) / float(precise_mask.size or 1)
+        return composite_rgb, changed_ratio, precise_mask, model_change_mask, text_mask, residual_mask
 
     def _normalize_advanced_erase_mask(
         self,

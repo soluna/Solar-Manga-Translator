@@ -2175,20 +2175,23 @@ img {
 }
 
 .v2-selection-erase-modal {
-  width: min(1180px, 100%);
+  width: min(1480px, calc(100vw - 20px));
+  min-height: min(940px, calc(100vh - 16px));
+  max-height: calc(100vh - 16px);
+  padding: 16px;
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .v2-selection-erase-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
+  grid-template-columns: minmax(0, 1fr) 210px;
   gap: 16px;
 }
 
 .v2-selection-erase-stage-wrap {
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   display: grid;
   place-items: center;
   border: 1px solid var(--v2-line);
@@ -2214,8 +2217,8 @@ img {
 
 .v2-selection-erase-stage img {
   display: block;
-  max-width: min(100%, 860px);
-  max-height: calc(100vh - 260px);
+  max-width: min(100%, calc(100vw - 300px));
+  max-height: calc(100vh - 172px);
   width: auto;
   height: auto;
   object-fit: contain;
@@ -2306,6 +2309,38 @@ img {
   justify-content: flex-end;
   gap: 10px;
   padding-top: 16px;
+}
+
+@media (max-width: 900px) {
+  .v2-selection-erase-modal {
+    width: calc(100vw - 12px);
+    min-height: calc(100vh - 12px);
+    max-height: calc(100vh - 12px);
+    padding: 12px;
+  }
+
+  .v2-selection-erase-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  .v2-selection-erase-stage img {
+    max-width: calc(100vw - 38px);
+    max-height: calc(100vh - 250px);
+  }
+
+  .v2-selection-erase-side {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto;
+  }
+
+  .v2-selection-erase-list {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, 1fr);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
 }
 
 .v2-history-grid {

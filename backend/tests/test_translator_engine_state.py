@@ -1186,16 +1186,45 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
             base = np.zeros((80, 80, 3), dtype=np.uint8)
-            base[:, :] = [32, 96, 160]
+            base[:, :] = [210, 210, 210]
+            base[24:28, 14:18] = [0, 0, 0]
             edited = np.full((80, 80, 3), 240, dtype=np.uint8)
             mask = np.zeros((80, 80), dtype=np.uint8)
             mask[20:40, 10:30] = 255
 
-            composite, changed_ratio = engine._composite_selection_erase_result(base, edited, mask)
+            composite, changed_ratio, precise_mask, model_change_mask, text_mask, residual_mask = (
+                engine._composite_selection_erase_result(base, edited, mask)
+            )
 
             self.assertGreater(changed_ratio, 0)
+            self.assertGreater(int(cv2.countNonZero(precise_mask)), 0)
+            self.assertGreater(int(cv2.countNonZero(model_change_mask)), 0)
+            self.assertGreater(int(cv2.countNonZero(text_mask)), 0)
+            self.assertEqual(int(cv2.countNonZero(residual_mask)), 0)
             self.assertTrue(np.array_equal(composite[5, 5], base[5, 5]))
             self.assertTrue(np.array_equal(composite[25, 15], edited[25, 15]))
+            self.assertTrue(np.array_equal(composite[38, 28], base[38, 28]))
+
+    def test_selection_erase_composite_inpaints_unchanged_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            base = np.full((80, 80, 3), 245, dtype=np.uint8)
+            cv2.line(base, (24, 26), (30, 34), (0, 0, 0), 2)
+            cv2.line(base, (36, 26), (30, 34), (0, 0, 0), 2)
+            edited = base.copy()
+            mask = np.zeros((80, 80), dtype=np.uint8)
+            mask[18:44, 18:44] = 255
+
+            composite, changed_ratio, precise_mask, model_change_mask, text_mask, residual_mask = (
+                engine._composite_selection_erase_result(base, edited, mask)
+            )
+
+            self.assertGreater(changed_ratio, 0)
+            self.assertEqual(int(cv2.countNonZero(model_change_mask)), 0)
+            self.assertGreater(int(cv2.countNonZero(text_mask)), 0)
+            self.assertGreater(int(cv2.countNonZero(residual_mask)), 0)
+            self.assertGreater(int(composite[30, 30, 0]), 150)
+            self.assertTrue(np.array_equal(composite[5, 5], base[5, 5]))
 
     def test_selection_erase_page_sends_only_selected_area_to_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1215,8 +1244,8 @@ print(json.dumps({
             }
             cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
             cache_dir.mkdir(parents=True)
-            base = np.full((80, 80, 3), [20, 80, 140], dtype=np.uint8)
-            base[20:40, 10:30] = [0, 0, 0]
+            base = np.full((80, 80, 3), [220, 220, 220], dtype=np.uint8)
+            base[24:28, 14:18] = [0, 0, 0]
             Image.fromarray(base).save(cache_dir / "inpainted.png")
             observed_inputs: list[np.ndarray] = []
 
@@ -1253,6 +1282,7 @@ print(json.dumps({
             output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
             self.assertTrue(np.array_equal(output[5, 5], base[5, 5]))
             self.assertTrue(np.array_equal(output[25, 15], [245, 245, 245]))
+            self.assertTrue(np.array_equal(output[38, 28], base[38, 28]))
 
     def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

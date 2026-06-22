@@ -9365,17 +9365,16 @@ watch(
                 >
                   选区擦除
                 </button>
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
+                  title="恢复高级擦除前的传统空页"
+                  @click="runV2AdvancedEraseAction('restore')"
+                >
+                  恢复传统空页
+                </button>
               </div>
             </div>
-            <button
-              type="button"
-              class="v2-ghost-button"
-              :disabled="!canRunAdvancedErase"
-              title="恢复高级擦除前的传统空页"
-              @click="runV2AdvancedEraseAction('restore')"
-            >
-              恢复传统空页
-            </button>
             <button
               type="button"
               class="v2-ghost-button"

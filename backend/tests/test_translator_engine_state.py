@@ -1152,6 +1152,96 @@ print(json.dumps({
             self.assertTrue(np.array_equal(composite[40, 40], edited[40, 40]))
             self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
 
+    def test_selection_erase_input_blanks_outside_rects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            base = np.zeros((80, 80, 3), dtype=np.uint8)
+            base[:, :] = [32, 96, 160]
+            base[20:40, 10:30] = [0, 0, 0]
+
+            rects = engine._normalize_selection_erase_rects(
+                [{"x": 0.125, "y": 0.25, "width": 0.25, "height": 0.25}],
+                base.shape,
+            )
+            mask = engine._build_selection_erase_mask(rects, base.shape)
+            selected_input = engine._build_selection_erase_input_image(base, mask)
+
+            self.assertEqual(rects, [(10, 20, 30, 40)])
+            self.assertTrue(np.array_equal(selected_input[5, 5], [255, 255, 255]))
+            self.assertTrue(np.array_equal(selected_input[25, 15], base[25, 15]))
+
+    def test_selection_erase_composite_keeps_pixels_outside_rects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            base = np.zeros((80, 80, 3), dtype=np.uint8)
+            base[:, :] = [32, 96, 160]
+            edited = np.full((80, 80, 3), 240, dtype=np.uint8)
+            mask = np.zeros((80, 80), dtype=np.uint8)
+            mask[20:40, 10:30] = 255
+
+            composite, changed_ratio = engine._composite_selection_erase_result(base, edited, mask)
+
+            self.assertGreater(changed_ratio, 0)
+            self.assertTrue(np.array_equal(composite[5, 5], base[5, 5]))
+            self.assertTrue(np.array_equal(composite[25, 15], edited[25, 15]))
+
+    def test_selection_erase_page_sends_only_selected_area_to_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((80, 80, 3), [64, 64, 64], dtype=np.uint8)
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            base = np.full((80, 80, 3), [20, 80, 140], dtype=np.uint8)
+            base[20:40, 10:30] = [0, 0, 0]
+            Image.fromarray(base).save(cache_dir / "inpainted.png")
+            observed_inputs: list[np.ndarray] = []
+
+            class FakeClient:
+                async def remove_text(self, source_rgb, *_args, **_kwargs):
+                    observed_inputs.append(source_rgb.copy())
+                    edited = source_rgb.copy()
+                    edited[20:40, 10:30] = [245, 245, 245]
+                    return edited
+
+            original_factory = translator_module.create_image_cleanup_client
+            translator_module.create_image_cleanup_client = lambda **_kwargs: FakeClient()
+            try:
+                result = asyncio.run(engine.advanced_erase_page(
+                    project_id="project-a",
+                    session=session,
+                    page_id="page-1.png",
+                    raw_config={
+                        "advanced_erase_provider": "volcengine-ark",
+                        "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
+                        "advanced_erase_model": "custom-seedream-model",
+                        "advanced_erase_api_key": "secret",
+                    },
+                    action="selection",
+                    selections=[{"x": 0.125, "y": 0.25, "width": 0.25, "height": 0.25}],
+                ))
+            finally:
+                translator_module.create_image_cleanup_client = original_factory
+
+            self.assertEqual(result["advanced_erase"]["action"], "selection")
+            self.assertEqual(len(observed_inputs), 1)
+            self.assertTrue(np.array_equal(observed_inputs[0][5, 5], [255, 255, 255]))
+            self.assertTrue(np.array_equal(observed_inputs[0][25, 15], base[25, 15]))
+            output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(output[5, 5], base[5, 5]))
+            self.assertTrue(np.array_equal(output[25, 15], [245, 245, 245]))
+
     def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

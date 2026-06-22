@@ -779,6 +779,7 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
             page_id=page_id,
             raw_config=payload.get("config", {}),
             action=action,
+            selections=payload.get("selections"),
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

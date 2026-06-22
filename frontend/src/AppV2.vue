@@ -636,6 +636,9 @@ const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
 const advancedEraseBusy = ref(false)
+const selectionEraseModalOpen = ref(false)
+const selectionEraseRects = ref([])
+const selectionEraseDraft = ref(null)
 const historyLoading = ref(false)
 const deletingProjectId = ref('')
 const restoringProjectId = ref('')
@@ -743,6 +746,7 @@ const regionListSearch = ref('')
 const regionListFilter = ref('all')
 const reviewCanvasZoneRef = ref(null)
 const reviewWorkspaceLayoutRef = ref(null)
+const selectionEraseStageRef = ref(null)
 const mainCanvasShellRef = ref(null)
 const compareCanvasShellRef = ref(null)
 const viewportPanState = ref(null)
@@ -1138,6 +1142,7 @@ const selectedEditPageMainImageUrl = computed(() => {
     page.stored_name
   )
 })
+const selectionEraseImageUrl = computed(() => selectedEditPageMainImageUrl.value)
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
@@ -8055,10 +8060,141 @@ function getAdvancedEraseConfigError() {
   return ''
 }
 
-async function runV2AdvancedEraseAction(action = 'erase') {
+function makeSelectionEraseRect(startX, startY, endX, endY) {
+  const x1 = clampValue(Math.min(startX, endX), 0, 1)
+  const y1 = clampValue(Math.min(startY, endY), 0, 1)
+  const x2 = clampValue(Math.max(startX, endX), 0, 1)
+  const y2 = clampValue(Math.max(startY, endY), 0, 1)
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    x: x1,
+    y: y1,
+    width: Math.max(0, x2 - x1),
+    height: Math.max(0, y2 - y1)
+  }
+}
+
+function getSelectionErasePoint(event) {
+  const stage = selectionEraseStageRef.value
+  if (!stage) {
+    return null
+  }
+  const rect = stage.getBoundingClientRect()
+  if (!rect.width || !rect.height) {
+    return null
+  }
+  return {
+    x: clampValue((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clampValue((event.clientY - rect.top) / rect.height, 0, 1)
+  }
+}
+
+function getSelectionEraseRectStyle(rect) {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.width * 100}%`,
+    height: `${rect.height * 100}%`
+  }
+}
+
+function openSelectionEraseModal() {
+  if (!canRunAdvancedErase.value) {
+    return
+  }
+  const configError = getAdvancedEraseConfigError()
+  if (configError) {
+    errorMessage.value = configError
+    status.value = '选区擦除未启动。'
+    return
+  }
+  selectionEraseRects.value = []
+  selectionEraseDraft.value = null
+  selectionEraseModalOpen.value = true
+}
+
+function closeSelectionEraseModal() {
+  selectionEraseModalOpen.value = false
+  selectionEraseDraft.value = null
+}
+
+function beginSelectionEraseDraw(event) {
+  if (!selectionEraseModalOpen.value || advancedEraseBusy.value) {
+    return
+  }
+  const point = getSelectionErasePoint(event)
+  if (!point) {
+    return
+  }
+  event.preventDefault()
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+  selectionEraseDraft.value = {
+    pointerId: event.pointerId,
+    startX: point.x,
+    startY: point.y,
+    ...makeSelectionEraseRect(point.x, point.y, point.x, point.y)
+  }
+}
+
+function updateSelectionEraseDraw(event) {
+  const draft = selectionEraseDraft.value
+  if (!draft || draft.pointerId !== event.pointerId) {
+    return
+  }
+  const point = getSelectionErasePoint(event)
+  if (!point) {
+    return
+  }
+  selectionEraseDraft.value = {
+    ...draft,
+    ...makeSelectionEraseRect(draft.startX, draft.startY, point.x, point.y)
+  }
+}
+
+function finishSelectionEraseDraw(event) {
+  const draft = selectionEraseDraft.value
+  if (!draft || draft.pointerId !== event.pointerId) {
+    return
+  }
+  event.currentTarget?.releasePointerCapture?.(event.pointerId)
+  if (draft.width >= 0.006 && draft.height >= 0.006) {
+    const { pointerId: _pointerId, startX: _startX, startY: _startY, ...rect } = draft
+    selectionEraseRects.value = [...selectionEraseRects.value, rect]
+  }
+  selectionEraseDraft.value = null
+}
+
+function cancelSelectionEraseDraw(event) {
+  if (selectionEraseDraft.value?.pointerId === event.pointerId) {
+    selectionEraseDraft.value = null
+  }
+}
+
+function removeSelectionEraseRect(rectId) {
+  selectionEraseRects.value = selectionEraseRects.value.filter((rect) => rect.id !== rectId)
+}
+
+function clearSelectionEraseRects() {
+  selectionEraseRects.value = []
+  selectionEraseDraft.value = null
+}
+
+async function confirmSelectionErase() {
+  const selections = selectionEraseRects.value
+    .filter((rect) => rect.width > 0 && rect.height > 0)
+    .map(({ x, y, width, height }) => ({ x, y, width, height }))
+  if (!selections.length) {
+    errorMessage.value = '请先框选要擦除的区域。'
+    return
+  }
+  closeSelectionEraseModal()
+  await runV2AdvancedEraseAction('selection', { selections })
+}
+
+async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
   const page = selectedEditPage.value
   if (!sessionId.value || !page || translating.value || advancedEraseBusy.value) {
-    return
+    return false
   }
 
   const normalizedAction = String(action || 'erase').trim().toLowerCase()
@@ -8067,7 +8203,7 @@ async function runV2AdvancedEraseAction(action = 'erase') {
     if (configError) {
       errorMessage.value = configError
       status.value = '高级擦除未启动。'
-      return
+      return false
     }
   }
 
@@ -8077,18 +8213,24 @@ async function runV2AdvancedEraseAction(action = 'erase') {
   const pageId = page.stored_name
   status.value = normalizedAction === 'restore'
     ? '正在恢复传统空页…'
-    : '正在进行高级擦除，等待 Seedream 返回图片…'
+    : normalizedAction === 'selection'
+      ? '正在进行选区擦除，等待 Seedream 返回图片…'
+      : '正在进行高级擦除，等待 Seedream 返回图片…'
 
   try {
+    const requestBody = {
+      action: normalizedAction,
+      config: buildRuntimeConfig()
+    }
+    if (normalizedAction === 'selection') {
+      requestBody.selections = Array.isArray(options.selections) ? options.selections : []
+    }
     const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        action: normalizedAction,
-        config: buildRuntimeConfig()
-      })
+      body: JSON.stringify(requestBody)
     })
     const payload = await response.json()
     if (!response.ok) {
@@ -8103,12 +8245,18 @@ async function runV2AdvancedEraseAction(action = 'erase') {
     void loadProjectHistory({ silent: true })
     status.value = normalizedAction === 'restore'
       ? '已恢复传统空页。'
-      : '高级擦除完成，空页与框页已刷新。'
+      : normalizedAction === 'selection'
+        ? '选区擦除完成，空页与框页已刷新。'
+        : '高级擦除完成，空页与框页已刷新。'
+    return true
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '高级擦除失败'
     status.value = normalizedAction === 'restore'
       ? '恢复传统空页失败。'
-      : '高级擦除失败。'
+      : normalizedAction === 'selection'
+        ? '选区擦除失败。'
+        : '高级擦除失败。'
+    return false
   } finally {
     advancedEraseBusy.value = false
   }
@@ -9199,15 +9347,26 @@ watch(
             >
               重新嵌字
             </button>
-            <button
-              type="button"
-              class="v2-ghost-button"
-              :disabled="!canRunAdvancedErase"
-              title="用 Seedream 对当前页做高级擦除，生成新的空页"
-              @click="runV2AdvancedEraseAction('erase')"
-            >
-              {{ advancedEraseBusy ? '擦除中…' : '高级擦除' }}
-            </button>
+            <div class="v2-erase-menu">
+              <button
+                type="button"
+                class="v2-ghost-button"
+                :disabled="!canRunAdvancedErase"
+                title="用 Seedream 对当前页做高级擦除，生成新的空页"
+                @click="runV2AdvancedEraseAction('erase')"
+              >
+                {{ advancedEraseBusy ? '擦除中…' : '高级擦除' }}
+              </button>
+              <div class="v2-erase-menu-popover">
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
+                  @click="openSelectionEraseModal"
+                >
+                  选区擦除
+                </button>
+              </div>
+            </div>
             <button
               type="button"
               class="v2-ghost-button"
@@ -9891,6 +10050,77 @@ watch(
         </div>
       </section>
     </main>
+
+    <div v-if="selectionEraseModalOpen" class="v2-overlay" @click.self="closeSelectionEraseModal">
+      <section class="v2-modal v2-selection-erase-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">高级擦除</p>
+            <h2 class="v2-section-title">选区擦除</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭选区擦除" @click="closeSelectionEraseModal">✕</button>
+        </header>
+        <div class="v2-selection-erase-layout">
+          <div class="v2-selection-erase-stage-wrap">
+            <div
+              ref="selectionEraseStageRef"
+              class="v2-selection-erase-stage"
+              @pointerdown="beginSelectionEraseDraw"
+              @pointermove="updateSelectionEraseDraw"
+              @pointerup="finishSelectionEraseDraw"
+              @pointercancel="cancelSelectionEraseDraw"
+            >
+              <img
+                v-if="selectionEraseImageUrl"
+                :src="selectionEraseImageUrl"
+                alt=""
+                draggable="false"
+              />
+              <div
+                v-for="rect in selectionEraseRects"
+                :key="rect.id"
+                class="v2-selection-erase-rect"
+                :style="getSelectionEraseRectStyle(rect)"
+              />
+              <div
+                v-if="selectionEraseDraft"
+                class="v2-selection-erase-rect is-draft"
+                :style="getSelectionEraseRectStyle(selectionEraseDraft)"
+              />
+            </div>
+          </div>
+          <aside class="v2-selection-erase-side">
+            <div class="v2-selection-erase-count">
+              <strong>{{ selectionEraseRects.length }}</strong>
+              <span>个选区</span>
+            </div>
+            <div v-if="selectionEraseRects.length" class="v2-selection-erase-list">
+              <button
+                v-for="(rect, index) in selectionEraseRects"
+                :key="rect.id"
+                type="button"
+                @click="removeSelectionEraseRect(rect.id)"
+              >
+                <span>选区 {{ index + 1 }}</span>
+                <small>{{ Math.round(rect.width * 100) }}% × {{ Math.round(rect.height * 100) }}%</small>
+              </button>
+            </div>
+            <div v-else class="v2-selection-erase-empty">在图上拖拽创建选区</div>
+          </aside>
+        </div>
+        <footer class="v2-selection-erase-actions">
+          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="clearSelectionEraseRects">
+            清空
+          </button>
+          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy" @click="closeSelectionEraseModal">
+            取消
+          </button>
+          <button type="button" class="v2-primary-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="confirmSelectionErase">
+            确认擦除
+          </button>
+        </footer>
+      </section>
+    </div>
 
     <div v-if="migrationModalOpen" class="v2-overlay" @click.self="migrationModalOpen = false">
       <section class="v2-modal v2-onboarding-modal">

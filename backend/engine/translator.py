@@ -31,6 +31,7 @@ from runtime_paths import AppPaths, resolve_app_paths
 from .image_cleanup import (
     ADVANCED_IMAGE_ERASE_PROMPT,
     ADVANCED_IMAGE_CONTAINER_MASK_PROMPT,
+    ADVANCED_IMAGE_SELECTION_ERASE_PROMPT,
     DEFAULT_IMAGE_CLEANUP_PROMPT,
     SEEDREAM_IMAGE_API_URL,
     create_image_cleanup_client,
@@ -1036,6 +1037,7 @@ class TranslatorEngine:
         page_id: str,
         raw_config: dict[str, Any] | None,
         action: str = "erase",
+        selections: Any = None,
     ) -> dict[str, Any]:
         if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
             raise FileNotFoundError("目标页面不存在，请刷新后重试。")
@@ -1057,6 +1059,15 @@ class TranslatorEngine:
             raise ValueError("缺少高级擦除模型名称。")
         if not str(config.get("advanced_erase_base_url") or "").strip():
             raise ValueError("缺少高级擦除接口地址。")
+
+        if normalized_action in {"selection", "selection-erase", "selected"}:
+            return await self._advanced_selection_erase_page(
+                project_id=project_id,
+                session=session,
+                page_id=page_id,
+                config=config,
+                selections=selections,
+            )
 
         source_path = self.get_page_source_image_path(project_id, session, page_id)
         page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
@@ -1227,6 +1238,139 @@ class TranslatorEngine:
                 "page_id": page_id,
                 "attempt_id": attempt_id,
                 "changed_ratio": changed_ratio,
+            },
+        }
+
+    async def _advanced_selection_erase_page(
+        self,
+        *,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        config: dict[str, Any],
+        selections: Any,
+    ) -> dict[str, Any]:
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+        backup_path = self._ensure_advanced_erase_traditional_backup(page_cache_dir)
+
+        base_path = page_cache_dir / "inpainted.png"
+        base_bgr = cv2.imread(str(base_path), cv2.IMREAD_COLOR)
+        if base_bgr is None:
+            raise RuntimeError(f"无法读取当前空页: {base_path}")
+        base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+        rects = self._normalize_selection_erase_rects(selections, base_rgb.shape)
+        if not rects:
+            raise ValueError("请至少框选一个要擦除的区域。")
+        selection_mask = self._build_selection_erase_mask(rects, base_rgb.shape)
+        selection_input_rgb = self._build_selection_erase_input_image(base_rgb, selection_mask)
+
+        client = create_image_cleanup_client(
+            mode="seedream-image",
+            api_key=config["advanced_erase_api_key"],
+            model=config["advanced_erase_model"],
+            api_url=config["advanced_erase_base_url"],
+            timeout_seconds=config["advanced_erase_timeout_seconds"],
+        )
+        print(
+            "[DEBUG] Selection erase request "
+            f"file={source_path.name} provider={config['advanced_erase_provider']} "
+            f"model={config['advanced_erase_model']} selections={len(rects)} "
+            f"size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
+        )
+
+        attempt_id = self._advanced_erase_attempt_id()
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        input_path = attempt_dir / f"{attempt_id}.selection-input.png"
+        seedream_output_path = attempt_dir / f"{attempt_id}.seedream.png"
+        output_path = attempt_dir / f"{attempt_id}.png"
+        selection_mask_path = attempt_dir / f"{attempt_id}.selection-mask.png"
+        diff_mask_path = attempt_dir / f"{attempt_id}.selection-diff.png"
+        metadata_path = attempt_dir / f"{attempt_id}.json"
+
+        self._save_rgb_image_atomic(input_path, selection_input_rgb)
+        cv2.imwrite(str(selection_mask_path), selection_mask)
+
+        edited_rgb = await asyncio.wait_for(
+            client.remove_text(selection_input_rgb, None, ADVANCED_IMAGE_SELECTION_ERASE_PROMPT),
+            timeout=int(config["advanced_erase_timeout_seconds"]) + 10,
+        )
+        edited_debug_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
+        self._save_rgb_image_atomic(seedream_output_path, edited_debug_rgb)
+
+        composite_rgb, changed_ratio = self._composite_selection_erase_result(
+            base_rgb,
+            edited_debug_rgb,
+            selection_mask,
+        )
+        diff_mask = self._advanced_erase_final_mask(
+            self._build_advanced_erase_change_mask(base_rgb, edited_debug_rgb),
+            selection_mask,
+        )
+        cv2.imwrite(str(diff_mask_path), diff_mask)
+        self._save_rgb_image_atomic(output_path, composite_rgb)
+        self._save_rgb_image_atomic(base_path, composite_rgb)
+
+        metadata = {
+            "attempt_id": attempt_id,
+            "created_at": self._now_iso(),
+            "page_id": page_id,
+            "source_path": str(source_path),
+            "base_path": str(base_path),
+            "provider": config["advanced_erase_provider"],
+            "api_url": config["advanced_erase_base_url"],
+            "model": config["advanced_erase_model"],
+            "mode": "selection",
+            "selections": [
+                {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                for x1, y1, x2, y2 in rects
+            ],
+            "selection_count": len(rects),
+            "selection_ratio": float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1),
+            "changed_ratio": changed_ratio,
+            "traditional_backup": str(backup_path),
+            "input_image": str(input_path),
+            "seedream_output": str(seedream_output_path),
+            "selection_mask": str(selection_mask_path),
+            "diff_mask": str(diff_mask_path),
+            "composited_output": str(output_path),
+            "rejected": False,
+        }
+        self._write_json_file(metadata_path, metadata)
+
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "selection",
+                "updated_at": self._now_iso(),
+                "attempt_id": attempt_id,
+                "provider": config["advanced_erase_provider"],
+                "model": config["advanced_erase_model"],
+                "changed_ratio": changed_ratio,
+                "selection_count": len(rects),
+            },
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="advanced_erase_selection",
+            snapshot_summary=f"选区擦除 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "advanced_erase": {
+                "action": "selection",
+                "page_id": page_id,
+                "attempt_id": attempt_id,
+                "changed_ratio": changed_ratio,
+                "selection_count": len(rects),
             },
         }
 
@@ -5782,6 +5926,92 @@ class TranslatorEngine:
         if clean_white_containers:
             composite_rgb = self._clean_advanced_erase_white_container_residue(source_rgb, composite_rgb, mask)
         return composite_rgb, mask, changed_ratio
+
+    def _normalize_selection_erase_rects(
+        self,
+        raw_rects: Any,
+        image_shape: tuple[int, ...],
+    ) -> list[tuple[int, int, int, int]]:
+        if not isinstance(raw_rects, list):
+            return []
+        height, width = image_shape[:2]
+        rects: list[tuple[int, int, int, int]] = []
+        for raw_rect in raw_rects:
+            if not isinstance(raw_rect, dict):
+                continue
+            try:
+                if {"x1", "y1", "x2", "y2"}.issubset(raw_rect.keys()):
+                    x1 = float(raw_rect.get("x1"))
+                    y1 = float(raw_rect.get("y1"))
+                    x2 = float(raw_rect.get("x2"))
+                    y2 = float(raw_rect.get("y2"))
+                else:
+                    x1 = float(raw_rect.get("x"))
+                    y1 = float(raw_rect.get("y"))
+                    rect_width = float(raw_rect.get("width"))
+                    rect_height = float(raw_rect.get("height"))
+                    x2 = x1 + rect_width
+                    y2 = y1 + rect_height
+            except (TypeError, ValueError):
+                continue
+
+            values = (x1, y1, x2, y2)
+            if all(-0.05 <= value <= 1.05 for value in values):
+                x1 *= width
+                x2 *= width
+                y1 *= height
+                y2 *= height
+
+            left = int(round(min(x1, x2)))
+            right = int(round(max(x1, x2)))
+            top = int(round(min(y1, y2)))
+            bottom = int(round(max(y1, y2)))
+            left = max(0, min(width, left))
+            right = max(0, min(width, right))
+            top = max(0, min(height, top))
+            bottom = max(0, min(height, bottom))
+            if right - left < 4 or bottom - top < 4:
+                continue
+            rects.append((left, top, right, bottom))
+        return rects
+
+    def _build_selection_erase_mask(
+        self,
+        rects: list[tuple[int, int, int, int]],
+        image_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        height, width = image_shape[:2]
+        mask = np.zeros((height, width), dtype=np.uint8)
+        for x1, y1, x2, y2 in rects:
+            mask[y1:y2, x1:x2] = 255
+        return mask
+
+    def _build_selection_erase_input_image(
+        self,
+        base_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> np.ndarray:
+        mask = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        selected_input = np.full_like(base_rgb, 255)
+        selected_input[mask > 0] = base_rgb[mask > 0]
+        return selected_input
+
+    def _composite_selection_erase_result(
+        self,
+        base_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        edited_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
+        mask = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        composite_rgb = base_rgb.copy()
+        composite_rgb[mask > 0] = edited_rgb[mask > 0]
+        diff_mask = self._advanced_erase_final_mask(
+            self._build_advanced_erase_change_mask(base_rgb, edited_rgb),
+            mask,
+        )
+        changed_ratio = float(cv2.countNonZero(diff_mask)) / float(diff_mask.size or 1)
+        return composite_rgb, changed_ratio
 
     def _normalize_advanced_erase_mask(
         self,

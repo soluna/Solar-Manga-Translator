@@ -1212,6 +1212,90 @@ print(json.dumps({
 
             self.assertTrue(engine._advanced_erase_allowed_mask_is_overbroad(mask))
 
+    def test_advanced_erase_model_container_mask_extracts_segmentation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), 128, dtype=np.uint8)
+            marker = np.zeros((240, 240, 3), dtype=np.uint8)
+            marker[20:220, 20:220] = 18
+            cv2.ellipse(marker, (78, 84), (28, 42), 0, 0, 360, (0, 255, 0), -1)
+            frame = np.array([[132, 76], [186, 70], [196, 142], [126, 152], [118, 112]], dtype=np.int32)
+            cv2.fillPoly(marker, [frame], (0, 255, 0))
+
+            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
+
+            self.assertIsNotNone(mask)
+            assert mask is not None
+            self.assertGreaterEqual(count, 2)
+            self.assertGreater(int(mask[84, 78]), 0)
+            self.assertGreater(int(mask[120, 150]), 0)
+            self.assertEqual(int(mask[10, 10]), 0)
+
+    def test_advanced_erase_model_container_mask_accepts_legacy_white_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((160, 160, 3), 96, dtype=np.uint8)
+            marker = np.zeros((160, 160, 3), dtype=np.uint8)
+            cv2.rectangle(marker, (52, 42), (108, 118), (255, 255, 255), -1)
+
+            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
+
+            self.assertIsNotNone(mask)
+            assert mask is not None
+            self.assertEqual(count, 1)
+            self.assertGreater(int(mask[72, 80]), 0)
+            self.assertEqual(int(mask[12, 12]), 0)
+
+    def test_advanced_erase_model_container_mask_handles_dark_containers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((200, 200, 3), 180, dtype=np.uint8)
+            cv2.rectangle(source, (66, 54), (134, 146), (8, 8, 8), -1)
+            cv2.rectangle(source, (66, 54), (134, 146), (245, 245, 245), 2)
+            marker = np.zeros((200, 200, 3), dtype=np.uint8)
+            cv2.rectangle(marker, (66, 54), (134, 146), (0, 255, 0), -1)
+
+            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
+
+            self.assertIsNotNone(mask)
+            assert mask is not None
+            self.assertEqual(count, 1)
+            self.assertGreater(int(mask[88, 90]), 0)
+
+    def test_advanced_erase_model_container_mask_rejects_full_page_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((100, 100, 3), 128, dtype=np.uint8)
+            marker = np.full((100, 100, 3), 255, dtype=np.uint8)
+
+            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
+
+            self.assertIsNone(mask)
+            self.assertEqual(count, 0)
+
+    def test_advanced_erase_white_container_residue_is_cleaned_selectively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((180, 180, 3), 120, dtype=np.uint8)
+            cv2.ellipse(source, (58, 72), (30, 46), 0, 0, 360, (255, 255, 255), -1)
+            cv2.ellipse(source, (58, 72), (30, 46), 0, 0, 360, (0, 0, 0), 2)
+            source[62:70, 50:66] = 0
+            texture_frame = np.array([[104, 48], [150, 42], [158, 126], [102, 132]], dtype=np.int32)
+            cv2.fillPoly(source, [texture_frame], (132, 132, 132))
+
+            composite = source.copy()
+            composite[62:70, 50:66] = 210
+            cv2.fillPoly(composite, [texture_frame], (164, 164, 164))
+            mask = np.zeros((180, 180), dtype=np.uint8)
+            cv2.ellipse(mask, (58, 72), (30, 46), 0, 0, 360, 255, -1)
+            cv2.fillPoly(mask, [texture_frame], 255)
+
+            cleaned = engine._clean_advanced_erase_white_container_residue(source, composite, mask)
+
+            self.assertGreater(int(cleaned[66, 58, 0]), 240)
+            self.assertLess(int(cleaned[72, 28, 0]), 32)
+            self.assertEqual(int(cleaned[86, 130, 0]), 164)
+
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

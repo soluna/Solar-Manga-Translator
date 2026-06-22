@@ -25,8 +25,28 @@ decorative lettering sits inside a frame, speech balloon, caption box, border,
 outline, tail, or any hand-drawn container, remove only the lettering and keep
 that surrounding container exactly. Inside white speech balloons or caption
 areas, leave a clean continuous white fill with no faint ghost text, smudges, or
-partial strokes. Do not translate, add text, redraw non-text content, crop,
-rotate, or change the page layout. Return only the cleaned image.
+partial strokes. Inside black, dark, colored, transparent, or patterned text
+containers, leave a clean continuous matching fill with no faint ghost text,
+smudges, or partial strokes. Do not translate, add text, redraw non-text
+content, crop, rotate, or change the page layout. Return only the cleaned image.
+""".strip()
+ADVANCED_IMAGE_CONTAINER_MASK_PROMPT = """
+Create a segmentation mask image for this manga/comic page. Do not edit the
+manga artwork. Keep exactly the same canvas, orientation, and aspect ratio as
+the input. Use pure black (#000000) for every pixel outside text containers.
+Use pure chroma green (#00FF00) to fill the complete interior of every speech
+balloon, thought bubble, caption box, narration box, rectangular dialogue box,
+and decorative sound-effect text container that contains text. This includes
+white, black, dark, colored, transparent, textured, and patterned containers.
+For irregular hand-drawn sound-effect containers, fill the whole irregular
+container interior, including jagged edges, tails, spikes, and border-adjacent
+interior. If uncertain, include a small margin just inside and immediately
+around the container border. Do not include characters, faces, hair, hands,
+clothing, bodies, panel borders, background texture, blank page margins, or
+non-text artwork. Do not draw outlines, labels, numbers, gradients, gray
+shading, anti-aliased artwork, or the original manga image. Return only a
+binary-looking mask: black background with solid chroma-green filled blobs for
+text containers.
 """.strip()
 
 

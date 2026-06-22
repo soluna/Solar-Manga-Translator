@@ -52,6 +52,15 @@ class TranslatorEngine:
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
+    DEFAULT_FONT_KEY = "builtin:NotoSansCJKtc-Regular.otf"
+    DEFAULT_STYLE_FONT_KEYS = {
+        "gothic": DEFAULT_FONT_KEY,
+        "mincho": DEFAULT_FONT_KEY,
+        "rounded": DEFAULT_FONT_KEY,
+        "cartoon": DEFAULT_FONT_KEY,
+        "handwritten": DEFAULT_FONT_KEY,
+        "sfx": DEFAULT_FONT_KEY,
+    }
     TRANSLATED_OUTPUT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
     REVIEW_MODES = ("classic", "canvas_beta")
     DEFAULT_REVIEW_MODE = "classic"
@@ -96,6 +105,7 @@ class TranslatorEngine:
         self.config_dir = self.paths.config_dir
         self.project_font_dir = self.base_dir.parent / "fonts"
         self.project_font_legacy_dir = self.base_dir.parent / "font"
+        self.open_builtin_font_dir = self.base_dir.parent / "fonts" / "builtin"
         self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -488,7 +498,7 @@ class TranslatorEngine:
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
             "project": [self.project_font_dir, self.project_font_legacy_dir],
-            "builtin": [self.builtin_font_dir],
+            "builtin": [self.open_builtin_font_dir, self.builtin_font_dir],
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
@@ -4267,13 +4277,17 @@ class TranslatorEngine:
                     source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
                     if source_bgr is not None:
                         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-                        prepared_regions, debug_info = self._prepare_cached_regions_for_edit_with_debug(
-                            source_rgb,
-                            cache_page_dir,
-                            config,
-                            image["stored_name"],
-                            session=session,
-                        )
+                        try:
+                            prepared_regions, debug_info = self._prepare_cached_regions_for_edit_with_debug(
+                                source_rgb,
+                                cache_page_dir,
+                                config,
+                                image["stored_name"],
+                                session=session,
+                            )
+                        except FileNotFoundError:
+                            prepared_regions = None
+                            debug_info = None
                 await self._render_cached_page(
                     source_path,
                     output_path,
@@ -4549,11 +4563,16 @@ class TranslatorEngine:
         api_key = str(raw_config.get("api_key", "")).strip()
         openai_base_url = str(raw_config.get("openai_base_url", "")).strip()
         openai_model = str(raw_config.get("openai_model", "")).strip()
-        font_key = str(raw_config.get("font_key", "")).strip()
-        font_path = self._resolve_font_path(font_key)
         render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
         render_letter_spacing = self._normalize_render_letter_spacing(raw_config.get("render_letter_spacing"))
         font_style_mode = self._normalize_font_style_mode(raw_config.get("font_style_mode"))
+        style_font_keys = self._normalize_style_font_keys(raw_config)
+        font_key = str(
+            raw_config.get("font_key")
+            or style_font_keys.get("gothic")
+            or self.DEFAULT_FONT_KEY
+        ).strip()
+        font_path = self._resolve_font_path(font_key)
         image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
         image_cleanup_model = self._normalize_image_cleanup_model(
             image_cleanup_mode,
@@ -4577,7 +4596,6 @@ class TranslatorEngine:
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
         rerender_output_format = self._normalize_rerender_output_format(raw_config.get("rerender_output_format"))
         pause_after_detection = bool(raw_config.get("pause_after_detection", False))
-        style_font_keys = self._normalize_style_font_keys(raw_config)
         style_font_paths = {
             style: self._resolve_font_path(font_key)
             for style, font_key in style_font_keys.items()
@@ -4689,10 +4707,7 @@ class TranslatorEngine:
         return value
 
     def _normalize_font_style_mode(self, raw_value: Any) -> str:
-        value = str(raw_value or "single").strip().lower()
-        if value not in {"single", "auto-map"}:
-            return "single"
-        return value
+        return "auto-map"
 
     def _normalize_render_letter_spacing(self, raw_value: Any) -> float:
         try:
@@ -4714,17 +4729,11 @@ class TranslatorEngine:
         return ""
 
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
-        return {
-            # Gothic / 黑体 follows the primary font. Keeping a separate implicit
-            # mapping here made the UI feel broken because changing the main font
-            # often had no visible effect on standard dialogue.
-            "gothic": "",
-            "mincho": str(raw_config.get("style_font_mincho_key", "")).strip(),
-            "rounded": str(raw_config.get("style_font_rounded_key", "")).strip(),
-            "cartoon": str(raw_config.get("style_font_cartoon_key", "")).strip(),
-            "handwritten": str(raw_config.get("style_font_handwritten_key", "")).strip(),
-            "sfx": str(raw_config.get("style_font_sfx_key", "")).strip(),
-        }
+        normalized: dict[str, str] = {}
+        for style in self.STYLE_BUCKETS:
+            raw_key = str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
+            normalized[style] = raw_key or self.DEFAULT_STYLE_FONT_KEYS.get(style, self.DEFAULT_FONT_KEY)
+        return normalized
 
     def _normalize_style_region_overrides(self, raw_value: Any) -> dict[str, str]:
         if not isinstance(raw_value, dict):
@@ -8293,8 +8302,6 @@ class TranslatorEngine:
             region.font_style = resolved_style
             if explicit_font_path:
                 region.font_family = explicit_font_path
-            elif resolved_style == "gothic":
-                region.font_family = default_font_path
             else:
                 region.font_family = style_paths.get(resolved_style) or default_font_path
 

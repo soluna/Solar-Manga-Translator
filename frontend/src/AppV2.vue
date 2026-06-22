@@ -88,6 +88,7 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
+const defaultBuiltinFontId = 'builtin:NotoSansCJKtc-Regular.otf'
 const projectGlossaryCategoryOptions = ['人名', '组织/团体', '地点', '作品/道具/技能', '行业术语', '其他']
 const textDirectionOptions = [
   { value: 'auto', label: '自动（中文默认竖排）' },
@@ -113,20 +114,20 @@ const defaultReviewComparePaneModes = ['final', 'frame']
 const reviewComparePaneOrder = reviewComparePaneOptions.map((option) => option.key)
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
-  gothic: ['華康儷中黑.ttf', '華康儷中黑'],
-  rounded: ['華康儷粗圓.ttf', '華康儷粗圓'],
-  mincho: ['華康儷粗宋.ttf', '華康儷粗宋'],
-  cartoon: ['華康布丁體.ttf', '華康布丁體'],
-  handwritten: ['華康竹風體.ttf', '華康竹風體'],
-  sfx: ['方正剪紙GBK.ttf', '方正剪紙GBK']
+  gothic: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
+  mincho: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
+  rounded: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
+  cartoon: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
+  handwritten: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
+  sfx: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular']
 }
 const previewFallbackFontNameMap = {
-  gothic: ['華康儷中黑.ttf', '華康儷粗黑.ttf', '華康粗黑體.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf', 'msyh.ttc'],
-  rounded: ['華康儷粗圓.ttf', 'SourceHanSansSC-Medium-2.otf', 'NotoSansSC-Bold.otf'],
-  mincho: ['華康儷粗宋.ttf', 'SourceHanSansSC-Regular-2.otf', 'Arial-Unicode-Regular.ttf'],
-  cartoon: ['華康儷粗圓.ttf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf'],
-  handwritten: ['華康儷粗圓.ttf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
-  sfx: ['方正剪紙GBK.ttf', '華康超黑體(P).ttf', '華康儷粗黑.ttf', 'NotoSansSC-Bold.otf']
+  gothic: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
+  mincho: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
+  rounded: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Medium-2.otf', 'NotoSansSC-Bold.otf'],
+  cartoon: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf'],
+  handwritten: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
+  sfx: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf']
 }
 const previewFontDecodeDenyList = new Set([
   '華康方圓體.ttf',
@@ -297,14 +298,14 @@ function createDefaultConfig() {
     api_key: '',
     openai_base_url: '',
     openai_model: '',
-    font_key: '',
-    font_style_mode: 'single',
-    style_font_gothic_key: '',
-    style_font_mincho_key: '',
-    style_font_rounded_key: '',
-    style_font_cartoon_key: '',
-    style_font_handwritten_key: '',
-    style_font_sfx_key: '',
+    font_key: defaultBuiltinFontId,
+    font_style_mode: 'auto-map',
+    style_font_gothic_key: defaultBuiltinFontId,
+    style_font_mincho_key: defaultBuiltinFontId,
+    style_font_rounded_key: defaultBuiltinFontId,
+    style_font_cartoon_key: defaultBuiltinFontId,
+    style_font_handwritten_key: defaultBuiltinFontId,
+    style_font_sfx_key: defaultBuiltinFontId,
     render_alignment: 'center',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
@@ -372,9 +373,7 @@ function normalizeStoredConfig(rawValue) {
   const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
     ? rawValue.mask_cleanup_strength
     : defaults.mask_cleanup_strength
-  const fontStyleMode = typeof rawValue.font_style_mode === 'string' && isValidFontStyleMode(rawValue.font_style_mode)
-    ? rawValue.font_style_mode
-    : defaults.font_style_mode
+  const fontStyleMode = defaults.font_style_mode
   const rerenderOutputFormat = typeof rawValue.rerender_output_format === 'string' && isValidRerenderOutputFormat(rawValue.rerender_output_format)
     ? rawValue.rerender_output_format
     : defaults.rerender_output_format
@@ -395,23 +394,31 @@ function normalizeStoredConfig(rawValue) {
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     openai_base_url: typeof rawValue.openai_base_url === 'string' ? rawValue.openai_base_url : defaults.openai_base_url,
     openai_model: typeof rawValue.openai_model === 'string' ? rawValue.openai_model : defaults.openai_model,
-    font_key: typeof rawValue.font_key === 'string' ? rawValue.font_key : defaults.font_key,
+    font_key: typeof rawValue.font_key === 'string' && rawValue.font_key.trim()
+      ? rawValue.font_key
+      : defaults.font_key,
     font_style_mode: fontStyleMode,
-    // 黑体统一跟随主字体，避免“主字体改了但对白黑体不动”的混乱体验。
-    style_font_gothic_key: defaults.style_font_gothic_key,
+    style_font_gothic_key: typeof rawValue.style_font_gothic_key === 'string' && rawValue.style_font_gothic_key.trim()
+      ? rawValue.style_font_gothic_key
+      : defaults.style_font_gothic_key,
     style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
+      && rawValue.style_font_mincho_key.trim()
       ? rawValue.style_font_mincho_key
       : defaults.style_font_mincho_key,
     style_font_rounded_key: typeof rawValue.style_font_rounded_key === 'string'
+      && rawValue.style_font_rounded_key.trim()
       ? rawValue.style_font_rounded_key
       : defaults.style_font_rounded_key,
     style_font_cartoon_key: typeof rawValue.style_font_cartoon_key === 'string'
+      && rawValue.style_font_cartoon_key.trim()
       ? rawValue.style_font_cartoon_key
       : defaults.style_font_cartoon_key,
     style_font_handwritten_key: typeof rawValue.style_font_handwritten_key === 'string'
+      && rawValue.style_font_handwritten_key.trim()
       ? rawValue.style_font_handwritten_key
       : defaults.style_font_handwritten_key,
     style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
+      && rawValue.style_font_sfx_key.trim()
       ? rawValue.style_font_sfx_key
       : defaults.style_font_sfx_key,
     render_alignment: renderAlignment,
@@ -1258,7 +1265,7 @@ const reviewModeLabelMap = {
 const compactConfigSummary = computed(() => {
   const translator = translatorLabelMap[config.value.translator] || config.value.translator
   const targetLang = targetLangLabelMap[config.value.target_lang] || config.value.target_lang
-  const styleMode = config.value.font_style_mode === 'auto-map' ? '多字体映射' : '单字体'
+  const styleMode = '字体映射'
   const cleanup = config.value.image_cleanup_mode === 'off' ? '稳定流程' : 'AI 去字'
   const workflow = config.value.pause_after_detection ? '先校对再翻译' : '直接翻译'
   const reviewMode = reviewModeLabelMap[config.value.default_review_mode] || config.value.default_review_mode
@@ -3227,9 +3234,6 @@ function getConfiguredFontId() {
 }
 
 function getConfiguredStyleFontId(styleBucket) {
-  if (styleBucket === 'gothic') {
-    return ''
-  }
   const configKey = styleFontConfigKeyMap[styleBucket]
   if (!configKey) {
     return ''
@@ -7714,8 +7718,8 @@ async function checkBackendStatus() {
 
 function pickRecommendedFont(fonts, targetLang) {
   const preferredNames = targetLang === 'JPN'
-    ? ['msgothic.ttc', 'NotoSansMonoCJK-VF.ttf.ttc']
-    : ['msyh.ttc', 'Arial-Unicode-Regular.ttf', 'NotoSansMonoCJK-VF.ttf.ttc']
+    ? ['NotoSansCJKtc-Regular.otf', 'msgothic.ttc', 'NotoSansMonoCJK-VF.ttf.ttc']
+    : ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf', 'msyh.ttc']
 
   return fonts.find((font) => preferredNames.includes(font.name)) || fonts[0] || null
 }
@@ -7746,9 +7750,6 @@ function pickMappedStyleFont(fonts, preferredNames) {
 function applyDefaultStyleFontMappings(fonts) {
   let changed = false
   for (const [styleKey, preferredNames] of Object.entries(defaultStyleFontNameMap)) {
-    if (styleKey === 'gothic') {
-      continue
-    }
     const configKey = `style_font_${styleKey}_key`
     if (config.value[configKey]) {
       continue
@@ -10475,26 +10476,28 @@ watch(
           <section class="v2-settings-group">
             <header>
               <strong>字体与渲染</strong>
-              <span>设定默认字体策略与输出形态</span>
+              <span>配置识别风格到实际字体的对应关系</span>
             </header>
 
-            <label class="v2-field">
-              <span>主字体</span>
-              <select v-model="config.font_key">
-                <option value="">自动推荐</option>
-                <option v-for="font in availableFonts" :key="font.id" :value="font.id">
-                  {{ font.label }}
-                </option>
-              </select>
-            </label>
+            <div class="v2-font-map-list">
+              <label
+                v-for="bucket in styleBucketOptions"
+                :key="bucket.value"
+                class="v2-font-map-row"
+              >
+                <span class="v2-font-map-label">{{ bucket.label }}</span>
+                <select v-model="config[styleFontConfigKeyMap[bucket.value]]">
+                  <option value="">使用内置默认</option>
+                  <option v-for="font in availableFonts" :key="font.id" :value="font.id">
+                    {{ font.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
 
-            <label class="v2-field">
-              <span>字体策略</span>
-              <select v-model="config.font_style_mode">
-                <option value="single">单字体</option>
-                <option value="auto-map">自动映射</option>
-              </select>
-            </label>
+            <p class="v2-settings-inline-note">
+              内置默认暂用 Noto Sans CJK；把自己的字体文件放入 fonts 目录后，可在上方逐项覆盖。
+            </p>
 
             <label class="v2-field">
               <span>结果输出</span>

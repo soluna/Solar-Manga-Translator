@@ -27,12 +27,13 @@ TEMP_EXTRACTED_DIR = APP_PATHS.cache_extracted_dir
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
 FONT_DIRECTORIES = {
+    "builtin": (
+        BASE_DIR.parent / "fonts" / "builtin",
+        BASE_DIR / "manga-image-translator" / "fonts",
+    ),
     "project": (
         BASE_DIR.parent / "fonts",
         BASE_DIR.parent / "font",
-    ),
-    "builtin": (
-        BASE_DIR / "manga-image-translator" / "fonts",
     ),
 }
 
@@ -135,10 +136,11 @@ def prepare_session_images(session_id: str, image_paths: list[str]) -> tuple[Pat
 def list_available_fonts() -> list[dict[str, str]]:
     fonts: list[dict[str, str]] = []
     preferred_order = {
-        "msyh.ttc": 0,
-        "msgothic.ttc": 1,
-        "Arial-Unicode-Regular.ttf": 2,
-        "NotoSansMonoCJK-VF.ttf.ttc": 3,
+        "NotoSansCJKtc-Regular.otf": 0,
+        "msyh.ttc": 10,
+        "msgothic.ttc": 11,
+        "Arial-Unicode-Regular.ttf": 12,
+        "NotoSansMonoCJK-VF.ttf.ttc": 13,
     }
 
     for source in FONT_DIRECTORIES:

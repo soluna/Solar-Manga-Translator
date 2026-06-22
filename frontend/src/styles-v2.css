@@ -2527,6 +2527,44 @@ img {
   text-wrap: pretty;
 }
 
+.v2-font-map-list {
+  display: grid;
+  gap: 8px;
+}
+
+.v2-font-map-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: var(--v2-radius-sm);
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(38, 55, 77, 0.08);
+}
+
+.v2-font-map-label {
+  color: var(--v2-text-soft);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.v2-font-map-row select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: var(--v2-radius-sm);
+  border: 1px solid var(--v2-line);
+  background: white;
+  color: var(--v2-text);
+  outline: none;
+}
+
+.v2-font-map-row select:focus {
+  border-color: rgba(37, 99, 235, 0.38);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
+}
+
 .v2-onboarding-modal {
   width: min(620px, 100%);
   max-height: min(720px, calc(100vh - 48px));

@@ -1338,6 +1338,47 @@ print(json.dumps({
             self.assertEqual(sanitized["advanced_erase_api_key"], "")
             self.assertEqual(sanitized["image_cleanup_api_key"], "")
 
+    def test_default_font_mapping_uses_bundled_open_font(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "backend"
+            base_dir.mkdir()
+            test_font_dir = root / "fonts" / "builtin"
+            test_font_dir.mkdir(parents=True)
+            (test_font_dir / "NotoSansCJKtc-Regular.otf").write_bytes(b"test-font")
+            engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
+
+            config = engine.normalize_user_config({})
+
+            self.assertEqual(config["font_style_mode"], "auto-map")
+            self.assertEqual(config["font_key"], engine.DEFAULT_FONT_KEY)
+            for style in engine.STYLE_BUCKETS:
+                self.assertEqual(config["style_font_keys"][style], engine.DEFAULT_FONT_KEY)
+                self.assertTrue(config["style_font_paths"][style].endswith("NotoSansCJKtc-Regular.otf"))
+
+    def test_font_mapping_keeps_user_style_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "backend"
+            base_dir.mkdir()
+            builtin_font_dir = root / "fonts" / "builtin"
+            builtin_font_dir.mkdir(parents=True)
+            (builtin_font_dir / "NotoSansCJKtc-Regular.otf").write_bytes(b"test-font")
+            custom_font_dir = root / "fonts"
+            custom_font_dir.mkdir(parents=True, exist_ok=True)
+            custom_font = custom_font_dir / "CustomDialogue.otf"
+            custom_font.write_bytes(b"custom-font")
+            engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
+
+            config = engine.normalize_user_config({
+                "style_font_gothic_key": f"project:{custom_font.name}",
+                "style_font_sfx_key": "",
+            })
+
+            self.assertEqual(config["style_font_keys"]["gothic"], f"project:{custom_font.name}")
+            self.assertEqual(config["style_font_keys"]["sfx"], engine.DEFAULT_FONT_KEY)
+            self.assertEqual(Path(config["style_font_paths"]["gothic"]).name, custom_font.name)
+
     def test_advanced_erase_rejection_saves_debug_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

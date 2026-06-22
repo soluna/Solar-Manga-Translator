@@ -1152,6 +1152,40 @@ print(json.dumps({
             self.assertTrue(np.array_equal(composite[40, 40], edited[40, 40]))
             self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
 
+    def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((120, 120, 3), 128, dtype=np.uint8)
+            cv2.ellipse(source, (60, 60), (30, 48), 0, 0, 360, (255, 255, 255), -1)
+            cv2.ellipse(source, (60, 60), (30, 48), 0, 0, 360, (0, 0, 0), 2)
+            source[50:62, 56:64] = 0
+            region = type("Region", (), {})()
+            region.xyxy = [56, 48, 64, 66]
+            region.font_size = 12
+
+            mask = engine._build_advanced_erase_region_container_mask(source, region)
+
+            self.assertGreater(int(mask[20, 60]), 0)
+            self.assertGreater(int(mask[56, 60]), 0)
+            self.assertEqual(int(mask[5, 5]), 0)
+
+    def test_advanced_erase_allowed_mask_expands_to_line_art_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((120, 120, 3), 112, dtype=np.uint8)
+            frame = np.array([[32, 20], [90, 18], [94, 98], [36, 102], [30, 72]], dtype=np.int32)
+            cv2.polylines(source, [frame], isClosed=True, color=(245, 245, 245), thickness=3)
+            source[50:66, 56:66] = 245
+            region = type("Region", (), {})()
+            region.xyxy = [56, 48, 66, 68]
+            region.font_size = 14
+
+            mask = engine._build_advanced_erase_region_container_mask(source, region)
+
+            self.assertGreater(int(mask[28, 40]), 0)
+            self.assertGreater(int(mask[90, 84]), 0)
+            self.assertEqual(int(mask[8, 8]), 0)
+
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

@@ -1155,36 +1155,62 @@ print(json.dumps({
     def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
-            source = np.full((120, 120, 3), 128, dtype=np.uint8)
-            cv2.ellipse(source, (60, 60), (30, 48), 0, 0, 360, (255, 255, 255), -1)
-            cv2.ellipse(source, (60, 60), (30, 48), 0, 0, 360, (0, 0, 0), 2)
-            source[50:62, 56:64] = 0
+            source = np.full((240, 240, 3), 128, dtype=np.uint8)
+            cv2.ellipse(source, (120, 120), (30, 48), 0, 0, 360, (255, 255, 255), -1)
+            cv2.ellipse(source, (120, 120), (30, 48), 0, 0, 360, (0, 0, 0), 2)
+            source[110:122, 116:124] = 0
             region = type("Region", (), {})()
-            region.xyxy = [56, 48, 64, 66]
+            region.xyxy = [116, 108, 124, 126]
             region.font_size = 12
 
             mask = engine._build_advanced_erase_region_container_mask(source, region)
 
-            self.assertGreater(int(mask[20, 60]), 0)
-            self.assertGreater(int(mask[56, 60]), 0)
+            self.assertGreater(int(mask[80, 120]), 0)
+            self.assertGreater(int(mask[116, 120]), 0)
             self.assertEqual(int(mask[5, 5]), 0)
 
     def test_advanced_erase_allowed_mask_expands_to_line_art_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
-            source = np.full((120, 120, 3), 112, dtype=np.uint8)
-            frame = np.array([[32, 20], [90, 18], [94, 98], [36, 102], [30, 72]], dtype=np.int32)
+            source = np.full((240, 240, 3), 112, dtype=np.uint8)
+            frame = np.array([[92, 60], [150, 58], [154, 138], [96, 142], [90, 112]], dtype=np.int32)
             cv2.polylines(source, [frame], isClosed=True, color=(245, 245, 245), thickness=3)
-            source[50:66, 56:66] = 245
+            source[90:106, 116:126] = 245
             region = type("Region", (), {})()
-            region.xyxy = [56, 48, 66, 68]
+            region.xyxy = [116, 88, 126, 108]
             region.font_size = 14
+            region.font_style = "sfx"
 
             mask = engine._build_advanced_erase_region_container_mask(source, region)
 
-            self.assertGreater(int(mask[28, 40]), 0)
-            self.assertGreater(int(mask[90, 84]), 0)
+            self.assertGreater(int(mask[68, 100]), 0)
+            self.assertGreater(int(mask[130, 144]), 0)
             self.assertEqual(int(mask[8, 8]), 0)
+
+    def test_advanced_erase_line_art_container_requires_decorative_style(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), 112, dtype=np.uint8)
+            frame = np.array([[92, 60], [150, 58], [154, 138], [96, 142], [90, 112]], dtype=np.int32)
+            cv2.polylines(source, [frame], isClosed=True, color=(245, 245, 245), thickness=3)
+            source[90:106, 116:126] = 245
+            region = type("Region", (), {})()
+            region.xyxy = [116, 88, 126, 108]
+            region.font_size = 14
+            region.font_style = "gothic"
+
+            mask = engine._build_advanced_erase_region_container_mask(source, region)
+
+            self.assertEqual(int(mask[68, 100]), 0)
+            self.assertGreater(int(mask[98, 120]), 0)
+
+    def test_advanced_erase_overbroad_allowed_mask_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            mask = np.zeros((100, 100), dtype=np.uint8)
+            mask[:, :] = 255
+
+            self.assertTrue(engine._advanced_erase_allowed_mask_is_overbroad(mask))
 
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -43,6 +43,7 @@ class TranslatorEngine:
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
     ADVANCED_ERASE_MAX_CHANGED_RATIO = 0.42
+    ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO = 0.62
     ADVANCED_ERASE_DEFAULT_PROVIDER = "volcengine-ark"
     ADVANCED_ERASE_DEFAULT_MODEL = "doubao-seedream-5-0-lite-260128"
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
@@ -1127,6 +1128,11 @@ class TranslatorEngine:
                 source_rgb,
                 edited_debug_rgb,
                 change_mask=debug_mask,
+                max_changed_ratio=(
+                    self.ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO
+                    if allowed_mask is not None
+                    else self.ADVANCED_ERASE_MAX_CHANGED_RATIO
+                ),
             )
         except RuntimeError as exc:
             self._write_json_file(metadata_path, {
@@ -5702,6 +5708,7 @@ class TranslatorEngine:
         source_rgb: np.ndarray,
         edited_rgb: np.ndarray,
         change_mask: np.ndarray | None = None,
+        max_changed_ratio: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, float]:
         edited_rgb = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
 
@@ -5710,10 +5717,15 @@ class TranslatorEngine:
             if change_mask is not None
             else self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
         )
+        ratio_limit = (
+            float(max_changed_ratio)
+            if max_changed_ratio is not None
+            else self.ADVANCED_ERASE_MAX_CHANGED_RATIO
+        )
         changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
         if changed_ratio <= 0:
             raise RuntimeError("高级擦除没有检测到可替换的文字区域。")
-        if changed_ratio > self.ADVANCED_ERASE_MAX_CHANGED_RATIO:
+        if changed_ratio > ratio_limit:
             raise RuntimeError(
                 "高级擦除返回图与原图差异过大，已拒绝覆盖空页。"
                 "请重试，或换一张图/更保守的提示后再试。"
@@ -5827,13 +5839,20 @@ class TranslatorEngine:
             return None, 0
 
         allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        conservative_allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        fallback_allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
         allowed_region_count = 0
         for region in regions:
             if bool(getattr(region, "skip_translation", False)) or bool(getattr(region, "disabled_region", False)):
                 continue
-            region_mask = self._build_advanced_erase_region_container_mask(source_rgb, region)
+            region_mask, conservative_mask, fallback_mask = self._build_advanced_erase_region_container_masks(
+                source_rgb,
+                region,
+            )
             if np.any(region_mask):
                 allowed = cv2.bitwise_or(allowed, region_mask)
+                conservative_allowed = cv2.bitwise_or(conservative_allowed, conservative_mask)
+                fallback_allowed = cv2.bitwise_or(fallback_allowed, fallback_mask)
                 allowed_region_count += 1
 
         if not np.any(allowed):
@@ -5841,9 +5860,26 @@ class TranslatorEngine:
 
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         allowed = cv2.morphologyEx(allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        conservative_allowed = cv2.morphologyEx(conservative_allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        fallback_allowed = cv2.morphologyEx(fallback_allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        if self._advanced_erase_allowed_mask_is_overbroad(allowed):
+            allowed = conservative_allowed
+        if self._advanced_erase_allowed_mask_is_overbroad(allowed):
+            allowed = fallback_allowed
         return allowed, allowed_region_count
 
     def _build_advanced_erase_region_container_mask(self, source_rgb: np.ndarray, region: Any) -> np.ndarray:
+        region_mask, _conservative_mask, _fallback_mask = self._build_advanced_erase_region_container_masks(
+            source_rgb,
+            region,
+        )
+        return region_mask
+
+    def _build_advanced_erase_region_container_masks(
+        self,
+        source_rgb: np.ndarray,
+        region: Any,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         fallback_mask = self._build_region_mask(
             region,
             source_rgb.shape,
@@ -5856,14 +5892,75 @@ class TranslatorEngine:
         region_mask = fallback_mask
         if bright_container is not None and np.any(bright_container):
             region_mask = cv2.bitwise_or(region_mask, bright_container)
+        conservative_mask = region_mask.copy()
         fallback_area = max(int(cv2.countNonZero(fallback_mask)), 1)
         bright_area = int(cv2.countNonZero(bright_container)) if bright_container is not None else 0
         line_container = None
-        if bright_area < fallback_area * 2:
+        if bright_area < fallback_area * 2 and self._region_allows_line_art_container(region):
             line_container = self._detect_line_art_text_container_mask(source_rgb, region)
         if line_container is not None and np.any(line_container):
             region_mask = cv2.bitwise_or(region_mask, line_container)
-        return region_mask
+        if not self._advanced_erase_region_mask_is_plausible(region_mask, fallback_mask, source_rgb.shape):
+            region_mask = conservative_mask
+        if not self._advanced_erase_region_mask_is_plausible(region_mask, fallback_mask, source_rgb.shape):
+            region_mask = fallback_mask
+        return region_mask, conservative_mask, fallback_mask
+
+    def _region_allows_line_art_container(self, region: Any) -> bool:
+        style_values = {
+            str(getattr(region, "font_style", "") or "").strip().lower(),
+            str(getattr(region, "auto_font_style", "") or "").strip().lower(),
+            str(getattr(region, "override_font_style", "") or "").strip().lower(),
+        }
+        return bool(style_values.intersection({"sfx", "handwritten", "cartoon"}))
+
+    def _advanced_erase_region_mask_is_plausible(
+        self,
+        mask: np.ndarray,
+        fallback_mask: np.ndarray,
+        image_shape: tuple[int, ...],
+    ) -> bool:
+        mask = self._normalize_advanced_erase_mask(mask, image_shape)
+        area = int(cv2.countNonZero(mask))
+        if area <= 0:
+            return False
+        page_area = max(mask.shape[0] * mask.shape[1], 1)
+        if area > int(page_area * 0.20):
+            return False
+        fallback_area = max(int(cv2.countNonZero(fallback_mask)), 1)
+        if area > max(fallback_area * 80, int(page_area * 0.04)):
+            return False
+        component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        for label in range(1, component_count):
+            comp_area = int(stats[label, cv2.CC_STAT_AREA])
+            comp_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            comp_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if comp_area > int(page_area * 0.18):
+                return False
+            if comp_width > int(mask.shape[1] * 0.72) or comp_height > int(mask.shape[0] * 0.72):
+                return False
+        return True
+
+    def _advanced_erase_allowed_mask_is_overbroad(self, mask: np.ndarray) -> bool:
+        mask = self._normalize_advanced_erase_mask(mask, mask.shape)
+        area = int(cv2.countNonZero(mask))
+        page_area = max(mask.shape[0] * mask.shape[1], 1)
+        if area > int(page_area * self.ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO):
+            return True
+        component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        for label in range(1, component_count):
+            comp_area = int(stats[label, cv2.CC_STAT_AREA])
+            comp_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            comp_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if comp_area > int(page_area * 0.45):
+                return True
+            if (
+                comp_area > int(page_area * 0.30)
+                and comp_width > int(mask.shape[1] * 0.82)
+                and comp_height > int(mask.shape[0] * 0.82)
+            ):
+                return True
+        return False
 
     def _detect_bright_text_container_mask(self, source_rgb: np.ndarray, region: Any) -> np.ndarray | None:
         gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)

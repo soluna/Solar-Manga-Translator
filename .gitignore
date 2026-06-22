@@ -16,3 +16,9 @@ frontend/test-artifacts/
 desktop/node_modules/
 desktop/dist/
 desktop/resources-staging/
+
+# User-provided or legacy local fonts should stay out of git. Only the
+# curated open-license built-in font package is versioned.
+fonts/*
+!fonts/builtin/
+!fonts/builtin/**

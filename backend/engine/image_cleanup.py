@@ -23,8 +23,10 @@ was removed. Preserve all non-text artwork, line art, panels, characters,
 objects, tones, colors, and composition unchanged. If a sound effect or
 decorative lettering sits inside a frame, speech balloon, caption box, border,
 outline, tail, or any hand-drawn container, remove only the lettering and keep
-that surrounding container exactly. Do not translate, add text, redraw non-text
-content, crop, rotate, or change the page layout. Return only the cleaned image.
+that surrounding container exactly. Inside white speech balloons or caption
+areas, leave a clean continuous white fill with no faint ghost text, smudges, or
+partial strokes. Do not translate, add text, redraw non-text content, crop,
+rotate, or change the page layout. Return only the cleaned image.
 """.strip()
 
 

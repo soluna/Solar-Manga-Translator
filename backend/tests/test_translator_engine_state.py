@@ -1126,7 +1126,31 @@ print(json.dumps({
             self.assertEqual(int(mask[10, 10]), 0)
             self.assertLess(changed_ratio, engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
             self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
-            self.assertLess(int(composite[40, 30, 0]), 180)
+            self.assertEqual(int(composite[40, 30, 0]), 120)
+
+    def test_advanced_erase_region_mask_uses_clean_result_without_source_bleed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((80, 80, 3), 255, dtype=np.uint8)
+            source[36:44, 30:50] = 0
+            edited = np.full((80, 80, 3), 255, dtype=np.uint8)
+            allowed_mask = np.zeros((80, 80), dtype=np.uint8)
+            allowed_mask[30:50, 20:60] = 255
+            final_mask = engine._advanced_erase_final_mask(
+                engine._build_advanced_erase_change_mask(source, edited),
+                allowed_mask,
+            )
+
+            composite, mask, changed_ratio = engine._composite_advanced_erase_result(
+                source,
+                edited,
+                change_mask=final_mask,
+            )
+
+            self.assertGreater(changed_ratio, 0)
+            self.assertEqual(int(mask[40, 40]), 255)
+            self.assertTrue(np.array_equal(composite[40, 40], edited[40, 40]))
+            self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
 
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

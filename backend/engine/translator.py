@@ -1120,7 +1120,7 @@ class TranslatorEngine:
             "allowed_mask": str(allowed_mask_path) if allowed_mask is not None else "",
             "final_mask": str(mask_path),
             "allowed_region_count": allowed_region_count,
-            "mask_mode": "region_limited" if allowed_mask is not None else "diff_only",
+            "mask_mode": "region_replace" if allowed_mask is not None else "diff_only",
         }
         try:
             composite_rgb, mask, changed_ratio = self._composite_advanced_erase_result(
@@ -5858,7 +5858,7 @@ class TranslatorEngine:
         if allowed_mask is None:
             return raw_diff_mask
         allowed_mask = self._normalize_advanced_erase_mask(allowed_mask, raw_diff_mask.shape)
-        return cv2.bitwise_and(raw_diff_mask, allowed_mask)
+        return allowed_mask
 
     def _threshold_advanced_erase_diff(self, diff: np.ndarray, threshold: int) -> np.ndarray:
         _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
@@ -5887,9 +5887,10 @@ class TranslatorEngine:
     def _advanced_erase_alpha_from_mask(self, mask: np.ndarray) -> np.ndarray:
         min_side = max(1, min(mask.shape[:2]))
         blur_size = max(3, min(17, int(round(min_side * 0.006)) | 1))
+        mask = self._normalize_advanced_erase_mask(mask, mask.shape)
         alpha = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-        alpha[mask == 0] = 0
-        alpha[mask > 0] = np.maximum(alpha[mask > 0], 224)
+        alpha[mask > 0] = 255
+        alpha[alpha < 4] = 0
         return alpha.astype(np.uint8)
 
     def _prepare_ai_cleanup_inputs(

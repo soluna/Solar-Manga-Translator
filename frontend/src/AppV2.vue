@@ -43,7 +43,8 @@ const browserConfigKeys = [
   'advanced_erase_provider',
   'advanced_erase_base_url',
   'advanced_erase_model',
-  'advanced_erase_timeout_seconds'
+  'advanced_erase_timeout_seconds',
+  'advanced_erase_selection_prompt'
 ]
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
@@ -77,6 +78,13 @@ const advancedEraseDefaultConfig = {
   model: 'doubao-seedream-5-0-lite-260128',
   timeoutSeconds: 120
 }
+const advancedEraseSelectionDefaultPrompt = [
+  "Edit this manga page. The white blank area is outside the user's selection and should stay blank.",
+  'In the visible selected areas, remove all text, letters, handwriting, and sound-effect characters.',
+  'Fill the removed text with the surrounding background.',
+  'Keep non-text artwork, character lines, speech bubbles, caption boxes, sound-effect borders, panels, tones, and layout unchanged.',
+  'Do not add or translate text. Do not crop, rotate, or resize. Return only the cleaned image.'
+].join('\n')
 const advancedEraseProviderOptions = [
   { value: 'volcengine-ark', label: '火山引擎 Ark / Seedream' }
 ]
@@ -322,7 +330,8 @@ function createDefaultConfig() {
     advanced_erase_base_url: advancedEraseDefaultConfig.baseUrl,
     advanced_erase_model: advancedEraseDefaultConfig.model,
     advanced_erase_api_key: '',
-    advanced_erase_timeout_seconds: advancedEraseDefaultConfig.timeoutSeconds
+    advanced_erase_timeout_seconds: advancedEraseDefaultConfig.timeoutSeconds,
+    advanced_erase_selection_prompt: advancedEraseSelectionDefaultPrompt
   }
 }
 
@@ -370,6 +379,10 @@ function normalizeStoredConfig(rawValue) {
     ? rawValue.advanced_erase_model.trim()
     : defaults.advanced_erase_model
   const advancedEraseTimeoutSeconds = normalizeAdvancedEraseTimeoutSeconds(rawValue.advanced_erase_timeout_seconds)
+  const advancedEraseSelectionPrompt = typeof rawValue.advanced_erase_selection_prompt === 'string'
+    && rawValue.advanced_erase_selection_prompt.trim()
+    ? rawValue.advanced_erase_selection_prompt.slice(0, 4000)
+    : defaults.advanced_erase_selection_prompt
   const maskCleanupStrength = typeof rawValue.mask_cleanup_strength === 'string' && isValidMaskCleanupStrength(rawValue.mask_cleanup_strength)
     ? rawValue.mask_cleanup_strength
     : defaults.mask_cleanup_strength
@@ -449,7 +462,8 @@ function normalizeStoredConfig(rawValue) {
     advanced_erase_api_key: typeof rawValue.advanced_erase_api_key === 'string'
       ? rawValue.advanced_erase_api_key
       : defaults.advanced_erase_api_key,
-    advanced_erase_timeout_seconds: advancedEraseTimeoutSeconds
+    advanced_erase_timeout_seconds: advancedEraseTimeoutSeconds,
+    advanced_erase_selection_prompt: advancedEraseSelectionPrompt
   }
 }
 
@@ -10874,6 +10888,16 @@ watch(
               />
             </label>
 
+            <label class="v2-field">
+              <span>选区擦除 Prompt</span>
+              <textarea
+                v-model="config.advanced_erase_selection_prompt"
+                class="v2-prompt-textarea"
+                rows="7"
+                autocomplete="off"
+              ></textarea>
+            </label>
+
             <div class="v2-inline-actions">
               <button
                 type="button"
@@ -10881,6 +10905,13 @@ watch(
                 @click="clearAdvancedEraseApiKey"
               >
                 清除高级擦除密钥
+              </button>
+              <button
+                type="button"
+                class="v2-ghost-button"
+                @click="config.advanced_erase_selection_prompt = advancedEraseSelectionDefaultPrompt"
+              >
+                恢复默认 Prompt
               </button>
             </div>
 

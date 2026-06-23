@@ -50,6 +50,7 @@ class TranslatorEngine:
     ADVANCED_ERASE_DEFAULT_MODEL = "doubao-seedream-5-0-lite-260128"
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
     ADVANCED_ERASE_MAX_TIMEOUT_SECONDS = 300
+    ADVANCED_ERASE_PROMPT_MAX_LENGTH = 4000
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
@@ -1297,8 +1298,11 @@ class TranslatorEngine:
         self._save_rgb_image_atomic(input_path, selection_input_rgb)
         cv2.imwrite(str(selection_mask_path), selection_mask)
 
+        selection_prompt = self._normalize_advanced_erase_selection_prompt(
+            config.get("advanced_erase_selection_prompt")
+        )
         edited_rgb = await asyncio.wait_for(
-            client.remove_text(selection_input_rgb, None, ADVANCED_IMAGE_SELECTION_ERASE_PROMPT),
+            client.remove_text(selection_input_rgb, None, selection_prompt),
             timeout=int(config["advanced_erase_timeout_seconds"]) + 10,
         )
         edited_debug_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
@@ -1333,6 +1337,7 @@ class TranslatorEngine:
             "api_url": config["advanced_erase_base_url"],
             "model": config["advanced_erase_model"],
             "mode": "selection",
+            "prompt": selection_prompt,
             "selections": [
                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                 for x1, y1, x2, y2 in rects
@@ -4752,6 +4757,9 @@ class TranslatorEngine:
         advanced_erase_timeout_seconds = self._normalize_advanced_erase_timeout_seconds(
             raw_config.get("advanced_erase_timeout_seconds")
         )
+        advanced_erase_selection_prompt = self._normalize_advanced_erase_selection_prompt(
+            raw_config.get("advanced_erase_selection_prompt")
+        )
         mask_cleanup_strength = self._normalize_mask_cleanup_strength(raw_config.get("mask_cleanup_strength"))
         export_mask_debug = bool(raw_config.get("export_mask_debug", False))
         rerender_output_format = self._normalize_rerender_output_format(raw_config.get("rerender_output_format"))
@@ -4808,6 +4816,7 @@ class TranslatorEngine:
             "advanced_erase_model": advanced_erase_model,
             "advanced_erase_api_key": advanced_erase_api_key,
             "advanced_erase_timeout_seconds": advanced_erase_timeout_seconds,
+            "advanced_erase_selection_prompt": advanced_erase_selection_prompt,
         }
 
     def _normalize_advanced_text_repair(self, raw_value: Any) -> str:
@@ -4839,6 +4848,12 @@ class TranslatorEngine:
             self.ADVANCED_ERASE_MIN_TIMEOUT_SECONDS,
             min(self.ADVANCED_ERASE_MAX_TIMEOUT_SECONDS, value),
         )
+
+    def _normalize_advanced_erase_selection_prompt(self, raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ADVANCED_IMAGE_SELECTION_ERASE_PROMPT
+        return value[:self.ADVANCED_ERASE_PROMPT_MAX_LENGTH]
 
     def _normalize_translator_model(
         self,
@@ -6258,28 +6273,17 @@ class TranslatorEngine:
             selection,
         )
         text_mask = self._build_selection_erase_text_mask(base_rgb, selection)
+        replace_mask = selection
 
-        if np.any(text_mask):
-            min_side = max(1, min(base_rgb.shape[:2]))
-            near_size = max(7, min(43, int(round(min_side * 0.014)) | 1))
-            near_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_size, near_size))
-            near_text_mask = cv2.dilate(text_mask, near_kernel, iterations=1)
-            precise_mask = cv2.bitwise_or(
-                text_mask,
-                cv2.bitwise_and(model_change_mask, near_text_mask),
-            )
-        else:
-            precise_mask = model_change_mask
-        precise_mask = cv2.bitwise_and(
-            self._normalize_advanced_erase_mask(precise_mask, base_rgb.shape),
-            selection,
-        )
-
-        if not np.any(precise_mask):
+        if not np.any(replace_mask):
             empty = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
             return base_rgb.copy(), 0.0, empty, model_change_mask, text_mask, empty
 
-        alpha = self._advanced_erase_alpha_from_mask(precise_mask)
+        min_side = max(1, min(base_rgb.shape[:2]))
+        blur_size = max(3, min(15, int(round(min_side * 0.01)) | 1))
+        alpha = cv2.GaussianBlur(replace_mask, (blur_size, blur_size), 0)
+        alpha = cv2.bitwise_and(alpha, replace_mask)
+        alpha[replace_mask > 0] = np.maximum(alpha[replace_mask > 0], 192)
         alpha_f = alpha[:, :, None].astype(np.float32) / 255.0
         composite = (
             base_rgb.astype(np.float32) * (1.0 - alpha_f)
@@ -6300,7 +6304,12 @@ class TranslatorEngine:
                 & (edited_gray <= 128)
                 & (text_mask > 0)
             )
-            residual_mask = np.where(unchanged | stubborn_dark, 255, 0).astype(np.uint8)
+            remaining_dark_text = (
+                (base_gray <= 190)
+                & (edited_gray <= 168)
+                & (text_mask > 0)
+            )
+            residual_mask = np.where(unchanged | stubborn_dark | remaining_dark_text, 255, 0).astype(np.uint8)
             residual_mask = self._filter_selection_erase_residual_mask(residual_mask, selection)
             if np.any(residual_mask):
                 min_side = max(1, min(base_rgb.shape[:2]))
@@ -6318,10 +6327,9 @@ class TranslatorEngine:
                     0,
                     255,
                 ).astype(np.uint8)
-                precise_mask = cv2.bitwise_or(precise_mask, residual_mask)
 
-        changed_ratio = float(cv2.countNonZero(precise_mask)) / float(precise_mask.size or 1)
-        return composite_rgb, changed_ratio, precise_mask, model_change_mask, text_mask, residual_mask
+        changed_ratio = float(cv2.countNonZero(replace_mask)) / float(replace_mask.size or 1)
+        return composite_rgb, changed_ratio, replace_mask, model_change_mask, text_mask, residual_mask
 
     def _normalize_advanced_erase_mask(
         self,

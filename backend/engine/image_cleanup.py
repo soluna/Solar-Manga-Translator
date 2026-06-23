@@ -32,15 +32,13 @@ smudges, or partial strokes. Do not translate, add text, redraw non-text
 content, crop, rotate, or change the page layout. Return only the cleaned image.
 """.strip()
 ADVANCED_IMAGE_SELECTION_ERASE_PROMPT = """
-You are editing a manga/comic page prepared for partial text removal. Most of
-the canvas may be blank white; only the visible non-blank selected areas matter.
-Remove every visible text mark inside those selected visible areas, including
-speech-bubble text, captions, decorative lettering, handwriting, stylized text,
-and sound effects. Reconstruct the selected local background naturally. Preserve
-all non-text artwork, line art, speech balloons, caption boxes, sound-effect
-containers, borders, tails, tones, colors, and composition inside the selected
-areas unchanged. Do not add text, translate, crop, rotate, or change the canvas
-size. Leave blank white areas blank. Return only the cleaned image.
+Edit this manga page. The white blank area is outside the user's selection and
+should stay blank. In the visible selected areas, remove all text, letters,
+handwriting, and sound-effect characters. Fill the removed text with the
+surrounding background. Keep non-text artwork, character lines, speech bubbles,
+caption boxes, sound-effect borders, panels, tones, and layout unchanged. Do
+not add or translate text. Do not crop, rotate, or resize. Return only the
+cleaned image.
 """.strip()
 ADVANCED_IMAGE_CONTAINER_MASK_PROMPT = """
 Create a segmentation mask image for this manga/comic page. Do not edit the

@@ -1203,7 +1203,7 @@ print(json.dumps({
             self.assertEqual(int(cv2.countNonZero(residual_mask)), 0)
             self.assertTrue(np.array_equal(composite[5, 5], base[5, 5]))
             self.assertTrue(np.array_equal(composite[25, 15], edited[25, 15]))
-            self.assertTrue(np.array_equal(composite[38, 28], base[38, 28]))
+            self.assertFalse(np.array_equal(composite[30, 25], base[30, 25]))
 
     def test_selection_erase_composite_inpaints_unchanged_symbol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1248,10 +1248,12 @@ print(json.dumps({
             base[24:28, 14:18] = [0, 0, 0]
             Image.fromarray(base).save(cache_dir / "inpainted.png")
             observed_inputs: list[np.ndarray] = []
+            observed_prompts: list[str] = []
 
             class FakeClient:
-                async def remove_text(self, source_rgb, *_args, **_kwargs):
+                async def remove_text(self, source_rgb, _guide_rgb=None, prompt="", **_kwargs):
                     observed_inputs.append(source_rgb.copy())
+                    observed_prompts.append(prompt)
                     edited = source_rgb.copy()
                     edited[20:40, 10:30] = [245, 245, 245]
                     return edited
@@ -1268,6 +1270,7 @@ print(json.dumps({
                         "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
                         "advanced_erase_model": "custom-seedream-model",
                         "advanced_erase_api_key": "secret",
+                        "advanced_erase_selection_prompt": "custom selection prompt",
                     },
                     action="selection",
                     selections=[{"x": 0.125, "y": 0.25, "width": 0.25, "height": 0.25}],
@@ -1277,12 +1280,13 @@ print(json.dumps({
 
             self.assertEqual(result["advanced_erase"]["action"], "selection")
             self.assertEqual(len(observed_inputs), 1)
+            self.assertEqual(observed_prompts, ["custom selection prompt"])
             self.assertTrue(np.array_equal(observed_inputs[0][5, 5], [255, 255, 255]))
             self.assertTrue(np.array_equal(observed_inputs[0][25, 15], base[25, 15]))
             output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
             self.assertTrue(np.array_equal(output[5, 5], base[5, 5]))
             self.assertTrue(np.array_equal(output[25, 15], [245, 245, 245]))
-            self.assertTrue(np.array_equal(output[38, 28], base[38, 28]))
+            self.assertFalse(np.array_equal(output[38, 28], base[38, 28]))
 
     def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

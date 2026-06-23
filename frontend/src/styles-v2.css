@@ -751,6 +751,12 @@ img {
   resize: vertical;
 }
 
+.v2-prompt-textarea {
+  min-height: 180px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.45;
+}
+
 .v2-search-input:focus,
 .v2-filter-select:focus,
 .v2-field input:focus,

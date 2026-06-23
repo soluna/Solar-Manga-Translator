@@ -6176,6 +6176,83 @@ class TranslatorEngine:
     ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         edited_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
         selection = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        if not np.any(selection):
+            empty = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+            return base_rgb.copy(), 0.0, empty, empty, empty, empty
+
+        composite_rgb = base_rgb.copy()
+        precise_mask = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+        model_change_mask = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+        text_mask = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+        residual_mask = np.zeros(base_rgb.shape[:2], dtype=np.uint8)
+
+        for x1, y1, x2, y2, component_mask in self._selection_erase_component_rois(selection):
+            base_roi = base_rgb[y1:y2, x1:x2]
+            edited_roi = edited_rgb[y1:y2, x1:x2]
+            (
+                local_composite,
+                _local_ratio,
+                local_precise,
+                local_model_change,
+                local_text,
+                local_residual,
+            ) = self._composite_selection_erase_roi_result(base_roi, edited_roi, component_mask)
+
+            target_roi = composite_rgb[y1:y2, x1:x2]
+            target_roi[local_precise > 0] = local_composite[local_precise > 0]
+            precise_mask[y1:y2, x1:x2] = cv2.bitwise_or(precise_mask[y1:y2, x1:x2], local_precise)
+            model_change_mask[y1:y2, x1:x2] = cv2.bitwise_or(
+                model_change_mask[y1:y2, x1:x2],
+                local_model_change,
+            )
+            text_mask[y1:y2, x1:x2] = cv2.bitwise_or(text_mask[y1:y2, x1:x2], local_text)
+            residual_mask[y1:y2, x1:x2] = cv2.bitwise_or(
+                residual_mask[y1:y2, x1:x2],
+                local_residual,
+            )
+
+        changed_ratio = float(cv2.countNonZero(precise_mask)) / float(precise_mask.size or 1)
+        return composite_rgb, changed_ratio, precise_mask, model_change_mask, text_mask, residual_mask
+
+    def _selection_erase_component_rois(
+        self,
+        selection_mask: np.ndarray,
+    ) -> list[tuple[int, int, int, int, np.ndarray]]:
+        selection = self._normalize_advanced_erase_mask(selection_mask, selection_mask.shape)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(selection, connectivity=8)
+        if component_count <= 1:
+            return []
+
+        height, width = selection.shape[:2]
+        min_side = max(1, min(height, width))
+        pad = max(16, min(96, int(round(min_side * 0.012))))
+        rois: list[tuple[int, int, int, int, np.ndarray]] = []
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area <= 0:
+                continue
+            left = int(stats[label, cv2.CC_STAT_LEFT])
+            top = int(stats[label, cv2.CC_STAT_TOP])
+            comp_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            comp_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            x1 = max(0, left - pad)
+            y1 = max(0, top - pad)
+            x2 = min(width, left + comp_width + pad)
+            y2 = min(height, top + comp_height + pad)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            component_mask = np.where(labels[y1:y2, x1:x2] == label, 255, 0).astype(np.uint8)
+            rois.append((x1, y1, x2, y2, component_mask))
+        return rois
+
+    def _composite_selection_erase_roi_result(
+        self,
+        base_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        edited_rgb = self._normalize_advanced_erase_edited_image(base_rgb, edited_rgb)
+        selection = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
         model_change_mask = self._clip_advanced_erase_mask(
             self._build_advanced_erase_change_mask(base_rgb, edited_rgb),
             selection,

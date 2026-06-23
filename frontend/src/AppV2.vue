@@ -1700,6 +1700,22 @@ function toApiUrl(path) {
   return `${apiBaseUrl.value}${path.startsWith('/') ? path : `/${path}`}`
 }
 
+async function readApiJson(response, fallbackMessage) {
+  const rawText = await response.text()
+  if (!rawText) {
+    return {}
+  }
+
+  try {
+    return JSON.parse(rawText)
+  } catch (_error) {
+    if (!response.ok) {
+      throw new Error(rawText.slice(0, 240) || fallbackMessage)
+    }
+    throw new Error(`${fallbackMessage}：后端返回了无法解析的响应。`)
+  }
+}
+
 function toWebSocketUrl(path) {
   const url = new URL(toApiUrl(path))
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -8225,14 +8241,24 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     if (normalizedAction === 'selection') {
       requestBody.selections = Array.isArray(options.selections) ? options.selections : []
     }
-    const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody)
-    })
-    const payload = await response.json()
+    let response
+    try {
+      response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      })
+    } catch (fetchError) {
+      const message = fetchError instanceof Error ? fetchError.message : ''
+      throw new Error(
+        message.toLowerCase().includes('failed to fetch')
+          ? '高级擦除请求连接中断：后端可能在处理大图时重启或被系统终止，请重试；如果再次出现，请查看后端日志。'
+          : (message || '高级擦除请求连接中断')
+      )
+    }
+    const payload = await readApiJson(response, '高级擦除失败')
     if (!response.ok) {
       throw new Error(payload.detail || '高级擦除失败')
     }

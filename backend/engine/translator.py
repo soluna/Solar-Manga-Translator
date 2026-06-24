@@ -1040,6 +1040,7 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         action: str = "erase",
         selections: Any = None,
+        local_mask_mode: Any = None,
     ) -> dict[str, Any]:
         if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
             raise FileNotFoundError("目标页面不存在，请刷新后重试。")
@@ -1060,6 +1061,7 @@ class TranslatorEngine:
                 page_id=page_id,
                 config=config,
                 selections=selections,
+                local_mask_mode=local_mask_mode,
             )
 
         if config.get("advanced_erase_provider") != self.ADVANCED_ERASE_DEFAULT_PROVIDER:
@@ -1413,6 +1415,7 @@ class TranslatorEngine:
         page_id: str,
         config: dict[str, Any],
         selections: Any,
+        local_mask_mode: Any = None,
     ) -> dict[str, Any]:
         source_path = self.get_page_source_image_path(project_id, session, page_id)
         page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
@@ -1429,6 +1432,15 @@ class TranslatorEngine:
         if not rects:
             raise ValueError("请至少框选一个要擦除的区域。")
         selection_mask = self._build_selection_erase_mask(rects, base_rgb.shape)
+        mask_mode = self._normalize_local_model_erase_mask_mode(local_mask_mode)
+        erase_mask = selection_mask
+        resolved_mask_mode = mask_mode
+        if mask_mode == "text":
+            text_mask = self._build_selection_erase_text_mask(base_rgb, selection_mask)
+            if np.any(text_mask):
+                erase_mask = text_mask
+            else:
+                resolved_mask_mode = "selection_fallback"
 
         attempt_id = self._advanced_erase_attempt_id()
         attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
@@ -1436,25 +1448,28 @@ class TranslatorEngine:
         input_path = attempt_dir / f"{attempt_id}.local-input.png"
         output_path = attempt_dir / f"{attempt_id}.local.png"
         selection_mask_path = attempt_dir / f"{attempt_id}.local-selection-mask.png"
+        erase_mask_path = attempt_dir / f"{attempt_id}.local-erase-mask.png"
         model_output_path = attempt_dir / f"{attempt_id}.local-model.png"
         metadata_path = attempt_dir / f"{attempt_id}.json"
 
         self._save_rgb_image_atomic(input_path, base_rgb)
         cv2.imwrite(str(selection_mask_path), selection_mask)
+        cv2.imwrite(str(erase_mask_path), erase_mask)
         device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
         print(
             "[DEBUG] Local model erase request "
             f"file={source_path.name} model=lama_large device={device} selections={len(rects)} "
-            f"size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
+            f"mask_mode={resolved_mask_mode} size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
         )
 
         try:
             model_rgb = await self._run_local_lama_inpaint(
                 base_rgb,
-                selection_mask,
+                erase_mask,
                 device=device,
             )
         except Exception as exc:
+            model_path = self.model_dir / "inpainting" / "lama_large_512px.ckpt"
             self._write_json_file(metadata_path, {
                 "attempt_id": attempt_id,
                 "created_at": self._now_iso(),
@@ -1464,21 +1479,25 @@ class TranslatorEngine:
                 "mode": "local_selection",
                 "model": "lama_large",
                 "device": device,
+                "mask_mode": mask_mode,
+                "resolved_mask_mode": resolved_mask_mode,
                 "selection_count": len(rects),
                 "selection_mask": str(selection_mask_path),
+                "erase_mask": str(erase_mask_path),
                 "traditional_backup": str(backup_path),
                 "rejected": True,
                 "error": str(exc),
             })
             raise RuntimeError(
                 "本地模型擦除失败。首次使用会自动下载 LaMa 模型；"
-                f"如果下载失败，请检查网络或稍后重试。详情：{exc}"
+                "如果下载很慢，也可以手动下载模型文件后放到 "
+                f"{model_path}。详情：{exc}"
             ) from exc
 
         model_rgb = self._normalize_advanced_erase_edited_image(base_rgb, model_rgb)
         self._save_rgb_image_atomic(model_output_path, model_rgb)
-        composite_rgb = self._composite_local_model_erase_result(base_rgb, model_rgb, selection_mask)
-        changed_ratio = float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1)
+        composite_rgb = self._composite_local_model_erase_result(base_rgb, model_rgb, erase_mask)
+        changed_ratio = float(cv2.countNonZero(erase_mask)) / float(erase_mask.size or 1)
         self._save_rgb_image_atomic(output_path, composite_rgb)
         self._save_rgb_image_atomic(base_path, composite_rgb)
 
@@ -1491,16 +1510,20 @@ class TranslatorEngine:
             "mode": "local_selection",
             "model": "lama_large",
             "device": device,
+            "mask_mode": mask_mode,
+            "resolved_mask_mode": resolved_mask_mode,
             "selections": [
                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                 for x1, y1, x2, y2 in rects
             ],
             "selection_count": len(rects),
-            "selection_ratio": changed_ratio,
+            "selection_ratio": float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1),
+            "erase_ratio": changed_ratio,
             "changed_ratio": changed_ratio,
             "traditional_backup": str(backup_path),
             "input_image": str(input_path),
             "selection_mask": str(selection_mask_path),
+            "erase_mask": str(erase_mask_path),
             "model_output": str(model_output_path),
             "composited_output": str(output_path),
             "rejected": False,
@@ -1517,6 +1540,7 @@ class TranslatorEngine:
                 "provider": "local",
                 "model": "lama_large",
                 "device": device,
+                "mask_mode": resolved_mask_mode,
                 "changed_ratio": changed_ratio,
                 "selection_count": len(rects),
             },
@@ -1540,6 +1564,7 @@ class TranslatorEngine:
                 "selection_count": len(rects),
                 "model": "lama_large",
                 "device": device,
+                "mask_mode": resolved_mask_mode,
             },
         }
 
@@ -6174,6 +6199,12 @@ class TranslatorEngine:
         selected_input = np.full_like(base_rgb, 255)
         selected_input[mask > 0] = base_rgb[mask > 0]
         return selected_input
+
+    def _normalize_local_model_erase_mask_mode(self, raw_value: Any) -> str:
+        value = str(raw_value or "text").strip().lower().replace("_", "-")
+        if value in {"selection", "selected", "area", "whole", "whole-selection", "full"}:
+            return "selection"
+        return "text"
 
     def _select_local_inpainting_device(self, use_gpu: bool) -> str:
         try:

@@ -36,6 +36,10 @@ FONT_DIRECTORIES = {
         BASE_DIR.parent / "font",
     ),
 }
+LOCAL_LAMA_MODEL_FILENAME = "lama_large_512px.ckpt"
+LOCAL_LAMA_MODEL_URL = "https://huggingface.co/dreMaz/AnimeMangaInpainting/resolve/main/lama_large_512px.ckpt"
+LOCAL_LAMA_MODEL_MIRROR_URL = "https://hf-mirror.com/dreMaz/AnimeMangaInpainting/resolve/main/lama_large_512px.ckpt"
+LOCAL_LAMA_MODEL_SHA256 = "11d30fbb3000fb2eceae318b75d9ced9229d99ae990a7f8b3ac35c8d31f2c935"
 
 
 def iter_font_directories(source: str) -> list[Path]:
@@ -276,6 +280,28 @@ def build_runtime_diagnostics() -> dict[str, Any]:
     }
 
 
+def build_local_lama_model_payload() -> dict[str, Any]:
+    model_path = APP_PATHS.models_dir / "inpainting" / LOCAL_LAMA_MODEL_FILENAME
+    partial_path = model_path.with_suffix(f"{model_path.suffix}.part")
+    model_size = model_path.stat().st_size if model_path.exists() else 0
+    partial_size = partial_path.stat().st_size if partial_path.exists() else 0
+    return {
+        "model": "lama_large",
+        "filename": LOCAL_LAMA_MODEL_FILENAME,
+        "download_url": LOCAL_LAMA_MODEL_URL,
+        "mirror_url": LOCAL_LAMA_MODEL_MIRROR_URL,
+        "sha256": LOCAL_LAMA_MODEL_SHA256,
+        "models_dir": str(APP_PATHS.models_dir),
+        "model_dir": str(model_path.parent),
+        "path": str(model_path),
+        "partial_path": str(partial_path),
+        "downloaded": model_path.exists(),
+        "size_bytes": model_size,
+        "partial_downloaded": partial_path.exists(),
+        "partial_size_bytes": partial_size,
+    }
+
+
 def read_log_tail(path: Path, max_lines: int = 200) -> list[str]:
     if not path.exists() or not path.is_file():
         return []
@@ -297,6 +323,11 @@ async def get_app_runtime(request: Request):
 @app.get("/api/app/diagnostics")
 async def get_app_diagnostics():
     return {"diagnostics": build_runtime_diagnostics()}
+
+
+@app.get("/api/app/local-models/lama-large")
+async def get_local_lama_model_status():
+    return {"model": build_local_lama_model_payload()}
 
 
 @app.get("/api/app/settings")
@@ -780,6 +811,7 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
             raw_config=payload.get("config", {}),
             action=action,
             selections=payload.get("selections"),
+            local_mask_mode=payload.get("local_mask_mode") or payload.get("mask_mode"),
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

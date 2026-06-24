@@ -79,11 +79,11 @@ const advancedEraseDefaultConfig = {
   timeoutSeconds: 120
 }
 const advancedEraseSelectionDefaultPrompt = [
-  "Edit this manga page. The white blank area is outside the user's selection and should stay blank.",
-  'In the visible selected areas, remove all text, letters, handwriting, and sound-effect characters.',
-  'Fill the removed text with the surrounding background.',
-  'Keep non-text artwork, character lines, speech bubbles, caption boxes, sound-effect borders, panels, tones, and layout unchanged.',
-  'Do not add or translate text. Do not crop, rotate, or resize. Return only the cleaned image.'
+  "Edit this manga page. The white blank area is outside the user's selected regions and should stay blank.",
+  'Inside the visible selected regions, remove only text strokes, letters, handwriting, and sound-effect characters.',
+  'Keep speech bubbles, caption boxes, sound-effect frames, tails, borders, panels, characters, background art, tones, and layout unchanged.',
+  'Fill removed text naturally with the surrounding background.',
+  'Do not translate, add text, crop, rotate, or resize. Return only the cleaned image.'
 ].join('\n')
 const advancedEraseProviderOptions = [
   { value: 'volcengine-ark', label: '火山引擎 Ark / Seedream' }
@@ -654,6 +654,9 @@ const selectionEraseModalOpen = ref(false)
 const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
+const localModelInfo = ref(null)
+const localModelInfoLoading = ref(false)
+const localModelEraseMaskMode = ref('text')
 const historyLoading = ref(false)
 const deletingProjectId = ref('')
 const restoringProjectId = ref('')
@@ -851,6 +854,18 @@ const selectionEraseIsLocal = computed(() => selectionEraseAction.value === 'loc
 const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '高级擦除'))
 const selectionEraseModalTitle = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '选区擦除'))
 const selectionEraseConfirmLabel = computed(() => (selectionEraseIsLocal.value ? '确认模型擦除' : '确认擦除'))
+const localModelStatusLabel = computed(() => {
+  if (localModelInfoLoading.value) {
+    return '正在读取模型状态…'
+  }
+  if (localModelInfo.value?.downloaded) {
+    return `模型已准备好${localModelInfo.value.size_bytes ? `，${formatBytes(localModelInfo.value.size_bytes)}` : ''}`
+  }
+  if (localModelInfo.value?.partial_downloaded) {
+    return `检测到未完成下载：${formatBytes(localModelInfo.value.partial_size_bytes)}`
+  }
+  return '首次使用会自动下载并校验模型，下载慢时可手动准备。'
+})
 const canUseProjectGlossary = computed(() => Boolean(sessionId.value) && !translating.value)
 const projectGlossaryEntryCount = computed(() => glossaryDraftEntries.value.length)
 const projectGlossaryOccurrencesLoaded = computed(() => Boolean(projectGlossary.value?.occurrences_loaded))
@@ -8151,6 +8166,23 @@ function getAdvancedEraseActionLabel(action) {
   return '高级擦除'
 }
 
+async function loadLocalModelInfo() {
+  localModelInfoLoading.value = true
+  try {
+    const response = await fetch(toApiUrl('/api/app/local-models/lama-large'))
+    const payload = await readApiJson(response, '读取本地模型状态失败')
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取本地模型状态失败')
+    }
+    localModelInfo.value = payload.model || null
+  } catch (error) {
+    console.warn('Failed to load local model info.', error)
+    localModelInfo.value = null
+  } finally {
+    localModelInfoLoading.value = false
+  }
+}
+
 function openSelectionEraseModal(action = 'selection') {
   if (!canRunAdvancedErase.value) {
     return
@@ -8167,6 +8199,10 @@ function openSelectionEraseModal(action = 'selection') {
   selectionEraseAction.value = normalizedAction === 'local-selection' ? 'local-selection' : 'selection'
   selectionEraseRects.value = []
   selectionEraseDraft.value = null
+  if (selectionEraseAction.value === 'local-selection') {
+    localModelEraseMaskMode.value = 'text'
+    void loadLocalModelInfo()
+  }
   selectionEraseModalOpen.value = true
 }
 
@@ -8245,7 +8281,10 @@ async function confirmSelectionErase() {
     return
   }
   closeSelectionEraseModal()
-  await runV2AdvancedEraseAction(selectionEraseAction.value, { selections })
+  await runV2AdvancedEraseAction(selectionEraseAction.value, {
+    selections,
+    localMaskMode: localModelEraseMaskMode.value
+  })
 }
 
 async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
@@ -8273,7 +8312,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     : normalizedAction === 'selection'
       ? '正在进行选区擦除，等待 Seedream 返回图片…'
       : normalizedAction === 'local-selection'
-      ? '正在进行本地模型擦除；首次使用可能需要下载 LaMa 模型…'
+      ? '正在准备本地 LaMa 模型并合并本页选区；首次使用会下载并校验模型，可能需要几分钟…'
       : '正在进行高级擦除，等待 Seedream 返回图片…'
 
   try {
@@ -8283,6 +8322,9 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     }
     if (['selection', 'local-selection'].includes(normalizedAction)) {
       requestBody.selections = Array.isArray(options.selections) ? options.selections : []
+    }
+    if (normalizedAction === 'local-selection') {
+      requestBody.local_mask_mode = options.localMaskMode === 'selection' ? 'selection' : 'text'
     }
     let response
     try {
@@ -8297,7 +8339,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       const message = fetchError instanceof Error ? fetchError.message : ''
       throw new Error(
         message.toLowerCase().includes('failed to fetch')
-          ? `${getAdvancedEraseActionLabel(normalizedAction)}请求连接中断：后端可能在处理大图、下载模型或加载模型时重启/被系统终止，请重试；如果再次出现，请查看后端日志。`
+          ? `${getAdvancedEraseActionLabel(normalizedAction)}请求连接中断：后端可能正在下载/校验/加载模型，或处理大图时被系统终止；请稍后重试，若反复出现请查看后端日志。`
           : (message || `${getAdvancedEraseActionLabel(normalizedAction)}请求连接中断`)
       )
     }
@@ -10170,6 +10212,43 @@ watch(
             </div>
           </div>
           <aside class="v2-selection-erase-side">
+            <div class="v2-selection-erase-hint">
+              建议一次性框出本页所有要擦的位置，确认后会合并成一张 mask 处理。
+            </div>
+            <div v-if="selectionEraseIsLocal" class="v2-local-model-panel">
+              <div class="v2-local-model-status">
+                <strong>{{ localModelInfo?.downloaded ? 'LaMa 模型已就绪' : 'LaMa 模型准备' }}</strong>
+                <span>{{ localModelStatusLabel }}</span>
+              </div>
+              <div class="v2-local-mask-mode">
+                <span>擦除范围</span>
+                <label>
+                  <input v-model="localModelEraseMaskMode" type="radio" value="text" />
+                  <strong>只擦文字笔画</strong>
+                  <small>默认，尽量保留气泡和边框</small>
+                </label>
+                <label>
+                  <input v-model="localModelEraseMaskMode" type="radio" value="selection" />
+                  <strong>擦整个选区</strong>
+                  <small>适合无边框拟声字或整块重绘</small>
+                </label>
+              </div>
+              <div v-if="localModelInfo" class="v2-local-model-paths">
+                <span>模型保存位置</span>
+                <code>{{ localModelInfo.path }}</code>
+                <div class="v2-local-model-path-actions">
+                  <button type="button" class="v2-ghost-button" @click="copyText(localModelInfo.download_url, '已复制 LaMa 模型下载地址。')">
+                    复制下载地址
+                  </button>
+                  <button type="button" class="v2-ghost-button" @click="copyText(localModelInfo.mirror_url, '已复制 LaMa 模型镜像地址。')">
+                    复制镜像地址
+                  </button>
+                  <button type="button" class="v2-ghost-button" @click="copyText(localModelInfo.path, '已复制 LaMa 模型保存路径。')">
+                    复制保存路径
+                  </button>
+                </div>
+              </div>
+            </div>
             <div class="v2-selection-erase-count">
               <strong>{{ selectionEraseRects.length }}</strong>
               <span>个选区</span>

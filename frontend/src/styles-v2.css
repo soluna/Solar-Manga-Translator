@@ -2191,7 +2191,7 @@ img {
 .v2-selection-erase-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 210px;
+  grid-template-columns: minmax(0, 1fr) 320px;
   gap: 16px;
 }
 
@@ -2223,7 +2223,7 @@ img {
 
 .v2-selection-erase-stage img {
   display: block;
-  max-width: min(100%, calc(100vw - 300px));
+  max-width: min(100%, calc(100vw - 410px));
   max-height: calc(100vh - 172px);
   width: auto;
   height: auto;
@@ -2247,9 +2247,88 @@ img {
 
 .v2-selection-erase-side {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 12px;
+}
+
+.v2-selection-erase-hint,
+.v2-local-model-panel {
+  padding: 12px;
+  border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-panel-muted);
+  color: var(--v2-text-muted);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.v2-local-model-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.v2-local-model-status,
+.v2-local-mask-mode,
+.v2-local-model-paths {
+  display: grid;
+  gap: 7px;
+}
+
+.v2-local-model-status strong,
+.v2-local-mask-mode > span,
+.v2-local-model-paths > span {
+  color: var(--v2-text);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.v2-local-mask-mode label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-panel);
+  color: var(--v2-text);
+}
+
+.v2-local-mask-mode input {
+  margin-top: 3px;
+}
+
+.v2-local-mask-mode small {
+  grid-column: 2;
+  color: var(--v2-text-muted);
+}
+
+.v2-local-model-paths code {
+  display: block;
+  max-height: 72px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--v2-radius-sm);
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--v2-text);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  word-break: break-all;
+  white-space: normal;
+}
+
+.v2-local-model-path-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.v2-local-model-path-actions .v2-ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.82rem;
 }
 
 .v2-selection-erase-count {
@@ -2274,6 +2353,7 @@ img {
 
 .v2-selection-erase-list {
   min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
   display: grid;
   align-content: start;
@@ -2333,12 +2413,12 @@ img {
 
   .v2-selection-erase-stage img {
     max-width: calc(100vw - 38px);
-    max-height: calc(100vh - 250px);
+    max-height: calc(100vh - 320px);
   }
 
   .v2-selection-erase-side {
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-rows: auto;
+    max-height: 260px;
+    overflow: auto;
   }
 
   .v2-selection-erase-list {

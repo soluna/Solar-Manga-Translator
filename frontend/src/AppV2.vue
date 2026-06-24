@@ -651,6 +651,7 @@ const uploading = ref(false)
 const translating = ref(false)
 const advancedEraseBusy = ref(false)
 const selectionEraseModalOpen = ref(false)
+const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
 const historyLoading = ref(false)
@@ -846,6 +847,10 @@ const canRetranslate = computed(
 const canRunAdvancedErase = computed(
   () => Boolean(sessionId.value && selectedEditPage.value && !translating.value && !advancedEraseBusy.value)
 )
+const selectionEraseIsLocal = computed(() => selectionEraseAction.value === 'local-selection')
+const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '高级擦除'))
+const selectionEraseModalTitle = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '选区擦除'))
+const selectionEraseConfirmLabel = computed(() => (selectionEraseIsLocal.value ? '确认模型擦除' : '确认擦除'))
 const canUseProjectGlossary = computed(() => Boolean(sessionId.value) && !translating.value)
 const projectGlossaryEntryCount = computed(() => glossaryDraftEntries.value.length)
 const projectGlossaryOccurrencesLoaded = computed(() => Boolean(projectGlossary.value?.occurrences_loaded))
@@ -8128,16 +8133,38 @@ function getSelectionEraseRectStyle(rect) {
   }
 }
 
-function openSelectionEraseModal() {
+function isRemoteAdvancedEraseAction(action) {
+  return ['erase', 'selection'].includes(String(action || '').trim().toLowerCase())
+}
+
+function getAdvancedEraseActionLabel(action) {
+  const normalized = String(action || '').trim().toLowerCase()
+  if (normalized === 'restore') {
+    return '恢复传统空页'
+  }
+  if (normalized === 'selection') {
+    return '选区擦除'
+  }
+  if (normalized === 'local-selection') {
+    return '本地模型擦除'
+  }
+  return '高级擦除'
+}
+
+function openSelectionEraseModal(action = 'selection') {
   if (!canRunAdvancedErase.value) {
     return
   }
-  const configError = getAdvancedEraseConfigError()
-  if (configError) {
-    errorMessage.value = configError
-    status.value = '选区擦除未启动。'
-    return
+  const normalizedAction = String(action || 'selection').trim().toLowerCase()
+  if (isRemoteAdvancedEraseAction(normalizedAction)) {
+    const configError = getAdvancedEraseConfigError()
+    if (configError) {
+      errorMessage.value = configError
+      status.value = '选区擦除未启动。'
+      return
+    }
   }
+  selectionEraseAction.value = normalizedAction === 'local-selection' ? 'local-selection' : 'selection'
   selectionEraseRects.value = []
   selectionEraseDraft.value = null
   selectionEraseModalOpen.value = true
@@ -8218,7 +8245,7 @@ async function confirmSelectionErase() {
     return
   }
   closeSelectionEraseModal()
-  await runV2AdvancedEraseAction('selection', { selections })
+  await runV2AdvancedEraseAction(selectionEraseAction.value, { selections })
 }
 
 async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
@@ -8228,7 +8255,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
   }
 
   const normalizedAction = String(action || 'erase').trim().toLowerCase()
-  if (normalizedAction !== 'restore') {
+  if (isRemoteAdvancedEraseAction(normalizedAction)) {
     const configError = getAdvancedEraseConfigError()
     if (configError) {
       errorMessage.value = configError
@@ -8245,6 +8272,8 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     ? '正在恢复传统空页…'
     : normalizedAction === 'selection'
       ? '正在进行选区擦除，等待 Seedream 返回图片…'
+      : normalizedAction === 'local-selection'
+      ? '正在进行本地模型擦除；首次使用可能需要下载 LaMa 模型…'
       : '正在进行高级擦除，等待 Seedream 返回图片…'
 
   try {
@@ -8252,7 +8281,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       action: normalizedAction,
       config: buildRuntimeConfig()
     }
-    if (normalizedAction === 'selection') {
+    if (['selection', 'local-selection'].includes(normalizedAction)) {
       requestBody.selections = Array.isArray(options.selections) ? options.selections : []
     }
     let response
@@ -8268,13 +8297,13 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       const message = fetchError instanceof Error ? fetchError.message : ''
       throw new Error(
         message.toLowerCase().includes('failed to fetch')
-          ? '高级擦除请求连接中断：后端可能在处理大图时重启或被系统终止，请重试；如果再次出现，请查看后端日志。'
-          : (message || '高级擦除请求连接中断')
+          ? `${getAdvancedEraseActionLabel(normalizedAction)}请求连接中断：后端可能在处理大图、下载模型或加载模型时重启/被系统终止，请重试；如果再次出现，请查看后端日志。`
+          : (message || `${getAdvancedEraseActionLabel(normalizedAction)}请求连接中断`)
       )
     }
-    const payload = await readApiJson(response, '高级擦除失败')
+    const payload = await readApiJson(response, `${getAdvancedEraseActionLabel(normalizedAction)}失败`)
     if (!response.ok) {
-      throw new Error(payload.detail || '高级擦除失败')
+      throw new Error(payload.detail || `${getAdvancedEraseActionLabel(normalizedAction)}失败`)
     }
 
     markPageImageUpdated(pageId)
@@ -8287,14 +8316,18 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       ? '已恢复传统空页。'
       : normalizedAction === 'selection'
         ? '选区擦除完成，空页与框页已刷新。'
+        : normalizedAction === 'local-selection'
+        ? '本地模型擦除完成，空页与框页已刷新。'
         : '高级擦除完成，空页与框页已刷新。'
     return true
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '高级擦除失败'
+    errorMessage.value = error instanceof Error ? error.message : `${getAdvancedEraseActionLabel(normalizedAction)}失败`
     status.value = normalizedAction === 'restore'
       ? '恢复传统空页失败。'
       : normalizedAction === 'selection'
         ? '选区擦除失败。'
+        : normalizedAction === 'local-selection'
+        ? '本地模型擦除失败。'
         : '高级擦除失败。'
     return false
   } finally {
@@ -9408,6 +9441,14 @@ watch(
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
+                  title="使用本地 LaMa 模型擦除选区；首次使用会自动下载模型"
+                  @click="openSelectionEraseModal('local-selection')"
+                >
+                  本地模型擦除
+                </button>
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
                   title="恢复高级擦除前的传统空页"
                   @click="runV2AdvancedEraseAction('restore')"
                 >
@@ -10094,10 +10135,10 @@ watch(
       <section class="v2-modal v2-selection-erase-modal">
         <header class="v2-modal-head">
           <div>
-            <p class="v2-section-kicker">高级擦除</p>
-            <h2 class="v2-section-title">选区擦除</h2>
+            <p class="v2-section-kicker">{{ selectionEraseModalKicker }}</p>
+            <h2 class="v2-section-title">{{ selectionEraseModalTitle }}</h2>
           </div>
-          <button type="button" class="v2-icon-button" aria-label="关闭选区擦除" @click="closeSelectionEraseModal">✕</button>
+          <button type="button" class="v2-icon-button" :aria-label="`关闭${selectionEraseModalTitle}`" @click="closeSelectionEraseModal">✕</button>
         </header>
         <div class="v2-selection-erase-layout">
           <div class="v2-selection-erase-stage-wrap">
@@ -10155,7 +10196,7 @@ watch(
             取消
           </button>
           <button type="button" class="v2-primary-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="confirmSelectionErase">
-            确认擦除
+            {{ selectionEraseConfirmLabel }}
           </button>
         </footer>
       </section>

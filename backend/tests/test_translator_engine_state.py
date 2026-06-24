@@ -1288,6 +1288,57 @@ print(json.dumps({
             self.assertTrue(np.array_equal(output[25, 15], [245, 245, 245]))
             self.assertFalse(np.array_equal(output[38, 28], base[38, 28]))
 
+    def test_local_model_selection_erase_does_not_require_remote_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((80, 80, 3), [64, 64, 64], dtype=np.uint8)
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            base = np.full((80, 80, 3), [220, 220, 220], dtype=np.uint8)
+            base[24:28, 14:18] = [0, 0, 0]
+            Image.fromarray(base).save(cache_dir / "inpainted.png")
+            observed_masks: list[np.ndarray] = []
+
+            async def fake_lama(base_rgb, selection_mask, *, device):
+                observed_masks.append(selection_mask.copy())
+                edited = base_rgb.copy()
+                edited[selection_mask > 0] = [245, 245, 245]
+                return edited
+
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+
+            result = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-selection",
+                selections=[{"x": 0.125, "y": 0.25, "width": 0.25, "height": 0.25}],
+            ))
+
+            self.assertEqual(result["advanced_erase"]["action"], "local-selection")
+            self.assertEqual(result["advanced_erase"]["model"], "lama_large")
+            self.assertEqual(result["advanced_erase"]["device"], "cpu")
+            self.assertEqual(len(observed_masks), 1)
+            self.assertEqual(int(observed_masks[0][25, 15]), 255)
+            self.assertEqual(int(observed_masks[0][5, 5]), 0)
+            output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(output[5, 5], base[5, 5]))
+            self.assertFalse(np.array_equal(output[25, 15], base[25, 15]))
+
     def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

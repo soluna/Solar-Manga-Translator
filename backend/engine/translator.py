@@ -51,6 +51,7 @@ class TranslatorEngine:
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
     ADVANCED_ERASE_MAX_TIMEOUT_SECONDS = 300
     ADVANCED_ERASE_PROMPT_MAX_LENGTH = 4000
+    LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
@@ -1052,6 +1053,15 @@ class TranslatorEngine:
             }
 
         config = self.capture_page_command_config(session, raw_config)
+        if normalized_action in {"local-selection", "local_model_selection", "local-model-selection", "model-selection"}:
+            return await self._local_model_selection_erase_page(
+                project_id=project_id,
+                session=session,
+                page_id=page_id,
+                config=config,
+                selections=selections,
+            )
+
         if config.get("advanced_erase_provider") != self.ADVANCED_ERASE_DEFAULT_PROVIDER:
             raise ValueError("高级擦除第一版仅支持火山引擎 Ark / Seedream。")
         if not str(config.get("advanced_erase_api_key") or "").strip():
@@ -1392,6 +1402,144 @@ class TranslatorEngine:
                 "attempt_id": attempt_id,
                 "changed_ratio": changed_ratio,
                 "selection_count": len(rects),
+            },
+        }
+
+    async def _local_model_selection_erase_page(
+        self,
+        *,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        config: dict[str, Any],
+        selections: Any,
+    ) -> dict[str, Any]:
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+        backup_path = self._ensure_advanced_erase_traditional_backup(page_cache_dir)
+
+        base_path = page_cache_dir / "inpainted.png"
+        base_bgr = cv2.imread(str(base_path), cv2.IMREAD_COLOR)
+        if base_bgr is None:
+            raise RuntimeError(f"无法读取当前空页: {base_path}")
+        base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+        rects = self._normalize_selection_erase_rects(selections, base_rgb.shape)
+        if not rects:
+            raise ValueError("请至少框选一个要擦除的区域。")
+        selection_mask = self._build_selection_erase_mask(rects, base_rgb.shape)
+
+        attempt_id = self._advanced_erase_attempt_id()
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        input_path = attempt_dir / f"{attempt_id}.local-input.png"
+        output_path = attempt_dir / f"{attempt_id}.local.png"
+        selection_mask_path = attempt_dir / f"{attempt_id}.local-selection-mask.png"
+        model_output_path = attempt_dir / f"{attempt_id}.local-model.png"
+        metadata_path = attempt_dir / f"{attempt_id}.json"
+
+        self._save_rgb_image_atomic(input_path, base_rgb)
+        cv2.imwrite(str(selection_mask_path), selection_mask)
+        device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
+        print(
+            "[DEBUG] Local model erase request "
+            f"file={source_path.name} model=lama_large device={device} selections={len(rects)} "
+            f"size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
+        )
+
+        try:
+            model_rgb = await self._run_local_lama_inpaint(
+                base_rgb,
+                selection_mask,
+                device=device,
+            )
+        except Exception as exc:
+            self._write_json_file(metadata_path, {
+                "attempt_id": attempt_id,
+                "created_at": self._now_iso(),
+                "page_id": page_id,
+                "source_path": str(source_path),
+                "base_path": str(base_path),
+                "mode": "local_selection",
+                "model": "lama_large",
+                "device": device,
+                "selection_count": len(rects),
+                "selection_mask": str(selection_mask_path),
+                "traditional_backup": str(backup_path),
+                "rejected": True,
+                "error": str(exc),
+            })
+            raise RuntimeError(
+                "本地模型擦除失败。首次使用会自动下载 LaMa 模型；"
+                f"如果下载失败，请检查网络或稍后重试。详情：{exc}"
+            ) from exc
+
+        model_rgb = self._normalize_advanced_erase_edited_image(base_rgb, model_rgb)
+        self._save_rgb_image_atomic(model_output_path, model_rgb)
+        composite_rgb = self._composite_local_model_erase_result(base_rgb, model_rgb, selection_mask)
+        changed_ratio = float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1)
+        self._save_rgb_image_atomic(output_path, composite_rgb)
+        self._save_rgb_image_atomic(base_path, composite_rgb)
+
+        metadata = {
+            "attempt_id": attempt_id,
+            "created_at": self._now_iso(),
+            "page_id": page_id,
+            "source_path": str(source_path),
+            "base_path": str(base_path),
+            "mode": "local_selection",
+            "model": "lama_large",
+            "device": device,
+            "selections": [
+                {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                for x1, y1, x2, y2 in rects
+            ],
+            "selection_count": len(rects),
+            "selection_ratio": changed_ratio,
+            "changed_ratio": changed_ratio,
+            "traditional_backup": str(backup_path),
+            "input_image": str(input_path),
+            "selection_mask": str(selection_mask_path),
+            "model_output": str(model_output_path),
+            "composited_output": str(output_path),
+            "rejected": False,
+        }
+        self._write_json_file(metadata_path, metadata)
+
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "local_selection",
+                "updated_at": self._now_iso(),
+                "attempt_id": attempt_id,
+                "provider": "local",
+                "model": "lama_large",
+                "device": device,
+                "changed_ratio": changed_ratio,
+                "selection_count": len(rects),
+            },
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="local_model_erase_selection",
+            snapshot_summary=f"本地模型擦除 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "advanced_erase": {
+                "action": "local-selection",
+                "page_id": page_id,
+                "attempt_id": attempt_id,
+                "changed_ratio": changed_ratio,
+                "selection_count": len(rects),
+                "model": "lama_large",
+                "device": device,
             },
         }
 
@@ -6026,6 +6174,72 @@ class TranslatorEngine:
         selected_input = np.full_like(base_rgb, 255)
         selected_input[mask > 0] = base_rgb[mask > 0]
         return selected_input
+
+    def _select_local_inpainting_device(self, use_gpu: bool) -> str:
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("本地模型擦除需要 PyTorch，请先安装完整后端依赖。") from exc
+
+        if use_gpu:
+            if torch.cuda.is_available():
+                return "cuda"
+            mps_backend = getattr(torch.backends, "mps", None)
+            if mps_backend is not None and mps_backend.is_available():
+                return "mps"
+        return "cpu"
+
+    async def _run_local_lama_inpaint(
+        self,
+        base_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+        *,
+        device: str,
+    ) -> np.ndarray:
+        self._ensure_vendor_import_path()
+        patch_mask_refinement()
+        from manga_translator.config import Inpainter, InpainterConfig, InpaintPrecision
+        from manga_translator.inpainting import dispatch as dispatch_inpainting
+        from manga_translator.utils import ModelWrapper
+
+        ModelWrapper._MODEL_DIR = str(self.model_dir)
+        config = InpainterConfig(
+            inpainter=Inpainter.lama_large,
+            inpainting_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
+            inpainting_precision=InpaintPrecision.bf16,
+        )
+        return await dispatch_inpainting(
+            Inpainter.lama_large,
+            base_rgb,
+            selection_mask,
+            config,
+            self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
+            device,
+            False,
+        )
+
+    def _composite_local_model_erase_result(
+        self,
+        base_rgb: np.ndarray,
+        model_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+    ) -> np.ndarray:
+        model_rgb = self._normalize_advanced_erase_edited_image(base_rgb, model_rgb)
+        mask = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
+        if not np.any(mask):
+            return base_rgb.copy()
+
+        min_side = max(1, min(base_rgb.shape[:2]))
+        blur_size = max(3, min(15, int(round(min_side * 0.01)) | 1))
+        alpha = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+        alpha = cv2.bitwise_and(alpha, mask)
+        alpha[mask > 0] = np.maximum(alpha[mask > 0], 224)
+        alpha_f = alpha[:, :, None].astype(np.float32) / 255.0
+        composite = (
+            base_rgb.astype(np.float32) * (1.0 - alpha_f)
+            + model_rgb.astype(np.float32) * alpha_f
+        )
+        return np.clip(composite, 0, 255).astype(np.uint8)
 
     def _build_selection_erase_text_mask(
         self,

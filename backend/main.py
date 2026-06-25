@@ -25,6 +25,7 @@ OUTPUT_DIR = APP_PATHS.output_dir
 TEMP_UPLOADS_DIR = APP_PATHS.cache_uploads_dir
 TEMP_EXTRACTED_DIR = APP_PATHS.cache_extracted_dir
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
 FONT_DIRECTORIES = {
     "builtin": (
@@ -216,6 +217,62 @@ def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str
     target_path = target_dir / filename
     shutil.copy2(temp_path, target_path)
     return str(target_path)
+
+
+def is_supported_image_filename(filename: str) -> bool:
+    return filename.lower().endswith(IMAGE_EXTENSIONS)
+
+
+def sanitize_upload_relative_path(raw_path: str, fallback_name: str) -> Path:
+    normalized = str(raw_path or "").replace("\\", "/").strip()
+    fallback = Path(fallback_name or "image").name
+    parts = []
+    for part in normalized.split("/"):
+        safe_part = Path(part).name.strip()
+        if not safe_part or safe_part in {".", ".."}:
+            continue
+        parts.append(safe_part)
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
+
+
+def unique_child_path(root: Path, relative_path: Path) -> Path:
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        return target
+
+    stem = target.stem
+    suffix = target.suffix
+    for index in range(2, 10000):
+        candidate = target.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"文件名冲突过多，无法保存: {target.name}")
+
+
+async def preserve_uploaded_image_files(
+    uploads: list[UploadFile],
+    relative_paths: list[str],
+    target_dir: Path,
+) -> list[str]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    staged: list[tuple[str, Path, UploadFile]] = []
+    for index, upload in enumerate(uploads):
+        filename = Path(upload.filename or f"image-{index + 1}").name
+        raw_relative_path = relative_paths[index] if index < len(relative_paths) else (upload.filename or filename)
+        relative_path = sanitize_upload_relative_path(raw_relative_path, filename)
+        if not is_supported_image_filename(str(relative_path)):
+            continue
+        staged.append((str(relative_path).replace("\\", "/").lower(), relative_path, upload))
+
+    images: list[str] = []
+    for _sort_key, relative_path, upload in sorted(staged, key=lambda item: item[0]):
+        destination = unique_child_path(target_dir, relative_path)
+        await asyncio.to_thread(copy_upload_to_path, upload, destination)
+        images.append(str(destination))
+    return images
 
 
 def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
@@ -827,27 +884,43 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
 
 @app.post("/api/upload")
 async def upload_comic(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] = File(default_factory=list),
+    relative_paths: list[str] = Form(default_factory=list),
+    folder_name: str | None = Form(None),
     review_mode: str = Form(TranslatorEngine.DEFAULT_REVIEW_MODE),
 ):
-    filename = Path(file.filename or "upload").name
-    if not filename.lower().endswith(ALLOWED_EXTENSIONS):
-        raise HTTPException(status_code=400, detail="Unsupported file format")
-
     session_id = str(uuid.uuid4())
-    file_path = TEMP_UPLOADS_DIR / f"{session_id}_{filename}"
-
-    await asyncio.to_thread(copy_upload_to_path, file, file_path)
-
     extract_dir = TEMP_EXTRACTED_DIR / session_id
     extract_dir.mkdir(exist_ok=True)
 
-    # 如果是压缩包则解压，是单图则直接返回单图路径
-    images = []
-    if filename.lower().endswith((".zip", ".cbz")):
-        images = extract_archive(str(file_path), str(extract_dir))
+    folder_uploads = [upload for upload in (files or []) if upload is not None]
+    if folder_uploads:
+        images = await preserve_uploaded_image_files(
+            folder_uploads,
+            relative_paths,
+            extract_dir,
+        )
+        if not images:
+            raise HTTPException(status_code=400, detail="文件夹中没有找到支持的图片文件。")
+        project_title = Path(str(folder_name or "").strip()).name or "图片文件夹"
     else:
-        images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+        if file is None:
+            raise HTTPException(status_code=400, detail="请先选择 zip/cbz、单张图片或图片文件夹。")
+        filename = Path(file.filename or "upload").name
+        if not filename.lower().endswith(ALLOWED_EXTENSIONS):
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+
+        file_path = TEMP_UPLOADS_DIR / f"{session_id}_{filename}"
+
+        await asyncio.to_thread(copy_upload_to_path, file, file_path)
+
+        # 如果是压缩包则解压，是单图则直接返回单图路径
+        if filename.lower().endswith((".zip", ".cbz")):
+            images = extract_archive(str(file_path), str(extract_dir))
+        else:
+            images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+        project_title = Path(filename).stem
 
     source_dir, staged_images = prepare_session_images(session_id, images)
     translated_dir = OUTPUT_DIR / session_id / "translated"
@@ -867,7 +940,7 @@ async def upload_comic(
     translator_engine.initialize_project(
         session_id,
         SESSIONS[session_id],
-        title=Path(filename).stem,
+        title=project_title,
         review_mode=review_mode,
     )
 

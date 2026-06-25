@@ -15,6 +15,7 @@ const configStorageKey = 'manga-translator.ui-config'
 const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
 const IMAGE_THUMBNAIL_MAX_SIDE = 480
 const IMAGE_REVIEW_MAX_SIDE = 2400
+const folderUploadImageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const browserConfigKeys = [
   'translator',
   'translator_model',
@@ -645,6 +646,8 @@ function createDefaultPerPageUiState() {
 }
 
 const selectedFile = ref(null)
+const selectedFolderFiles = ref([])
+const selectedFolderName = ref('')
 const status = ref('正在检查后端状态...')
 const backendOnline = ref(false)
 const uploading = ref(false)
@@ -780,6 +783,7 @@ const v2PageSearch = ref('')
 const v2HistorySearch = ref('')
 const v2HistorySort = ref('recent')
 const v2UploadInputRef = ref(null)
+const v2FolderUploadInputRef = ref(null)
 const v2SupplementInputRef = ref(null)
 
 let socket = null
@@ -814,7 +818,13 @@ const {
   getRegionCommitStatusClass,
 } = usePageCommandState()
 
-const canUpload = computed(() => Boolean(selectedFile.value) && !uploading.value)
+const canUpload = computed(() => Boolean(selectedFile.value || selectedFolderFiles.value.length) && !uploading.value)
+const selectedUploadLabel = computed(() => {
+  if (selectedFolderFiles.value.length) {
+    return `${selectedFolderName.value || '图片文件夹'}（${selectedFolderFiles.value.length} 张图片）`
+  }
+  return selectedFile.value?.name || ''
+})
 const canTranslate = computed(() => Boolean(sessionId.value) && !translating.value)
 const canUseV2SupplementUpload = computed(() => (
   Boolean(sessionId.value)
@@ -7850,11 +7860,52 @@ async function loadFonts() {
 function onFileChange(event) {
   const [file] = event.target.files || []
   selectedFile.value = file || null
+  selectedFolderFiles.value = []
+  selectedFolderName.value = ''
   errorMessage.value = ''
 }
 
 function triggerV2UploadPicker() {
   v2UploadInputRef.value?.click()
+}
+
+function triggerV2FolderUploadPicker() {
+  v2FolderUploadInputRef.value?.click()
+}
+
+function getUploadFileExtension(file) {
+  const name = String(file?.name || '')
+  const dotIndex = name.lastIndexOf('.')
+  return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : ''
+}
+
+function getUploadRelativePath(file) {
+  return String(file?.webkitRelativePath || file?.relativePath || file?.name || '').replace(/\\/g, '/')
+}
+
+function isSupportedFolderImageFile(file) {
+  return Boolean(file?.name) && folderUploadImageExtensions.has(getUploadFileExtension(file))
+}
+
+function inferFolderName(files) {
+  const firstPath = getUploadRelativePath(files?.[0])
+  const firstPart = firstPath.split('/').filter(Boolean)[0]
+  return firstPart || '图片文件夹'
+}
+
+function setSelectedFolderFiles(files, folderName = '') {
+  const imageFiles = Array.from(files || [])
+    .filter(isSupportedFolderImageFile)
+    .sort((left, right) => getUploadRelativePath(left).localeCompare(
+      getUploadRelativePath(right),
+      undefined,
+      { numeric: true, sensitivity: 'base' }
+    ))
+  selectedFile.value = null
+  selectedFolderFiles.value = imageFiles
+  selectedFolderName.value = folderName || inferFolderName(imageFiles)
+  errorMessage.value = imageFiles.length ? '' : '文件夹中没有找到支持的图片文件。'
+  return imageFiles.length
 }
 
 async function startV2NewProject() {
@@ -7934,6 +7985,18 @@ async function handleV2FileChange(event) {
   }
 }
 
+async function handleV2FolderChange(event) {
+  const count = setSelectedFolderFiles(event?.target?.files || [])
+  if (count > 0) {
+    await submitFileV2()
+  } else {
+    status.value = '文件夹中没有找到支持的图片文件。'
+  }
+  if (event?.target) {
+    event.target.value = ''
+  }
+}
+
 async function submitV2SupplementFile(file) {
   if (!file) {
     return
@@ -8000,15 +8063,78 @@ function handleV2DragLeave(event) {
   v2UploadDragOver.value = false
 }
 
+function readDroppedFileEntry(entry, parentPath = '') {
+  return new Promise((resolve) => {
+    entry.file((file) => {
+      file.relativePath = `${parentPath}${file.name}`
+      resolve([file])
+    }, () => resolve([]))
+  })
+}
+
+async function readDroppedDirectoryEntry(entry, parentPath = '') {
+  const directoryPath = `${parentPath}${entry.name}/`
+  const reader = entry.createReader()
+  const entries = []
+  while (true) {
+    const batch = await new Promise((resolve) => {
+      reader.readEntries(resolve, () => resolve([]))
+    })
+    if (!batch.length) {
+      break
+    }
+    entries.push(...batch)
+  }
+
+  const nestedFiles = await Promise.all(entries.map((child) => readDroppedEntry(child, directoryPath)))
+  return nestedFiles.flat()
+}
+
+function readDroppedEntry(entry, parentPath = '') {
+  if (!entry) {
+    return Promise.resolve([])
+  }
+  if (entry.isFile) {
+    return readDroppedFileEntry(entry, parentPath)
+  }
+  if (entry.isDirectory) {
+    return readDroppedDirectoryEntry(entry, parentPath)
+  }
+  return Promise.resolve([])
+}
+
+async function getDroppedUploadFiles(event) {
+  const items = Array.from(event.dataTransfer?.items || [])
+  const entries = items
+    .map((item) => (typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null))
+    .filter(Boolean)
+  if (entries.length) {
+    const nestedFiles = await Promise.all(entries.map((entry) => readDroppedEntry(entry)))
+    return nestedFiles.flat()
+  }
+  return Array.from(event.dataTransfer?.files || [])
+}
+
 async function handleV2Drop(event) {
   event.preventDefault()
   v2UploadDragOver.value = false
-  const [file] = event.dataTransfer?.files || []
-  if (!file) {
+  const droppedFiles = await getDroppedUploadFiles(event)
+  if (!droppedFiles.length) {
     return
   }
-  selectedFile.value = file
-  errorMessage.value = ''
+  if (droppedFiles.length > 1 || droppedFiles.some((file) => getUploadRelativePath(file).includes('/'))) {
+    const count = setSelectedFolderFiles(droppedFiles)
+    if (!count) {
+      status.value = '拖入的文件夹中没有找到支持的图片文件。'
+      return
+    }
+  } else {
+    const [file] = droppedFiles
+    selectedFile.value = file
+    selectedFolderFiles.value = []
+    selectedFolderName.value = ''
+    errorMessage.value = ''
+  }
   await submitFileV2()
 }
 
@@ -8574,8 +8700,8 @@ function adjustRegionFontSizeV2(region, delta) {
 }
 
 async function submitFile() {
-  if (!selectedFile.value) {
-    errorMessage.value = '请先选择一个 zip/cbz 或单张图片文件。'
+  if (!selectedFile.value && !selectedFolderFiles.value.length) {
+    errorMessage.value = '请先选择一个 zip/cbz、单张图片文件或图片文件夹。'
     return
   }
 
@@ -8603,7 +8729,15 @@ async function submitFile() {
 
   try {
     const formData = new FormData()
-    formData.append('file', selectedFile.value)
+    if (selectedFolderFiles.value.length) {
+      formData.append('folder_name', selectedFolderName.value || '图片文件夹')
+      for (const file of selectedFolderFiles.value) {
+        formData.append('files', file, file.name)
+        formData.append('relative_paths', getUploadRelativePath(file))
+      }
+    } else {
+      formData.append('file', selectedFile.value)
+    }
     formData.append('review_mode', config.value.default_review_mode)
 
     const response = await fetch(toApiUrl('/api/upload'), {
@@ -9170,6 +9304,15 @@ watch(
       @change="handleV2FileChange"
     />
     <input
+      ref="v2FolderUploadInputRef"
+      class="v2-hidden-input"
+      type="file"
+      multiple
+      webkitdirectory
+      directory
+      @change="handleV2FolderChange"
+    />
+    <input
       ref="v2SupplementInputRef"
       class="v2-hidden-input"
       :accept="acceptValue"
@@ -9334,8 +9477,13 @@ watch(
           <button type="button" class="v2-upload-surface v2-upload-surface-home" @click="triggerV2UploadPicker">
             <span class="v2-upload-icon">⬆</span>
             <strong>{{ uploading ? '正在导入素材…' : '上传图片 / 图片包' }}</strong>
-            <p>{{ selectedFile ? selectedFile.name : '支持 zip、cbz 和单张图片；点击或拖拽到这里后会直接创建新的项目。' }}</p>
+            <p>{{ selectedUploadLabel || '支持 zip、cbz、单张图片和图片文件夹；点击选择文件，或拖拽文件/文件夹到这里。' }}</p>
           </button>
+          <div class="v2-upload-secondary-actions">
+            <button type="button" class="v2-ghost-button" :disabled="uploading" @click="triggerV2FolderUploadPicker">
+              上传文件夹
+            </button>
+          </div>
         </section>
       </section>
 

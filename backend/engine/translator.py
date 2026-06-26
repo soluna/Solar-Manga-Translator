@@ -106,9 +106,12 @@ class TranslatorEngine:
         self.output_root = self.paths.output_dir
         self.logs_dir = self.paths.logs_dir
         self.config_dir = self.paths.config_dir
+        self.user_font_dir = self.paths.user_fonts_dir
+        self.project_font_custom_dir = self.base_dir.parent / "fonts" / "custom"
         self.project_font_dir = self.base_dir.parent / "fonts"
         self.project_font_legacy_dir = self.base_dir.parent / "font"
-        self.open_builtin_font_dir = self.base_dir.parent / "fonts" / "builtin"
+        self.open_builtin_font_dir = self.base_dir.parent / "fonts" / "system"
+        self.open_builtin_font_legacy_dir = self.base_dir.parent / "fonts" / "builtin"
         self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -500,8 +503,17 @@ class TranslatorEngine:
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
-            "project": [self.project_font_dir, self.project_font_legacy_dir],
-            "builtin": [self.open_builtin_font_dir, self.builtin_font_dir],
+            "project": [
+                self.user_font_dir,
+                self.project_font_custom_dir,
+                self.project_font_dir,
+                self.project_font_legacy_dir,
+            ],
+            "builtin": [
+                self.open_builtin_font_dir,
+                self.open_builtin_font_legacy_dir,
+                self.builtin_font_dir,
+            ],
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
@@ -5110,7 +5122,7 @@ class TranslatorEngine:
         return normalized
 
     def _normalize_translation_override_text(self, value: Any) -> str:
-        return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
 
     def _normalize_translation_region_skip_overrides(self, raw_value: Any) -> dict[str, bool]:
         if not isinstance(raw_value, dict):

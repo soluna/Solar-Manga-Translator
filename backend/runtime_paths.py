@@ -86,6 +86,10 @@ class AppPaths:
         return self.logs_dir / "backend.log"
 
     @property
+    def user_fonts_dir(self) -> Path:
+        return self.app_data_dir / "fonts"
+
+    @property
     def legacy_temp_uploads_dir(self) -> Path:
         return self.code_dir / "temp_uploads"
 
@@ -108,6 +112,7 @@ class AppPaths:
             self.logs_dir,
             self.cache_dir,
             self.config_dir,
+            self.user_fonts_dir,
             self.projects_dir,
             self.cache_uploads_dir,
             self.cache_extracted_dir,

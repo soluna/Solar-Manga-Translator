@@ -105,6 +105,20 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertNotIn("missing-region", session["translation_region_overrides"])
             self.assertNotIn("missing-region", session["translation_region_layout_overrides"])
 
+    def test_translation_override_preserves_single_space(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            session = {"translation_region_overrides": {}}
+
+            engine._set_region_translation_override_value(session, "region-1", " ")
+            self.assertEqual(session["translation_region_overrides"]["region-1"], " ")
+
+            normalized = engine._normalize_translation_region_overrides({"region-1": " "})
+            self.assertEqual(normalized, {"region-1": " "})
+
+            engine._set_region_translation_override_value(session, "region-1", "")
+            self.assertNotIn("region-1", session["translation_region_overrides"])
+
     def test_restore_rejects_project_when_all_source_images_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

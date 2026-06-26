@@ -29,10 +29,13 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
 FONT_DIRECTORIES = {
     "builtin": (
+        BASE_DIR.parent / "fonts" / "system",
         BASE_DIR.parent / "fonts" / "builtin",
         BASE_DIR / "manga-image-translator" / "fonts",
     ),
     "project": (
+        APP_PATHS.user_fonts_dir,
+        BASE_DIR.parent / "fonts" / "custom",
         BASE_DIR.parent / "fonts",
         BASE_DIR.parent / "font",
     ),
@@ -166,7 +169,7 @@ def list_available_fonts() -> list[dict[str, str]]:
                 if path.name in seen_names:
                     continue
                 seen_names.add(path.name)
-                source_label = "自定义" if source == "project" else "内置"
+                source_label = "自定义" if source == "project" else "系统"
                 suffix = path.suffix.lower()
                 format_hint = {
                     ".ttf": "truetype",
@@ -290,6 +293,10 @@ def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
         "logs_dir": str(APP_PATHS.logs_dir),
         "settings_path": str(APP_PATHS.settings_path),
         "settings_exists": APP_PATHS.settings_path.exists(),
+        "font_dirs": {
+            source: [str(path) for path in iter_font_directories(source)]
+            for source in FONT_DIRECTORIES
+        },
         "migration": migration,
     }
 

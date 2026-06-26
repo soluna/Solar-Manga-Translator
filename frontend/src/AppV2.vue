@@ -167,6 +167,7 @@ const emptyRuntimeInfo = {
   logs_dir: '',
   settings_path: '',
   settings_exists: false,
+  font_dirs: {},
   migration: {
     needed: false,
     status: 'pending',
@@ -1383,6 +1384,20 @@ const appRuntimeGpuLabel = computed(() => {
   return gpu.cuda_version ? `${primary} / CUDA ${gpu.cuda_version}` : primary
 })
 const appRuntimeDiskLabel = computed(() => formatBytes(appDiagnostics.value?.disk?.free_bytes || 0))
+const appRuntimeCustomFontDirLabel = computed(() => {
+  const projectDirs = appRuntime.value?.font_dirs?.project
+  const dirs = Array.isArray(projectDirs)
+    ? projectDirs.map((path) => String(path || '').trim()).filter(Boolean)
+    : []
+  return dirs.join('；')
+})
+const appRuntimeSystemFontDirLabel = computed(() => {
+  const systemDirs = appRuntime.value?.font_dirs?.builtin
+  const dirs = Array.isArray(systemDirs)
+    ? systemDirs.map((path) => String(path || '').trim()).filter(Boolean)
+    : []
+  return dirs.join('；')
+})
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
   || String(sessionId.value || '').trim()
@@ -6157,7 +6172,7 @@ function normalizeRegionTranslationDraft(nextValue) {
 }
 
 function normalizeRegionTranslationOverride(nextValue) {
-  return normalizeRegionTranslationDraft(nextValue).trim()
+  return normalizeRegionTranslationDraft(nextValue)
 }
 
 function updateTranslationSkipOverride(region, enabled) {
@@ -10882,6 +10897,16 @@ watch(
               <span>日志目录</span>
               <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
             </div>
+
+            <div v-if="appRuntimeSystemFontDirLabel" class="v2-readonly-field">
+              <span>系统字体目录</span>
+              <strong :title="appRuntimeSystemFontDirLabel">{{ appRuntimeSystemFontDirLabel }}</strong>
+            </div>
+
+            <div v-if="appRuntimeCustomFontDirLabel" class="v2-readonly-field">
+              <span>自定义字体目录</span>
+              <strong :title="appRuntimeCustomFontDirLabel">{{ appRuntimeCustomFontDirLabel }}</strong>
+            </div>
           </section>
 
           <section v-if="currentProject" class="v2-settings-group">
@@ -11033,7 +11058,7 @@ watch(
             </div>
 
             <p class="v2-settings-inline-note">
-              内置默认暂用 Noto Sans CJK；把自己的字体文件放入 fonts 目录后，可在上方逐项覆盖。
+              系统字体随应用放在 fonts/system；把自己的字体文件放入自定义字体目录后，可在上方逐项覆盖，不需要安装到 Windows 系统字体。
             </p>
 
             <label class="v2-field">

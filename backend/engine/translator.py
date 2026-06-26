@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib
 import json
+import logging
 import shutil
 import sys
 import os
@@ -39,6 +40,7 @@ from .image_cleanup import (
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+logger = logging.getLogger("manga_translator.engine")
 
 
 class TranslatorEngine:
@@ -7444,7 +7446,19 @@ class TranslatorEngine:
             page_cache_dir.exists()
             and (page_cache_dir / "inpainted.png").exists()
             and (page_cache_dir / "regions.json").exists()
+            and self._cached_regions_json_is_readable(page_cache_dir)
         )
+
+    def _cached_regions_json_is_readable(self, page_cache_dir: Path) -> bool:
+        regions_path = page_cache_dir / "regions.json"
+        if not regions_path.exists():
+            return False
+        try:
+            payload = json.loads(regions_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Unreadable rerender regions cache. path=%s error=%s", regions_path, exc)
+            return False
+        return isinstance(payload, list)
 
     def _page_document_region_to_text_region(
         self,
@@ -7537,9 +7551,16 @@ class TranslatorEngine:
         try:
             document = self.get_page_document(session_id, session, stored_name)
         except Exception as exc:
-            print(f"[WARN] Could not load page document while restoring editable cache for {session_id}/{stored_name}: {exc}")
+            logger.warning(
+                "Could not load page document while restoring editable cache. session_id=%s page=%s error=%s",
+                session_id,
+                stored_name,
+                exc,
+            )
 
         raw_regions = document.get("regions") if isinstance(document, dict) else []
+        if not isinstance(raw_regions, list):
+            raw_regions = []
         restored_regions: list[Any] = []
         for region_payload in raw_regions or []:
             if not isinstance(region_payload, dict):
@@ -7552,15 +7573,21 @@ class TranslatorEngine:
 
         has_manual_regions = bool(self._manual_regions_for_page(session, stored_name))
         if not restored_regions and not has_manual_regions:
-            return False
+            logger.warning(
+                "No editable regions found while restoring page cache; creating empty cache so batch translation can continue. session_id=%s page=%s",
+                session_id,
+                stored_name,
+            )
 
         page_cache_dir.mkdir(parents=True, exist_ok=True)
         self._save_cached_regions(page_cache_dir, restored_regions)
         restored = self._has_rerenderable_page_cache(page_cache_dir)
         if restored:
-            print(
-                f"[WARN] Restored editable cache for {session_id}/{stored_name} "
-                "from persisted page document."
+            logger.warning(
+                "Restored editable cache from persisted page document. session_id=%s page=%s regions=%s",
+                session_id,
+                stored_name,
+                len(restored_regions),
             )
         return restored
 
@@ -7579,7 +7606,7 @@ class TranslatorEngine:
             corrupt_path = page_cache_dir / f"inpainted.corrupt-{uuid.uuid4().hex[:8]}.png"
             try:
                 inpainted_path.rename(corrupt_path)
-                print(f"[WARN] Moved unreadable page base cache to {corrupt_path}")
+                logger.warning("Moved unreadable page base cache aside. source=%s target=%s", inpainted_path, corrupt_path)
             except OSError:
                 pass
 
@@ -7611,7 +7638,14 @@ class TranslatorEngine:
 
     def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
-        region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
+        try:
+            region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to load cached regions. path=%s error=%s", regions_path, exc)
+            return []
+        if not isinstance(region_payloads, list):
+            logger.warning("Cached regions payload is not a list. path=%s", regions_path)
+            return []
         regions: list[Any] = []
         for index, payload in enumerate(region_payloads):
             if not isinstance(payload, dict):

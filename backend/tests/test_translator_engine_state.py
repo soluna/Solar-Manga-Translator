@@ -278,6 +278,37 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertEqual(repaired_bgr[0, 0].tolist(), [12, 34, 56])
             self.assertTrue(any(path.name.startswith("inpainted.corrupt-") for path in cache_dir.iterdir()))
 
+    def test_editable_cache_allows_empty_region_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            project_id = "empty-region-cache"
+            source_dir = engine._project_source_dir(project_id)
+            source_dir.mkdir(parents=True)
+            source_path = source_dir / "0200.jpg"
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(source_path)
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(engine._project_translated_dir(project_id)),
+                "rerender_cache_dir": str(Path(tmp) / "rerender-cache"),
+                "source_images": [{"name": "0200.jpg", "stored_name": "0200.jpg"}],
+                "manual_regions": {},
+                "last_config": {},
+            }
+
+            restored = engine._ensure_editable_page_cache(
+                session_id=project_id,
+                session=session,
+                stored_name="0200.jpg",
+                config={},
+                source_path=source_path,
+            )
+            cache_dir = engine._session_page_cache_dir(session, project_id, "0200.jpg")
+            regions = json.loads((cache_dir / "regions.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(restored)
+            self.assertEqual(regions, [])
+            self.assertTrue((cache_dir / "inpainted.png").exists())
+
     def test_openai_compatible_settings_validation_uses_lightweight_http_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

@@ -79,6 +79,35 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertFalse(engine.is_session_busy("project-a"))
             self.assertTrue(engine.try_mark_session_busy("project-a", "rerender"))
 
+    def test_delete_project_removes_project_storage_and_preview_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            project_id = "project-delete"
+            paths_to_remove = [
+                engine._project_dir(project_id),
+                engine._project_output_dir(project_id),
+                engine._rerender_cache_dir(project_id),
+                engine._mask_debug_dir(project_id),
+                engine._style_rerender_debug_dir(project_id),
+                engine._image_preview_project_cache_dir(project_id),
+            ]
+            for path in paths_to_remove:
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "marker.txt").write_text("x", encoding="utf-8")
+            (engine.temp_dir / f"{project_id}_detect.log").write_text("log", encoding="utf-8")
+            engine._write_project_index([
+                {"project_id": project_id, "title": "delete me"},
+                {"project_id": "keep-project", "title": "keep me"},
+            ])
+
+            engine.delete_project(project_id)
+
+            for path in paths_to_remove:
+                self.assertFalse(path.exists(), str(path))
+            self.assertFalse((engine.temp_dir / f"{project_id}_detect.log").exists())
+            remaining = engine._read_json_file(engine.project_index_path, [])
+            self.assertEqual([item["project_id"] for item in remaining], ["keep-project"])
+
     def test_page_commands_reject_unknown_region_without_dirty_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

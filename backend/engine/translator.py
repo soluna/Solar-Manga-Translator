@@ -2172,8 +2172,9 @@ class TranslatorEngine:
         rerender_cache_dir = self._rerender_cache_dir(project_id)
         mask_debug_dir = self._mask_debug_dir(project_id)
         style_debug_dir = self._style_rerender_debug_dir(project_id)
+        image_preview_cache_dir = self._image_preview_project_cache_dir(project_id)
 
-        for path in (project_dir, output_dir, rerender_cache_dir, mask_debug_dir, style_debug_dir):
+        for path in (project_dir, output_dir, rerender_cache_dir, mask_debug_dir, style_debug_dir, image_preview_cache_dir):
             if path.exists():
                 if path.is_dir():
                     shutil.rmtree(path, ignore_errors=True)
@@ -3531,10 +3532,13 @@ class TranslatorEngine:
 
         return self._save_image_preview_atomic(resized_image, output_base, has_alpha)
 
-    def _image_preview_cache_dir(self, project_id: str, page_id: str) -> Path:
+    def _image_preview_project_cache_dir(self, project_id: str) -> Path:
         project_key = hashlib.sha1(str(project_id or "").encode("utf-8")).hexdigest()[:12]
+        return self.temp_dir / "image_previews" / project_key
+
+    def _image_preview_cache_dir(self, project_id: str, page_id: str) -> Path:
         page_key = hashlib.sha1(str(page_id or "").encode("utf-8")).hexdigest()[:12]
-        return self.temp_dir / "image_previews" / project_key / page_key
+        return self._image_preview_project_cache_dir(project_id) / page_key
 
     def _save_image_preview_atomic(self, image: Any, output_base: Path, has_alpha: bool) -> Path:
         candidates: list[tuple[str, str, dict[str, Any], str]] = [

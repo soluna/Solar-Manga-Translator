@@ -799,6 +799,94 @@ class TranslatorEngine:
                 translated_output_map[stored_name] = current_output.name
         return translated_output_map
 
+    def _translated_outputs_cover_all_sources(
+        self,
+        session: dict[str, Any],
+        translated_dir: Path,
+        preferred_format: str,
+    ) -> bool:
+        source_images = [
+            image
+            for image in (session.get("source_images") or [])
+            if isinstance(image, dict) and str(image.get("stored_name") or "").strip()
+        ]
+        if not source_images:
+            return False
+
+        for image in source_images:
+            stored_name = str(image.get("stored_name") or "").strip()
+            current_output = self._current_translated_output(session, translated_dir, stored_name, preferred_format)
+            if current_output is None or not current_output.exists():
+                return False
+        return True
+
+    def _has_persisted_page_regions(self, project_id: str, source_images: list[dict[str, Any]]) -> bool:
+        for image in source_images:
+            if not isinstance(image, dict):
+                continue
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not stored_name:
+                continue
+            payload = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+            regions = payload.get("regions") if isinstance(payload, dict) else None
+            if isinstance(regions, list) and any(isinstance(region, dict) for region in regions):
+                return True
+        return False
+
+    def _has_rerenderable_page_caches(self, project_id: str, session: dict[str, Any]) -> bool:
+        cache_dir = self._session_rerender_cache_dir(session, project_id)
+        for image in session.get("source_images") or []:
+            if not isinstance(image, dict):
+                continue
+            stored_name = str(image.get("stored_name") or "").strip()
+            if stored_name and self._has_rerenderable_page_cache(cache_dir / stored_name):
+                return True
+        return False
+
+    def _latest_snapshot_workflow_stage(self, project_id: str) -> str:
+        for snapshot in self._read_snapshot_manifests(project_id):
+            stage = str(snapshot.get("workflow_stage") or "").strip().lower()
+            if stage in {"translated", "detected"}:
+                return stage
+        return ""
+
+    def _infer_restored_workflow_stage(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        manifest: dict[str, Any],
+        translated_dir: Path,
+        preferred_format: str,
+    ) -> str:
+        current_stage = str(session.get("workflow_stage") or "").strip().lower()
+        if current_stage not in {"idle", "detecting", "detected", "translating", "translated"}:
+            current_stage = "idle"
+
+        if self._translated_outputs_cover_all_sources(session, translated_dir, preferred_format):
+            return "translated"
+
+        source_images = list(session.get("source_images") or [])
+        has_page_regions = self._has_persisted_page_regions(project_id, source_images)
+        has_page_cache = self._has_rerenderable_page_caches(project_id, session)
+        has_editable_state = has_page_regions or has_page_cache
+
+        if current_stage == "translated" and has_editable_state:
+            return "translated"
+
+        manifest_stage = str(manifest.get("workflow_stage") or "").strip().lower() if isinstance(manifest, dict) else ""
+        snapshot_stage = self._latest_snapshot_workflow_stage(project_id)
+        for persisted_stage in (snapshot_stage, manifest_stage):
+            if persisted_stage == "translated" and has_editable_state:
+                return "translated"
+            if persisted_stage == "detected" and has_editable_state:
+                return "detected"
+
+        if current_stage == "detected":
+            return "detected"
+        if has_editable_state:
+            return "detected"
+        return "idle"
+
     def _recover_session_from_manifest(self, project_id: str, manifest: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(manifest, dict) or not manifest:
             return None
@@ -1917,8 +2005,15 @@ class TranslatorEngine:
             restored_from_manifest = True
         if not session.get("source_images"):
             raise FileNotFoundError("项目原图文件缺失，无法恢复。请确认项目数据目录仍然完整。")
-        if session.get("workflow_stage") in {"", "idle"} and session["translated_output_map"]:
-            session["workflow_stage"] = str(manifest_dict.get("workflow_stage") or "translated")
+        inferred_workflow_stage = self._infer_restored_workflow_stage(
+            project_id,
+            session,
+            manifest_dict,
+            translated_dir_path,
+            self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
+        )
+        if session.get("workflow_stage") != inferred_workflow_stage:
+            session["workflow_stage"] = inferred_workflow_stage
             restored_from_manifest = True
         if restored_from_manifest:
             self.persist_project_state(project_id, session, persist_page_documents=False)
@@ -5324,9 +5419,24 @@ class TranslatorEngine:
             if candidate not in candidates:
                 candidates.append(candidate)
 
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+        for suffix in self.TRANSLATED_OUTPUT_SUFFIXES:
+            try:
+                variant_candidates = sorted(output_dir.glob(f"{stem}__*{suffix}"))
+            except OSError:
+                variant_candidates = []
+            for candidate in variant_candidates:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        existing_candidates = [candidate for candidate in candidates if candidate.exists()]
+        if existing_candidates:
+            def candidate_sort_key(path: Path) -> tuple[float, str]:
+                try:
+                    return (path.stat().st_mtime, path.name)
+                except OSError:
+                    return (0.0, path.name)
+
+            return max(existing_candidates, key=candidate_sort_key)
         return None
 
     def _copy_source_to_output(self, source_path: Path, output_path: Path) -> None:

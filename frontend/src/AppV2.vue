@@ -837,23 +837,25 @@ const canStartNewProject = computed(() => !uploading.value && !translating.value
 const canContinueSegmentedTranslation = computed(
   () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'detected'
 )
-const selectedEditPageHasTranslatedResult = computed(() => {
-  const storedName = String(selectedEditPage.value?.stored_name || '').trim()
-  if (!storedName) {
-    return false
-  }
-  return Boolean(latestTranslatedImageUrlByPage.value[storedName])
-})
+const canRunInitialDetection = computed(
+  () => Boolean(sessionId.value)
+    && !translating.value
+    && workflowStage.value === 'idle'
+    && !translatedImages.value.length
+)
 const canTranslateCurrentPage = computed(
   () => Boolean(
     sessionId.value
     && selectedEditPage.value
     && !translating.value
-    && (workflowStage.value === 'detected' || !selectedEditPageHasTranslatedResult.value)
+    && workflowStage.value === 'detected'
   )
 )
 const canRerender = computed(
-  () => Boolean(sessionId.value) && !translating.value && workflowStage.value === 'translated' && Boolean(downloadUrl.value || translatedImages.value.length)
+  () => Boolean(sessionId.value)
+    && !translating.value
+    && workflowStage.value === 'translated'
+    && Boolean(downloadUrl.value || translatedImages.value.length || originalImages.value.length)
 )
 const canRetranslate = computed(
   () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
@@ -1641,12 +1643,15 @@ const v2ReviewPrimaryLabel = computed(() => {
     return '继续翻译'
   }
   if (canTranslateCurrentPage.value) {
-    return workflowStage.value === 'detected' ? '翻译本页' : '开始识别'
+    return '翻译本页'
   }
   if (canRerender.value) {
     return '保存并重渲染'
   }
-  return '开始翻译'
+  if (canRunInitialDetection.value) {
+    return '开始识别'
+  }
+  return workflowStage.value === 'translated' ? '重新翻译' : '开始翻译'
 })
 const v2FilteredProjectHistory = computed(() => {
   const search = String(v2HistorySearch.value || '').trim().toLowerCase()
@@ -1721,6 +1726,9 @@ const primaryTranslateAction = computed(() => {
   if (workflowStage.value === 'detected') {
     return 'resume-translate'
   }
+  if (workflowStage.value === 'translated') {
+    return 'translate'
+  }
   return config.value.pause_after_detection ? 'detect' : 'translate'
 })
 
@@ -1741,8 +1749,11 @@ const primaryTranslateLabel = computed(() => {
   if (workflowStage.value === 'detected') {
     return '继续翻译'
   }
+  if (workflowStage.value === 'translated') {
+    return '重新翻译'
+  }
   if (config.value.pause_after_detection) {
-    return workflowStage.value === 'translated' ? '重新识别' : '开始识别'
+    return '开始识别'
   }
   return '开始翻译'
 })
@@ -8204,11 +8215,15 @@ function runV2ReviewPrimaryAction() {
     return
   }
   if (canTranslateCurrentPage.value) {
-    startTranslation(workflowStage.value === 'detected' ? 'translate-page' : 'detect')
+    startTranslation('translate-page')
     return
   }
   if (canRerender.value) {
     startTranslation('rerender')
+    return
+  }
+  if (canRunInitialDetection.value) {
+    startTranslation('detect')
     return
   }
   startTranslation('translate')

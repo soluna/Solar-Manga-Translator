@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,80 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             with self.assertRaises(FileNotFoundError):
                 engine.restore_project_session(project_id)
+
+    def test_restore_recovers_rerender_variant_outputs_and_translated_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            project_id = "rerender-restore"
+            source_dir = engine._project_source_dir(project_id)
+            translated_dir = engine._project_translated_dir(project_id)
+            source_dir.mkdir(parents=True)
+            translated_dir.mkdir(parents=True)
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (8, 8), (240, 240, 240)).save(source_dir / "page-2.png")
+            Image.new("RGB", (8, 8), (20, 20, 20)).save(translated_dir / "page-1.png")
+            Image.new("RGB", (8, 8), (30, 30, 30)).save(translated_dir / "page-1__rerender-2.png")
+            Image.new("RGB", (8, 8), (40, 40, 40)).save(translated_dir / "page-2__rerender-2.png")
+            os.utime(translated_dir / "page-1.png", (1, 1))
+            os.utime(translated_dir / "page-1__rerender-2.png", (2, 2))
+            os.utime(translated_dir / "page-2__rerender-2.png", (2, 2))
+            state = {
+                "project_id": project_id,
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [
+                    {"name": "page-1.png", "stored_name": "page-1.png"},
+                    {"name": "page-2.png", "stored_name": "page-2.png"},
+                ],
+                "translated_output_map": {},
+                "workflow_stage": "detected",
+                "last_config": {"rerender_output_format": "png"},
+            }
+            engine._write_json_file(engine._project_session_state_path(project_id), state)
+            engine._write_json_file(engine._project_manifest_path(project_id), {"project_id": project_id})
+
+            session = engine.restore_project_session(project_id)
+            payload = engine.build_client_session_payload(project_id, session)
+
+            self.assertEqual(session["workflow_stage"], "translated")
+            self.assertEqual(session["translated_output_map"]["page-1.png"], "page-1__rerender-2.png")
+            self.assertEqual(session["translated_output_map"]["page-2.png"], "page-2__rerender-2.png")
+            self.assertEqual(payload["workflow_stage"], "translated")
+            self.assertEqual(len(payload["translated_images"]), 2)
+
+    def test_restore_recovers_detected_stage_from_persisted_page_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            project_id = "detected-restore"
+            source_dir = engine._project_source_dir(project_id)
+            translated_dir = engine._project_translated_dir(project_id)
+            source_dir.mkdir(parents=True)
+            translated_dir.mkdir(parents=True)
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(source_dir / "page-1.png")
+            state = {
+                "project_id": project_id,
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "translated_output_map": {},
+                "workflow_stage": "idle",
+                "last_config": {},
+            }
+            engine._write_json_file(engine._project_session_state_path(project_id), state)
+            engine._write_json_file(engine._project_manifest_path(project_id), {"project_id": project_id})
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "regions": [{
+                    "region_id": "region-1",
+                    "bbox": [1, 1, 4, 4],
+                    "source_text": "こんにちは",
+                    "translation": {"machine": "", "resolved": "こんにちは"},
+                }],
+            })
+
+            session = engine.restore_project_session(project_id)
+
+            self.assertEqual(session["workflow_stage"], "detected")
 
     def test_openai_compatible_settings_validation_uses_lightweight_http_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

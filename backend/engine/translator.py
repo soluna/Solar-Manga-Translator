@@ -6111,6 +6111,8 @@ class TranslatorEngine:
             raise RuntimeError(f"无法读取原图: {source_path}")
 
         inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
+        if inpainted_bgr is None and self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
         if inpainted_bgr is None:
             raise RuntimeError(f"无法读取缓存底图: {page_cache_dir / 'inpainted.png'}")
 
@@ -7518,10 +7520,10 @@ class TranslatorEngine:
         source_path: Path | None = None,
     ) -> bool:
         page_cache_dir = self._session_page_cache_dir(session, session_id, stored_name)
-        if self._has_rerenderable_page_cache(page_cache_dir):
-            return True
-
         resolved_source_path = source_path or (Path(session.get("source_dir") or "") / stored_name)
+        if self._has_rerenderable_page_cache(page_cache_dir):
+            return self._ensure_page_base_image_cache(resolved_source_path, page_cache_dir)
+
         if not resolved_source_path.exists():
             return False
         if not self._ensure_page_base_image_cache(resolved_source_path, page_cache_dir):
@@ -7566,10 +7568,26 @@ class TranslatorEngine:
         page_cache_dir.mkdir(parents=True, exist_ok=True)
 
         inpainted_path = page_cache_dir / "inpainted.png"
-        if not inpainted_path.exists():
-            cv2.imwrite(str(inpainted_path), source_bgr)
+        if inpainted_path.exists() and cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None:
+            return True
 
-        return inpainted_path.exists()
+        if inpainted_path.exists():
+            corrupt_path = page_cache_dir / f"inpainted.corrupt-{uuid.uuid4().hex[:8]}.png"
+            try:
+                inpainted_path.rename(corrupt_path)
+                print(f"[WARN] Moved unreadable page base cache to {corrupt_path}")
+            except OSError:
+                pass
+
+        backup_path = self._advanced_erase_traditional_backup_path(page_cache_dir)
+        backup_bgr = cv2.imread(str(backup_path), cv2.IMREAD_COLOR) if backup_path.exists() else None
+        if backup_bgr is not None:
+            self._save_rgb_image_atomic(inpainted_path, cv2.cvtColor(backup_bgr, cv2.COLOR_BGR2RGB))
+            return cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
+
+        self._save_rgb_image_atomic(inpainted_path, cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB))
+
+        return cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
 
     def _ensure_vendor_import_path(self) -> None:
         vendor_root = str(self.base_dir / "manga-image-translator")
@@ -9267,6 +9285,8 @@ class TranslatorEngine:
             raise RuntimeError(f"无法读取原图: {source_path}")
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
         inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
+        if inpainted_bgr is None and self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
         if inpainted_bgr is None:
             raise RuntimeError(f"重嵌字缓存损坏，无法读取底图: {page_cache_dir / 'inpainted.png'}")
 

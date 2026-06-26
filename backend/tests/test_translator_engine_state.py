@@ -212,6 +212,43 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             self.assertEqual(session["workflow_stage"], "detected")
 
+    def test_editable_cache_repairs_unreadable_base_from_traditional_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            project_id = "cache-repair"
+            source_dir = engine._project_source_dir(project_id)
+            source_dir.mkdir(parents=True)
+            source_path = source_dir / "page-1.png"
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(source_path)
+            session = {
+                "source_dir": str(source_dir),
+                "rerender_cache_dir": str(Path(tmp) / "rerender-cache"),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+            }
+            cache_dir = engine._session_page_cache_dir(session, project_id, "page-1.png")
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "regions.json").write_text("[]", encoding="utf-8")
+            (cache_dir / "inpainted.png").write_bytes(b"not-a-png")
+            backup_path = engine._advanced_erase_traditional_backup_path(cache_dir)
+            backup_path.parent.mkdir(parents=True)
+            backup_bgr = np.zeros((8, 8, 3), dtype=np.uint8)
+            backup_bgr[:, :] = [12, 34, 56]
+            cv2.imwrite(str(backup_path), backup_bgr)
+
+            repaired = engine._ensure_editable_page_cache(
+                session_id=project_id,
+                session=session,
+                stored_name="page-1.png",
+                config={},
+                source_path=source_path,
+            )
+            repaired_bgr = cv2.imread(str(cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
+
+            self.assertTrue(repaired)
+            self.assertIsNotNone(repaired_bgr)
+            self.assertEqual(repaired_bgr[0, 0].tolist(), [12, 34, 56])
+            self.assertTrue(any(path.name.startswith("inpainted.corrupt-") for path in cache_dir.iterdir()))
+
     def test_openai_compatible_settings_validation_uses_lightweight_http_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

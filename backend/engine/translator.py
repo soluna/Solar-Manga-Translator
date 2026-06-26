@@ -2447,7 +2447,29 @@ class TranslatorEngine:
             "version": self.PROJECT_GLOSSARY_VERSION,
             "entries": entries,
             "updated_at": str((raw_value or {}).get("updated_at") or self._now_iso()) if isinstance(raw_value, dict) else self._now_iso(),
+            "auto_extract_completed": bool((raw_value or {}).get("auto_extract_completed")) if isinstance(raw_value, dict) else False,
+            "auto_extracted_at": str((raw_value or {}).get("auto_extracted_at") or "") if isinstance(raw_value, dict) else "",
         }
+
+    def _project_glossary_auto_extract_completed(self, session: dict[str, Any]) -> bool:
+        glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        session["project_glossary"] = glossary
+        return bool(glossary.get("auto_extract_completed"))
+
+    def _mark_project_glossary_auto_extract_completed(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        *,
+        persist: bool,
+    ) -> None:
+        glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        glossary["auto_extract_completed"] = True
+        glossary["auto_extracted_at"] = self._now_iso()
+        glossary["updated_at"] = glossary["auto_extracted_at"]
+        session["project_glossary"] = glossary
+        if persist:
+            self.persist_project_state(project_id, session, persist_page_documents=False)
 
     def _project_glossary_occurrences(
         self,
@@ -2541,7 +2563,12 @@ class TranslatorEngine:
                     entry["replacement"] = previous_translation
                 entries.append(entry)
 
-        glossary = self._normalize_project_glossary({"entries": entries, "updated_at": self._now_iso()})
+        glossary = self._normalize_project_glossary({
+            "entries": entries,
+            "updated_at": self._now_iso(),
+            "auto_extract_completed": bool(existing_glossary.get("auto_extract_completed")),
+            "auto_extracted_at": str(existing_glossary.get("auto_extracted_at") or ""),
+        })
         session["project_glossary"] = glossary
         if persist:
             self.persist_project_state(project_id, session, persist_page_documents=False)
@@ -2825,8 +2852,11 @@ class TranslatorEngine:
         session: dict[str, Any],
         config: dict[str, Any],
         progress_callback: ProgressCallback | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         self._ensure_runtime_patches()
+        if not force and self._project_glossary_auto_extract_completed(session):
+            return self.get_project_glossary(project_id, session)
         project_context = self._project_text_context_for_glossary(project_id, session)
         if not project_context:
             return self.get_project_glossary(project_id, session)
@@ -2861,6 +2891,7 @@ class TranslatorEngine:
         if not extracted_entries:
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。"})
+            self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
             return self.get_project_glossary(project_id, session)
 
         current = self._normalize_project_glossary(session.get("project_glossary"))
@@ -2877,6 +2908,7 @@ class TranslatorEngine:
             self.save_project_glossary(project_id, session, merged_entries, persist=True)
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": f"已补充 {added_count} 个项目专有名词，继续翻译。"})
+        self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
         return self.get_project_glossary(project_id, session)
 
     def _glossary_replacement_candidates(
@@ -4505,11 +4537,11 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
         target_stored_name: str | None = None,
+        skip_completed: bool = False,
     ) -> dict[str, str]:
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
-        existing_glossary = self._normalize_project_glossary(session.get("project_glossary"))
-        if target_stored_name is None or not existing_glossary.get("entries"):
+        if target_stored_name is None and not self._project_glossary_auto_extract_completed(session):
             await self.extract_project_glossary(session_id, session, config, progress_callback=progress_callback)
         self._attach_project_glossary_context(session, config)
         source_dir = Path(session["source_dir"])
@@ -4523,8 +4555,21 @@ class TranslatorEngine:
             self._translation_request_debug_path(session_id).unlink()
 
         source_images = self._resolve_translation_images(session, target_stored_name)
+        skipped_completed = 0
+        if skip_completed and target_stored_name is None:
+            source_images, skipped_completed = self._filter_completed_translation_images(
+                session,
+                output_dir,
+                source_images,
+                config["rerender_output_format"],
+            )
         total = len(source_images)
         await progress_callback({"event": "start", "total_pages": total})
+        if skipped_completed:
+            await progress_callback({
+                "event": "status",
+                "message": f"已跳过 {skipped_completed} 张已有翻译结果的页面，继续处理剩余页面。",
+            })
         await progress_callback(
             {
                 "event": "status",
@@ -4582,6 +4627,12 @@ class TranslatorEngine:
                 session=session,
             )
             self._update_translated_output_map(session, stored_name, output_path)
+            self.persist_project_state(
+                session_id,
+                session,
+                persist_page_documents=True,
+                page_ids=[stored_name],
+            )
 
             await progress_callback(
                 {
@@ -4594,7 +4645,8 @@ class TranslatorEngine:
                 }
             )
 
-        complex_images = self._select_complex_repair_images(session, source_dir, config)
+        complex_session = {**session, "source_images": source_images} if skip_completed and target_stored_name is None else session
+        complex_images = self._select_complex_repair_images(complex_session, source_dir, config)
         if complex_images:
             if self._wants_ai_image_cleanup(config):
                 if self._has_image_cleanup_key(config):
@@ -4832,6 +4884,27 @@ class TranslatorEngine:
         if not matched_images:
             raise RuntimeError("找不到当前选中的页面，无法只翻译这一页。请刷新逐框校对后再试。")
         return matched_images
+
+    def _filter_completed_translation_images(
+        self,
+        session: dict[str, Any],
+        output_dir: Path,
+        source_images: list[dict[str, Any]],
+        preferred_format: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        remaining_images: list[dict[str, Any]] = []
+        skipped_count = 0
+        for image in source_images:
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not stored_name:
+                continue
+            current_output = self._current_translated_output(session, output_dir, stored_name, preferred_format)
+            if current_output is not None and current_output.exists():
+                self._update_translated_output_map(session, stored_name, current_output)
+                skipped_count += 1
+                continue
+            remaining_images.append(image)
+        return remaining_images, skipped_count
 
     def _collect_session_archive_files(
         self,

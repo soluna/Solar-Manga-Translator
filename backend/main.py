@@ -546,7 +546,7 @@ async def extract_project_glossary(project_id: str, payload: dict[str, Any] | No
         raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再提取专有名词。")
 
     config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
-    glossary = await translator_engine.extract_project_glossary(project_id, session, config)
+    glossary = await translator_engine.extract_project_glossary(project_id, session, config, force=True)
     return {"glossary": glossary}
 
 
@@ -1040,6 +1040,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 session=session,
                 raw_config=config,
                 progress_callback=send_event,
+                skip_completed=True,
             )
         elif action == "translate-page":
             result = await translator_engine.resume_translation_session(

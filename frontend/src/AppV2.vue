@@ -857,6 +857,14 @@ const canRerender = computed(
     && workflowStage.value === 'translated'
     && Boolean(downloadUrl.value || translatedImages.value.length || originalImages.value.length)
 )
+const hasPartialTranslatedResults = computed(
+  () => Boolean(
+    sessionId.value
+    && originalImages.value.length
+    && translatedImages.value.length
+    && translatedImages.value.length < originalImages.value.length
+  )
+)
 const canRetranslate = computed(
   () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
 )
@@ -1723,7 +1731,7 @@ const previewFontFaceCss = computed(() => {
 })
 
 const primaryTranslateAction = computed(() => {
-  if (workflowStage.value === 'detected') {
+  if (workflowStage.value === 'detected' || hasPartialTranslatedResults.value) {
     return 'resume-translate'
   }
   if (workflowStage.value === 'translated') {
@@ -1746,7 +1754,7 @@ const primaryTranslateLabel = computed(() => {
     return '翻译进行中...'
   }
 
-  if (workflowStage.value === 'detected') {
+  if (workflowStage.value === 'detected' || hasPartialTranslatedResults.value) {
     return '继续翻译'
   }
   if (workflowStage.value === 'translated') {
@@ -8247,7 +8255,7 @@ function runV2RetranslateAction() {
   if (!canRetranslate.value || translating.value) {
     return
   }
-  startTranslation('translate')
+  startTranslation(hasPartialTranslatedResults.value || workflowStage.value === 'detected' ? 'resume-translate' : 'translate')
 }
 
 function getAdvancedEraseConfigError() {
@@ -9683,7 +9691,7 @@ watch(
               title="使用当前设置和模型重新翻译整本漫画"
               @click="runV2RetranslateAction"
             >
-              重新翻译
+              {{ hasPartialTranslatedResults || workflowStage === 'detected' ? '继续翻译' : '重新翻译' }}
             </button>
             <button
               type="button"

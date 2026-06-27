@@ -2858,6 +2858,10 @@ img {
   gap: 8px;
 }
 
+.v2-font-library-actions .v2-secondary-button {
+  flex: 1 1 160px;
+}
+
 .v2-font-map-row {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr);

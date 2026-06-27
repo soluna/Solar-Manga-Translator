@@ -678,6 +678,9 @@ const translatedDirPath = ref('')
 const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
 const availableFonts = ref([])
+const fontLibraryRefreshing = ref(false)
+const fontLibraryMessage = ref('')
+const fontLibraryRevision = ref(0)
 const previewFontLoadState = ref({})
 const reviewInspectionPages = ref([])
 const reviewInspectionLoading = ref(false)
@@ -1408,6 +1411,20 @@ const appRuntimeSystemFontDirLabel = computed(() => {
     : []
   return dirs.join('；')
 })
+const canOpenFontLibraryDirectory = computed(() => (
+  Boolean(isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
+))
+const fontLibraryStatusText = computed(() => {
+  if (fontLibraryRefreshing.value) {
+    return '正在重新扫描字库目录并载入字体…'
+  }
+  if (fontLibraryMessage.value) {
+    return fontLibraryMessage.value
+  }
+  const builtinCount = availableFonts.value.filter((font) => font?.source === 'builtin').length
+  const customCount = availableFonts.value.filter((font) => font?.source === 'project').length
+  return `当前共读取 ${availableFonts.value.length} 个字体（系统 ${builtinCount} / 自定义 ${customCount}）。`
+})
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
   || String(sessionId.value || '').trim()
@@ -1722,9 +1739,13 @@ const previewFontFaceCss = computed(() => {
     }
     const family = getPreviewFontAlias(font.id)
     const formatHint = getPreviewFontFormatHint(font)
+    const fontUrl = toApiUrl(font.url)
+    const refreshedFontUrl = fontLibraryRevision.value
+      ? `${fontUrl}${fontUrl.includes('?') ? '&' : '?'}v=${fontLibraryRevision.value}`
+      : fontUrl
     const srcValue = formatHint
-      ? `url('${toApiUrl(font.url)}') format('${formatHint}')`
-      : `url('${toApiUrl(font.url)}')`
+      ? `url('${refreshedFontUrl}') format('${formatHint}')`
+      : `url('${refreshedFontUrl}')`
     rules.push(`@font-face{font-family:'${family}';src:${srcValue};font-style:normal;font-weight:400;font-display:swap;}`)
   }
   return rules.join('\n')
@@ -7865,15 +7886,25 @@ function applyDefaultStyleFontMappings(fonts) {
   return changed
 }
 
-async function loadFonts() {
+async function loadFonts({ forceRefresh = false } = {}) {
   try {
-    const response = await fetch(toApiUrl('/api/fonts'))
+    const requestPath = forceRefresh
+      ? `/api/fonts?refresh=${Date.now()}`
+      : '/api/fonts'
+    const response = await fetch(
+      toApiUrl(requestPath),
+      forceRefresh ? { cache: 'no-store' } : undefined
+    )
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`)
     }
 
     const payload = await response.json()
     availableFonts.value = payload.fonts || []
+    if (forceRefresh) {
+      previewFontLoadState.value = {}
+      fontLibraryRevision.value = Date.now()
+    }
 
     if (!config.value.font_key) {
       const recommended = pickRecommendedFont(availableFonts.value, config.value.target_lang)
@@ -7886,8 +7917,51 @@ async function loadFonts() {
       saveStoredConfig(config.value)
       status.value = '已按你预设的字体样式映射自动带出默认字体。'
     }
+    return { ok: true, fonts: availableFonts.value }
   } catch (error) {
     availableFonts.value = []
+    return {
+      ok: false,
+      fonts: [],
+      error: error instanceof Error ? error.message : String(error || ''),
+    }
+  }
+}
+
+async function refreshFontLibrary() {
+  if (fontLibraryRefreshing.value) {
+    return
+  }
+
+  fontLibraryRefreshing.value = true
+  fontLibraryMessage.value = ''
+  const result = await loadFonts({ forceRefresh: true })
+  fontLibraryRefreshing.value = false
+
+  if (!result.ok) {
+    fontLibraryMessage.value = `刷新字库失败：${result.error || '无法读取字体目录。'}`
+    return
+  }
+
+  const builtinCount = result.fonts.filter((font) => font?.source === 'builtin').length
+  const customCount = result.fonts.filter((font) => font?.source === 'project').length
+  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个字体（系统 ${builtinCount} / 自定义 ${customCount}）。`
+}
+
+async function openFontLibraryDirectory() {
+  if (!canOpenFontLibraryDirectory.value) {
+    fontLibraryMessage.value = '请在 Windows 桌面版中打开自定义字库文件夹。'
+    return
+  }
+
+  try {
+    const result = await desktopBridge.openUserFonts()
+    if (!result?.ok) {
+      throw new Error(result?.error || '系统文件管理器未能打开目录。')
+    }
+    fontLibraryMessage.value = `已打开自定义字库文件夹：${result.path || appRuntimeCustomFontDirLabel.value}`
+  } catch (error) {
+    fontLibraryMessage.value = `打开字库文件夹失败：${error instanceof Error ? error.message : String(error || '')}`
   }
 }
 
@@ -11063,6 +11137,27 @@ watch(
               <strong>字体与渲染</strong>
               <span>配置识别风格到实际字体的对应关系</span>
             </header>
+
+            <div class="v2-inline-actions v2-font-library-actions">
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="fontLibraryRefreshing"
+                @click="refreshFontLibrary"
+              >
+                {{ fontLibraryRefreshing ? '刷新中…' : '刷新字库' }}
+              </button>
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="!canOpenFontLibraryDirectory"
+                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开自定义字库文件夹' : '仅 Windows 桌面版支持'"
+                @click="openFontLibraryDirectory"
+              >
+                打开字库文件夹
+              </button>
+            </div>
+            <p class="v2-settings-inline-note" aria-live="polite">{{ fontLibraryStatusText }}</p>
 
             <div class="v2-font-map-list">
               <label

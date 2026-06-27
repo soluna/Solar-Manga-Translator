@@ -12,4 +12,5 @@ contextBridge.exposeInMainWorld('mangaDesktop', {
   runtime: loadRuntime(),
   getRuntime: () => ipcRenderer.invoke('desktop:get-runtime'),
   revealPath: (targetPath) => ipcRenderer.invoke('desktop:reveal-path', targetPath),
+  openUserFonts: () => ipcRenderer.invoke('desktop:open-user-fonts'),
 })

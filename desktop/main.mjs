@@ -247,6 +247,16 @@ ipcMain.handle('desktop:reveal-path', async (_event, targetPath) => {
   shell.showItemInFolder(targetPath)
   return true
 })
+ipcMain.handle('desktop:open-user-fonts', async () => {
+  const fontsDir = join(app.getPath('userData'), 'fonts')
+  ensureDir(fontsDir)
+  const error = await shell.openPath(fontsDir)
+  return {
+    ok: !error,
+    path: fontsDir,
+    error,
+  }
+})
 
 app.on('window-all-closed', () => {
   app.quit()

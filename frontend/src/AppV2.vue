@@ -698,6 +698,7 @@ const pageEditHistory = ref({})
 const pageCommandRevisions = ref({})
 const canvasPreviewDirtyPages = ref({})
 const pageImageNonces = ref({})
+const pageBaseImageNonces = ref({})
 const creatingManualRegion = ref(false)
 const manualDrawMode = ref(false)
 const adjustingRegionId = ref('')
@@ -801,12 +802,14 @@ let styleInspectionRequestToken = 0
 let autoFitCanvasPageIds = new Set()
 const pageCommandExecutionQueue = new Map()
 const preloadedImageUrls = new Set()
+const imageLoadPromises = new Map()
 let canvasLayoutFrame = null
 const TRANSLATION_COMPLETION_RECOVERY_DELAY_MS = 15000
 const TRANSLATION_COMPLETION_RECOVERY_RETRY_MS = 15000
 const TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS = 20
 let translationCompletionRecoveryTimer = null
 let translationCompletionRecoveryToken = 0
+let translationFinalizationPromise = null
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const {
@@ -1157,14 +1160,15 @@ const selectedEditPage = computed(() => {
   )
 })
 const selectedEditPageIndex = computed(() => {
-  if (!selectedEditPage.value) {
+  const selectedPageId = String(selectedEditPageKey.value || selectedEditPage.value?.stored_name || '').trim()
+  if (!selectedPageId) {
     return -1
   }
-  return mergedInspectionPages.value.findIndex((page) => page.stored_name === selectedEditPage.value?.stored_name)
+  return v2PageEntries.value.findIndex((page) => page.stored_name === selectedPageId)
 })
 const canSelectPreviousEditPage = computed(() => selectedEditPageIndex.value > 0)
 const canSelectNextEditPage = computed(() => {
-  return selectedEditPageIndex.value >= 0 && selectedEditPageIndex.value < mergedInspectionPages.value.length - 1
+  return selectedEditPageIndex.value >= 0 && selectedEditPageIndex.value < v2PageEntries.value.length - 1
 })
 const v2SelectedPagePositionLabel = computed(() => {
   if (selectedEditPageIndex.value < 0) {
@@ -1178,7 +1182,7 @@ const selectedEditPageSummary = computed(() => {
     return ''
   }
   const pageNumber = selectedEditPageIndex.value >= 0 ? selectedEditPageIndex.value + 1 : 1
-  return `第 ${pageNumber} / ${mergedInspectionPages.value.length} 页`
+  return `第 ${pageNumber} / ${v2PageEntries.value.length} 页`
 })
 const selectedEditPageThumbnailUrl = computed(() => {
   const page = selectedEditPage.value
@@ -1862,9 +1866,19 @@ function withExplicitCacheBust(url, nonce) {
   return withUrlQueryParam(url, 't', nonce)
 }
 
-function getPageImageNonce(pageId) {
+function getPageImageNonce(pageId, path = '') {
   const normalizedPageId = String(pageId || '').trim()
-  return normalizedPageId ? pageImageNonces.value[normalizedPageId] : ''
+  if (!normalizedPageId) {
+    return ''
+  }
+  const normalizedPath = String(path || '').toLowerCase()
+  if (normalizedPath.includes('/source-image')) {
+    return ''
+  }
+  if (normalizedPath.includes('/base-image')) {
+    return pageBaseImageNonces.value[normalizedPageId] || ''
+  }
+  return pageImageNonces.value[normalizedPageId] || ''
 }
 
 function getVersionedPageImageUrl(path, pageId, options = {}) {
@@ -1873,7 +1887,7 @@ function getVersionedPageImageUrl(path, pageId, options = {}) {
   if (!url) {
     return ''
   }
-  return withExplicitCacheBust(url, getPageImageNonce(pageId))
+  return withExplicitCacheBust(url, getPageImageNonce(pageId, path))
 }
 
 function getThumbnailPageImageUrl(path, pageId) {
@@ -1884,14 +1898,22 @@ function getReviewPageImageUrl(path, pageId) {
   return getVersionedPageImageUrl(path, pageId, { maxSide: IMAGE_REVIEW_MAX_SIDE })
 }
 
-function markPageImageUpdated(pageId, timestamp = Date.now()) {
+function markPageImageUpdated(pageId, timestamp = Date.now(), options = {}) {
   const normalizedPageId = String(pageId || '').trim()
   if (!normalizedPageId) {
     return
   }
-  pageImageNonces.value = {
-    ...pageImageNonces.value,
-    [normalizedPageId]: timestamp
+  if (options.translated !== false) {
+    pageImageNonces.value = {
+      ...pageImageNonces.value,
+      [normalizedPageId]: timestamp
+    }
+  }
+  if (options.base) {
+    pageBaseImageNonces.value = {
+      ...pageBaseImageNonces.value,
+      [normalizedPageId]: timestamp
+    }
   }
 }
 
@@ -1901,6 +1923,10 @@ function markTranslatedPayloadImagesUpdated(images = [], options = {}) {
   }
   const onlyPageId = String(options.onlyPageId || '').trim()
   const shouldRefreshAll = Boolean(options.refreshAll)
+  const preserveExisting = Boolean(options.preserveExisting)
+  if (!onlyPageId && !shouldRefreshAll) {
+    return
+  }
   const timestamp = Date.now()
   const nextNonces = { ...pageImageNonces.value }
   let changed = false
@@ -1913,7 +1939,7 @@ function markTranslatedPayloadImagesUpdated(images = [], options = {}) {
     if (onlyPageId && storedName !== onlyPageId) {
       continue
     }
-    if (!shouldRefreshAll && !onlyPageId && nextNonces[storedName]) {
+    if (preserveExisting && nextNonces[storedName]) {
       continue
     }
     nextNonces[storedName] = timestamp
@@ -1931,8 +1957,44 @@ function preloadImageUrl(url) {
     return
   }
   preloadedImageUrls.add(normalizedUrl)
-  const image = new window.Image()
-  image.src = normalizedUrl
+  void waitForImageUrlReady(normalizedUrl)
+}
+
+function waitForImageUrlReady(url, timeoutMs = 30000) {
+  const normalizedUrl = String(url || '').trim()
+  if (!normalizedUrl || typeof window === 'undefined') {
+    return Promise.resolve(false)
+  }
+  if (imageLoadPromises.has(normalizedUrl)) {
+    return imageLoadPromises.get(normalizedUrl)
+  }
+
+  const promise = new Promise((resolve) => {
+    const image = new window.Image()
+    image.decoding = 'async'
+    let settled = false
+    const timeoutId = window.setTimeout(() => finish(false), timeoutMs)
+    const finish = (loaded) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      window.clearTimeout(timeoutId)
+      if (!loaded) {
+        imageLoadPromises.delete(normalizedUrl)
+        preloadedImageUrls.delete(normalizedUrl)
+      }
+      resolve(Boolean(loaded))
+    }
+    image.onload = () => finish(true)
+    image.onerror = () => finish(false)
+    image.src = normalizedUrl
+    if (image.complete && image.naturalWidth > 0) {
+      finish(true)
+    }
+  })
+  imageLoadPromises.set(normalizedUrl, promise)
+  return promise
 }
 
 function preloadReviewImagesAroundPage(pageKey = '') {
@@ -1942,21 +2004,24 @@ function preloadReviewImagesAroundPage(pageKey = '') {
   }
   const normalizedPageKey = String(pageKey || selectedEditPageKey.value || '').trim()
   const currentIndex = Math.max(0, entries.findIndex((entry) => entry.stored_name === normalizedPageKey))
-  const preloadIndexes = new Set([
-    currentIndex,
-    Math.max(0, currentIndex - 1),
-    Math.min(entries.length - 1, currentIndex + 1)
-  ])
-
-  for (const index of preloadIndexes) {
-    const entry = entries[index]
-    if (!entry) {
-      continue
+  const currentEntry = entries[currentIndex]
+  if (currentEntry) {
+    for (const pane of selectedReviewComparePanes.value) {
+      if (pane.key === 'final') {
+        preloadImageUrl(currentEntry.finalUrl || currentEntry.previewUrl)
+      } else if (pane.key === 'source') {
+        preloadImageUrl(currentEntry.sourceUrl)
+      } else {
+        preloadImageUrl(currentEntry.blankUrl || currentEntry.sourceUrl)
+      }
     }
-    preloadImageUrl(entry.sourceUrl)
-    preloadImageUrl(entry.blankUrl)
-    preloadImageUrl(entry.finalUrl)
-    preloadImageUrl(entry.previewUrl)
+  }
+
+  for (const index of [currentIndex - 1, currentIndex + 1]) {
+    const entry = entries[index]
+    if (entry) {
+      preloadImageUrl(entry.coverUrl)
+    }
   }
 }
 
@@ -2291,10 +2356,12 @@ async function exportCurrentProjectTranslationRequestDebug() {
   }
 }
 
-function closeSocket() {
-  if (socket) {
-    const socketToClose = socket
-    socket = null
+function closeSocket(targetSocket = socket) {
+  if (targetSocket) {
+    const socketToClose = targetSocket
+    if (socket === socketToClose) {
+      socket = null
+    }
     expectedClosingSockets.add(socketToClose)
     socketToClose.close()
   }
@@ -2343,6 +2410,85 @@ function markCompletedTranslationAction(completedAction, pageTargetStoredName = 
     }
   } else if (completedAction === 'resume-translate' || completedAction === 'translate') {
     clearCanvasPreviewDirty()
+  }
+}
+
+async function waitForLatestTranslatedPageImage(pageId = '') {
+  const normalizedPageId = String(
+    pageId
+    || selectedEditPageKey.value
+    || v2PageEntries.value[0]?.stored_name
+    || ''
+  ).trim()
+  if (!normalizedPageId) {
+    return false
+  }
+  const entry = v2PageEntries.value.find((page) => page.stored_name === normalizedPageId)
+  const imageUrl = String(entry?.finalUrl || entry?.previewUrl || '').trim()
+  if (!imageUrl) {
+    return false
+  }
+  return await waitForImageUrlReady(imageUrl)
+}
+
+async function finalizeCompletedTranslation(payload, context = {}) {
+  if (translationFinalizationPromise) {
+    return await translationFinalizationPromise
+  }
+
+  const completedAction = String(context.action || activeAction.value || 'translate')
+  const pageTargetStoredName = String(context.pageTargetStoredName || '').trim()
+  const activeSocket = context.socket || socket
+  const finalization = (async () => {
+    resetTranslationCompletionRecovery()
+    closeSocket(activeSocket)
+    errorMessage.value = ''
+    status.value = completedAction === 'detect'
+      ? '识别任务已完成，正在载入校对数据…'
+      : '嵌字任务已完成，正在载入最新结果…'
+
+    applySessionPayload(payload, {
+      refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
+      refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName),
+      preserveExistingTranslatedImageNonce: true,
+    })
+    markCompletedTranslationAction(completedAction, pageTargetStoredName)
+
+    const inspectionPageId = String(
+      pageTargetStoredName
+      || selectedEditPageKey.value
+      || v2PageEntries.value[0]?.stored_name
+      || ''
+    ).trim()
+    if (inspectionPageId) {
+      await loadEditInspection({ silent: true, pageId: inspectionPageId })
+    }
+    if (completedAction === 'detect' && !mergedInspectionPages.value.length) {
+      await ensureEditInspectionReadyAfterDetect()
+    }
+    if (completedAction !== 'detect') {
+      await waitForLatestTranslatedPageImage(inspectionPageId)
+    }
+
+    await nextTick()
+    preloadReviewImagesAroundPage(inspectionPageId)
+    scheduleCanvasLayoutRefresh()
+    status.value = getCompletedTranslationStatus(completedAction, pageTargetStoredName)
+  })()
+
+  translationFinalizationPromise = finalization
+  try {
+    await finalization
+  } catch (error) {
+    console.warn('[TranslationFinalization] result refresh failed', error)
+    errorMessage.value = `任务已完成，但刷新最新结果失败：${error instanceof Error ? error.message : String(error || '')}`
+    status.value = '任务已完成，请重新进入当前页面查看结果。'
+  } finally {
+    if (translationFinalizationPromise === finalization) {
+      translationFinalizationPromise = null
+    }
+    translating.value = false
+    void loadProjectHistory({ silent: true })
   }
 }
 
@@ -2400,27 +2546,11 @@ async function recoverCompletedTranslationIfIdle(context = {}, token = translati
       return
     }
 
-    const completedAction = context.action || activeAction.value
-    const pageTargetStoredName = String(context.pageTargetStoredName || '').trim()
-    resetTranslationCompletionRecovery()
-    translating.value = false
-    errorMessage.value = ''
-    applySessionPayload(payload, {
-      refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
-      refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName)
+    await finalizeCompletedTranslation(payload, {
+      action: context.action || activeAction.value,
+      pageTargetStoredName: context.pageTargetStoredName,
+      socket: context.socket,
     })
-    markCompletedTranslationAction(completedAction, pageTargetStoredName)
-    status.value = getCompletedTranslationStatus(completedAction, pageTargetStoredName)
-    void loadEditInspection({ silent: completedAction !== 'detect' }).catch((error) => {
-      console.warn('[TranslationRecovery] review inspector refresh failed', error)
-    })
-    if (config.value.font_style_mode === 'auto-map') {
-      void loadStyleInspection({ silent: true }).catch((error) => {
-        console.warn('[TranslationRecovery] style inspector refresh failed', error)
-      })
-    }
-    void loadProjectHistory({ silent: true })
-    closeSocket()
   } catch (error) {
     console.warn('[TranslationRecovery] completion recovery failed', error)
     if (token === translationCompletionRecoveryToken && translating.value && attempt < TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS) {
@@ -2698,6 +2828,10 @@ function applySessionPayload(payload, options = {}) {
     ? options.forceRegionIds.map((regionId) => String(regionId || '').trim()).filter(Boolean)
     : []
   renderNonce.value = Date.now()
+  if (sessionChanged) {
+    pageImageNonces.value = {}
+    pageBaseImageNonces.value = {}
+  }
   sessionId.value = nextSessionId
   workflowStage.value = payload?.workflow_stage || 'idle'
   downloadUrl.value = payload?.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
@@ -2712,7 +2846,8 @@ function applySessionPayload(payload, options = {}) {
   }))
   markTranslatedPayloadImagesUpdated(payload?.translated_images || [], {
     onlyPageId: options.refreshTranslatedPageId || '',
-    refreshAll: sessionChanged || resetInspectors || Boolean(options.refreshAllTranslatedImages)
+    refreshAll: Boolean(options.refreshAllTranslatedImages),
+    preserveExisting: Boolean(options.preserveExistingTranslatedImageNonce),
   })
   translatedImages.value = (payload?.translated_images || []).map((image, index) => ({
     id: image.id || `${sessionId.value || 'session'}-translated-${index}`,
@@ -2867,11 +3002,6 @@ async function restoreProject(projectId) {
       throw new Error(payload.detail || '恢复历史项目失败')
     }
     applySessionPayload(payload, { resetInspectors: true })
-    try {
-      await loadEditInspection({ silent: true })
-    } catch (inspectionError) {
-      console.warn('[HistoryRestore] review inspector preload failed', inspectionError)
-    }
     await loadProjectHistory({ silent: true })
     status.value = `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
   } catch (error) {
@@ -2902,11 +3032,6 @@ async function restoreSnapshot(projectId, snapshotId) {
       throw new Error(payload.detail || '恢复历史快照失败')
     }
     applySessionPayload(payload, { resetInspectors: true })
-    try {
-      await loadEditInspection({ silent: true })
-    } catch (inspectionError) {
-      console.warn('[HistoryRestore] snapshot inspector preload failed', inspectionError)
-    }
     await loadProjectHistory({ silent: true })
     status.value = `已从历史快照恢复项目「${currentProject.value?.title || payload.session_id}」，可以继续编辑。`
   } catch (error) {
@@ -4018,6 +4143,13 @@ function replaceInspectionPage(pages, nextPage) {
     return nextPages
   }
   return [...nextPages, { ...nextPage }]
+}
+
+function mergeInspectionPages(pages, incomingPages) {
+  return (incomingPages || []).reduce(
+    (nextPages, page) => replaceInspectionPage(nextPages, page),
+    [...(pages || [])]
+  )
 }
 
 function applyInspectionOverrides(overrides, options = {}) {
@@ -5246,17 +5378,28 @@ function setCurrentPageViewportPreset(preset = 'fit', pane = 'main') {
 }
 
 function selectAdjacentEditPage(offset) {
-  if (!mergedInspectionPages.value.length || selectedEditPageIndex.value < 0) {
+  if (!v2PageEntries.value.length || selectedEditPageIndex.value < 0) {
     return
   }
   const nextIndex = Math.min(
-    mergedInspectionPages.value.length - 1,
+    v2PageEntries.value.length - 1,
     Math.max(0, selectedEditPageIndex.value + offset),
   )
-  const nextPage = mergedInspectionPages.value[nextIndex]
+  const nextPage = v2PageEntries.value[nextIndex]
   if (nextPage?.stored_name) {
     void selectEditPageForReview(nextPage.stored_name)
   }
+}
+
+function isInspectionPageLoaded(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId) {
+    return false
+  }
+  const hasReviewPage = reviewInspectionPages.value.some((page) => page?.stored_name === normalizedPageId)
+  const hasStylePage = config.value.font_style_mode !== 'auto-map'
+    || styleInspectionPages.value.some((page) => page?.stored_name === normalizedPageId)
+  return hasReviewPage && hasStylePage
 }
 
 async function selectEditPageForReview(pageKey) {
@@ -5271,6 +5414,9 @@ async function selectEditPageForReview(pageKey) {
   canvasMarqueeState.value = null
   closeAdvancedStylePopover()
   selectedEditPageKey.value = normalizedPageKey
+  if (v2View.value === 'review' && !isInspectionPageLoaded(normalizedPageKey)) {
+    await loadEditInspection({ pageId: normalizedPageKey })
+  }
 }
 
 function selectAdjacentEditRegion(offset) {
@@ -5934,8 +6080,10 @@ async function deleteManualRegion(region) {
   }
 }
 
-function applyReviewInspectionPayload(payload) {
-  reviewInspectionPages.value = payload.pages || []
+function applyReviewInspectionPayload(payload, options = {}) {
+  reviewInspectionPages.value = options.mergePages
+    ? mergeInspectionPages(reviewInspectionPages.value, payload.pages)
+    : (payload.pages || [])
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
@@ -5962,8 +6110,10 @@ function applyReviewInspectionPayload(payload) {
   })
 }
 
-function applyStyleInspectionPayload(payload) {
-  styleInspectionPages.value = payload.pages || []
+function applyStyleInspectionPayload(payload, options = {}) {
+  styleInspectionPages.value = options.mergePages
+    ? mergeInspectionPages(styleInspectionPages.value, payload.pages)
+    : (payload.pages || [])
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
@@ -6020,6 +6170,7 @@ function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
 
 async function loadReviewInspection(options = {}) {
   const silent = Boolean(options.silent)
+  const pageId = String(options.pageId || '').trim()
   if (!sessionId.value) {
     reviewInspectionRequestToken += 1
     reviewInspectionPages.value = []
@@ -6037,7 +6188,10 @@ async function loadReviewInspection(options = {}) {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ config: buildRuntimeConfig() })
+      body: JSON.stringify({
+        config: buildRuntimeConfig(),
+        target_stored_name: pageId || undefined,
+      })
     })
 
     const payload = await response.json()
@@ -6048,7 +6202,7 @@ async function loadReviewInspection(options = {}) {
     if (requestToken !== reviewInspectionRequestToken) {
       return
     }
-    applyReviewInspectionPayload(payload)
+    applyReviewInspectionPayload(payload, { mergePages: Boolean(pageId) })
     syncEditSelection()
   } catch (error) {
     if (requestToken !== reviewInspectionRequestToken) {
@@ -6064,6 +6218,7 @@ async function loadReviewInspection(options = {}) {
 
 async function loadStyleInspection(options = {}) {
   const silent = Boolean(options.silent)
+  const pageId = String(options.pageId || '').trim()
   if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
     styleInspectionRequestToken += 1
     styleInspectionPages.value = []
@@ -6081,7 +6236,10 @@ async function loadStyleInspection(options = {}) {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ config: buildRuntimeConfig() })
+      body: JSON.stringify({
+        config: buildRuntimeConfig(),
+        target_stored_name: pageId || undefined,
+      })
     })
 
     const payload = await response.json()
@@ -6092,7 +6250,7 @@ async function loadStyleInspection(options = {}) {
     if (requestToken !== styleInspectionRequestToken) {
       return
     }
-    applyStyleInspectionPayload(payload)
+    applyStyleInspectionPayload(payload, { mergePages: Boolean(pageId) })
     syncEditSelection()
   } catch (error) {
     if (requestToken !== styleInspectionRequestToken) {
@@ -6115,9 +6273,17 @@ async function loadEditInspection(options = {}) {
     return
   }
 
-  const tasks = [loadReviewInspection({ silent })]
+  const pageId = options.allPages
+    ? ''
+    : String(
+      options.pageId
+      || selectedEditPageKey.value
+      || v2PageEntries.value[0]?.stored_name
+      || ''
+    ).trim()
+  const tasks = [loadReviewInspection({ silent, pageId })]
   if (config.value.font_style_mode === 'auto-map') {
-    tasks.push(loadStyleInspection({ silent }))
+    tasks.push(loadStyleInspection({ silent, pageId }))
   } else {
     resetStyleInspector()
   }
@@ -8272,20 +8438,12 @@ async function openV2ReviewPage(pageKey = '') {
   await nextTick()
   scheduleCanvasLayoutRefresh()
   preloadReviewImagesAroundPage(targetKey)
-  void loadEditInspection({ silent: true })
-    .then(() => {
-      if (!selectedEditRegionKey.value && selectedEditPage.value?.regions?.length) {
-        selectedEditRegionKey.value = selectedEditPage.value.regions[0].id
-      }
-      preloadReviewImagesAroundPage(targetKey)
-      scheduleCanvasLayoutRefresh()
-    })
-    .catch(() => {
-      // Picker should still open even when the review payload is not ready yet.
-    })
+  await loadEditInspection({ pageId: targetKey })
   if (!selectedEditRegionKey.value && selectedEditPage.value?.regions?.length) {
     selectedEditRegionKey.value = selectedEditPage.value.regions[0].id
   }
+  preloadReviewImagesAroundPage(targetKey)
+  scheduleCanvasLayoutRefresh()
 }
 
 function runV2ReviewPrimaryAction() {
@@ -8586,7 +8744,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       throw new Error(payload.detail || `${getAdvancedEraseActionLabel(normalizedAction)}失败`)
     }
 
-    markPageImageUpdated(pageId)
+    markPageImageUpdated(pageId, Date.now(), { base: true })
     applySessionPayload(payload, { refreshTranslatedPageId: pageId })
     await loadEditInspection({ silent: true })
     preloadReviewImagesAroundPage(pageId)
@@ -8920,6 +9078,9 @@ function startTranslation(action = 'translate') {
   }
 
   currentSocket.onmessage = async (event) => {
+    if (currentSocket !== socket) {
+      return
+    }
     const payload = JSON.parse(event.data)
 
     if (payload.event === 'start') {
@@ -8982,6 +9143,7 @@ function startTranslation(action = 'translate') {
           sessionId: sessionId.value,
           action: activeAction.value,
           pageTargetStoredName,
+          socket: currentSocket,
           attempt: 1
         })
       }
@@ -8994,24 +9156,11 @@ function startTranslation(action = 'translate') {
     }
 
     if (payload.event === 'completed') {
-      resetTranslationCompletionRecovery()
-      translating.value = false
-      const completedAction = activeAction.value
-      applySessionPayload(payload, {
-        refreshTranslatedPageId: (completedAction === 'rerender' || completedAction === 'translate-page') ? pageTargetStoredName : '',
-        refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName)
+      await finalizeCompletedTranslation(payload, {
+        action: activeAction.value,
+        pageTargetStoredName,
+        socket: currentSocket,
       })
-      markCompletedTranslationAction(completedAction, pageTargetStoredName)
-      status.value = getCompletedTranslationStatus(completedAction, pageTargetStoredName)
-      await loadEditInspection({ silent: completedAction !== 'detect' })
-      if (completedAction === 'detect' && !mergedInspectionPages.value.length) {
-        await ensureEditInspectionReadyAfterDetect()
-      }
-      if (config.value.font_style_mode === 'auto-map') {
-        await loadStyleInspection({ silent: true })
-      }
-      void loadProjectHistory({ silent: true })
-      closeSocket()
       return
     }
 
@@ -9649,7 +9798,13 @@ watch(
             @click="openV2ReviewPage(page.stored_name)"
           >
             <div class="v2-page-card-media">
-              <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
+              <img
+                :src="getV2PageCover(page, index)"
+                :alt="page.name"
+                loading="lazy"
+                decoding="async"
+                @error="handleV2ImageError($event, index)"
+              />
               <span class="v2-page-card-number">P{{ page.pageNumber }}</span>
             </div>
             <div class="v2-page-card-body">
@@ -9809,7 +9964,13 @@ watch(
                 :class="['v2-page-rail-item', page.stored_name === (v2SelectedPageEntry?.stored_name || '') ? 'active' : '']"
                 @click="selectEditPageForReview(page.stored_name)"
               >
-                <img :src="getV2PageCover(page, index)" :alt="page.name" @error="handleV2ImageError($event, index)" />
+                <img
+                  :src="getV2PageCover(page, index)"
+                  :alt="page.name"
+                  loading="lazy"
+                  decoding="async"
+                  @error="handleV2ImageError($event, index)"
+                />
                 <div class="v2-page-rail-copy">
                   <strong>{{ page.pageNumber }}</strong>
                 </div>
@@ -9901,6 +10062,7 @@ watch(
                       v-if="getReviewComparePaneImageUrl(pane.key)"
                       :alt="getReviewComparePaneAlt(pane.key)"
                       :src="getReviewComparePaneImageUrl(pane.key)"
+                      decoding="async"
                       @load="scheduleCanvasLayoutRefresh"
                     />
                     <div v-else class="v2-canvas-empty">

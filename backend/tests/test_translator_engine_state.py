@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -719,6 +720,32 @@ print(json.dumps({
             )
             self.assertEqual(preview_path, cached_preview_path)
 
+    def test_page_image_response_path_uses_cache_before_resizing_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_path = root / "large-source.png"
+            Image.new("RGB", (1200, 800), (12, 34, 56)).save(source_path)
+
+            preview_path = engine.get_page_image_response_path(
+                source_path,
+                "project-a",
+                "page-1.png",
+                "source",
+                320,
+            )
+
+            with mock.patch.object(Image.Image, "resize", side_effect=AssertionError("cache miss")):
+                cached_preview_path = engine.get_page_image_response_path(
+                    source_path,
+                    "project-a",
+                    "page-1.png",
+                    "source",
+                    320,
+                )
+
+            self.assertEqual(preview_path, cached_preview_path)
+
     def test_page_image_response_path_keeps_original_when_preview_is_unneeded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -738,6 +765,64 @@ print(json.dumps({
                 source_path,
                 engine.get_page_image_response_path(source_path, "project-a", "page-1.png", "source", 480),
             )
+
+    def test_inspection_can_load_one_persisted_page_without_rebuilding_all_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-inspection"
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [
+                    {"name": "page 1", "stored_name": "page-1.png"},
+                    {"name": "page 2", "stored_name": "page-2.png"},
+                ],
+                "translated_output_map": {},
+                "last_config": {},
+                "workflow_stage": "translated",
+            }
+
+            for page_id in ("page-1.png", "page-2.png"):
+                Image.new("RGB", (120, 160), (255, 255, 255)).save(source_dir / page_id)
+                engine._write_json_file(
+                    engine._project_page_document_path(project_id, page_id),
+                    {
+                        "version": engine.PAGE_DOCUMENT_VERSION,
+                        "page_id": page_id,
+                        "dimensions": {"width": 120, "height": 160},
+                        "regions": [],
+                    },
+                )
+
+            with mock.patch.object(
+                engine,
+                "_build_page_document",
+                side_effect=AssertionError("persisted page should be reused"),
+            ):
+                review_payload = asyncio.run(
+                    engine.inspect_translation_regions(
+                        project_id,
+                        session,
+                        {},
+                        target_stored_name="page-2.png",
+                    )
+                )
+                style_payload = asyncio.run(
+                    engine.inspect_style_regions(
+                        project_id,
+                        session,
+                        {},
+                        target_stored_name="page-2.png",
+                    )
+                )
+
+            self.assertEqual([page["stored_name"] for page in review_payload["pages"]], ["page-2.png"])
+            self.assertEqual([page["stored_name"] for page in style_payload["pages"]], ["page-2.png"])
 
     def test_project_glossary_preview_uses_previous_translation_as_replacement_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

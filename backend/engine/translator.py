@@ -121,6 +121,8 @@ class TranslatorEngine:
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
         self.active_sessions_lock = threading.Lock()
+        self.validated_page_base_images: set[tuple[str, int, int]] = set()
+        self.validated_page_base_images_lock = threading.Lock()
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -3520,25 +3522,10 @@ class TranslatorEngine:
         from PIL import Image, ImageOps
 
         with Image.open(source_path) as source_image:
-            source_image.load()
-            normalized_image = ImageOps.exif_transpose(source_image)
-            source_width, source_height = normalized_image.size
+            source_width, source_height = source_image.size
             source_long_side = max(source_width, source_height)
             if source_long_side <= max_side:
                 return source_path
-
-            scale = max_side / source_long_side
-            target_size = (
-                max(1, round(source_width * scale)),
-                max(1, round(source_height * scale)),
-            )
-            has_alpha = (
-                normalized_image.mode in {"RGBA", "LA"}
-                or (normalized_image.mode == "P" and "transparency" in normalized_image.info)
-            )
-            resampling_namespace = getattr(Image, "Resampling", Image)
-            resampling_filter = getattr(resampling_namespace, "LANCZOS", getattr(Image, "LANCZOS", 1))
-            resized_image = normalized_image.resize(target_size, resampling_filter)
 
         preview_dir = self._image_preview_cache_dir(project_id, page_id)
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -3559,6 +3546,24 @@ class TranslatorEngine:
             candidate_path = output_base.with_suffix(extension)
             if candidate_path.exists():
                 return candidate_path
+
+        with Image.open(source_path) as source_image:
+            source_image.load()
+            normalized_image = ImageOps.exif_transpose(source_image)
+            normalized_width, normalized_height = normalized_image.size
+            normalized_long_side = max(normalized_width, normalized_height)
+            scale = max_side / normalized_long_side
+            target_size = (
+                max(1, round(normalized_width * scale)),
+                max(1, round(normalized_height * scale)),
+            )
+            has_alpha = (
+                normalized_image.mode in {"RGBA", "LA"}
+                or (normalized_image.mode == "P" and "transparency" in normalized_image.info)
+            )
+            resampling_namespace = getattr(Image, "Resampling", Image)
+            resampling_filter = getattr(resampling_namespace, "LANCZOS", getattr(Image, "LANCZOS", 1))
+            resized_image = normalized_image.resize(target_size, resampling_filter)
 
         for stale_path in preview_dir.glob(f"{safe_kind}-{max_side}-*"):
             with contextlib.suppress(OSError):
@@ -5829,13 +5834,22 @@ class TranslatorEngine:
         session_id: str,
         session: dict[str, Any],
         raw_config: dict[str, Any] | None,
+        target_stored_name: str | None = None,
     ) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
         pages: list[dict[str, Any]] = []
+        target = str(target_stored_name or "").strip()
 
         for image in session["source_images"]:
+            if target and str(image.get("stored_name") or "") != target:
+                continue
             try:
-                page_document = self._build_page_document(session_id, session, image["stored_name"], config)
+                page_document = self._get_inspection_page_document(
+                    session_id,
+                    session,
+                    image["stored_name"],
+                    config,
+                )
             except Exception as exc:
                 print(f"[WARN] Failed to build style inspection page for {session_id}/{image['stored_name']}: {exc}")
                 continue
@@ -5855,13 +5869,22 @@ class TranslatorEngine:
         session_id: str,
         session: dict[str, Any],
         raw_config: dict[str, Any] | None,
+        target_stored_name: str | None = None,
     ) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
         pages: list[dict[str, Any]] = []
+        target = str(target_stored_name or "").strip()
 
         for image in session["source_images"]:
+            if target and str(image.get("stored_name") or "") != target:
+                continue
             try:
-                page_document = self._build_page_document(session_id, session, image["stored_name"], config)
+                page_document = self._get_inspection_page_document(
+                    session_id,
+                    session,
+                    image["stored_name"],
+                    config,
+                )
             except Exception as exc:
                 print(f"[WARN] Failed to build review inspection page for {session_id}/{image['stored_name']}: {exc}")
                 continue
@@ -5877,6 +5900,28 @@ class TranslatorEngine:
                 "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
             },
         }
+
+    def _get_inspection_page_document(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        stored_name: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        override_keys = (
+            "translation_region_overrides",
+            "translation_region_skip_overrides",
+            "translation_region_disabled_overrides",
+            "translation_region_layout_overrides",
+            "style_region_overrides",
+        )
+        has_pending_override_changes = any(
+            dict(config.get(key) or {}) != dict(session.get(key) or {})
+            for key in override_keys
+        )
+        if has_pending_override_changes:
+            return self._build_page_document(session_id, session, stored_name, config)
+        return self.get_page_document(session_id, session, stored_name)
 
     def _session_workflow_stage(self, session: dict[str, Any]) -> str:
         stage = str(session.get("workflow_stage") or "").strip().lower()
@@ -7665,15 +7710,18 @@ class TranslatorEngine:
         return restored
 
     def _ensure_page_base_image_cache(self, source_path: Path, page_cache_dir: Path) -> bool:
-        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-        if source_bgr is None:
-            return False
-
         page_cache_dir.mkdir(parents=True, exist_ok=True)
-
         inpainted_path = page_cache_dir / "inpainted.png"
-        if inpainted_path.exists() and cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None:
-            return True
+        if inpainted_path.exists():
+            stat = inpainted_path.stat()
+            signature = (str(inpainted_path.resolve()), stat.st_size, stat.st_mtime_ns)
+            with self.validated_page_base_images_lock:
+                if signature in self.validated_page_base_images:
+                    return True
+            if cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None:
+                with self.validated_page_base_images_lock:
+                    self.validated_page_base_images.add(signature)
+                return True
 
         if inpainted_path.exists():
             corrupt_path = page_cache_dir / f"inpainted.corrupt-{uuid.uuid4().hex[:8]}.png"
@@ -7683,15 +7731,28 @@ class TranslatorEngine:
             except OSError:
                 pass
 
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            return False
+
         backup_path = self._advanced_erase_traditional_backup_path(page_cache_dir)
         backup_bgr = cv2.imread(str(backup_path), cv2.IMREAD_COLOR) if backup_path.exists() else None
         if backup_bgr is not None:
             self._save_rgb_image_atomic(inpainted_path, cv2.cvtColor(backup_bgr, cv2.COLOR_BGR2RGB))
-            return cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
+            restored = cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
+            if restored:
+                stat = inpainted_path.stat()
+                with self.validated_page_base_images_lock:
+                    self.validated_page_base_images.add((str(inpainted_path.resolve()), stat.st_size, stat.st_mtime_ns))
+            return restored
 
         self._save_rgb_image_atomic(inpainted_path, cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB))
-
-        return cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
+        restored = cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR) is not None
+        if restored:
+            stat = inpainted_path.stat()
+            with self.validated_page_base_images_lock:
+                self.validated_page_base_images.add((str(inpainted_path.resolve()), stat.st_size, stat.st_mtime_ns))
+        return restored
 
     def _ensure_vendor_import_path(self) -> None:
         vendor_root = str(self.base_dir / "manga-image-translator")

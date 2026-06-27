@@ -624,22 +624,26 @@ async def delete_project(project_id: str):
 @app.post("/api/style-regions/{session_id}")
 async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(session_id)
+    payload = payload or {}
 
     return await translator_engine.inspect_style_regions(
         session_id=session_id,
         session=session,
-        raw_config=(payload or {}).get("config", {}),
+        raw_config=payload.get("config", {}),
+        target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
     )
 
 
 @app.post("/api/review-regions/{session_id}")
 async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(session_id)
+    payload = payload or {}
 
     return await translator_engine.inspect_translation_regions(
         session_id=session_id,
         session=session,
-        raw_config=(payload or {}).get("config", {}),
+        raw_config=payload.get("config", {}),
+        target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
     )
 
 
@@ -735,16 +739,17 @@ async def get_page_document(session_id: str, page_id: str):
 async def get_page_base_image(session_id: str, page_id: str, max_side: int | None = None):
     session = get_or_restore_session(session_id)
     try:
-        base_path = translator_engine.get_page_base_image_path(session_id, session, page_id)
+        response_path = await asyncio.to_thread(
+            lambda: translator_engine.get_page_image_response_path(
+                translator_engine.get_page_base_image_path(session_id, session, page_id),
+                session_id,
+                page_id,
+                "base",
+                max_side,
+            )
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    response_path = translator_engine.get_page_image_response_path(
-        base_path,
-        session_id,
-        page_id,
-        "base",
-        max_side,
-    )
     return FileResponse(path=response_path)
 
 
@@ -752,16 +757,17 @@ async def get_page_base_image(session_id: str, page_id: str, max_side: int | Non
 async def get_page_source_image(session_id: str, page_id: str, max_side: int | None = None):
     session = get_or_restore_session(session_id)
     try:
-        source_path = translator_engine.get_page_source_image_path(session_id, session, page_id)
+        response_path = await asyncio.to_thread(
+            lambda: translator_engine.get_page_image_response_path(
+                translator_engine.get_page_source_image_path(session_id, session, page_id),
+                session_id,
+                page_id,
+                "source",
+                max_side,
+            )
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    response_path = translator_engine.get_page_image_response_path(
-        source_path,
-        session_id,
-        page_id,
-        "source",
-        max_side,
-    )
     return FileResponse(path=response_path)
 
 
@@ -769,16 +775,17 @@ async def get_page_source_image(session_id: str, page_id: str, max_side: int | N
 async def get_page_preview_image(session_id: str, page_id: str, max_side: int | None = None):
     session = get_or_restore_session(session_id)
     try:
-        preview_path = translator_engine.get_page_preview_image_path(session_id, session, page_id)
+        response_path = await asyncio.to_thread(
+            lambda: translator_engine.get_page_image_response_path(
+                translator_engine.get_page_preview_image_path(session_id, session, page_id),
+                session_id,
+                page_id,
+                "preview",
+                max_side,
+            )
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    response_path = translator_engine.get_page_image_response_path(
-        preview_path,
-        session_id,
-        page_id,
-        "preview",
-        max_side,
-    )
     return FileResponse(path=response_path)
 
 
@@ -786,16 +793,17 @@ async def get_page_preview_image(session_id: str, page_id: str, max_side: int | 
 async def get_page_translated_image(session_id: str, page_id: str, max_side: int | None = None):
     session = get_or_restore_session(session_id)
     try:
-        translated_path = translator_engine.get_page_translated_image_path(session_id, session, page_id)
+        response_path = await asyncio.to_thread(
+            lambda: translator_engine.get_page_image_response_path(
+                translator_engine.get_page_translated_image_path(session_id, session, page_id),
+                session_id,
+                page_id,
+                "translated",
+                max_side,
+            )
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    response_path = translator_engine.get_page_image_response_path(
-        translated_path,
-        session_id,
-        page_id,
-        "translated",
-        max_side,
-    )
     return FileResponse(path=response_path)
 
 
@@ -1057,16 +1065,21 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 raw_config=config,
                 progress_callback=send_event,
             )
+        logger.info("Translation websocket completed. session_id=%s action=%s", session_id, action)
+        completed_payload = {
+            "event": "completed",
+            **translator_engine.build_client_session_payload(session_id, session),
+            **result,
+        }
+        if isinstance(completed_payload.get("project"), dict):
+            completed_payload["project"] = {
+                **completed_payload["project"],
+                "is_busy": False,
+                "busy_action": "",
+            }
+        await websocket.send_json(completed_payload)
         translator_engine.clear_session_busy(session_id)
         busy_cleared = True
-        logger.info("Translation websocket completed. session_id=%s action=%s", session_id, action)
-        await websocket.send_json(
-            {
-                "event": "completed",
-                **translator_engine.build_client_session_payload(session_id, session),
-                **result,
-            }
-        )
     except WebSocketDisconnect:
         logger.warning(
             "Translation websocket disconnected. session_id=%s action=%s target=%s",

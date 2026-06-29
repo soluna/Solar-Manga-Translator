@@ -80,6 +80,52 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertFalse(engine.is_session_busy("project-a"))
             self.assertTrue(engine.try_mark_session_busy("project-a", "rerender"))
 
+    def test_stroke_strength_accepts_values_above_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            self.assertEqual(engine._normalize_stroke_strength(3.25), 3.25)
+            self.assertEqual(engine._normalize_stroke_strength(99), 5.0)
+
+    def test_brush_edit_operations_paint_restore_and_erase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            base = np.full((100, 100, 3), 240, dtype=np.uint8)
+            source = np.full((100, 100, 3), (20, 40, 180), dtype=np.uint8)
+            operations = engine._normalize_brush_edit_operations(
+                [
+                    {
+                        "mode": "paint",
+                        "color": [255, 0, 0],
+                        "size": 18,
+                        "points": [[0.2, 0.2]],
+                    },
+                    {
+                        "mode": "restore",
+                        "size": 18,
+                        "points": [[0.5, 0.5]],
+                    },
+                    {
+                        "mode": "paint",
+                        "color": [0, 0, 0],
+                        "size": 18,
+                        "points": [[0.8, 0.8]],
+                    },
+                    {
+                        "mode": "erase",
+                        "size": 18,
+                        "points": [[0.8, 0.8]],
+                    },
+                ],
+                base.shape,
+            )
+
+            edited = engine._apply_brush_edit_operations(base, source, operations)
+
+            np.testing.assert_array_equal(edited[20, 20], np.array([255, 0, 0], dtype=np.uint8))
+            np.testing.assert_array_equal(edited[50, 50], source[50, 50])
+            np.testing.assert_array_equal(edited[80, 80], base[80, 80])
+
     def test_delete_project_removes_project_storage_and_preview_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

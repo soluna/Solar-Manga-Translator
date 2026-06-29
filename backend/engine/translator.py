@@ -76,11 +76,14 @@ class TranslatorEngine:
     STYLE_ROTATION_MIN = -180.0
     STYLE_ROTATION_MAX = 180.0
     STYLE_STROKE_MIN = 0.0
-    STYLE_STROKE_MAX = 1.0
+    STYLE_STROKE_MAX = 5.0
     STYLE_LETTER_SPACING_MIN = 0.5
     STYLE_LETTER_SPACING_MAX = 2.5
     STYLE_LINE_SPACING_MIN = 0.5
     STYLE_LINE_SPACING_MAX = 2.5
+    BRUSH_EDIT_MAX_OPERATIONS = 500
+    BRUSH_EDIT_MAX_POINTS = 100_000
+    BRUSH_EDIT_MAX_SIZE = 2048.0
     PROJECT_GLOSSARY_VERSION = 1
     PROJECT_GLOSSARY_CATEGORIES = {
         "人名",
@@ -1357,6 +1360,210 @@ class TranslatorEngine:
                 "changed_ratio": changed_ratio,
             },
         }
+
+    def brush_edit_page(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        operations: Any,
+    ) -> dict[str, Any]:
+        if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
+            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
+
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+
+        base_path = page_cache_dir / "inpainted.png"
+        base_bgr = cv2.imread(str(base_path), cv2.IMREAD_COLOR)
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if base_bgr is None:
+            raise RuntimeError(f"无法读取当前空页: {base_path}")
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图: {source_path}")
+
+        base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        if source_rgb.shape[:2] != base_rgb.shape[:2]:
+            source_rgb = cv2.resize(
+                source_rgb,
+                (base_rgb.shape[1], base_rgb.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        normalized_operations = self._normalize_brush_edit_operations(operations, base_rgb.shape)
+        if not normalized_operations:
+            raise ValueError("请至少绘制一笔后再保存。")
+
+        self._ensure_advanced_erase_traditional_backup(page_cache_dir)
+        edited_rgb = self._apply_brush_edit_operations(base_rgb, source_rgb, normalized_operations)
+        self._save_rgb_image_atomic(base_path, edited_rgb)
+
+        changed_pixels = np.any(edited_rgb != base_rgb, axis=2).astype(np.uint8) * 255
+        changed_ratio = float(cv2.countNonZero(changed_pixels)) / float(changed_pixels.size or 1)
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "brush",
+                "updated_at": self._now_iso(),
+                "operation_count": len(normalized_operations),
+                "changed_ratio": changed_ratio,
+            },
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="brush_edit",
+            snapshot_summary=f"画笔编辑 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "brush_edit": {
+                "action": "brush",
+                "page_id": page_id,
+                "operation_count": len(normalized_operations),
+                "changed_ratio": changed_ratio,
+            },
+        }
+
+    def _normalize_brush_edit_operations(
+        self,
+        raw_operations: Any,
+        image_shape: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_operations, list):
+            return []
+        if len(raw_operations) > self.BRUSH_EDIT_MAX_OPERATIONS:
+            raise ValueError(f"单次最多保存 {self.BRUSH_EDIT_MAX_OPERATIONS} 笔，请分次保存。")
+
+        height, width = image_shape[:2]
+        total_points = 0
+        normalized: list[dict[str, Any]] = []
+        for raw_operation in raw_operations:
+            if not isinstance(raw_operation, dict):
+                continue
+            mode = str(raw_operation.get("mode") or "").strip().lower()
+            if mode not in {"paint", "erase", "restore"}:
+                continue
+
+            raw_points = raw_operation.get("points")
+            if not isinstance(raw_points, list):
+                continue
+            points: list[tuple[int, int]] = []
+            coordinate_space = str(raw_operation.get("coordinate_space") or "normalized").strip().lower()
+            for raw_point in raw_points:
+                if isinstance(raw_point, dict):
+                    raw_x = raw_point.get("x")
+                    raw_y = raw_point.get("y")
+                elif isinstance(raw_point, (list, tuple)) and len(raw_point) >= 2:
+                    raw_x, raw_y = raw_point[:2]
+                else:
+                    continue
+                try:
+                    x = float(raw_x)
+                    y = float(raw_y)
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(x) or not np.isfinite(y):
+                    continue
+                if coordinate_space == "normalized":
+                    x *= max(width - 1, 1)
+                    y *= max(height - 1, 1)
+                points.append((
+                    int(round(np.clip(x, 0, max(width - 1, 0)))),
+                    int(round(np.clip(y, 0, max(height - 1, 0)))),
+                ))
+
+            if not points:
+                continue
+            total_points += len(points)
+            if total_points > self.BRUSH_EDIT_MAX_POINTS:
+                raise ValueError("本次画笔轨迹过多，请先保存当前修改后再继续。")
+
+            size = self._normalize_float_range(
+                raw_operation.get("size"),
+                1.0,
+                min(self.BRUSH_EDIT_MAX_SIZE, float(max(width, height))),
+                digits=2,
+            ) or 20.0
+            feather = 0.0
+            if mode == "paint":
+                feather = self._normalize_float_range(
+                    raw_operation.get("feather"),
+                    0.0,
+                    size / 2.0,
+                    digits=2,
+                ) or 0.0
+            normalized.append({
+                "mode": mode,
+                "color": self._rgb_color_payload(raw_operation.get("color"), (255, 255, 255)),
+                "size": size,
+                "feather": feather,
+                "points": points,
+            })
+        return normalized
+
+    def _build_brush_edit_mask(
+        self,
+        image_shape: tuple[int, ...],
+        points: list[tuple[int, int]],
+        size: float,
+        feather: float,
+    ) -> np.ndarray:
+        height, width = image_shape[:2]
+        radius = max(float(size) / 2.0, 0.5)
+        feather = float(np.clip(feather, 0.0, radius))
+        core_radius = max(radius - feather, 0.5)
+        thickness = max(1, int(round(core_radius * 2.0)))
+        mask = np.zeros((height, width), dtype=np.uint8)
+        point_array = np.asarray(points, dtype=np.int32)
+        if len(points) > 1:
+            cv2.polylines(mask, [point_array], False, 255, thickness=thickness, lineType=cv2.LINE_AA)
+        circle_radius = max(1, int(round(core_radius)))
+        for point in (points if len(points) == 1 else (points[0], points[-1])):
+            cv2.circle(mask, point, circle_radius, 255, thickness=-1, lineType=cv2.LINE_AA)
+        if feather > 0:
+            mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=max(feather / 3.0, 0.35))
+        return mask
+
+    def _apply_brush_edit_operations(
+        self,
+        base_rgb: np.ndarray,
+        source_rgb: np.ndarray,
+        operations: list[dict[str, Any]],
+    ) -> np.ndarray:
+        edited = base_rgb.copy()
+        for operation in operations:
+            mode = str(operation.get("mode") or "")
+            mask = self._build_brush_edit_mask(
+                edited.shape,
+                list(operation.get("points") or []),
+                float(operation.get("size") or 20.0),
+                float(operation.get("feather") or 0.0),
+            )
+            if not np.any(mask):
+                continue
+            if mode == "erase":
+                target = base_rgb
+            elif mode == "restore":
+                target = source_rgb
+            else:
+                target = np.empty_like(edited)
+                target[:, :] = np.asarray(operation.get("color") or (255, 255, 255), dtype=np.uint8)
+            alpha = mask[:, :, None].astype(np.float32) / 255.0
+            edited = np.clip(
+                edited.astype(np.float32) * (1.0 - alpha)
+                + target.astype(np.float32) * alpha,
+                0,
+                255,
+            ).astype(np.uint8)
+        return edited
 
     async def _advanced_selection_erase_page(
         self,

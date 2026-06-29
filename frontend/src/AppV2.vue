@@ -111,8 +111,14 @@ const maxCanvasHistoryEntries = 50
 const renderFontSizeOffset = -6
 const renderTextPaddingRatio = 0.12
 const defaultStrokeStrength = 0.2
+const maxStrokeStrength = 5
 const styleColorSwatches = ['#000000', '#ffffff', '#152234', '#ef4444', '#f59e0b', '#2563eb']
-const strokeStrengthOptions = [0, 0.1, 0.2, 0.35, 0.5, 0.75, 1]
+const strokeStrengthOptions = [0, 0.1, 0.2, 0.5, 1, 2, 3, 5]
+const brushEditToolOptions = [
+  { value: 'paint', label: '画笔', symbol: '●' },
+  { value: 'erase', label: '橡皮擦', symbol: '◌' },
+  { value: 'restore', label: '恢复画笔', symbol: '↺' }
+]
 const reviewComparePaneOptions = [
   { key: 'final', label: '嵌后', shortLabel: '嵌后' },
   { key: 'source', label: '原图', shortLabel: '原图' },
@@ -658,6 +664,20 @@ const selectionEraseModalOpen = ref(false)
 const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
+const brushEditModalOpen = ref(false)
+const brushEditLoading = ref(false)
+const brushEditSaving = ref(false)
+const brushEditLoadError = ref('')
+const brushEditTool = ref('paint')
+const brushEditColor = ref('#ffffff')
+const brushEditPaintSize = ref(20)
+const brushEditFeather = ref(0)
+const brushEditEraserSize = ref(20)
+const brushEditRestoreSize = ref(20)
+const brushEditColorPicking = ref(false)
+const brushEditOperations = ref([])
+const brushEditCursor = ref({ visible: false, x: 0, y: 0, diameter: 20 })
+const brushEditImageSize = ref({ previewWidth: 0, previewHeight: 0, fullWidth: 0, fullHeight: 0 })
 const localModelInfo = ref(null)
 const localModelInfoLoading = ref(false)
 const localModelEraseMaskMode = ref('text')
@@ -773,6 +793,8 @@ const regionListFilter = ref('all')
 const reviewCanvasZoneRef = ref(null)
 const reviewWorkspaceLayoutRef = ref(null)
 const selectionEraseStageRef = ref(null)
+const brushEditStageRef = ref(null)
+const brushEditCanvasRef = ref(null)
 const mainCanvasShellRef = ref(null)
 const compareCanvasShellRef = ref(null)
 const viewportPanState = ref(null)
@@ -800,6 +822,9 @@ let topbarTaskProgressTimer = null
 let reviewInspectionRequestToken = 0
 let styleInspectionRequestToken = 0
 let autoFitCanvasPageIds = new Set()
+let brushEditBaseImage = null
+let brushEditSourceImage = null
+let brushEditActiveStroke = null
 const pageCommandExecutionQueue = new Map()
 const preloadedImageUrls = new Set()
 const imageLoadPromises = new Map()
@@ -875,7 +900,13 @@ const canRetranslate = computed(
   () => Boolean(sessionId.value) && !translating.value && (workflowStage.value === 'translated' || Boolean(translatedImages.value.length))
 )
 const canRunAdvancedErase = computed(
-  () => Boolean(sessionId.value && selectedEditPage.value && !translating.value && !advancedEraseBusy.value)
+  () => Boolean(
+    sessionId.value
+    && selectedEditPage.value
+    && !translating.value
+    && !advancedEraseBusy.value
+    && !brushEditSaving.value
+  )
 )
 const selectionEraseIsLocal = computed(() => selectionEraseAction.value === 'local-selection')
 const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '高级擦除'))
@@ -1205,6 +1236,17 @@ const selectedEditPageMainImageUrl = computed(() => {
   )
 })
 const selectionEraseImageUrl = computed(() => selectedEditPageMainImageUrl.value)
+const brushEditBlankImageUrl = computed(() => selectedEditPageMainImageUrl.value)
+const brushEditSourceImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  return getReviewPageImageUrl(
+    page.source_image_url || page.image_url || page.base_image_url || '',
+    page.stored_name
+  )
+})
 const selectedEditRegion = computed(() => {
   const page = selectedEditPage.value
   if (!page) {
@@ -4001,7 +4043,7 @@ function getRegionStrokeStrength(region) {
     return 0
   }
   const rawValue = override.stroke_width
-  return Math.round(clampNumber(rawValue, 0, 1, defaultStrokeStrength) * 1000) / 1000
+  return Math.round(clampNumber(rawValue, 0, maxStrokeStrength, defaultStrokeStrength) * 1000) / 1000
 }
 
 function getRegionLetterSpacing(region) {
@@ -6521,7 +6563,7 @@ function updateRegionLayoutOverride(regionId, patch) {
     currentOverride.rotation = Math.round(clampNumber(patch.rotation, -180, 180, 0) * 100) / 100
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'stroke_width')) {
-    currentOverride.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, 1, defaultStrokeStrength) * 1000) / 1000
+    currentOverride.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, maxStrokeStrength, defaultStrokeStrength) * 1000) / 1000
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'letter_spacing')) {
     currentOverride.letter_spacing = Math.round(clampNumber(patch.letter_spacing, 0.5, 2.5, 1) * 1000) / 1000
@@ -7184,7 +7226,7 @@ function normalizeAdvancedStylePatch(patch) {
     normalized.rotation = Math.round(clampNumber(patch.rotation, -180, 180, 0) * 100) / 100
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'stroke_width')) {
-    normalized.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, 1, defaultStrokeStrength) * 1000) / 1000
+    normalized.stroke_width = Math.round(clampNumber(patch.stroke_width, 0, maxStrokeStrength, defaultStrokeStrength) * 1000) / 1000
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'letter_spacing')) {
     normalized.letter_spacing = Math.round(clampNumber(patch.letter_spacing, 0.5, 2.5, 1) * 1000) / 1000
@@ -8683,6 +8725,388 @@ async function confirmSelectionErase() {
   })
 }
 
+function loadBrushEditImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.decoding = 'async'
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('画笔编辑图片加载失败，请刷新页面后重试。'))
+    image.src = url
+  })
+}
+
+function normalizeBrushEditSize(value, fallback = 20) {
+  return Math.round(clampNumber(value, 1, 2048, fallback) * 10) / 10
+}
+
+function normalizeBrushEditFeather(value) {
+  const radius = normalizeBrushEditSize(brushEditPaintSize.value) / 2
+  return Math.round(clampNumber(value, 0, radius, 0) * 10) / 10
+}
+
+function getBrushEditToolSize(tool = brushEditTool.value) {
+  if (tool === 'erase') {
+    return normalizeBrushEditSize(brushEditEraserSize.value)
+  }
+  if (tool === 'restore') {
+    return normalizeBrushEditSize(brushEditRestoreSize.value)
+  }
+  return normalizeBrushEditSize(brushEditPaintSize.value)
+}
+
+function setBrushEditTool(tool) {
+  if (!brushEditToolOptions.some((option) => option.value === tool)) {
+    return
+  }
+  brushEditTool.value = tool
+  brushEditColorPicking.value = false
+}
+
+function resetBrushEditRuntime() {
+  brushEditBaseImage = null
+  brushEditSourceImage = null
+  brushEditActiveStroke = null
+  brushEditCursor.value = { visible: false, x: 0, y: 0, diameter: 20 }
+  brushEditImageSize.value = { previewWidth: 0, previewHeight: 0, fullWidth: 0, fullHeight: 0 }
+}
+
+function drawBrushEditBase() {
+  const canvas = brushEditCanvasRef.value
+  if (!canvas || !brushEditBaseImage) {
+    return
+  }
+  const context = canvas.getContext('2d')
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(brushEditBaseImage, 0, 0, canvas.width, canvas.height)
+}
+
+function getBrushEditPreviewScale() {
+  const size = brushEditImageSize.value
+  if (!size.previewWidth || !size.previewHeight || !size.fullWidth || !size.fullHeight) {
+    return 1
+  }
+  return Math.max(0.0001, (
+    size.previewWidth / size.fullWidth
+    + size.previewHeight / size.fullHeight
+  ) / 2)
+}
+
+function drawBrushEditStamp(operation, point) {
+  const canvas = brushEditCanvasRef.value
+  if (!canvas || !brushEditBaseImage || !brushEditSourceImage) {
+    return
+  }
+  const context = canvas.getContext('2d')
+  const x = point.x * canvas.width
+  const y = point.y * canvas.height
+  const radius = Math.max(0.5, Number(operation.size || 20) * getBrushEditPreviewScale() / 2)
+
+  if (operation.mode === 'paint') {
+    const feather = Math.min(
+      radius,
+      Math.max(0, Number(operation.feather || 0) * getBrushEditPreviewScale())
+    )
+    context.save()
+    context.beginPath()
+    context.arc(x, y, radius, 0, Math.PI * 2)
+    if (feather > 0) {
+      const [red, green, blue] = hexToColorTriplet(operation.color, [255, 255, 255])
+      const gradient = context.createRadialGradient(x, y, Math.max(0, radius - feather), x, y, radius)
+      gradient.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 1)`)
+      gradient.addColorStop(1, `rgba(${red}, ${green}, ${blue}, 0)`)
+      context.fillStyle = gradient
+    } else {
+      context.fillStyle = normalizeHexColor(operation.color, '#ffffff')
+    }
+    context.fill()
+    context.restore()
+    return
+  }
+
+  const sourceImage = operation.mode === 'restore' ? brushEditSourceImage : brushEditBaseImage
+  context.save()
+  context.beginPath()
+  context.arc(x, y, radius, 0, Math.PI * 2)
+  context.clip()
+  context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
+  context.restore()
+}
+
+function drawBrushEditSegment(operation, previousPoint, nextPoint) {
+  const canvas = brushEditCanvasRef.value
+  if (!canvas) {
+    return
+  }
+  const startX = previousPoint.x * canvas.width
+  const startY = previousPoint.y * canvas.height
+  const endX = nextPoint.x * canvas.width
+  const endY = nextPoint.y * canvas.height
+  const distance = Math.hypot(endX - startX, endY - startY)
+  const previewRadius = Math.max(0.5, Number(operation.size || 20) * getBrushEditPreviewScale() / 2)
+  const steps = Math.max(1, Math.ceil(distance / Math.max(1, previewRadius * 0.35)))
+  for (let index = 1; index <= steps; index += 1) {
+    const ratio = index / steps
+    drawBrushEditStamp(operation, {
+      x: previousPoint.x + (nextPoint.x - previousPoint.x) * ratio,
+      y: previousPoint.y + (nextPoint.y - previousPoint.y) * ratio
+    })
+  }
+}
+
+function replayBrushEditOperations() {
+  drawBrushEditBase()
+  for (const operation of brushEditOperations.value) {
+    const points = Array.isArray(operation.points) ? operation.points : []
+    if (!points.length) {
+      continue
+    }
+    drawBrushEditStamp(operation, points[0])
+    for (let index = 1; index < points.length; index += 1) {
+      drawBrushEditSegment(operation, points[index - 1], points[index])
+    }
+  }
+}
+
+function getBrushEditPoint(event) {
+  const canvas = brushEditCanvasRef.value
+  if (!canvas) {
+    return null
+  }
+  const rect = canvas.getBoundingClientRect()
+  if (!rect.width || !rect.height) {
+    return null
+  }
+  return {
+    x: clampValue((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clampValue((event.clientY - rect.top) / rect.height, 0, 1),
+    canvasX: clampValue((event.clientX - rect.left) / rect.width, 0, 1) * canvas.width,
+    canvasY: clampValue((event.clientY - rect.top) / rect.height, 0, 1) * canvas.height,
+    localX: event.clientX - rect.left,
+    localY: event.clientY - rect.top,
+    cssScale: rect.width / Math.max(brushEditImageSize.value.fullWidth || canvas.width, 1)
+  }
+}
+
+function updateBrushEditCursor(event) {
+  const point = getBrushEditPoint(event)
+  if (!point) {
+    return
+  }
+  brushEditCursor.value = {
+    visible: true,
+    x: point.localX,
+    y: point.localY,
+    diameter: Math.max(3, getBrushEditToolSize() * point.cssScale)
+  }
+}
+
+function beginBrushEditDraw(event) {
+  if (brushEditLoading.value || brushEditSaving.value) {
+    return
+  }
+  const point = getBrushEditPoint(event)
+  const canvas = brushEditCanvasRef.value
+  if (!point || !canvas) {
+    return
+  }
+  updateBrushEditCursor(event)
+  event.preventDefault()
+
+  if (brushEditColorPicking.value) {
+    try {
+      const pixel = canvas.getContext('2d').getImageData(
+        Math.min(canvas.width - 1, Math.max(0, Math.round(point.canvasX))),
+        Math.min(canvas.height - 1, Math.max(0, Math.round(point.canvasY))),
+        1,
+        1
+      ).data
+      brushEditColor.value = colorTripletToHex([pixel[0], pixel[1], pixel[2]])
+      brushEditColorPicking.value = false
+      brushEditTool.value = 'paint'
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : '无法从图片中拾取颜色。'
+    }
+    return
+  }
+
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+  brushEditActiveStroke = {
+    pointerId: event.pointerId,
+    mode: brushEditTool.value,
+    color: normalizeHexColor(brushEditColor.value, '#ffffff'),
+    size: getBrushEditToolSize(),
+    feather: brushEditTool.value === 'paint' ? normalizeBrushEditFeather(brushEditFeather.value) : 0,
+    coordinate_space: 'normalized',
+    points: [{ x: point.x, y: point.y }]
+  }
+  drawBrushEditStamp(brushEditActiveStroke, brushEditActiveStroke.points[0])
+}
+
+function updateBrushEditDraw(event) {
+  updateBrushEditCursor(event)
+  const stroke = brushEditActiveStroke
+  if (!stroke || stroke.pointerId !== event.pointerId) {
+    return
+  }
+  const point = getBrushEditPoint(event)
+  if (!point) {
+    return
+  }
+  const previousPoint = stroke.points[stroke.points.length - 1]
+  if (Math.hypot(point.x - previousPoint.x, point.y - previousPoint.y) < 0.0001) {
+    return
+  }
+  const nextPoint = { x: point.x, y: point.y }
+  stroke.points.push(nextPoint)
+  drawBrushEditSegment(stroke, previousPoint, nextPoint)
+}
+
+function finishBrushEditDraw(event) {
+  const stroke = brushEditActiveStroke
+  if (!stroke || stroke.pointerId !== event.pointerId) {
+    return
+  }
+  event.currentTarget?.releasePointerCapture?.(event.pointerId)
+  const { pointerId: _pointerId, ...operation } = stroke
+  brushEditOperations.value = [...brushEditOperations.value, operation]
+  brushEditActiveStroke = null
+}
+
+function hideBrushEditCursor() {
+  if (!brushEditActiveStroke) {
+    brushEditCursor.value = { ...brushEditCursor.value, visible: false }
+  }
+}
+
+function getBrushEditCursorStyle() {
+  const cursor = brushEditCursor.value
+  return {
+    width: `${cursor.diameter}px`,
+    height: `${cursor.diameter}px`,
+    left: `${cursor.x}px`,
+    top: `${cursor.y}px`
+  }
+}
+
+function undoBrushEditStroke() {
+  if (!brushEditOperations.value.length || brushEditSaving.value) {
+    return
+  }
+  brushEditOperations.value = brushEditOperations.value.slice(0, -1)
+  replayBrushEditOperations()
+}
+
+function resetBrushEditCanvas() {
+  if (brushEditSaving.value) {
+    return
+  }
+  brushEditOperations.value = []
+  brushEditActiveStroke = null
+  drawBrushEditBase()
+}
+
+async function openBrushEditModal() {
+  if (!canRunAdvancedErase.value || !brushEditBlankImageUrl.value || !brushEditSourceImageUrl.value) {
+    return
+  }
+  brushEditModalOpen.value = true
+  brushEditLoading.value = true
+  brushEditTool.value = 'paint'
+  brushEditColor.value = '#ffffff'
+  brushEditPaintSize.value = 20
+  brushEditFeather.value = 0
+  brushEditEraserSize.value = 20
+  brushEditRestoreSize.value = 20
+  brushEditColorPicking.value = false
+  brushEditOperations.value = []
+  brushEditLoadError.value = ''
+  errorMessage.value = ''
+  await nextTick()
+
+  try {
+    const imageRequestNonce = Date.now()
+    const [baseImage, sourceImage] = await Promise.all([
+      loadBrushEditImage(withUrlQueryParam(brushEditBlankImageUrl.value, 'brush_editor', imageRequestNonce)),
+      loadBrushEditImage(withUrlQueryParam(brushEditSourceImageUrl.value, 'brush_editor', imageRequestNonce))
+    ])
+    const canvas = brushEditCanvasRef.value
+    if (!canvas) {
+      throw new Error('画笔画布初始化失败。')
+    }
+    brushEditBaseImage = baseImage
+    brushEditSourceImage = sourceImage
+    canvas.width = baseImage.naturalWidth
+    canvas.height = baseImage.naturalHeight
+    const page = selectedEditPage.value
+    brushEditImageSize.value = {
+      previewWidth: canvas.width,
+      previewHeight: canvas.height,
+      fullWidth: Math.max(1, Number(page?.image_width || page?.dimensions?.width || canvas.width)),
+      fullHeight: Math.max(1, Number(page?.image_height || page?.dimensions?.height || canvas.height))
+    }
+    drawBrushEditBase()
+  } catch (error) {
+    brushEditLoadError.value = error instanceof Error ? error.message : '画笔编辑器初始化失败。'
+    errorMessage.value = brushEditLoadError.value
+    console.warn('Failed to initialize brush editor.', error)
+    resetBrushEditRuntime()
+  } finally {
+    brushEditLoading.value = false
+  }
+}
+
+function closeBrushEditModal(force = false) {
+  if (brushEditSaving.value && !force) {
+    return
+  }
+  brushEditModalOpen.value = false
+  brushEditLoading.value = false
+  brushEditLoadError.value = ''
+  brushEditOperations.value = []
+  brushEditColorPicking.value = false
+  resetBrushEditRuntime()
+}
+
+async function confirmBrushEdit() {
+  const page = selectedEditPage.value
+  if (!sessionId.value || !page || brushEditSaving.value || !brushEditOperations.value.length) {
+    return
+  }
+  brushEditSaving.value = true
+  activeAction.value = 'brush-edit'
+  errorMessage.value = ''
+  status.value = '正在按原图分辨率保存画笔修改…'
+  const pageId = page.stored_name
+
+  try {
+    const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/brush-edit`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operations: brushEditOperations.value
+      })
+    })
+    const payload = await readApiJson(response, '保存画笔修改失败')
+    if (!response.ok) {
+      throw new Error(payload.detail || '保存画笔修改失败')
+    }
+    markPageImageUpdated(pageId, Date.now(), { base: true, translated: false })
+    applySessionPayload(payload, { refreshTranslatedPageId: pageId })
+    closeBrushEditModal(true)
+    await loadEditInspection({ silent: true })
+    preloadReviewImagesAroundPage(pageId)
+    scheduleCanvasLayoutRefresh()
+    void loadProjectHistory({ silent: true })
+    status.value = '画笔修改已保存为空页。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '保存画笔修改失败'
+    status.value = '画笔修改保存失败。'
+  } finally {
+    brushEditSaving.value = false
+  }
+}
+
 async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
   const page = selectedEditPage.value
   if (!sessionId.value || !page || translating.value || advancedEraseBusy.value) {
@@ -9898,6 +10322,13 @@ watch(
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
+                  @click="openBrushEditModal"
+                >
+                  画笔擦除
+                </button>
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
                   title="使用本地 LaMa 模型擦除选区；首次使用会自动下载模型"
                   @click="openSelectionEraseModal('local-selection')"
                 >
@@ -10161,13 +10592,14 @@ watch(
                                 />
                               </label>
                               <label class="v2-field">
-                                <span>描边</span>
+                                <span>描边强度</span>
                                 <input
                                   :value="getRegionStrokeStrength(region)"
                                   type="number"
                                   min="0"
-                                  max="1"
+                                  :max="maxStrokeStrength"
                                   step="0.05"
+                                  title="相对字号的描边强度；1 约等于字号的 35%"
                                   @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
                                 />
                               </label>
@@ -10698,6 +11130,181 @@ watch(
           </button>
           <button type="button" class="v2-primary-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="confirmSelectionErase">
             {{ selectionEraseConfirmLabel }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="brushEditModalOpen" class="v2-overlay" @click.self="closeBrushEditModal">
+      <section class="v2-modal v2-brush-edit-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">空页编辑</p>
+            <h2 class="v2-section-title">画笔擦除</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭画笔擦除" :disabled="brushEditSaving" @click="closeBrushEditModal">✕</button>
+        </header>
+
+        <div class="v2-brush-edit-layout">
+          <div class="v2-brush-edit-stage-wrap">
+            <div v-if="brushEditLoading" class="v2-brush-edit-loading">正在加载空页与原图…</div>
+            <div v-else-if="brushEditLoadError" class="v2-brush-edit-loading is-error">{{ brushEditLoadError }}</div>
+            <div
+              v-show="!brushEditLoading && !brushEditLoadError"
+              ref="brushEditStageRef"
+              :class="['v2-brush-edit-stage', brushEditColorPicking ? 'is-picking-color' : '']"
+            >
+              <canvas
+                ref="brushEditCanvasRef"
+                aria-label="空页画笔编辑画布"
+                @pointerdown="beginBrushEditDraw"
+                @pointermove="updateBrushEditDraw"
+                @pointerup="finishBrushEditDraw"
+                @pointercancel="finishBrushEditDraw"
+                @pointerleave="hideBrushEditCursor"
+              ></canvas>
+              <span
+                v-if="brushEditCursor.visible && !brushEditColorPicking"
+                :class="['v2-brush-edit-cursor', `is-${brushEditTool}`]"
+                :style="{
+                  ...getBrushEditCursorStyle(),
+                  borderColor: brushEditTool === 'paint' ? brushEditColor : undefined
+                }"
+              ></span>
+            </div>
+          </div>
+
+          <aside class="v2-brush-edit-side">
+            <div class="v2-brush-tool-list" role="group" aria-label="画笔工具">
+              <button
+                v-for="tool in brushEditToolOptions"
+                :key="tool.value"
+                type="button"
+                :class="{ active: brushEditTool === tool.value }"
+                :aria-pressed="brushEditTool === tool.value"
+                @click="setBrushEditTool(tool.value)"
+              >
+                <span aria-hidden="true">{{ tool.symbol }}</span>
+                <strong>{{ tool.label }}</strong>
+              </button>
+            </div>
+
+            <div v-if="brushEditTool === 'paint'" class="v2-brush-settings">
+              <label class="v2-field">
+                <span>颜色</span>
+                <div class="v2-brush-color-row">
+                  <input v-model="brushEditColor" type="color" aria-label="画笔颜色" />
+                  <input
+                    v-model="brushEditColor"
+                    type="text"
+                    maxlength="7"
+                    aria-label="画笔颜色 Hex"
+                    @change="brushEditColor = normalizeHexColor($event.target.value, '#ffffff')"
+                  />
+                  <button
+                    type="button"
+                    :class="['v2-icon-button', brushEditColorPicking ? 'active' : '']"
+                    aria-label="从图片拾取颜色"
+                    title="从图片拾取颜色"
+                    @click="brushEditColorPicking = !brushEditColorPicking"
+                  >
+                    ⊙
+                  </button>
+                </div>
+              </label>
+              <label class="v2-field">
+                <span>大小</span>
+                <div class="v2-brush-value-row">
+                  <input v-model.number="brushEditPaintSize" type="range" min="1" max="400" step="1" />
+                  <input
+                    v-model.number="brushEditPaintSize"
+                    type="number"
+                    min="1"
+                    max="2048"
+                    step="1"
+                    @change="brushEditPaintSize = normalizeBrushEditSize($event.target.value)"
+                  />
+                  <small>px</small>
+                </div>
+              </label>
+              <label class="v2-field">
+                <span>羽化</span>
+                <div class="v2-brush-value-row">
+                  <input
+                    v-model.number="brushEditFeather"
+                    type="range"
+                    min="0"
+                    :max="Math.max(1, brushEditPaintSize / 2)"
+                    step="1"
+                  />
+                  <input
+                    v-model.number="brushEditFeather"
+                    type="number"
+                    min="0"
+                    :max="Math.max(1, brushEditPaintSize / 2)"
+                    step="1"
+                    @change="brushEditFeather = normalizeBrushEditFeather($event.target.value)"
+                  />
+                  <small>px</small>
+                </div>
+              </label>
+            </div>
+
+            <div v-else-if="brushEditTool === 'erase'" class="v2-brush-settings">
+              <label class="v2-field">
+                <span>橡皮擦大小</span>
+                <div class="v2-brush-value-row">
+                  <input v-model.number="brushEditEraserSize" type="range" min="1" max="400" step="1" />
+                  <input
+                    v-model.number="brushEditEraserSize"
+                    type="number"
+                    min="1"
+                    max="2048"
+                    step="1"
+                    @change="brushEditEraserSize = normalizeBrushEditSize($event.target.value)"
+                  />
+                  <small>px</small>
+                </div>
+              </label>
+            </div>
+
+            <div v-else class="v2-brush-settings">
+              <label class="v2-field">
+                <span>恢复画笔大小</span>
+                <div class="v2-brush-value-row">
+                  <input v-model.number="brushEditRestoreSize" type="range" min="1" max="400" step="1" />
+                  <input
+                    v-model.number="brushEditRestoreSize"
+                    type="number"
+                    min="1"
+                    max="2048"
+                    step="1"
+                    @change="brushEditRestoreSize = normalizeBrushEditSize($event.target.value)"
+                  />
+                  <small>px</small>
+                </div>
+              </label>
+            </div>
+
+            <div class="v2-brush-edit-count">
+              <strong>{{ brushEditOperations.length }}</strong>
+              <span>笔修改</span>
+            </div>
+          </aside>
+        </div>
+
+        <footer class="v2-selection-erase-actions">
+          <button type="button" class="v2-ghost-button" :disabled="brushEditSaving || !brushEditOperations.length" @click="undoBrushEditStroke">
+            撤销上一笔
+          </button>
+          <button type="button" class="v2-ghost-button" :disabled="brushEditSaving || !brushEditOperations.length" @click="resetBrushEditCanvas">
+            重置
+          </button>
+          <button type="button" class="v2-ghost-button" :disabled="brushEditSaving" @click="closeBrushEditModal">
+            取消
+          </button>
+          <button type="button" class="v2-primary-button" :disabled="brushEditLoading || brushEditSaving || !brushEditOperations.length" @click="confirmBrushEdit">
+            {{ brushEditSaving ? '保存中…' : '确认保存' }}
           </button>
         </footer>
       </section>

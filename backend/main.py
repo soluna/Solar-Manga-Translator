@@ -897,6 +897,34 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
     return result
 
 
+@app.post("/api/pages/{session_id}/{page_id}/brush-edit")
+async def brush_edit_page(session_id: str, page_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(session_id)
+    payload = payload or {}
+
+    if not translator_engine.try_mark_session_busy(session_id, "brush-edit"):
+        raise HTTPException(status_code=409, detail="该项目已有任务在运行，请等待当前任务完成。")
+
+    try:
+        result = await asyncio.to_thread(
+            translator_engine.brush_edit_page,
+            session_id,
+            session,
+            page_id,
+            payload.get("operations"),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        translator_engine.clear_session_busy(session_id)
+
+    return result
+
+
 @app.post("/api/upload")
 async def upload_comic(
     file: UploadFile | None = File(None),

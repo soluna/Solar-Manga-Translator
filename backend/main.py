@@ -1006,7 +1006,26 @@ async def download_translated_archive(session_id: str):
     return FileResponse(
         path=download_path,
         media_type="application/zip",
-        filename=f"{session_id}_translated.zip",
+        filename=translator_engine.get_export_archive_filename(session_id, session, "result"),
+    )
+
+
+@app.get("/api/download/{session_id}/blank")
+async def download_blank_archive(session_id: str):
+    session = get_or_restore_session(session_id)
+    download_path = Path(
+        translator_engine.build_blank_session_archive(
+            session_id=session_id,
+            session=session,
+        )
+    )
+    if not download_path.exists():
+        raise HTTPException(status_code=404, detail="Blank archive not found")
+
+    return FileResponse(
+        path=download_path,
+        media_type="application/zip",
+        filename=translator_engine.get_export_archive_filename(session_id, session, "blank"),
     )
 
 

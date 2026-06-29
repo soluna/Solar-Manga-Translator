@@ -664,6 +664,8 @@ const selectionEraseModalOpen = ref(false)
 const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
+const selectionEraseImageSize = ref({ width: 0, height: 0 })
+const selectionEraseViewport = ref({ mode: 'fit', zoom: 1 })
 const brushEditModalOpen = ref(false)
 const brushEditLoading = ref(false)
 const brushEditSaving = ref(false)
@@ -678,6 +680,9 @@ const brushEditColorPicking = ref(false)
 const brushEditOperations = ref([])
 const brushEditCursor = ref({ visible: false, x: 0, y: 0, diameter: 20 })
 const brushEditImageSize = ref({ previewWidth: 0, previewHeight: 0, fullWidth: 0, fullHeight: 0 })
+const brushEditViewport = ref({ mode: 'fit', zoom: 1 })
+const regionStyleClipboard = ref(null)
+const miniToast = ref('')
 const localModelInfo = ref(null)
 const localModelInfoLoading = ref(false)
 const localModelEraseMaskMode = ref('text')
@@ -835,6 +840,7 @@ const TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS = 20
 let translationCompletionRecoveryTimer = null
 let translationCompletionRecoveryToken = 0
 let translationFinalizationPromise = null
+let miniToastTimer = null
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const {
@@ -959,6 +965,15 @@ const v2ExportArchiveUrl = computed(() => {
 })
 const canExportTranslatedResults = computed(
   () => Boolean(v2ExportArchiveUrl.value) && !translating.value
+)
+const v2BlankArchiveUrl = computed(() => {
+  const activeSessionId = String(sessionId.value || '').trim()
+  return activeSessionId
+    ? withCacheBust(toApiUrl(`/api/download/${activeSessionId}/blank`))
+    : ''
+})
+const canExportBlankResults = computed(
+  () => Boolean(v2BlankArchiveUrl.value && originalImages.value.length) && !translating.value
 )
 const activeTaskProjectId = computed(() => (translating.value ? String(sessionId.value || '').trim() : ''))
 const canInspectEditor = computed(() => Boolean(sessionId.value))
@@ -6693,7 +6708,7 @@ async function undoCanvasEdit() {
   }
 
   try {
-    if (entry.kind === 'create_region') {
+    if (entry.kind === 'create_region' || entry.kind === 'duplicate_region') {
       const createdRegionId = String(entry.createdRegionId || '')
       await applyPageCommands(pageId, [{ type: 'delete_manual_region', region_id: createdRegionId }])
     } else if (entry.kind === 'merge_regions') {
@@ -6813,6 +6828,20 @@ async function redoCanvasEdit() {
         redo: current.redo.slice(0, -1)
       })
       selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
+    } else if (entry.kind === 'duplicate_region') {
+      const commandResult = await applyPageCommands(pageId, [{
+        type: 'duplicate_region',
+        region_id: entry.sourceRegionId
+      }])
+      const refreshedEntry = {
+        ...entry,
+        createdRegionId: String(commandResult?.payload?.created_region_id || '')
+      }
+      replacePageHistoryState(pageId, {
+        undo: [...current.undo, refreshedEntry].slice(-maxCanvasHistoryEntries),
+        redo: current.redo.slice(0, -1)
+      })
+      selectedEditRegionKey.value = refreshedEntry.createdRegionId || selectedEditRegionKey.value
     } else if (entry.kind === 'merge_regions') {
       const commandResult = await applyPageCommands(pageId, [{ type: 'merge_regions', region_ids: entry.regionIds || [] }])
       const refreshedEntry = {
@@ -6870,6 +6899,29 @@ async function runCanvasStructuredAction(page, options) {
       status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
       selectedEditPageKey.value = page.stored_name
       selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+    }
+    return
+  }
+
+  if (kind === 'duplicate_region' && regionIds.length === 1) {
+    markCanvasPreviewDirty(page.stored_name)
+    result = await applyPageCommands(page.stored_name, [{
+      type: 'duplicate_region',
+      region_id: regionIds[0]
+    }])
+    const createdRegionId = String(result?.payload?.created_region_id || '')
+    pushCanvasHistory(page.stored_name, {
+      kind: 'duplicate_region',
+      label: '复制文本框',
+      pageId: page.stored_name,
+      sourceRegionId: regionIds[0],
+      createdRegionId
+    })
+    if (result?.isLatest !== false) {
+      selectedEditPageKey.value = page.stored_name
+      selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
+      canvasRegionSelection.value = createdRegionId ? { [createdRegionId]: true } : {}
+      showMiniToast('已复制文本框')
     }
     return
   }
@@ -7217,6 +7269,118 @@ function getRegionAdvancedStyleSnapshot(region) {
     fg_color: hexToColorTriplet(getRegionTextColorHex(region), [21, 34, 52]),
     bg_color: hexToColorTriplet(getRegionStrokeColorHex(region), [255, 255, 255]),
     preserve_background: shouldPreserveRegionBackground(region)
+  }
+}
+
+function showMiniToast(message) {
+  miniToast.value = String(message || '').trim()
+  if (miniToastTimer) {
+    window.clearTimeout(miniToastTimer)
+  }
+  if (miniToast.value) {
+    miniToastTimer = window.setTimeout(() => {
+      miniToast.value = ''
+      miniToastTimer = null
+    }, 1800)
+  }
+}
+
+function getRegionStyleClipboardSnapshot(region) {
+  return {
+    enabled: !isRegionDisabled(region),
+    direction: getResolvedRegionDirection(region),
+    fontKey: getEffectiveRegionFontId(region),
+    fontSize: Math.max(8, Math.round(Number(getRegionFontSize(region) || 12))),
+    fontStyle: getResolvedStyle(region),
+    advanced: getRegionAdvancedStyleSnapshot(region)
+  }
+}
+
+function buildRegionStyleCommands(regionId, snapshot) {
+  return [
+    {
+      type: snapshot.enabled ? 'restore_region' : 'disable_region',
+      region_id: regionId
+    },
+    {
+      type: 'update_text_direction',
+      region_id: regionId,
+      direction: snapshot.direction
+    },
+    {
+      type: 'update_region_font',
+      region_id: regionId,
+      font_key: snapshot.fontKey || ''
+    },
+    {
+      type: 'update_font_size',
+      region_id: regionId,
+      font_size: snapshot.fontSize
+    },
+    {
+      type: 'update_font_style',
+      region_id: regionId,
+      style: snapshot.fontStyle || ''
+    },
+    {
+      type: 'update_region_style',
+      region_id: regionId,
+      ...snapshot.advanced
+    }
+  ]
+}
+
+function copyRegionStyle(region) {
+  if (!region?.id) {
+    return
+  }
+  regionStyleClipboard.value = getRegionStyleClipboardSnapshot(region)
+  showMiniToast('样式已复制')
+}
+
+async function pasteRegionStyle(region) {
+  const page = selectedEditPage.value
+  const copiedStyle = regionStyleClipboard.value
+  if (!page?.stored_name || !region?.id) {
+    return
+  }
+  if (!copiedStyle) {
+    showMiniToast('请先复制一个框的样式')
+    return
+  }
+
+  const previousStyle = getRegionStyleClipboardSnapshot(region)
+  const redoCommands = buildRegionStyleCommands(region.id, copiedStyle)
+  const undoCommands = buildRegionStyleCommands(region.id, previousStyle)
+  setRegionCommitState([region.id], 'saving', '保存中…')
+  try {
+    await applyPageCommands(page.stored_name, redoCommands)
+    pushCanvasHistory(page.stored_name, {
+      label: '粘贴文本框样式',
+      undoCommands,
+      redoCommands
+    })
+    selectedEditRegionKey.value = region.id
+    void warmPreviewFonts()
+    clearRegionCommitState([region.id], ['saving'])
+    showMiniToast('样式已粘贴')
+  } catch (error) {
+    setRegionCommitState([region.id], 'failed', error instanceof Error ? error.message : '样式粘贴失败')
+    errorMessage.value = error instanceof Error ? error.message : '样式粘贴失败'
+  }
+}
+
+async function duplicateRegion(region) {
+  if (!selectedEditPage.value || !region?.id || translating.value || isPageCommandPending(selectedEditPage.value.stored_name)) {
+    return
+  }
+  try {
+    await runCanvasStructuredAction(selectedEditPage.value, {
+      kind: 'duplicate_region',
+      regionIds: [region.id]
+    })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '复制文本框失败'
   }
 }
 
@@ -7892,6 +8056,37 @@ async function syncTranslatedPreviewScale() {
 }
 
 function handleGlobalCanvasKeydown(event) {
+  if (selectionEraseModalOpen.value || brushEditModalOpen.value) {
+    if (isEditableTextTarget(event.target)) {
+      return
+    }
+    const viewportKind = brushEditModalOpen.value ? 'brush' : 'selection'
+    const hasCommandModifier = event.metaKey || event.ctrlKey
+    if (hasCommandModifier && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      event.preventDefault()
+      if (brushEditModalOpen.value) {
+        undoBrushEditStroke()
+      } else {
+        undoSelectionEraseRect()
+      }
+      return
+    }
+    if (!hasCommandModifier && (event.key === '0' || event.code === 'Numpad0')) {
+      event.preventDefault()
+      setEraseViewportPreset(viewportKind, 'fit')
+      return
+    }
+    if (!hasCommandModifier && (event.key === '+' || event.key === '=' || event.code === 'NumpadAdd')) {
+      event.preventDefault()
+      adjustEraseViewportZoom(viewportKind, 1)
+      return
+    }
+    if (!hasCommandModifier && (event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract')) {
+      event.preventDefault()
+      adjustEraseViewportZoom(viewportKind, -1)
+    }
+    return
+  }
   if (v2View.value !== 'review' || !selectedEditPage.value) {
     return
   }
@@ -8019,6 +8214,21 @@ function downloadV2TranslatedResults() {
   link.click()
   document.body.removeChild(link)
   status.value = '已开始导出翻译结果压缩包。'
+}
+
+function downloadV2BlankResults() {
+  if (!canExportBlankResults.value || !v2BlankArchiveUrl.value) {
+    status.value = '当前还没有可导出的空页。'
+    return
+  }
+
+  const link = document.createElement('a')
+  link.href = v2BlankArchiveUrl.value
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  status.value = '已开始导出空页压缩包。'
 }
 
 function getBackendLogHint() {
@@ -8586,6 +8796,91 @@ function getSelectionEraseRectStyle(rect) {
   }
 }
 
+function handleSelectionEraseImageLoad(event) {
+  const image = event.target
+  selectionEraseImageSize.value = {
+    width: Math.max(1, Number(image?.naturalWidth || 0)),
+    height: Math.max(1, Number(image?.naturalHeight || 0))
+  }
+}
+
+function getEraseViewportState(kind) {
+  return kind === 'brush' ? brushEditViewport.value : selectionEraseViewport.value
+}
+
+function getEraseViewportNaturalSize(kind) {
+  if (kind === 'brush') {
+    return {
+      width: Number(brushEditImageSize.value.previewWidth || 0),
+      height: Number(brushEditImageSize.value.previewHeight || 0)
+    }
+  }
+  return selectionEraseImageSize.value
+}
+
+function getEraseViewportStage(kind) {
+  return kind === 'brush' ? brushEditStageRef.value : selectionEraseStageRef.value
+}
+
+function getEraseViewportScale(kind) {
+  const viewport = getEraseViewportState(kind)
+  if (viewport.mode === 'custom') {
+    return viewport.zoom
+  }
+  const naturalSize = getEraseViewportNaturalSize(kind)
+  const stage = getEraseViewportStage(kind)
+  const renderedWidth = Number(stage?.getBoundingClientRect?.().width || 0)
+  return naturalSize.width > 0 && renderedWidth > 0
+    ? renderedWidth / naturalSize.width
+    : 1
+}
+
+function updateEraseViewport(kind, nextViewport) {
+  const normalized = {
+    mode: nextViewport.mode === 'custom' ? 'custom' : 'fit',
+    zoom: Math.max(0.05, Math.min(6, Number(nextViewport.zoom || 1)))
+  }
+  if (kind === 'brush') {
+    brushEditViewport.value = normalized
+  } else {
+    selectionEraseViewport.value = normalized
+  }
+}
+
+function adjustEraseViewportZoom(kind, direction) {
+  const currentZoom = getEraseViewportScale(kind)
+  const factor = direction > 0 ? 1.25 : 0.8
+  updateEraseViewport(kind, {
+    mode: 'custom',
+    zoom: currentZoom * factor
+  })
+}
+
+function setEraseViewportPreset(kind, preset) {
+  updateEraseViewport(kind, preset === 'actual'
+    ? { mode: 'custom', zoom: 1 }
+    : { mode: 'fit', zoom: 1 })
+}
+
+function getEraseViewportStageStyle(kind) {
+  const viewport = getEraseViewportState(kind)
+  const naturalSize = getEraseViewportNaturalSize(kind)
+  if (viewport.mode !== 'custom' || !naturalSize.width || !naturalSize.height) {
+    return {}
+  }
+  return {
+    width: `${Math.round(naturalSize.width * viewport.zoom)}px`,
+    height: `${Math.round(naturalSize.height * viewport.zoom)}px`
+  }
+}
+
+function getEraseViewportLabel(kind) {
+  const viewport = getEraseViewportState(kind)
+  return viewport.mode === 'fit'
+    ? '适应'
+    : `${Math.round(viewport.zoom * 100)}%`
+}
+
 function isRemoteAdvancedEraseAction(action) {
   return ['erase', 'selection'].includes(String(action || '').trim().toLowerCase())
 }
@@ -8637,6 +8932,8 @@ function openSelectionEraseModal(action = 'selection') {
   selectionEraseAction.value = normalizedAction === 'local-selection' ? 'local-selection' : 'selection'
   selectionEraseRects.value = []
   selectionEraseDraft.value = null
+  selectionEraseImageSize.value = { width: 0, height: 0 }
+  selectionEraseViewport.value = { mode: 'fit', zoom: 1 }
   if (selectionEraseAction.value === 'local-selection') {
     localModelEraseMaskMode.value = 'text'
     void loadLocalModelInfo()
@@ -8707,6 +9004,14 @@ function removeSelectionEraseRect(rectId) {
 
 function clearSelectionEraseRects() {
   selectionEraseRects.value = []
+  selectionEraseDraft.value = null
+}
+
+function undoSelectionEraseRect() {
+  if (!selectionEraseRects.value.length || advancedEraseBusy.value) {
+    return
+  }
+  selectionEraseRects.value = selectionEraseRects.value.slice(0, -1)
   selectionEraseDraft.value = null
 }
 
@@ -9020,6 +9325,7 @@ async function openBrushEditModal() {
   brushEditRestoreSize.value = 20
   brushEditColorPicking.value = false
   brushEditOperations.value = []
+  brushEditViewport.value = { mode: 'fit', zoom: 1 }
   brushEditLoadError.value = ''
   errorMessage.value = ''
   await nextTick()
@@ -9687,6 +9993,10 @@ onBeforeUnmount(() => {
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()
   clearTopbarTaskProgress()
+  if (miniToastTimer) {
+    window.clearTimeout(miniToastTimer)
+    miniToastTimer = null
+  }
   if (canvasLayoutFrame != null) {
     window.cancelAnimationFrame(canvasLayoutFrame)
     canvasLayoutFrame = null
@@ -10050,14 +10360,25 @@ watch(
           >
             专有名词库
           </button>
-          <button
-            type="button"
-            class="v2-topbar-button"
-            :disabled="!canExportTranslatedResults"
-            @click="downloadV2TranslatedResults"
-          >
-            导出结果
-          </button>
+          <div class="v2-erase-menu v2-export-menu">
+            <button
+              type="button"
+              class="v2-topbar-button v2-dropdown-trigger"
+              :disabled="!canExportTranslatedResults && !canExportBlankResults"
+              aria-haspopup="menu"
+            >
+              导出
+              <span class="v2-dropdown-arrow" aria-hidden="true">⌄</span>
+            </button>
+            <div class="v2-erase-menu-popover" role="menu">
+              <button type="button" :disabled="!canExportTranslatedResults" @click="downloadV2TranslatedResults">
+                导出结果
+              </button>
+              <button type="button" :disabled="!canExportBlankResults" @click="downloadV2BlankResults">
+                导出空页
+              </button>
+            </div>
+          </div>
           <button
             type="button"
             class="v2-primary-button"
@@ -10116,15 +10437,25 @@ watch(
             新建项目
           </button>
 
-          <button
-            v-if="v2HasProject"
-            type="button"
-            class="v2-topbar-button"
-            :disabled="!canExportTranslatedResults"
-            @click="downloadV2TranslatedResults"
-          >
-            导出结果
-          </button>
+          <div v-if="v2HasProject" class="v2-erase-menu v2-export-menu">
+            <button
+              type="button"
+              class="v2-topbar-button v2-dropdown-trigger"
+              :disabled="!canExportTranslatedResults && !canExportBlankResults"
+              aria-haspopup="menu"
+            >
+              导出
+              <span class="v2-dropdown-arrow" aria-hidden="true">⌄</span>
+            </button>
+            <div class="v2-erase-menu-popover" role="menu">
+              <button type="button" :disabled="!canExportTranslatedResults" @click="downloadV2TranslatedResults">
+                导出结果
+              </button>
+              <button type="button" :disabled="!canExportBlankResults" @click="downloadV2BlankResults">
+                导出空页
+              </button>
+            </div>
+          </div>
 
           <button
             v-if="v2HasProject"
@@ -10304,14 +10635,23 @@ watch(
             <div class="v2-erase-menu">
               <button
                 type="button"
-                class="v2-ghost-button"
+                class="v2-ghost-button v2-dropdown-trigger"
                 :disabled="!canRunAdvancedErase"
-                title="用 Seedream 对当前页做高级擦除，生成新的空页"
-                @click="runV2AdvancedEraseAction('erase')"
+                title="打开擦除方式菜单"
+                aria-haspopup="menu"
               >
-                {{ advancedEraseBusy ? '擦除中…' : '高级擦除' }}
+                {{ advancedEraseBusy ? '擦除中…' : '擦除' }}
+                <span class="v2-dropdown-arrow" aria-hidden="true">⌄</span>
               </button>
-              <div class="v2-erase-menu-popover">
+              <div class="v2-erase-menu-popover" role="menu">
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
+                  title="用 Seedream 对当前页做高级擦除，生成新的空页"
+                  @click="runV2AdvancedEraseAction('erase')"
+                >
+                  高级擦除
+                </button>
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
@@ -10865,6 +11205,33 @@ watch(
                   </div>
 
                   <div class="v2-region-card-actions" @click.stop @mousedown.stop>
+                    <div v-if="selectedEditRegionKey === region.id" class="v2-region-copy-actions">
+                      <button
+                        type="button"
+                        class="v2-region-mini-button"
+                        title="复制这个框的全部样式"
+                        @click.stop="copyRegionStyle(region)"
+                      >
+                        样式复制
+                      </button>
+                      <button
+                        type="button"
+                        class="v2-region-mini-button"
+                        title="粘贴上次复制的全部样式"
+                        @click.stop="pasteRegionStyle(region)"
+                      >
+                        样式粘贴
+                      </button>
+                      <button
+                        type="button"
+                        class="v2-region-mini-button"
+                        title="复制这个文本框"
+                        :disabled="translating || isPageCommandPending(selectedEditPage.stored_name)"
+                        @click.stop="duplicateRegion(region)"
+                      >
+                        框复制
+                      </button>
+                    </div>
                     <button
                       type="button"
                       class="v2-icon-button"
@@ -11027,6 +11394,8 @@ watch(
       </section>
     </main>
 
+    <div v-if="miniToast" class="v2-mini-toast" role="status">{{ miniToast }}</div>
+
     <div v-if="selectionEraseModalOpen" class="v2-overlay" @click.self="closeSelectionEraseModal">
       <section class="v2-modal v2-selection-erase-modal">
         <header class="v2-modal-head">
@@ -11034,13 +11403,23 @@ watch(
             <p class="v2-section-kicker">{{ selectionEraseModalKicker }}</p>
             <h2 class="v2-section-title">{{ selectionEraseModalTitle }}</h2>
           </div>
-          <button type="button" class="v2-icon-button" :aria-label="`关闭${selectionEraseModalTitle}`" @click="closeSelectionEraseModal">✕</button>
+          <div class="v2-modal-head-actions">
+            <div class="v2-erase-zoom-controls" role="group" aria-label="选区画布缩放">
+              <button type="button" aria-label="缩小" title="缩小（-）" @click="adjustEraseViewportZoom('selection', -1)">−</button>
+              <button type="button" @click="setEraseViewportPreset('selection', 'fit')">适应</button>
+              <button type="button" @click="setEraseViewportPreset('selection', 'actual')">100%</button>
+              <button type="button" aria-label="放大" title="放大（+）" @click="adjustEraseViewportZoom('selection', 1)">＋</button>
+              <span>{{ getEraseViewportLabel('selection') }}</span>
+            </div>
+            <button type="button" class="v2-icon-button" :aria-label="`关闭${selectionEraseModalTitle}`" @click="closeSelectionEraseModal">✕</button>
+          </div>
         </header>
         <div class="v2-selection-erase-layout">
-          <div class="v2-selection-erase-stage-wrap">
+          <div :class="['v2-selection-erase-stage-wrap', selectionEraseViewport.mode === 'custom' ? 'is-custom-zoom' : '']">
             <div
               ref="selectionEraseStageRef"
-              class="v2-selection-erase-stage"
+              :class="['v2-selection-erase-stage', selectionEraseViewport.mode === 'custom' ? 'is-custom-zoom' : '']"
+              :style="getEraseViewportStageStyle('selection')"
               @pointerdown="beginSelectionEraseDraw"
               @pointermove="updateSelectionEraseDraw"
               @pointerup="finishSelectionEraseDraw"
@@ -11051,6 +11430,7 @@ watch(
                 :src="selectionEraseImageUrl"
                 alt=""
                 draggable="false"
+                @load="handleSelectionEraseImageLoad"
               />
               <div
                 v-for="rect in selectionEraseRects"
@@ -11122,6 +11502,9 @@ watch(
           </aside>
         </div>
         <footer class="v2-selection-erase-actions">
+          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="undoSelectionEraseRect">
+            撤销
+          </button>
           <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="clearSelectionEraseRects">
             清空
           </button>
@@ -11142,17 +11525,31 @@ watch(
             <p class="v2-section-kicker">空页编辑</p>
             <h2 class="v2-section-title">画笔擦除</h2>
           </div>
-          <button type="button" class="v2-icon-button" aria-label="关闭画笔擦除" :disabled="brushEditSaving" @click="closeBrushEditModal">✕</button>
+          <div class="v2-modal-head-actions">
+            <div class="v2-erase-zoom-controls" role="group" aria-label="画笔画布缩放">
+              <button type="button" aria-label="缩小" title="缩小（-）" @click="adjustEraseViewportZoom('brush', -1)">−</button>
+              <button type="button" @click="setEraseViewportPreset('brush', 'fit')">适应</button>
+              <button type="button" @click="setEraseViewportPreset('brush', 'actual')">100%</button>
+              <button type="button" aria-label="放大" title="放大（+）" @click="adjustEraseViewportZoom('brush', 1)">＋</button>
+              <span>{{ getEraseViewportLabel('brush') }}</span>
+            </div>
+            <button type="button" class="v2-icon-button" aria-label="关闭画笔擦除" :disabled="brushEditSaving" @click="closeBrushEditModal">✕</button>
+          </div>
         </header>
 
         <div class="v2-brush-edit-layout">
-          <div class="v2-brush-edit-stage-wrap">
+          <div :class="['v2-brush-edit-stage-wrap', brushEditViewport.mode === 'custom' ? 'is-custom-zoom' : '']">
             <div v-if="brushEditLoading" class="v2-brush-edit-loading">正在加载空页与原图…</div>
             <div v-else-if="brushEditLoadError" class="v2-brush-edit-loading is-error">{{ brushEditLoadError }}</div>
             <div
               v-show="!brushEditLoading && !brushEditLoadError"
               ref="brushEditStageRef"
-              :class="['v2-brush-edit-stage', brushEditColorPicking ? 'is-picking-color' : '']"
+              :class="[
+                'v2-brush-edit-stage',
+                brushEditColorPicking ? 'is-picking-color' : '',
+                brushEditViewport.mode === 'custom' ? 'is-custom-zoom' : ''
+              ]"
+              :style="getEraseViewportStageStyle('brush')"
             >
               <canvas
                 ref="brushEditCanvasRef"

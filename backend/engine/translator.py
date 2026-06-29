@@ -4552,6 +4552,21 @@ class TranslatorEngine:
                 snapshot_hints.append("manual_region_added")
                 continue
 
+            if command_type == "duplicate_region":
+                region_id = require_existing_region_id(command)
+                region = self.duplicate_region(
+                    project_id=project_id,
+                    session=session,
+                    stored_name=page_id,
+                    region_id=region_id,
+                    raw_config=config,
+                )
+                created_region_id = str(region.get("id") or "")
+                updated_region_ids.append(created_region_id)
+                snapshot_hints.append("manual_region_duplicated")
+                page_region_ids = None
+                continue
+
             if command_type == "merge_regions":
                 region_ids = command.get("region_ids") or []
                 region = await self.merge_regions(
@@ -5170,10 +5185,41 @@ class TranslatorEngine:
             output_dir=output_dir,
             preferred_output_format=resolved_output_format,
         )
-        archive_base = self.temp_dir / f"{session_id}_translated"
-        archive_path = self._make_selected_archive(Path(f"{archive_base}.zip"), archive_files, output_dir)
+        project_name = self._safe_export_name(session.get("project_title"), session_id)
+        named_files = [
+            (file_path, f"{project_name}_result_{index:04d}{file_path.suffix.lower()}")
+            for index, file_path in enumerate(archive_files, start=1)
+        ]
+        archive_path = self._make_named_archive(
+            self.temp_dir / f"{session_id}_result.zip",
+            named_files,
+        )
         session["download_path"] = archive_path
         return archive_path
+
+    def build_blank_session_archive(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+    ) -> str:
+        project_name = self._safe_export_name(session.get("project_title"), session_id)
+        named_files: list[tuple[Path, str]] = []
+        for index, image in enumerate(session.get("source_images") or [], start=1):
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not stored_name:
+                continue
+            base_path = self.get_page_base_image_path(session_id, session, stored_name)
+            suffix = base_path.suffix.lower() if base_path.suffix else ".png"
+            named_files.append((base_path, f"{project_name}_blank_{index:04d}{suffix}"))
+        return self._make_named_archive(
+            self.temp_dir / f"{session_id}_blank.zip",
+            named_files,
+        )
+
+    def get_export_archive_filename(self, session_id: str, session: dict[str, Any], kind: str) -> str:
+        normalized_kind = "blank" if str(kind or "").strip().lower() == "blank" else "result"
+        project_name = self._safe_export_name(session.get("project_title"), session_id)
+        return f"{project_name}_{normalized_kind}.zip"
 
     def _ensure_runtime_patches(self) -> None:
         try:
@@ -5774,6 +5820,23 @@ class TranslatorEngine:
                 archive.write(file_path, arcname=file_path.relative_to(root_dir))
 
         return str(archive_path.resolve())
+
+    def _make_named_archive(self, archive_path: Path, files: list[tuple[Path, str]]) -> str:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        if archive_path.exists():
+            archive_path.unlink()
+
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file_path, archive_name in files:
+                if file_path.exists():
+                    archive.write(file_path, arcname=archive_name)
+
+        return str(archive_path.resolve())
+
+    def _safe_export_name(self, value: Any, fallback: str) -> str:
+        normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(value or "").strip())
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .")
+        return (normalized or str(fallback or "manga")).strip(" .")[:120]
 
     def _has_style_font_overrides(self, config: dict[str, Any]) -> bool:
         if config.get("font_style_mode") != "auto-map":
@@ -8278,6 +8341,7 @@ class TranslatorEngine:
         region.machine_translation = str(payload.get("machine_translation") or translation or "")
         region.translation_override = ""
         region.preserve_background = bool(payload.get("preserve_background"))
+        region.allow_overlap = bool(payload.get("allow_overlap"))
         return region
 
     def _merge_manual_regions(
@@ -8329,6 +8393,8 @@ class TranslatorEngine:
         normalized["target_lang"] = str(payload.get("target_lang") or "")
         normalized["manual"] = True
         normalized["created_at"] = float(payload.get("created_at") or time.time())
+        if bool(payload.get("allow_overlap")):
+            normalized["allow_overlap"] = True
         if bool(payload.get("preserve_background")):
             normalized["preserve_background"] = True
         if "merged_from" in payload:
@@ -8590,6 +8656,118 @@ class TranslatorEngine:
         )
         manual_regions = self._ensure_manual_regions_store(session)
         manual_regions.setdefault(stored_name, []).append(payload)
+        return payload
+
+    def duplicate_region(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        stored_name: str,
+        region_id: str,
+        raw_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        document = self.get_page_document(project_id, session, stored_name)
+        source_region = next(
+            (
+                region for region in (document.get("regions") or [])
+                if str(region.get("region_id") or region.get("id") or "") == region_id
+            ),
+            None,
+        )
+        if not isinstance(source_region, dict):
+            raise FileNotFoundError("目标文本框不存在，请刷新后重试。")
+
+        dimensions = document.get("dimensions") or {}
+        image_width = max(1, int(dimensions.get("width") or 1))
+        image_height = max(1, int(dimensions.get("height") or 1))
+        source_bbox = self._normalize_manual_bbox(source_region.get("bbox"), image_width, image_height)
+        x1, y1, x2, y2 = source_bbox
+        offset = max(8, min(24, int(round(min(image_width, image_height) * 0.012))))
+        dx = offset if x2 + offset <= image_width else (-offset if x1 - offset >= 0 else 0)
+        dy = offset if y2 + offset <= image_height else (-offset if y1 - offset >= 0 else 0)
+        duplicated_bbox = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+
+        style = source_region.get("style") or {}
+        flags = source_region.get("flags") or {}
+        translation = source_region.get("translation") or {}
+        config = self._normalize_config(raw_config)
+        resolved_translation = str(
+            translation.get("resolved")
+            if translation.get("resolved") is not None
+            else translation.get("edited")
+            if translation.get("edited") is not None
+            else translation.get("machine")
+            or ""
+        )
+        payload = self._build_manual_region_payload(
+            stored_name=stored_name,
+            bbox=duplicated_bbox,
+            source_text=str(source_region.get("source_text") or ""),
+            translation=resolved_translation,
+            target_lang=config["target_lang"],
+            direction=str(source_region.get("direction") or "auto"),
+            font_size=float(style.get("font_size") or 12),
+            fg_color=style.get("fg_color"),
+            bg_color=style.get("bg_color"),
+        )
+        payload.update({
+            "alignment": str(style.get("alignment") or "auto"),
+            "angle": float(style.get("rotation") or 0.0),
+            "letter_spacing": float(style.get("letter_spacing") or 1.0),
+            "line_spacing": float(style.get("line_spacing") or 1.0),
+            "font_family": str(style.get("font_path") or ""),
+            "stroke_width": float(style.get("stroke_width") if style.get("stroke_width") is not None else 0.2),
+            "preserve_background": bool(flags.get("preserve_background")),
+            "allow_overlap": True,
+        })
+        manual_regions = self._ensure_manual_regions_store(session)
+        manual_regions.setdefault(stored_name, []).append(payload)
+
+        duplicated_region_id = str(payload["id"])
+        translation_overrides = dict(session.get("translation_region_overrides") or {})
+        translation_overrides[duplicated_region_id] = resolved_translation
+        session["translation_region_overrides"] = translation_overrides
+
+        if bool(flags.get("keep_original")):
+            skip_overrides = dict(session.get("translation_region_skip_overrides") or {})
+            skip_overrides[duplicated_region_id] = True
+            session["translation_region_skip_overrides"] = skip_overrides
+
+        direction = str(source_region.get("direction") or "").strip().lower()
+        layout_override: dict[str, Any] = {
+            "font_size": max(8, int(round(float(style.get("font_size") or 12)))),
+            "direction": "vertical" if direction.startswith("v") else "horizontal",
+            "rotation": float(style.get("rotation") or 0.0),
+            "stroke_width": float(style.get("stroke_width") if style.get("stroke_width") is not None else 0.2),
+            "letter_spacing": float(style.get("letter_spacing") or 1.0),
+            "line_spacing": float(style.get("line_spacing") or 1.0),
+            "fg_color": self._rgb_color_payload(style.get("fg_color"), (0, 0, 0)),
+            "bg_color": self._rgb_color_payload(style.get("bg_color"), (255, 255, 255)),
+            "preserve_background": bool(flags.get("preserve_background")),
+        }
+        font_key = str(style.get("font_key_override") or "").strip()
+        if font_key:
+            layout_override["font_key"] = font_key
+        layout_overrides = dict(session.get("translation_region_layout_overrides") or {})
+        layout_overrides[duplicated_region_id] = layout_override
+        session["translation_region_layout_overrides"] = layout_overrides
+
+        resolved_font_style = str(
+            style.get("font_style_override")
+            or style.get("font_style")
+            or style.get("auto_font_style")
+            or ""
+        ).strip()
+        if resolved_font_style:
+            style_overrides = dict(session.get("style_region_overrides") or {})
+            style_overrides[duplicated_region_id] = resolved_font_style
+            session["style_region_overrides"] = style_overrides
+
+        if bool(flags.get("disabled")):
+            disabled_overrides = dict(session.get("translation_region_disabled_overrides") or {})
+            disabled_overrides[duplicated_region_id] = True
+            session["translation_region_disabled_overrides"] = disabled_overrides
+
         return payload
 
     def _sort_regions_for_merge(self, regions: list[Any]) -> list[Any]:
@@ -8913,6 +9091,8 @@ class TranslatorEngine:
                 continue
             for other_index, other_region in indexed_regions[position + 1:]:
                 if other_index in suppressed:
+                    continue
+                if bool(getattr(region, "allow_overlap", False)) or bool(getattr(other_region, "allow_overlap", False)):
                     continue
 
                 smaller_cover, iou, center_ratio = self._region_overlap_metrics(region, other_region)

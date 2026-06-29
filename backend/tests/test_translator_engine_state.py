@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import cv2
@@ -86,6 +88,130 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             self.assertEqual(engine._normalize_stroke_strength(3.25), 3.25)
             self.assertEqual(engine._normalize_stroke_strength(99), 5.0)
+
+    def test_duplicate_region_copies_style_and_offsets_bbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "duplicate-project"
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (400, 600), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {"target_lang": "CHS"},
+                "manual_regions": {},
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 400, "height": 600},
+                "regions": [{
+                    "region_id": "source-region",
+                    "bbox": [40, 50, 180, 240],
+                    "direction": "v",
+                    "source_text": "原文",
+                    "translation": {"machine": "译文", "edited": "新译文", "resolved": "新译文"},
+                    "style": {
+                        "font_style": "handwritten",
+                        "font_key_override": "project:test.ttf",
+                        "font_size": 36,
+                        "letter_spacing": 1.2,
+                        "line_spacing": 1.3,
+                        "alignment": "left",
+                        "fg_color": [12, 34, 56],
+                        "bg_color": [240, 241, 242],
+                        "stroke_width": 2.5,
+                        "rotation": 8,
+                    },
+                    "flags": {
+                        "disabled": True,
+                        "keep_original": True,
+                        "preserve_background": True,
+                    },
+                }],
+            })
+
+            duplicated = engine.duplicate_region(
+                project_id=project_id,
+                session=session,
+                stored_name="page-1.png",
+                region_id="source-region",
+                raw_config={"target_lang": "CHS"},
+            )
+
+            duplicated_id = duplicated["id"]
+            self.assertNotEqual(duplicated["bbox"], [40, 50, 180, 240])
+            self.assertEqual(duplicated["font_size"], 36)
+            self.assertEqual(duplicated["stroke_width"], 2.5)
+            self.assertEqual(session["translation_region_overrides"][duplicated_id], "新译文")
+            self.assertEqual(session["translation_region_layout_overrides"][duplicated_id]["font_key"], "project:test.ttf")
+            self.assertEqual(session["style_region_overrides"][duplicated_id], "handwritten")
+            self.assertTrue(session["translation_region_disabled_overrides"][duplicated_id])
+            self.assertTrue(session["translation_region_skip_overrides"][duplicated_id])
+            original_region = SimpleNamespace(
+                xyxy=[40, 50, 180, 240],
+                translation="新译文",
+                text="原文",
+                font_size=36,
+                manual_region=False,
+                allow_overlap=False,
+            )
+            duplicated_region = SimpleNamespace(
+                xyxy=duplicated["bbox"],
+                translation="新译文",
+                text="原文",
+                font_size=36,
+                manual_region=True,
+                allow_overlap=True,
+            )
+            self.assertEqual(len(engine._dedupe_overlapping_regions([original_region, duplicated_region])), 2)
+
+    def test_export_archives_use_project_result_and_blank_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (20, 20), (255, 255, 255)).save(source_dir / "001.jpg")
+            Image.new("RGB", (20, 20), (245, 245, 245)).save(source_dir / "002.png")
+            Image.new("RGB", (20, 20), (0, 0, 0)).save(translated_dir / "001.png")
+            Image.new("RGB", (20, 20), (10, 10, 10)).save(translated_dir / "002.png")
+            session = {
+                "project_title": "项目:测试",
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [
+                    {"name": "001.jpg", "stored_name": "001.jpg"},
+                    {"name": "002.png", "stored_name": "002.png"},
+                ],
+                "translated_output_map": {
+                    "001.jpg": "001.png",
+                    "002.png": "002.png",
+                },
+                "last_config": {"rerender_output_format": "png"},
+            }
+
+            result_archive = engine.build_session_archive("project-a", session)
+            blank_archive = engine.build_blank_session_archive("project-a", session)
+
+            with zipfile.ZipFile(result_archive) as archive:
+                self.assertEqual(archive.namelist(), [
+                    "项目_测试_result_0001.png",
+                    "项目_测试_result_0002.png",
+                ])
+            with zipfile.ZipFile(blank_archive) as archive:
+                self.assertEqual(archive.namelist(), [
+                    "项目_测试_blank_0001.png",
+                    "项目_测试_blank_0002.png",
+                ])
+            self.assertEqual(engine.get_export_archive_filename("project-a", session, "result"), "项目_测试_result.zip")
+            self.assertEqual(engine.get_export_archive_filename("project-a", session, "blank"), "项目_测试_blank.zip")
 
     def test_brush_edit_operations_paint_restore_and_erase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

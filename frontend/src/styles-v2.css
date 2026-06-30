@@ -1873,6 +1873,7 @@ img {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
 }
 
 .v2-region-mini-button {
@@ -1885,6 +1886,28 @@ img {
   font-size: 0.66rem;
   font-weight: 800;
   cursor: pointer;
+}
+
+.v2-region-mini-button.v2-region-icon-action {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+  font-size: 0.88rem;
+}
+
+.v2-region-action-icon {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
 }
 
 .v2-region-mini-button:hover,

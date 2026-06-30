@@ -11266,28 +11266,47 @@ watch(
                     <div v-if="selectedEditRegionKey === region.id" class="v2-region-copy-actions">
                       <button
                         type="button"
-                        class="v2-region-mini-button"
+                        class="v2-region-mini-button v2-region-icon-action"
                         title="复制这个框的全部样式"
+                        aria-label="复制这个框的全部样式"
                         @click.stop="copyRegionStyle(region)"
                       >
-                        样式复制
+                        <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <rect x="8" y="4" width="11" height="11" rx="2" />
+                          <path d="M5 9v9a2 2 0 0 0 2 2h9" />
+                          <path d="m11 12 5-5" />
+                          <path d="m15 6 3 3" />
+                        </svg>
                       </button>
                       <button
                         type="button"
-                        class="v2-region-mini-button"
+                        class="v2-region-mini-button v2-region-icon-action"
                         title="粘贴上次复制的全部样式"
+                        aria-label="粘贴上次复制的全部样式"
                         @click.stop="pasteRegionStyle(region)"
                       >
-                        样式粘贴
+                        <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M9 5h6l1 2h2v8" />
+                          <path d="M6 7v13h12v-3" />
+                          <path d="M6 7h2" />
+                          <path d="m10 16 7-7" />
+                          <path d="m16 8 3 3" />
+                        </svg>
                       </button>
                       <button
                         type="button"
-                        class="v2-region-mini-button"
+                        class="v2-region-mini-button v2-region-icon-action"
                         title="复制这个文本框"
+                        aria-label="复制这个文本框"
                         :disabled="translating || isPageCommandPending(selectedEditPage.stored_name)"
                         @click.stop="duplicateRegion(region)"
                       >
-                        框复制
+                        <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <rect x="8" y="4" width="11" height="13" rx="2" />
+                          <path d="M5 8v11a2 2 0 0 0 2 2h9" />
+                          <path d="M11 9h5" />
+                          <path d="M11 13h4" />
+                        </svg>
                       </button>
                     </div>
                     <button

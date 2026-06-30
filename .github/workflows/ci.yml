@@ -17,7 +17,7 @@ jobs:
       - name: Install backend test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements.txt pillow numpy opencv-python httpx tqdm
+          python -m pip install -r backend/requirements.txt pillow numpy opencv-python httpx tqdm shapely
       - name: Compile backend
         run: |
           python -m py_compile \

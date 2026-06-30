@@ -39,4 +39,7 @@ Bundled open-source fonts:
 - Source Han Sans SC Regular, Medium, and Bold
 - Source: https://github.com/adobe-fonts/source-han-sans
 - License: SIL Open Font License 1.1, included at
-  `backend/typefaces/OFL-1.1-Source-Han-Sans.txt`
+  `fonts/system/OFL-1.1-Source-Han-Sans.txt`
+
+User-provided fonts belong under `fonts/custom/`. They are not part of the
+repository or release payload and remain the user's licensing responsibility.

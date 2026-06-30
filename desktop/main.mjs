@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs'
+import { cpSync, createWriteStream, existsSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -71,6 +71,24 @@ function resolvePackagedResourcePath(...segments) {
   return join(process.resourcesPath, ...segments)
 }
 
+function prepareFontDirectory(userDataDir) {
+  const fontsDir = app.isPackaged
+    ? join(userDataDir, 'fonts')
+    : resolveRepoPath('fonts')
+  const systemDir = join(fontsDir, 'system')
+  const customDir = join(fontsDir, 'custom')
+  ensureDir(systemDir)
+  ensureDir(customDir)
+
+  if (app.isPackaged) {
+    const bundledSystemDir = resolvePackagedResourcePath('fonts', 'system')
+    if (existsSync(bundledSystemDir)) {
+      cpSync(bundledSystemDir, systemDir, { recursive: true, force: true })
+    }
+  }
+  return fontsDir
+}
+
 function detectPythonExecutable() {
   const candidates = [
     process.env.MANGA_TRANSLATOR_PYTHON,
@@ -92,11 +110,13 @@ function detectPythonExecutable() {
 
 function resolveBackendLaunch(userDataDir, port, token) {
   const logsDir = join(userDataDir, 'logs')
+  const fontsDir = prepareFontDirectory(userDataDir)
   const env = {
     ...process.env,
     APP_DESKTOP_MODE: '1',
     APP_VERSION: app.getVersion(),
     APP_DATA_DIR: userDataDir,
+    APP_FONT_DIR: fontsDir,
     APP_LOG_DIR: logsDir,
     APP_BACKEND_HOST: '127.0.0.1',
     APP_BACKEND_PORT: String(port),
@@ -116,6 +136,7 @@ function resolveBackendLaunch(userDataDir, port, token) {
         APP_CODE_DIR: codeDir,
       },
       logsDir,
+      fontsDir,
     }
   }
 
@@ -130,6 +151,7 @@ function resolveBackendLaunch(userDataDir, port, token) {
       APP_CODE_DIR: codeDir,
     },
     logsDir,
+    fontsDir,
   }
 }
 
@@ -176,6 +198,8 @@ async function startBackend() {
     appVersion: app.getVersion(),
     dataDir: userDataDir,
     logsDir: launch.logsDir,
+    fontsDir: launch.fontsDir,
+    font_root: launch.fontsDir,
     backendLogPath: join(launch.logsDir, 'backend.log'),
   }
   process.env.MANGA_TRANSLATOR_DESKTOP_RUNTIME = JSON.stringify(backendRuntime)
@@ -376,7 +400,7 @@ ipcMain.handle('desktop:open-user-fonts', async (event) => {
   if (!isTrustedIpcEvent(event)) {
     return { ok: false, path: '', error: '不受信任的渲染器来源。' }
   }
-  const fontsDir = join(app.getPath('userData'), 'fonts')
+  const fontsDir = backendRuntime?.fontsDir || prepareFontDirectory(app.getPath('userData'))
   ensureDir(fontsDir)
   const error = await shell.openPath(fontsDir)
   return {

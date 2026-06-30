@@ -82,7 +82,7 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertFalse(migrated["needed"])
             self.assertTrue((paths.projects_dir / "project-a" / "project.json").exists())
             self.assertTrue((paths.output_dir / "project-a" / "page-1.png").exists())
-            self.assertFalse((paths.user_fonts_dir / "custom.otf").exists())
+            self.assertTrue((paths.user_fonts_dir / "custom" / "custom.otf").exists())
             self.assertTrue((paths.models_dir / "inpainting" / "lama.ckpt").exists())
             self.assertEqual(paths.load_settings()["translator"], "doubao-ark")
             project_index = json.loads(paths.project_index_path.read_text(encoding="utf-8"))

@@ -36,6 +36,7 @@ jobs:
             backend.tests.test_http_requests \
             backend.tests.test_api_security \
             backend.tests.test_runtime_paths \
+            backend.tests.test_system_fonts \
             backend.tests.test_translator_engine_state \
             -v
 
@@ -66,14 +67,20 @@ jobs:
           node --check scripts/package-win.mjs
       - name: Check for forbidden tracked content
         run: |
-          if git ls-files | grep -Ei '(^|/)(fonts?|models?|output_images|temp_uploads|temp_extracted|resources-staging|node_modules)(/|$)'; then
+          if git ls-files | grep -Ei '(^|/)(models?|output_images|temp_uploads|temp_extracted|resources-staging|node_modules)(/|$)'; then
             echo "Forbidden generated or binary-content directory is tracked."
             exit 1
           fi
-          disallowed_fonts="$(git ls-files | grep -Ei '\.(otf|ttf|ttc|woff2?|eot)$' | grep -Ev '^backend/typefaces/SourceHanSansSC-(Regular-2|Medium-2|Bold)\.otf$' || true)"
+          disallowed_fonts="$(git ls-files | grep -Ei '\.(otf|ttf|ttc|woff2?|eot)$' | grep -Ev '^fonts/system/SourceHanSansSC-(Regular-2|Medium-2|Bold)\.otf$' || true)"
           if [ -n "$disallowed_fonts" ]; then
             echo "$disallowed_fonts"
             echo "Only allowlisted open-source bundled fonts may be tracked."
+            exit 1
+          fi
+          disallowed_custom_fonts="$(git ls-files fonts/custom | grep -Ev '^fonts/custom/\.gitkeep$' || true)"
+          if [ -n "$disallowed_custom_fonts" ]; then
+            echo "$disallowed_custom_fonts"
+            echo "User-provided fonts under fonts/custom must not be tracked."
             exit 1
           fi
           if git grep -n -E '(/Users/|/Volumes/|C:\\Users\\|iCloud~md~obsidian|ClaudeDev|Mobile Documents|Mobile%20Documents|Documents/SOL)' -- . ':(exclude).github/workflows/ci.yml'; then

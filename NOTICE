@@ -8,4 +8,4 @@ translated manga outputs, proprietary fonts, model weights, API credentials, or
 private user data.
 
 The bundled Source Han Sans SC typefaces are distributed under the SIL Open
-Font License 1.1. See `backend/typefaces/OFL-1.1-Source-Han-Sans.txt`.
+Font License 1.1. See `fonts/system/OFL-1.1-Source-Han-Sans.txt`.

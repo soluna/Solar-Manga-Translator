@@ -31,7 +31,7 @@ def now_iso() -> str:
 
 def pick_font() -> tuple[str, str]:
     path = find_default_bundled_font(BACKEND_DIR)
-    return (f"project:{BUNDLED_DEFAULT_FONT_NAME}", str(path)) if path is not None else ("", "")
+    return (f"system:{BUNDLED_DEFAULT_FONT_NAME}", str(path)) if path is not None else ("", "")
 
 
 def safe_remove(path: Path) -> None:

@@ -2242,9 +2242,9 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            typefaces_dir = base_dir / "typefaces"
-            typefaces_dir.mkdir(parents=True)
-            test_font = typefaces_dir / "SourceHanSansSC-Regular-2.otf"
+            system_font_dir = root / "fonts" / "system"
+            system_font_dir.mkdir(parents=True)
+            test_font = system_font_dir / "SourceHanSansSC-Regular-2.otf"
             test_font.write_bytes(b"test-font")
             engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
 
@@ -2260,9 +2260,12 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            bundled_font_dir = base_dir / "typefaces"
+            bundled_font_dir = root / "fonts" / "system"
+            custom_font_dir = root / "fonts" / "custom"
             bundled_font_dir.mkdir(parents=True)
-            custom_font = bundled_font_dir / "CustomDialogue.otf"
+            custom_font_dir.mkdir(parents=True)
+            (bundled_font_dir / "SourceHanSansSC-Regular-2.otf").write_bytes(b"bundled-font")
+            custom_font = custom_font_dir / "CustomDialogue.otf"
             custom_font.write_bytes(b"bundled-font")
             engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
 
@@ -2279,9 +2282,9 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            typefaces_dir = base_dir / "typefaces"
-            typefaces_dir.mkdir(parents=True)
-            default_font = typefaces_dir / "SourceHanSansSC-Regular-2.otf"
+            system_font_dir = root / "fonts" / "system"
+            system_font_dir.mkdir(parents=True)
+            default_font = system_font_dir / "SourceHanSansSC-Regular-2.otf"
             default_font.write_bytes(b"bundled-font")
             outside_font = root / "outside.otf"
             outside_font.write_bytes(b"outside-font")
@@ -2296,6 +2299,26 @@ print(json.dumps({
             self.assertEqual(Path(config["font_path"]).name, default_font.name)
             self.assertEqual(config["style_font_keys"]["gothic"], engine.DEFAULT_FONT_KEY)
             self.assertEqual(Path(config["style_font_paths"]["gothic"]).name, default_font.name)
+
+    def test_recent_project_prefixed_preset_font_key_moves_back_to_system(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "backend"
+            system_font_dir = root / "fonts" / "system"
+            system_font_dir.mkdir(parents=True)
+            preset = system_font_dir / "SourceHanSansSC-Medium-2.otf"
+            preset.write_bytes(b"bundled-font")
+            engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
+
+            config = engine.normalize_user_config({
+                "font_key": f"project:{preset.name}",
+                "style_font_gothic_key": f"project:{preset.name}",
+            })
+
+            expected_key = f"system:{preset.name}"
+            self.assertEqual(config["font_key"], expected_key)
+            self.assertEqual(config["style_font_keys"]["gothic"], expected_key)
+            self.assertEqual(Path(config["font_path"]).name, preset.name)
 
     def test_advanced_erase_rejection_saves_debug_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

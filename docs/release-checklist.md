@@ -9,6 +9,8 @@ installer.
 - No tracked manga/comic pages, translated outputs, screenshots containing
   recognizable comic pages, non-allowlisted font binaries, model weights, `.env`
   files, logs, or local caches.
+- `fonts/system/` contains only the allowlisted open-source presets and license;
+  `fonts/custom/` contains no tracked user font files.
 - `git grep` finds no personal absolute paths such as macOS home/volume paths,
   Windows user-profile paths, cloud-notes paths, or machine-local directories.
 - Secret scanning reports no API keys, private keys, tokens, or passwords.
@@ -38,6 +40,8 @@ installer.
 - Scan `desktop/resources-staging/` for secrets, personal paths,
   non-allowlisted fonts, copyrighted media, large unexpected files, and `.git`
   directories.
+- Confirm staging contains `fonts/system/` presets and an empty
+  `fonts/custom/`, never the developer's local custom fonts.
 - Install, launch, translate a synthetic fixture, close, and uninstall in a
   clean Windows VM.
 - Publish installer SHA-256 checksums.

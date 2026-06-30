@@ -58,7 +58,7 @@ The build script:
 
 ## What Must Not Be Packaged
 
-- Non-allowlisted repository or user font files
+- Non-allowlisted repository fonts or any user files from `fonts/custom/`
 - Manga/comic source pages or translated outputs
 - `.env` files or API keys
 - Logs, temporary uploads, output folders, cache, screenshots, or fixtures from
@@ -74,6 +74,7 @@ Before distributing an installer:
 - Inspect `desktop/resources-staging/release-manifest.json`.
 - Scan `desktop/resources-staging/` for secrets, personal paths,
   non-allowlisted fonts, comic media, and large unexpected files.
+- Confirm only `fonts/system/` presets are bundled and `fonts/custom/` is empty.
 - Install in a clean Windows VM.
 - Confirm the backend listens only on loopback and requires the runtime token.
 - Confirm settings persist while saved API keys are redacted in renderer data.

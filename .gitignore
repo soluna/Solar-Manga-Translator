@@ -21,7 +21,14 @@ desktop/resources-staging/
 *.pen
 design/
 
-# User-provided or legacy local fonts should stay out of git and release
-# packages. Allowlisted open-source bundled typefaces live under
-# backend/typefaces/ instead.
-fonts/
+# Only allowlisted open-source presets are versioned. User fonts stay local.
+fonts/*
+!fonts/system/
+fonts/system/*
+!fonts/system/OFL-1.1-Source-Han-Sans.txt
+!fonts/system/SourceHanSansSC-Bold.otf
+!fonts/system/SourceHanSansSC-Medium-2.otf
+!fonts/system/SourceHanSansSC-Regular-2.otf
+!fonts/custom/
+fonts/custom/*
+!fonts/custom/.gitkeep

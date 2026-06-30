@@ -94,8 +94,13 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
-const defaultSystemFontId = 'project:SourceHanSansSC-Regular-2.otf'
+const defaultSystemFontId = 'system:SourceHanSansSC-Regular-2.otf'
 const legacyDefaultFontIds = new Set(['system:auto'])
+const bundledFontNames = new Set([
+  'SourceHanSansSC-Regular-2.otf',
+  'SourceHanSansSC-Medium-2.otf',
+  'SourceHanSansSC-Bold.otf'
+])
 const projectGlossaryCategoryOptions = ['人名', '组织/团体', '地点', '作品/道具/技能', '行业术语', '其他']
 const textDirectionOptions = [
   { value: 'auto', label: '自动（中文默认竖排）' },
@@ -168,6 +173,7 @@ const emptyRuntimeInfo = {
   logs_dir: '',
   settings_path: '',
   settings_exists: false,
+  font_root: '',
   font_dirs: {},
   migration: {
     needed: false,
@@ -405,6 +411,17 @@ function normalizeStoredConfig(rawValue) {
     const normalized = typeof value === 'string' ? value.trim() : ''
     if (!normalized || legacyDefaultFontIds.has(normalized)) {
       return fallback
+    }
+    const separatorIndex = normalized.indexOf(':')
+    if (separatorIndex > 0) {
+      const source = normalized.slice(0, separatorIndex)
+      const fontName = normalized.slice(separatorIndex + 1)
+      if (source === 'builtin') {
+        return bundledFontNames.has(fontName) ? `system:${fontName}` : fallback
+      }
+      if (source === 'project' && bundledFontNames.has(fontName)) {
+        return `system:${fontName}`
+      }
     }
     return normalized
   }
@@ -1469,13 +1486,7 @@ const appRuntimeGpuLabel = computed(() => {
   return gpu.cuda_version ? `${primary} / CUDA ${gpu.cuda_version}` : primary
 })
 const appRuntimeDiskLabel = computed(() => formatBytes(appDiagnostics.value?.disk?.free_bytes || 0))
-const appRuntimeBundledFontDirLabel = computed(() => {
-  const projectDirs = appRuntime.value?.font_dirs?.project
-  const dirs = Array.isArray(projectDirs)
-    ? projectDirs.map((path) => String(path || '').trim()).filter(Boolean)
-    : []
-  return dirs.join('；')
-})
+const appRuntimeFontRootLabel = computed(() => String(appRuntime.value?.font_root || '').trim())
 const canOpenFontLibraryDirectory = computed(() => (
   Boolean(
     (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
@@ -1489,8 +1500,9 @@ const fontLibraryStatusText = computed(() => {
   if (fontLibraryMessage.value) {
     return fontLibraryMessage.value
   }
-  const bundledCount = availableFonts.value.filter((font) => font?.source === 'project').length
-  return `当前共读取 ${availableFonts.value.length} 个内置字体（项目字体 ${bundledCount}）。`
+  const systemCount = availableFonts.value.filter((font) => font?.source === 'system').length
+  const customCount = availableFonts.value.filter((font) => font?.source === 'project').length
+  return `当前共读取 ${availableFonts.value.length} 个字体（预置 ${systemCount} / 自定义 ${customCount}）。`
 })
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
@@ -8436,13 +8448,14 @@ async function refreshFontLibrary() {
     return
   }
 
-  const bundledCount = result.fonts.filter((font) => font?.source === 'project').length
-  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个内置字体（项目字体 ${bundledCount}）。`
+  const systemCount = result.fonts.filter((font) => font?.source === 'system').length
+  const customCount = result.fonts.filter((font) => font?.source === 'project').length
+  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个字体（预置 ${systemCount} / 自定义 ${customCount}）。`
 }
 
 async function openFontLibraryDirectory() {
   if (!canOpenFontLibraryDirectory.value) {
-    fontLibraryMessage.value = '请先确认本地后端在线，再打开项目内置字体文件夹。'
+    fontLibraryMessage.value = '请先确认本地后端在线，再打开 fonts 字体文件夹。'
     return
   }
 
@@ -8460,7 +8473,7 @@ async function openFontLibraryDirectory() {
     if (!result?.ok) {
       throw new Error(result?.error || '系统文件管理器未能打开目录。')
     }
-    fontLibraryMessage.value = `已打开项目内置字体文件夹：${result.path || appRuntimeBundledFontDirLabel.value}`
+    fontLibraryMessage.value = `已打开 fonts 字体文件夹：${result.path || appRuntimeFontRootLabel.value}`
   } catch (error) {
     fontLibraryMessage.value = `打开字库文件夹失败：${error instanceof Error ? error.message : String(error || '')}`
   }
@@ -12246,9 +12259,9 @@ watch(
               <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
             </div>
 
-            <div v-if="appRuntimeBundledFontDirLabel" class="v2-readonly-field">
-              <span>内置字体目录</span>
-              <strong :title="appRuntimeBundledFontDirLabel">{{ appRuntimeBundledFontDirLabel }}</strong>
+            <div v-if="appRuntimeFontRootLabel" class="v2-readonly-field">
+              <span>字体目录</span>
+              <strong :title="appRuntimeFontRootLabel">{{ appRuntimeFontRootLabel }}</strong>
             </div>
           </section>
 
@@ -12397,7 +12410,7 @@ watch(
                 type="button"
                 class="v2-secondary-button"
                 :disabled="!canOpenFontLibraryDirectory"
-                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开项目内置字体文件夹' : '本地后端在线后可打开'"
+                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开 fonts 字体文件夹' : '本地后端在线后可打开'"
                 @click="openFontLibraryDirectory"
               >
                 打开字库文件夹
@@ -12413,7 +12426,7 @@ watch(
               >
                 <span class="v2-font-map-label">{{ bucket.label }}</span>
                 <select v-model="config[styleFontConfigKeyMap[bucket.value]]">
-                  <option :value="defaultSystemFontId">使用内置默认</option>
+                  <option :value="defaultSystemFontId">使用预置默认</option>
                   <option v-for="font in availableFonts" :key="font.id" :value="font.id">
                     {{ font.label }}
                   </option>
@@ -12422,7 +12435,7 @@ watch(
             </div>
 
             <p class="v2-settings-inline-note">
-              应用只读取项目内置字体目录，不扫描操作系统字体。当前内置字体为开源授权字体。
+              应用只读取 fonts/system（预置）与 fonts/custom（自定义），不会扫描操作系统字体。
             </p>
 
             <label class="v2-field">

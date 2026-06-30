@@ -30,7 +30,15 @@ import numpy as np
 from http_requests import build_json_post_request
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
-from system_fonts import BUNDLED_DEFAULT_FONT_NAME, FONT_EXTENSIONS, bundled_font_directories, find_default_bundled_font
+from system_fonts import (
+    BUNDLED_DEFAULT_FONT_NAME,
+    BUNDLED_PREFERRED_FONT_NAMES,
+    FONT_EXTENSIONS,
+    bundled_font_directories,
+    custom_font_directories,
+    ensure_project_font_directories,
+    find_default_bundled_font,
+)
 from .image_cleanup import (
     ADVANCED_IMAGE_ERASE_PROMPT,
     ADVANCED_IMAGE_CONTAINER_MASK_PROMPT,
@@ -60,7 +68,7 @@ class TranslatorEngine:
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
-    DEFAULT_FONT_KEY = f"project:{BUNDLED_DEFAULT_FONT_NAME}"
+    DEFAULT_FONT_KEY = f"system:{BUNDLED_DEFAULT_FONT_NAME}"
     LEGACY_DEFAULT_FONT_KEYS = {"system:auto"}
     DEFAULT_STYLE_FONT_KEYS = {
         "gothic": DEFAULT_FONT_KEY,
@@ -115,7 +123,9 @@ class TranslatorEngine:
         self.output_root = self.paths.output_dir
         self.logs_dir = self.paths.logs_dir
         self.config_dir = self.paths.config_dir
+        self.font_root_dir = ensure_project_font_directories(self.base_dir)
         self.bundled_font_dirs = list(bundled_font_directories(self.base_dir))
+        self.custom_font_dirs = list(custom_font_directories(self.base_dir))
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
@@ -532,7 +542,8 @@ class TranslatorEngine:
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
-            "project": self.bundled_font_dirs,
+            "system": self.bundled_font_dirs,
+            "project": self.custom_font_dirs,
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
@@ -5378,8 +5389,7 @@ class TranslatorEngine:
             or style_font_keys.get("gothic")
             or self.DEFAULT_FONT_KEY
         ).strip()
-        if font_key in self.LEGACY_DEFAULT_FONT_KEYS:
-            font_key = self.DEFAULT_FONT_KEY
+        font_key = self._canonicalize_font_key(font_key)
         if not self._resolve_font_path(font_key):
             font_key = self.DEFAULT_FONT_KEY
         font_path = self._resolve_font_path(font_key)
@@ -5551,9 +5561,9 @@ class TranslatorEngine:
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
         normalized: dict[str, str] = {}
         for style in self.STYLE_BUCKETS:
-            raw_key = str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
-            if raw_key in self.LEGACY_DEFAULT_FONT_KEYS:
-                raw_key = self.DEFAULT_FONT_KEY
+            raw_key = self._canonicalize_font_key(
+                str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
+            )
             fallback_key = self.DEFAULT_STYLE_FONT_KEYS.get(style, self.DEFAULT_FONT_KEY)
             normalized[style] = raw_key if raw_key and self._resolve_font_path(raw_key) else fallback_key
         return normalized
@@ -5703,7 +5713,8 @@ class TranslatorEngine:
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
             return ""
-        if font_key == self.DEFAULT_FONT_KEY or font_key in self.LEGACY_DEFAULT_FONT_KEYS:
+        font_key = self._canonicalize_font_key(font_key)
+        if font_key == self.DEFAULT_FONT_KEY:
             default_font = find_default_bundled_font(self.base_dir)
             return str(default_font) if default_font is not None else ""
 
@@ -5724,6 +5735,22 @@ class TranslatorEngine:
 
         print(f"[WARN] Requested font not found: {font_key}")
         return ""
+
+    def _canonicalize_font_key(self, font_key: str) -> str:
+        normalized = str(font_key or "").strip()
+        if not normalized:
+            return ""
+        if normalized in self.LEGACY_DEFAULT_FONT_KEYS:
+            return self.DEFAULT_FONT_KEY
+        if ":" not in normalized:
+            return normalized
+
+        source, font_name = normalized.split(":", 1)
+        if source == "builtin":
+            source = "system"
+        elif source == "project" and font_name in BUNDLED_PREFERRED_FONT_NAMES:
+            source = "system"
+        return f"{source}:{font_name}"
 
     def _resolve_font_path_inside(self, font_dir: Path, font_name: str) -> str:
         normalized_name = str(font_name or "").replace("\\", "/").strip("/")

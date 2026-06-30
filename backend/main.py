@@ -22,6 +22,8 @@ from runtime_paths import resolve_app_paths
 from system_fonts import BUNDLED_DEFAULT_FONT_NAME
 from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
 from system_fonts import bundled_font_directories
+from system_fonts import custom_font_directories
+from system_fonts import ensure_project_font_directories
 from utils.file_handler import extract_archive, verify_supported_image
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
@@ -57,9 +59,13 @@ MAX_REQUEST_BYTES = max(
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = tuple(sorted(SYSTEM_FONT_EXTENSIONS))
+FONT_ROOT_DIR = ensure_project_font_directories(BASE_DIR)
 FONT_DIRECTORIES = {
-    "project": (
+    "system": (
         *bundled_font_directories(BASE_DIR),
+    ),
+    "project": (
+        *custom_font_directories(BASE_DIR),
     ),
 }
 LOCAL_LAMA_MODEL_FILENAME = "lama_large_512px.ckpt"
@@ -289,7 +295,7 @@ def list_available_fonts() -> list[dict[str, str]]:
                 if font_id in seen_ids:
                     continue
                 seen_ids.add(font_id)
-                source_label = "内置"
+                source_label = "预置" if source == "system" else "自定义"
                 suffix = path.suffix.lower()
                 format_hint = {
                     ".ttf": "truetype",
@@ -422,6 +428,7 @@ def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
         "logs_dir": str(APP_PATHS.logs_dir),
         "settings_path": str(APP_PATHS.settings_path),
         "settings_exists": APP_PATHS.settings_path.exists(),
+        "font_root": str(FONT_ROOT_DIR),
         "font_dirs": {
             source: [str(path) for path in iter_font_directories(source)]
             for source in FONT_DIRECTORIES
@@ -578,12 +585,10 @@ async def get_app_logs_tail(lines: int = 200):
 
 @app.post("/api/app/open-user-fonts")
 async def open_user_fonts_directory():
-    font_dirs = iter_font_directories("project")
-    target_dir = font_dirs[0] if font_dirs else (BASE_DIR / "typefaces")
-    error = open_directory_in_file_manager(target_dir)
+    error = open_directory_in_file_manager(FONT_ROOT_DIR)
     return {
         "ok": not error,
-        "path": str(target_dir),
+        "path": str(FONT_ROOT_DIR),
         "error": error,
     }
 

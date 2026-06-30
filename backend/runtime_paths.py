@@ -395,6 +395,7 @@ class AppPaths:
             legacy_app_projects = legacy_app_data_dir / "projects"
             legacy_app_output = legacy_app_data_dir / "output"
             legacy_app_models = legacy_app_data_dir / "models"
+            legacy_app_fonts = legacy_app_data_dir / "fonts"
             legacy_app_settings = legacy_app_data_dir / "config" / "settings.json"
 
             if legacy_app_projects.exists():
@@ -409,6 +410,20 @@ class AppPaths:
                 shutil.copytree(legacy_app_output, self.output_dir, dirs_exist_ok=True)
             if legacy_app_models.exists():
                 shutil.copytree(legacy_app_models, self.models_dir, dirs_exist_ok=True)
+            if legacy_app_fonts.exists():
+                font_root = Path(os.getenv("APP_FONT_DIR") or self.user_fonts_dir).expanduser().resolve()
+                custom_font_dir = font_root / "custom"
+                custom_font_dir.mkdir(parents=True, exist_ok=True)
+                legacy_custom_dir = legacy_app_fonts / "custom"
+                if legacy_custom_dir.exists():
+                    shutil.copytree(legacy_custom_dir, custom_font_dir, dirs_exist_ok=True)
+                else:
+                    shutil.copytree(
+                        legacy_app_fonts,
+                        custom_font_dir,
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("system", "builtin"),
+                    )
             if legacy_app_settings.exists() and not self.settings_path.exists():
                 self.settings_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy_app_settings, self.settings_path)

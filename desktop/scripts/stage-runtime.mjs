@@ -7,6 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const desktopDir = resolve(__dirname, '..')
 const repoRoot = resolve(desktopDir, '..')
 const backendDir = resolve(repoRoot, 'backend')
+const fontsDir = resolve(repoRoot, 'fonts')
 const upstreamDir = resolve(backendDir, 'manga-image-translator')
 const stagingRoot = resolve(desktopDir, 'resources-staging')
 
@@ -50,7 +51,7 @@ const backendFiles = [
   'upstream.json',
 ]
 
-const backendDirs = ['engine', 'typefaces', 'utils']
+const backendDirs = ['engine', 'utils']
 const upstreamFiles = ['LICENSE']
 const upstreamDirs = ['dict', 'manga_translator']
 
@@ -179,6 +180,14 @@ function copyBackendSource() {
   }
 }
 
+function copyBundledFonts() {
+  const sourceSystemDir = resolve(fontsDir, 'system')
+  const targetFontsDir = resolve(stagingRoot, 'fonts')
+  requirePath(sourceSystemDir, 'fonts/system')
+  copyPath(sourceSystemDir, resolve(targetFontsDir, 'system'))
+  mkdirSync(resolve(targetFontsDir, 'custom'), { recursive: true })
+}
+
 function main() {
   const frontendDist = resolve(repoRoot, 'frontend', 'dist')
   requirePath(frontendDist, 'frontend/dist')
@@ -189,6 +198,7 @@ function main() {
 
   copyPath(frontendDist, resolve(stagingRoot, 'frontend-dist'))
   copyBackendSource()
+  copyBundledFonts()
   copyPath(runtimeDir, resolve(stagingRoot, 'python-runtime'))
 
   writeFileSync(
@@ -198,14 +208,18 @@ function main() {
         created_at: new Date().toISOString(),
         frontend_dist: 'frontend/dist',
         backend_source: 'backend',
+        fonts: {
+          system: 'fonts/system',
+          custom: 'fonts/custom',
+        },
         python_runtime: process.env.MANGA_TRANSLATOR_PYTHON_RUNTIME ? 'MANGA_TRANSLATOR_PYTHON_RUNTIME' : 'backend/venv',
         upstream: {
           repository: 'https://github.com/zyddnys/manga-image-translator.git',
           commit: currentUpstreamCommit(),
           staged_paths: ['manga_translator/', 'dict/', 'LICENSE'],
         },
-        bundled_typefaces: ['backend/typefaces/SourceHanSansSC-*.otf'],
-        excluded: ['fonts/', 'models/', 'examples/', 'result/', 'temp_uploads/', '.git/'],
+        bundled_typefaces: ['fonts/system/SourceHanSansSC-*.otf'],
+        excluded: ['fonts/custom/*', 'models/', 'examples/', 'result/', 'temp_uploads/', '.git/'],
       },
       null,
       2

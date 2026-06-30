@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping improve Manga Auto-Translator WebUI.
+Thank you for helping improve Solar-Manga-Translator.
 
 ## Ground Rules
 

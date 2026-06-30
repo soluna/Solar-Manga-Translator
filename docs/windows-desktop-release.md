@@ -16,7 +16,7 @@ public release note.
 
 Writable data lives under:
 
-- `%LOCALAPPDATA%/MangaTranslator/`
+- `%LOCALAPPDATA%/Solar-Manga-Translator/`
 
 Subdirectories:
 

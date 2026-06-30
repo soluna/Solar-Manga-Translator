@@ -312,7 +312,7 @@ async function createMainWindow() {
     minWidth: 1260,
     minHeight: 760,
     backgroundColor: '#eef2f7',
-    title: 'Manga Translator',
+    title: 'Solar-Manga-Translator',
     webPreferences: {
       preload: join(__dirname, 'preload.mjs'),
       contextIsolation: true,
@@ -400,7 +400,7 @@ app.whenReady().then(async () => {
     await createMainWindow()
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown startup error'
-    await dialog.showErrorBox('Manga Translator 启动失败', message)
+    await dialog.showErrorBox('Solar-Manga-Translator 启动失败', message)
     stopBackend()
     app.quit()
   }

@@ -1,9 +1,9 @@
 {
-  "name": "manga-translator-desktop",
+  "name": "solar-manga-translator-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Windows desktop shell for Manga Translator",
-  "author": "Manga Translator contributors",
+  "description": "Windows desktop shell for Solar-Manga-Translator",
+  "author": "Solar-Manga-Translator contributors",
   "type": "module",
   "main": "main.mjs",
   "scripts": {
@@ -17,8 +17,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "org.mangatranslator.desktop",
-    "productName": "Manga Translator",
+    "appId": "io.github.soluna.solar-manga-translator",
+    "productName": "Solar-Manga-Translator",
     "files": [
       "main.mjs",
       "preload.mjs",
@@ -46,7 +46,7 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "MangaTranslator-${version}-Setup.${ext}"
+      "artifactName": "Solar-Manga-Translator-${version}-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,

@@ -12,6 +12,9 @@ installer.
 - `git grep` finds no personal absolute paths such as macOS home/volume paths,
   Windows user-profile paths, cloud-notes paths, or machine-local directories.
 - Secret scanning reports no API keys, private keys, tokens, or passwords.
+- Reachable Git history has been scanned for forbidden assets, private paths,
+  and common secret patterns.
+- GitHub exposes only reviewed release branches.
 - `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, and `SECURITY.md` are present.
 
@@ -40,8 +43,6 @@ installer.
 
 ## Known Release Gaps
 
-- Git history may still contain removed fonts/media/personal metadata until a
-  dedicated history rewrite is performed.
 - Code signing is not configured.
 - SBOM generation is not automated.
 - The current local Python audit reports an upstream Torch advisory without a

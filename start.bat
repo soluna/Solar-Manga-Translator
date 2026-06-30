@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
 
 echo ===================================================
-echo Manga Auto-Translator WebUI Start Script
+echo Solar-Manga-Translator Start Script
 echo ===================================================
 
 call :stop_existing_service_on_port 8000 "uvicorn main:app"

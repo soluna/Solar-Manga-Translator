@@ -33,7 +33,7 @@ find_python() {
 }
 
 echo "==================================================="
-echo "Manga Auto-Translator WebUI 启动脚本 (macOS / 独立测试环境)"
+echo "Solar-Manga-Translator 启动脚本 (macOS / 独立测试环境)"
 echo "==================================================="
 echo "此脚本仅使用 backend/.venv-mac，不会触碰 Windows 使用的 backend/venv。"
 

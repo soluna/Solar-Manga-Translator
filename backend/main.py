@@ -24,7 +24,7 @@ from utils.file_handler import extract_archive, verify_supported_image
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
 app = FastAPI(
-    title="Manga Translator API",
+    title="Solar-Manga-Translator API",
     docs_url="/docs" if ENABLE_API_DOCS else None,
     redoc_url="/redoc" if ENABLE_API_DOCS else None,
     openapi_url="/openapi.json" if ENABLE_API_DOCS else None,

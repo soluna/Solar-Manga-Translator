@@ -2,7 +2,7 @@
 set -e
 
 echo "==================================================="
-echo "Manga Auto-Translator WebUI 启动脚本 (Linux/Mac)"
+echo "Solar-Manga-Translator 启动脚本 (Linux/Mac)"
 echo "==================================================="
 
 # 检查 Python 环境

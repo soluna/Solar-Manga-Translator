@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-APP_NAME = "MangaTranslator"
+APP_NAME = "Solar-Manga-Translator"
 
 
 def _now_iso() -> str:

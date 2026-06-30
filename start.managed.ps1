@@ -15,7 +15,7 @@ $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
 $backendUrl = "http://127.0.0.1:8000/api/status"
 $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-    Join-Path $env:LOCALAPPDATA "MangaTranslator"
+    Join-Path $env:LOCALAPPDATA "Solar-Manga-Translator"
 } else {
     Join-Path $root ".runtime"
 }
@@ -224,7 +224,7 @@ try {
     $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && set "VITE_API_TOKEN=' + $apiToken + '" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
 
     $backendProcess = Start-CmdWindow `
-        -Title "Manga Translator API" `
+        -Title "Solar-Manga-Translator API" `
         -WorkingDirectory $backendDir `
         -Command ('set "APP_API_TOKEN=' + $apiToken + '" && call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port 8000') `
         -LogPath $backendLogPath
@@ -234,7 +234,7 @@ try {
     }
 
     $frontendProcess = Start-CmdWindow `
-        -Title "Manga Translator WebUI" `
+        -Title "Solar-Manga-Translator WebUI" `
         -WorkingDirectory $frontendDir `
         -Command $frontendCommand `
         -LogPath $frontendLogPath

@@ -1,4 +1,4 @@
-# Manga Translator Desktop
+# Solar-Manga-Translator Desktop
 
 This directory contains the Electron shell for the local Windows desktop build.
 Electron owns the window and process lifecycle; the translation work still runs
@@ -56,7 +56,7 @@ temporary uploads, output folders, or the upstream `.git` directory.
 
 Desktop builds use:
 
-- Windows: `%LOCALAPPDATA%/MangaTranslator/`
+- Windows: `%LOCALAPPDATA%/Solar-Manga-Translator/`
 
 Expected subdirectories:
 

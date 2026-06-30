@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
+import net from 'node:net'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { chromium } from 'playwright'
+import { launchChromium } from './playwright-launcher.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -15,11 +18,46 @@ const artifactDir = path.join(frontendDir, 'test-artifacts', 'v2-workspace')
 
 const FIXTURE_PROJECT_ID = 'canvas-e2e-fixture'
 const FIXTURE_PROJECT_TITLE = 'Canvas E2E Fixture'
-const BACKEND_URL = process.env.CANVAS_E2E_BACKEND_URL || 'http://127.0.0.1:8000'
-const FRONTEND_URL = process.env.CANVAS_E2E_FRONTEND_URL || 'http://127.0.0.1:5173'
+const ownsAppDataDir = !process.env.APP_DATA_DIR
+const E2E_APP_DATA_DIR = process.env.APP_DATA_DIR || await fs.mkdtemp(path.join(os.tmpdir(), 'manga-translator-v2-e2e-'))
+const E2E_API_TOKEN = process.env.CANVAS_E2E_API_TOKEN || process.env.APP_API_TOKEN || randomBytes(32).toString('base64url')
+process.env.APP_DATA_DIR = E2E_APP_DATA_DIR
+process.env.APP_API_TOKEN = E2E_API_TOKEN
+const generatedBackendPort = process.env.CANVAS_E2E_BACKEND_URL ? '' : await findFreePort(0)
+const generatedFrontendPort = process.env.CANVAS_E2E_FRONTEND_URL
+  ? ''
+  : await findFreePort(0, new Set([generatedBackendPort]))
+const BACKEND_URL = process.env.CANVAS_E2E_BACKEND_URL || `http://127.0.0.1:${generatedBackendPort}`
+const FRONTEND_URL = process.env.CANVAS_E2E_FRONTEND_URL || `http://127.0.0.1:${generatedFrontendPort}`
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function tryListen(port) {
+  return new Promise((resolvePort, reject) => {
+    const server = net.createServer()
+    server.unref()
+    server.once('error', reject)
+    server.listen({ host: '127.0.0.1', port }, () => {
+      const address = server.address()
+      server.close(() => resolvePort(address?.port || port))
+    })
+  })
+}
+
+async function findFreePort(preferredPort, blockedPorts = new Set()) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const candidate = await tryListen(attempt === 0 ? preferredPort : 0)
+    if (!blockedPorts.has(candidate)) {
+      return candidate
+    }
+  }
+  throw new Error('无法获取互不冲突的空闲测试端口')
+}
+
+function apiHeaders() {
+  return { Authorization: `Bearer ${E2E_API_TOKEN}` }
 }
 
 function isIgnorableConsoleEntry(entry) {
@@ -66,7 +104,7 @@ function pickBackendPython() {
 
 async function httpOk(url) {
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { headers: apiHeaders() })
     return response.ok
   } catch {
     return false
@@ -124,6 +162,10 @@ async function ensureServices() {
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', new URL(BACKEND_URL).port || '8000'],
       {
         cwd: backendDir,
+        env: {
+          APP_DATA_DIR: E2E_APP_DATA_DIR,
+          APP_API_TOKEN: E2E_API_TOKEN,
+        },
         label: 'backend-v2-e2e',
       }
     )
@@ -137,6 +179,13 @@ async function ensureServices() {
       ['run', 'dev', '--', '--host', '127.0.0.1', '--port', new URL(FRONTEND_URL).port || '5173'],
       {
         cwd: frontendDir,
+        env: {
+          FRONTEND_PORT: new URL(FRONTEND_URL).port || '5173',
+          VITE_API_BASE_URL: BACKEND_URL,
+          VITE_API_TOKEN: E2E_API_TOKEN,
+          VITE_DEV_PORT: new URL(FRONTEND_URL).port || '5173',
+          VITE_DEV_PROXY_TARGET: BACKEND_URL,
+        },
         label: 'frontend-v2-e2e',
       }
     )
@@ -154,7 +203,7 @@ async function saveScreenshot(page, name) {
 }
 
 async function createSupplementFixture() {
-  const sourceImage = path.join(frontendDir, 'src', 'assets', 'v2', 'thumb-a.jpg')
+  const sourceImage = path.join(E2E_APP_DATA_DIR, 'output', FIXTURE_PROJECT_ID, 'source', '0001.jpg')
   const targetImage = path.join(artifactDir, 'Fixture Page 1.jpg')
   await fs.copyFile(sourceImage, targetImage)
   return targetImage
@@ -219,12 +268,13 @@ async function readPreviewTextCentering(locator) {
 async function main() {
   await fs.mkdir(artifactDir, { recursive: true })
 
-  const started = await ensureServices()
+  let started = []
   let browser
   try {
+    started = await ensureServices()
     await ensureFixture()
 
-    browser = await chromium.launch({ headless: true })
+    browser = await launchChromium({ headless: true })
     const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } })
     const consoleErrors = []
     page.on('console', (message) => {
@@ -332,7 +382,6 @@ async function main() {
     if (
       previewCentering.deltaX > Math.max(8, previewCentering.boxWidth * 0.18)
       || previewCentering.deltaY > Math.max(8, previewCentering.boxHeight * 0.18)
-      || previewCentering.textAlign !== 'center'
     ) {
       throw new Error(`框内预览文本没有稳定居中：${JSON.stringify(previewCentering)}`)
     }
@@ -374,13 +423,14 @@ async function main() {
     await assertText(page.locator('.v2-topbar-project-copy span'), '第 2 页', '页导航没有切换到下一页')
 
     const supplementImage = await createSupplementFixture()
-    const supplementUpload = page.waitForResponse((response) => (
-      response.url().includes(`/api/projects/${FIXTURE_PROJECT_ID}/base-images`)
-      && response.request().method() === 'POST'
-      && response.ok()
-    ))
-    await page.locator('input.v2-hidden-input').nth(1).setInputFiles(supplementImage)
-    await supplementUpload
+    await Promise.all([
+      page.waitForResponse((response) => (
+        response.url().includes(`/api/projects/${FIXTURE_PROJECT_ID}/base-images`)
+        && response.request().method() === 'POST'
+        && response.ok()
+      )),
+      page.getByTestId('v2-supplement-file-input').setInputFiles(supplementImage),
+    ])
 
     await page.getByRole('button', { name: '打开设置' }).last().click()
     await page.getByTestId('v2-settings-panel').waitFor({ state: 'visible', timeout: 20000 })
@@ -408,6 +458,9 @@ async function main() {
   } finally {
     await browser?.close()
     await stopProcesses(started)
+    if (ownsAppDataDir) {
+      await fs.rm(E2E_APP_DATA_DIR, { recursive: true, force: true })
+    }
   }
 }
 

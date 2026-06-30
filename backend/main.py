@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import Any
 import asyncio
+import contextlib
 import logging
 import os
+import secrets
 import shutil
 import sys
 import uuid
@@ -10,34 +12,54 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from engine.translator import TranslatorEngine
 from runtime_paths import resolve_app_paths
-from utils.file_handler import extract_archive
+from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
+from system_fonts import find_default_system_font, system_font_directories
+from utils.file_handler import extract_archive, verify_supported_image
 
-app = FastAPI(title="Manga Translator API")
+ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
+app = FastAPI(
+    title="Manga Translator API",
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
+)
 
 BASE_DIR = Path(os.getenv("APP_CODE_DIR") or Path(__file__).resolve().parent).resolve()
 APP_PATHS = resolve_app_paths(BASE_DIR)
 OUTPUT_DIR = APP_PATHS.output_dir
 TEMP_UPLOADS_DIR = APP_PATHS.cache_uploads_dir
 TEMP_EXTRACTED_DIR = APP_PATHS.cache_extracted_dir
+API_TOKEN = str(os.getenv("APP_API_TOKEN") or os.getenv("MANGA_TRANSLATOR_API_TOKEN") or "").strip()
+DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+
+
+def positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+MAX_UPLOAD_BYTES = positive_env_int("APP_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
+MAX_REQUEST_BYTES = max(
+    MAX_UPLOAD_BYTES,
+    positive_env_int("APP_MAX_REQUEST_BYTES", MAX_UPLOAD_BYTES + 64 * 1024 * 1024),
+)
 ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
-FONT_EXTENSIONS = (".ttf", ".ttc", ".otf")
+FONT_EXTENSIONS = tuple(sorted(SYSTEM_FONT_EXTENSIONS))
 FONT_DIRECTORIES = {
-    "builtin": (
-        BASE_DIR.parent / "fonts" / "system",
-        BASE_DIR.parent / "fonts" / "builtin",
-        BASE_DIR / "manga-image-translator" / "fonts",
-    ),
+    "system": system_font_directories(),
     "project": (
         APP_PATHS.user_fonts_dir,
         BASE_DIR.parent / "fonts" / "custom",
-        BASE_DIR.parent / "fonts",
-        BASE_DIR.parent / "font",
     ),
 }
 LOCAL_LAMA_MODEL_FILENAME = "lama_large_512px.ckpt"
@@ -61,6 +83,12 @@ SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
 logger = logging.getLogger("manga_translator.api")
 
+allowed_hosts = [
+    host.strip()
+    for host in os.getenv("APP_ALLOWED_HOSTS", "127.0.0.1,localhost,[::1],testserver").split(",")
+    if host.strip()
+]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -68,12 +96,11 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "null",
     ],
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # 确保输出和临时目录存在并挂载静态文件
@@ -81,10 +108,98 @@ APP_PATHS.ensure_directories()
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
 
+class UploadTooLargeError(ValueError):
+    pass
+
+
+def is_public_read_path(path: str, method: str) -> bool:
+    if path == "/api/status":
+        return True
+    if method != "GET":
+        return False
+    if path.startswith(("/output/", "/api/fonts/file/", "/api/download/")):
+        return True
+    if path.startswith("/api/pages/"):
+        return path.endswith(("/base-image", "/source-image", "/preview-image", "/translated-image"))
+    return False
+
+
+def has_valid_api_token(raw_authorization: str | None) -> bool:
+    if not API_TOKEN:
+        return True
+    scheme, _, candidate = str(raw_authorization or "").partition(" ")
+    return scheme.lower() == "bearer" and bool(candidate) and secrets.compare_digest(candidate, API_TOKEN)
+
+
+def websocket_has_valid_api_token(websocket: WebSocket) -> bool:
+    if not API_TOKEN:
+        return True
+    protocols = {
+        protocol.strip()
+        for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if protocol.strip()
+    }
+    candidate = next(
+        (protocol.removeprefix("auth.") for protocol in protocols if protocol.startswith("auth.")),
+        "",
+    )
+    return bool(candidate) and secrets.compare_digest(candidate, API_TOKEN)
+
+
+@app.middleware("http")
+async def protect_local_api(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        with contextlib.suppress(ValueError):
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "上传内容超过允许大小。"})
+
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+    if (
+        API_TOKEN
+        and not is_public_read_path(request.url.path, request.method)
+        and not has_valid_api_token(request.headers.get("authorization"))
+    ):
+        response = JSONResponse(status_code=401, content={"detail": "需要有效的本地 API 访问令牌。"})
+    else:
+        response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
+
+
+@app.exception_handler(UploadTooLargeError)
+async def handle_upload_too_large(_request: Request, exc: UploadTooLargeError):
+    return JSONResponse(status_code=413, content={"detail": str(exc)})
+
+
 def copy_upload_to_path(upload: UploadFile, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("wb") as buffer:
-        shutil.copyfileobj(upload.file, buffer)
+    copied = 0
+    try:
+        with destination.open("wb") as buffer:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > MAX_UPLOAD_BYTES:
+                    raise UploadTooLargeError("单个上传文件超过允许大小。")
+                buffer.write(chunk)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            destination.unlink()
+        raise
 
 
 def configure_app_logging() -> None:
@@ -151,24 +266,54 @@ def list_available_fonts() -> list[dict[str, str]]:
         "NotoSansMonoCJK-VF.ttf.ttc": 13,
     }
 
+    default_system_font = find_default_system_font()
+    if default_system_font is not None:
+        default_extension = default_system_font.suffix.lower()
+        default_format_hint = {
+            ".ttf": "truetype",
+            ".otf": "opentype",
+        }.get(default_extension, "")
+        default_root = next(
+            (root for root in FONT_DIRECTORIES["system"] if root.resolve() in default_system_font.parents),
+            None,
+        )
+        if default_root is not None:
+            relative_name = default_system_font.relative_to(default_root.resolve()).as_posix()
+            fonts.append(
+                {
+                    "id": "system:auto",
+                    "name": default_system_font.name,
+                    "label": f"{default_system_font.stem} (系统默认)",
+                    "source": "system",
+                    "extension": default_extension,
+                    "format_hint": default_format_hint,
+                    "url": f"/api/fonts/file/system/{quote(relative_name, safe='/')}",
+                }
+            )
+
     for source in FONT_DIRECTORIES:
-        seen_names: set[str] = set()
+        seen_ids: set[str] = set()
         for font_dir in iter_font_directories(source):
             if not font_dir.exists():
                 continue
 
-            font_paths = sorted(
-                (
-                    path for path in font_dir.iterdir()
-                    if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
-                ),
-                key=lambda path: (preferred_order.get(path.name, 99), path.name.lower()),
-            )
+            try:
+                font_paths = sorted(
+                    (
+                        path for path in font_dir.rglob("*")
+                        if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
+                    ),
+                    key=lambda path: (preferred_order.get(path.name, 99), path.name.lower()),
+                )
+            except OSError:
+                continue
 
             for path in font_paths:
-                if path.name in seen_names:
+                relative_name = path.relative_to(font_dir).as_posix()
+                font_id = f"{source}:{relative_name}"
+                if font_id in seen_ids or (source == "system" and default_system_font == path.resolve()):
                     continue
-                seen_names.add(path.name)
+                seen_ids.add(font_id)
                 source_label = "自定义" if source == "project" else "系统"
                 suffix = path.suffix.lower()
                 format_hint = {
@@ -177,13 +322,13 @@ def list_available_fonts() -> list[dict[str, str]]:
                 }.get(suffix, "")
                 fonts.append(
                     {
-                        "id": f"{source}:{path.name}",
+                        "id": font_id,
                         "name": path.name,
                         "label": f"{path.stem} ({source_label})",
                         "source": source,
                         "extension": suffix,
                         "format_hint": format_hint,
-                        "url": f"/api/fonts/file/{source}/{quote(path.name)}",
+                        "url": f"/api/fonts/file/{source}/{quote(relative_name, safe='/')}",
                     }
                 )
 
@@ -191,13 +336,19 @@ def list_available_fonts() -> list[dict[str, str]]:
 
 
 def resolve_font_file(source: str, font_name: str) -> Path:
-    if Path(font_name).name != font_name:
+    normalized_name = str(font_name or "").replace("\\", "/").strip("/")
+    if not normalized_name or any(part in {"", ".", ".."} for part in normalized_name.split("/")):
         raise HTTPException(status_code=404, detail="字体文件不存在。")
     for font_dir in iter_font_directories(source):
         if not font_dir.exists():
             continue
-        target_path = (font_dir / font_name).resolve()
-        if target_path.exists() and target_path.parent == font_dir.resolve():
+        target_path = (font_dir / Path(*normalized_name.split("/"))).resolve()
+        resolved_root = font_dir.resolve()
+        if (
+            target_path.is_file()
+            and target_path.suffix.lower() in FONT_EXTENSIONS
+            and resolved_root in target_path.parents
+        ):
             return target_path
     raise HTTPException(status_code=404, detail="字体文件不存在。")
 
@@ -219,6 +370,8 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
 def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str) -> str:
     target_path = target_dir / filename
     shutil.copy2(temp_path, target_path)
+    if not verify_supported_image(target_path):
+        raise ValueError("上传的文件不是有效的受支持图片。")
     return str(target_path)
 
 
@@ -274,7 +427,8 @@ async def preserve_uploaded_image_files(
     for _sort_key, relative_path, upload in sorted(staged, key=lambda item: item[0]):
         destination = unique_child_path(target_dir, relative_path)
         await asyncio.to_thread(copy_upload_to_path, upload, destination)
-        images.append(str(destination))
+        if await asyncio.to_thread(verify_supported_image, destination):
+            images.append(str(destination))
     return images
 
 
@@ -374,9 +528,8 @@ def read_log_tail(path: Path, max_lines: int = 200) -> list[str]:
 
 
 @app.get("/api/status")
-async def get_status(request: Request):
-    runtime = build_runtime_payload(request)
-    return {"status": "running", "runtime": runtime}
+async def get_status():
+    return {"status": "running", "auth_required": bool(API_TOKEN)}
 
 
 @app.get("/api/app/runtime")
@@ -492,23 +645,29 @@ async def upload_project_base_images(project_id: str, file: UploadFile = File(..
 
     upload_token = str(uuid.uuid4())
     file_path = TEMP_UPLOADS_DIR / f"{upload_token}_{filename}"
-    await asyncio.to_thread(copy_upload_to_path, file, file_path)
-
     extract_dir = TEMP_EXTRACTED_DIR / f"{project_id}_base_{upload_token}"
     extract_dir.mkdir(exist_ok=True)
 
-    images = []
-    if filename.lower().endswith((".zip", ".cbz")):
-        images = extract_archive(str(file_path), str(extract_dir))
-    else:
-        images = [preserve_single_upload_name(file_path, extract_dir, filename)]
-
     try:
+        await asyncio.to_thread(copy_upload_to_path, file, file_path)
+        if filename.lower().endswith((".zip", ".cbz")):
+            images = await asyncio.to_thread(extract_archive, str(file_path), str(extract_dir))
+        else:
+            images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+        if not images:
+            raise ValueError("文件中没有找到有效的受支持图片。")
         result = translator_engine.attach_base_images(project_id, session, images)
+    except UploadTooLargeError:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Failed to attach base images. project_id=%s", project_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            file_path.unlink()
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
     return {
         **translator_engine.build_client_session_payload(project_id, session),
@@ -936,56 +1095,74 @@ async def upload_comic(
     session_id = str(uuid.uuid4())
     extract_dir = TEMP_EXTRACTED_DIR / session_id
     extract_dir.mkdir(exist_ok=True)
+    file_path: Path | None = None
 
-    folder_uploads = [upload for upload in (files or []) if upload is not None]
-    if folder_uploads:
-        images = await preserve_uploaded_image_files(
-            folder_uploads,
-            relative_paths,
-            extract_dir,
-        )
-        if not images:
-            raise HTTPException(status_code=400, detail="文件夹中没有找到支持的图片文件。")
-        project_title = Path(str(folder_name or "").strip()).name or "图片文件夹"
-    else:
-        if file is None:
-            raise HTTPException(status_code=400, detail="请先选择 zip/cbz、单张图片或图片文件夹。")
-        filename = Path(file.filename or "upload").name
-        if not filename.lower().endswith(ALLOWED_EXTENSIONS):
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-
-        file_path = TEMP_UPLOADS_DIR / f"{session_id}_{filename}"
-
-        await asyncio.to_thread(copy_upload_to_path, file, file_path)
-
-        # 如果是压缩包则解压，是单图则直接返回单图路径
-        if filename.lower().endswith((".zip", ".cbz")):
-            images = extract_archive(str(file_path), str(extract_dir))
+    try:
+        folder_uploads = [upload for upload in (files or []) if upload is not None]
+        if folder_uploads:
+            images = await preserve_uploaded_image_files(
+                folder_uploads,
+                relative_paths,
+                extract_dir,
+            )
+            if not images:
+                raise ValueError("文件夹中没有找到有效的受支持图片。")
+            project_title = Path(str(folder_name or "").strip()).name or "图片文件夹"
         else:
-            images = [preserve_single_upload_name(file_path, extract_dir, filename)]
-        project_title = Path(filename).stem
+            if file is None:
+                raise HTTPException(status_code=400, detail="请先选择 zip/cbz、单张图片或图片文件夹。")
+            filename = Path(file.filename or "upload").name
+            if not filename.lower().endswith(ALLOWED_EXTENSIONS):
+                raise HTTPException(status_code=400, detail="Unsupported file format")
 
-    source_dir, staged_images = prepare_session_images(session_id, images)
-    translated_dir = OUTPUT_DIR / session_id / "translated"
-    translated_dir.mkdir(parents=True, exist_ok=True)
+            file_path = TEMP_UPLOADS_DIR / f"{session_id}_{filename}"
+            await asyncio.to_thread(copy_upload_to_path, file, file_path)
 
-    SESSIONS[session_id] = {
-        "source_dir": str(source_dir),
-        "translated_dir": str(translated_dir),
-        "source_images": staged_images,
-        "download_path": None,
-        "translated_output_map": {},
-        "rerender_generation": 0,
-        "manual_regions": {},
-        "workflow_stage": "idle",
-        "review_mode": review_mode,
-    }
-    translator_engine.initialize_project(
-        session_id,
-        SESSIONS[session_id],
-        title=project_title,
-        review_mode=review_mode,
-    )
+            if filename.lower().endswith((".zip", ".cbz")):
+                images = await asyncio.to_thread(extract_archive, str(file_path), str(extract_dir))
+            else:
+                images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+            if not images:
+                raise ValueError("文件中没有找到有效的受支持图片。")
+            project_title = Path(filename).stem
+
+        source_dir, staged_images = prepare_session_images(session_id, images)
+        translated_dir = OUTPUT_DIR / session_id / "translated"
+        translated_dir.mkdir(parents=True, exist_ok=True)
+
+        SESSIONS[session_id] = {
+            "source_dir": str(source_dir),
+            "translated_dir": str(translated_dir),
+            "source_images": staged_images,
+            "download_path": None,
+            "translated_output_map": {},
+            "rerender_generation": 0,
+            "manual_regions": {},
+            "workflow_stage": "idle",
+            "review_mode": review_mode,
+        }
+        translator_engine.initialize_project(
+            session_id,
+            SESSIONS[session_id],
+            title=project_title,
+            review_mode=review_mode,
+        )
+    except UploadTooLargeError:
+        raise
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Failed to create project from upload. session_id=%s", session_id)
+        SESSIONS.pop(session_id, None)
+        shutil.rmtree(OUTPUT_DIR / session_id, ignore_errors=True)
+        raise
+    finally:
+        if file_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                file_path.unlink()
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
     return translator_engine.build_client_session_payload(session_id, SESSIONS[session_id])
 
@@ -1031,7 +1208,18 @@ async def download_blank_archive(session_id: str):
 
 @app.websocket("/ws/translate/{session_id}")
 async def translate_session(websocket: WebSocket, session_id: str):
-    await websocket.accept()
+    if not websocket_has_valid_api_token(websocket):
+        logger.warning("Translation websocket rejected because the local API token was invalid.")
+        await websocket.close(code=1008)
+        return
+
+    offered_protocols = {
+        protocol.strip()
+        for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if protocol.strip()
+    }
+    selected_protocol = "manga-translator" if "manga-translator" in offered_protocols else None
+    await websocket.accept(subprotocol=selected_protocol)
     busy_cleared = False
     action = "translate"
     target_stored_name = ""

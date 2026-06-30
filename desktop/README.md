@@ -1,70 +1,64 @@
 # Manga Translator Desktop
 
-Windows 本地分享版的桌面壳在这个目录里。
+This directory contains the Electron shell for the local Windows desktop build.
+Electron owns the window and process lifecycle; the translation work still runs
+in the local Python backend.
 
-## 目标
+## Goals
 
-- 双击安装后即可启动，不要求用户自己装 Python / Node / Git
-- 用户项目、输出、日志、模型和配置全部落在用户数据目录
-- Electron 只负责窗口与进程编排，翻译主逻辑仍由本地 Python 后端提供
+- Start from a desktop window without asking end users to run terminal commands.
+- Keep projects, output, logs, models, cache, and settings in the user data
+  directory instead of the application install directory.
+- Inject the local backend URL and per-session API token into the renderer.
+- Package only allowlisted runtime files.
 
-## 目录说明
+## Scripts
 
-- `main.mjs`
-  - Electron 主进程
-  - 启动本地后端
-  - 注入动态 API 地址与运行时信息
-- `preload.mjs`
-  - 向前端暴露 `window.mangaDesktop`
-- `scripts/dev.mjs`
-  - 本地开发：启动 Vite dev server 后再启动 Electron
-- `scripts/stage-runtime.mjs`
-  - 把前端构建产物、后端源码、字体、Python runtime 复制到 `resources-staging/`
-- `scripts/package-win.mjs`
-  - 执行前端构建、资源 staging，并调用 `electron-builder`
+- `npm run dev`: start Vite and Electron for local development.
+- `npm run stage-runtime`: stage the frontend build, allowlisted backend files,
+  pinned upstream runtime subset, and Python runtime.
+- `npm run dist:win`: build the Windows NSIS installer.
+- `npm run dist:win:dir`: build an unpacked Windows app directory.
 
-## 本地开发
+## Development
 
 ```bash
-cd <repo>/desktop
-npm install
+cd desktop
+npm ci
 npm run dev
 ```
 
-默认会：
+The dev script starts the frontend dev server on `127.0.0.1`, then opens an
+Electron window. The backend is launched through `backend/desktop_server.py`.
 
-1. 启动 `frontend` 的 Vite dev server
-2. 启动 Electron 窗口
-3. 由 Electron 自动寻找可用 Python 并拉起 `backend/desktop_server.py`
+## Windows Packaging
 
-## Windows 打包
-
-建议在 Windows 机器上执行。
-
-前提：
-
-- 已经准备好 `backend/venv`
-- 已经安装 `desktop` 目录下的 npm 依赖
-
-命令：
+Build on Windows after preparing `backend/venv`:
 
 ```powershell
-cd \path\to\manga-translator\desktop
-npm install
+cd desktop
+npm ci
 npm run dist:win
 ```
 
-产物默认输出到：
+The packaging flow runs:
 
-- `desktop/dist/`
+1. `frontend` production build.
+2. `backend/install_deps.py --prepare-only` to ensure the pinned upstream
+   checkout is patched.
+3. `desktop/scripts/stage-runtime.mjs`.
+4. `electron-builder`.
 
-## 运行时目录
+The staging script does not copy repository fonts, local models, examples,
+temporary uploads, output folders, or the upstream `.git` directory.
 
-桌面版会把可写数据统一放到：
+## Runtime Data
+
+Desktop builds use:
 
 - Windows: `%LOCALAPPDATA%/MangaTranslator/`
 
-其中包含：
+Expected subdirectories:
 
 - `projects/`
 - `output/`
@@ -72,3 +66,5 @@ npm run dist:win
 - `logs/`
 - `cache/`
 - `config/`
+
+Review `docs/release-checklist.md` before publishing any installer.

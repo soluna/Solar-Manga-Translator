@@ -67,11 +67,18 @@ if ! "$MAC_VENV_DIR/bin/python" -c "import cv2, numpy, fastapi, uvicorn, PIL, we
   "$MAC_VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
 fi
 
+echo "[2.5/4] 准备固定版本的 manga-image-translator 核心引擎..."
+(
+  cd "$BACKEND_DIR"
+  "$MAC_VENV_DIR/bin/python" install_deps.py --prepare-only
+)
+
 if ! PYTHONPATH="$BACKEND_DIR/manga-image-translator" "$MAC_VENV_DIR/bin/python" -c "import langcodes, manga_translator" >/dev/null 2>&1; then
-  echo "[2.5/4] 补齐 manga-image-translator 运行依赖..."
+  echo "[2.6/4] 补齐 manga-image-translator 运行依赖..."
   (
     cd "$BACKEND_DIR"
     "$MAC_VENV_DIR/bin/python" install_deps.py
+    "$MAC_VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
   )
 fi
 
@@ -81,8 +88,9 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
 fi
 
 echo "[4/4] 启动服务..."
+API_TOKEN="$("$MAC_VENV_DIR/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
 cd "$BACKEND_DIR"
-"$MAC_VENV_DIR/bin/python" -m uvicorn main:app --host 0.0.0.0 --port 8000 &
+APP_API_TOKEN="$API_TOKEN" "$MAC_VENV_DIR/bin/python" -m uvicorn main:app --host 127.0.0.1 --port 8000 &
 BACKEND_PID=$!
 
 echo "等待后端启动..."
@@ -92,9 +100,9 @@ cd "$FRONTEND_DIR"
 FRONTEND_PORT="$(node "$FRONTEND_DIR/scripts/find-free-port.mjs" "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}")"
 FRONTEND_URL="http://localhost:$FRONTEND_PORT"
 if [ "$MAC_OPEN_BROWSER" = "0" ]; then
-  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort &
+  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" VITE_API_TOKEN="$API_TOKEN" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort &
 else
-  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort --open "$FRONTEND_URL" &
+  FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" VITE_API_TOKEN="$API_TOKEN" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort --open "$FRONTEND_URL" &
 fi
 FRONTEND_PID=$!
 

@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const desktopDir = resolve(__dirname, '..')
 const repoRoot = resolve(desktopDir, '..')
+const backendDir = resolve(repoRoot, 'backend')
 const frontendDir = resolve(repoRoot, 'frontend')
 const args = process.argv.slice(2)
 
@@ -45,6 +47,24 @@ function run(command, commandArgs, options = {}) {
   })
 }
 
+function detectPythonRuntimeExecutable() {
+  const envPath = process.env.MANGA_TRANSLATOR_PYTHON_RUNTIME
+  const candidates = [
+    envPath ? resolve(envPath, 'Scripts', 'python.exe') : null,
+    resolve(backendDir, 'venv', 'Scripts', 'python.exe'),
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  }
+
+  throw new Error(
+    '未找到可打包的 Python runtime。请先准备 backend/venv，或设置 MANGA_TRANSLATOR_PYTHON_RUNTIME。'
+  )
+}
+
 async function main() {
   if (process.platform !== 'win32') {
     throw new Error('Windows 安装包请在 Windows 机器上构建。')
@@ -53,6 +73,12 @@ async function main() {
   await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
     cwd: frontendDir,
     env: process.env,
+  })
+
+  await run(detectPythonRuntimeExecutable(), [resolve(backendDir, 'install_deps.py'), '--prepare-only'], {
+    cwd: backendDir,
+    env: process.env,
+    windowsCommandWrapper: false,
   })
 
   await run(process.execPath, [resolve(desktopDir, 'scripts', 'stage-runtime.mjs')], {

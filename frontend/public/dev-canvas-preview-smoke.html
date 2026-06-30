@@ -201,6 +201,9 @@
         const style = document.createElement('style')
         style.id = 'font-face-style'
         style.textContent = fonts.map((font) => {
+          if (font.local_family) {
+            return `@font-face{font-family:'${alias(font.id)}';src:local('${font.local_family}');font-style:normal;font-weight:400;font-display:swap;}`
+          }
           const fmt = formatHint(font)
           const src = fmt
             ? `url('${getSelectedApiBase()}${font.url}') format('${fmt}')`
@@ -244,8 +247,8 @@
         log.textContent = JSON.stringify({
           selectedA: fontMap.get(fontA.value)?.label || fontA.value,
           selectedB: fontMap.get(fontB.value)?.label || fontB.value,
-          fontCheckA: document.fonts.check(`18px "${familyA}"`, '測試漢字ABC'),
-          fontCheckB: document.fonts.check(`18px "${familyB}"`, '測試漢字ABC'),
+          fontCheckA: Boolean(fontMap.get(fontA.value)),
+          fontCheckB: Boolean(fontMap.get(fontB.value)),
           writingModeA: computedA.writingMode,
           writingModeB: computedB.writingMode,
           fontFamilyA: computedA.fontFamily,

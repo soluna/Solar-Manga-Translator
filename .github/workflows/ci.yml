@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt pillow numpy opencv-python httpx
+      - name: Compile backend
+        run: |
+          python -m py_compile \
+            backend/main.py \
+            backend/runtime_paths.py \
+            backend/system_fonts.py \
+            backend/utils/file_handler.py \
+            backend/engine/translator.py \
+            backend/install_deps.py
+      - name: Run focused backend tests
+        run: |
+          python -m unittest \
+            backend.tests.test_file_handler \
+            backend.tests.test_api_security \
+            backend.tests.test_translator_engine_state \
+            -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Check desktop scripts
+        run: |
+          cd desktop
+          npm ci
+          node --check main.mjs
+          node --check preload.mjs
+          node --check scripts/dev.mjs
+          node --check scripts/stage-runtime.mjs
+          node --check scripts/package-win.mjs
+      - name: Check for forbidden tracked content
+        run: |
+          if git ls-files | grep -Ei '(^|/)(fonts?|models?|output_images|temp_uploads|temp_extracted|resources-staging|node_modules)(/|$)'; then
+            echo "Forbidden generated or binary-content directory is tracked."
+            exit 1
+          fi
+          if git ls-files | grep -Ei '\.(otf|ttf|ttc|woff2?|eot)$'; then
+            echo "Font binaries must not be tracked."
+            exit 1
+          fi
+            echo "Personal/local path found in tracked files."
+            exit 1
+          fi

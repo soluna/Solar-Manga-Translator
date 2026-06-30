@@ -14,7 +14,7 @@ async function canListen(port) {
     const server = net.createServer()
     server.unref()
     server.once('error', () => resolvePort(false))
-    server.listen(port, '0.0.0.0', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.close(() => resolvePort(true))
     })
   })
@@ -31,7 +31,7 @@ async function findFrontendPort(preferredPort = 5173) {
     const server = net.createServer()
     server.unref()
     server.on('error', reject)
-    server.listen(0, '0.0.0.0', () => {
+    server.listen(0, '127.0.0.1', () => {
       const address = server.address()
       const port = typeof address === 'object' && address ? address.port : 0
       server.close((error) => {

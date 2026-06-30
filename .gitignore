@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
 venv/
 .venv-mac/
 __pycache__/
@@ -16,9 +18,10 @@ frontend/test-artifacts/
 desktop/node_modules/
 desktop/dist/
 desktop/resources-staging/
+*.pen
+design/
 
-# User-provided or legacy local fonts should stay out of git. Only the
-# curated open-license built-in font package is versioned.
-fonts/*
-!fonts/builtin/
-!fonts/builtin/**
+# User-provided or legacy local fonts should stay out of git and release
+# packages. The app discovers OS fonts and user-installed custom fonts at
+# runtime instead of shipping font files in the repository.
+fonts/

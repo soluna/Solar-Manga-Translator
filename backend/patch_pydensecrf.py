@@ -169,6 +169,18 @@ def patch_custom_openai_translator(target_file: Path, patched_file: Path) -> boo
     shutil.copy2(patched_file, target_file)
     return True
 
+def patch_sakura_translator(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    updated, changed = _replace_once(
+        content,
+        '        self.client.api_key = "sk-114514"\n',
+        '        self.client.api_key = openai.api_key or "empty"\n',
+        "Sakura translator dummy API key placeholder",
+    )
+    if changed:
+        target_file.write_text(updated, encoding='utf-8')
+    return changed
+
 def patch_text_render(target_file: Path) -> bool:
     content = target_file.read_text(encoding='utf-8')
     updated = content
@@ -404,6 +416,7 @@ def patch_mask_refinement():
     target_gemini_file = translator_dir / "manga_translator" / "translators" / "gemini.py"
     target_chatgpt_file = translator_dir / "manga_translator" / "translators" / "chatgpt.py"
     target_custom_openai_file = translator_dir / "manga_translator" / "translators" / "custom_openai.py"
+    target_sakura_file = translator_dir / "manga_translator" / "translators" / "sakura.py"
     target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
     patched_rerender_cache_file = backend_dir / "patched_rerender_cache.py"
     target_rerender_cache_file = translator_dir / "manga_translator" / "utils" / "rerender_cache.py"
@@ -481,6 +494,10 @@ def patch_mask_refinement():
         print(f"Error: Could not find {patched_custom_openai_file}")
         return False
 
+    if not target_sakura_file.exists():
+        print(f"Error: Could not find {target_sakura_file}")
+        return False
+
     try:
         if patched_text_render_file.exists():
             shutil.copy2(patched_text_render_file, target_text_render_file)
@@ -524,6 +541,9 @@ def patch_mask_refinement():
 
         patch_custom_openai_translator(target_custom_openai_file, patched_custom_openai_file)
         print("Successfully replaced custom_openai.py with the patched Responses-compatible version!")
+
+        patch_sakura_translator(target_sakura_file)
+        print("Successfully patched Sakura translator dummy API key placeholder!")
 
         # We also need to patch translators/keys.py to default to Gemini 3.1 Pro Preview
         keys_file = translator_dir / "manga_translator" / "translators" / "keys.py"

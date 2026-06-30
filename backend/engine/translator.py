@@ -29,6 +29,7 @@ import numpy as np
 
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
+from system_fonts import find_default_system_font, system_font_directories
 from .image_cleanup import (
     ADVANCED_IMAGE_ERASE_PROMPT,
     ADVANCED_IMAGE_CONTAINER_MASK_PROMPT,
@@ -44,6 +45,7 @@ logger = logging.getLogger("manga_translator.engine")
 
 
 class TranslatorEngine:
+    SECRET_CONFIG_KEYS = ("api_key", "image_cleanup_api_key", "advanced_erase_api_key")
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
     ADVANCED_ERASE_MAX_CHANGED_RATIO = 0.42
@@ -57,7 +59,7 @@ class TranslatorEngine:
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
-    DEFAULT_FONT_KEY = "builtin:NotoSansCJKtc-Regular.otf"
+    DEFAULT_FONT_KEY = "system:auto"
     DEFAULT_STYLE_FONT_KEYS = {
         "gothic": DEFAULT_FONT_KEY,
         "mincho": DEFAULT_FONT_KEY,
@@ -113,11 +115,6 @@ class TranslatorEngine:
         self.config_dir = self.paths.config_dir
         self.user_font_dir = self.paths.user_fonts_dir
         self.project_font_custom_dir = self.base_dir.parent / "fonts" / "custom"
-        self.project_font_dir = self.base_dir.parent / "fonts"
-        self.project_font_legacy_dir = self.base_dir.parent / "font"
-        self.open_builtin_font_dir = self.base_dir.parent / "fonts" / "system"
-        self.open_builtin_font_legacy_dir = self.base_dir.parent / "fonts" / "builtin"
-        self.builtin_font_dir = self.base_dir / "manga-image-translator" / "fonts"
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
@@ -164,12 +161,34 @@ class TranslatorEngine:
         return self.temp_dir / f"{project_id}_translation-request-debug.jsonl"
 
     def load_persisted_settings(self) -> dict[str, Any]:
-        return self._normalize_config(self.paths.load_settings())
+        normalized = self._normalize_config(
+            self.paths.load_settings(),
+            include_persisted_secrets=False,
+        )
+        return self._redact_settings(normalized)
 
     def save_persisted_settings(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
-        normalized = self._normalize_config(raw_config)
+        incoming = dict(raw_config or {})
+        stored = self.paths.load_settings()
+        clear_secrets = {
+            str(key)
+            for key in (incoming.pop("_clear_secrets", []) or [])
+            if str(key) in self.SECRET_CONFIG_KEYS
+        }
+        merged = dict(stored)
+        merged.update(incoming)
+        for secret_key in self.SECRET_CONFIG_KEYS:
+            if secret_key in clear_secrets:
+                merged[secret_key] = ""
+            elif not str(merged.get(secret_key) or "").strip():
+                merged[secret_key] = str(stored.get(secret_key) or "").strip()
+
+        normalized = self._normalize_config(
+            merged,
+            include_persisted_secrets=False,
+        )
         self.paths.save_settings(normalized)
-        return normalized
+        return self._redact_settings(normalized)
 
     def normalize_user_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         return self._normalize_config(raw_config)
@@ -216,6 +235,16 @@ class TranslatorEngine:
             "translator": selected_translator,
             "preview": preview,
         }
+
+    def _redact_settings(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        redacted = copy.deepcopy(normalized)
+        redacted["configured_secrets"] = {
+            secret_key: bool(str(normalized.get(secret_key) or "").strip())
+            for secret_key in self.SECRET_CONFIG_KEYS
+        }
+        for secret_key in self.SECRET_CONFIG_KEYS:
+            redacted[secret_key] = ""
+        return redacted
 
     async def _validate_openai_compatible_connection(self, config: dict[str, Any]) -> str:
         base_url = str(config.get("openai_base_url") or "").strip()
@@ -513,14 +542,8 @@ class TranslatorEngine:
             "project": [
                 self.user_font_dir,
                 self.project_font_custom_dir,
-                self.project_font_dir,
-                self.project_font_legacy_dir,
             ],
-            "builtin": [
-                self.open_builtin_font_dir,
-                self.open_builtin_font_legacy_dir,
-                self.builtin_font_dir,
-            ],
+            "system": list(system_font_directories()),
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
@@ -5222,6 +5245,8 @@ class TranslatorEngine:
         return f"{project_name}_{normalized_kind}.zip"
 
     def _ensure_runtime_patches(self) -> None:
+        if os.getenv("APP_RUNTIME_PATCHES_PREPARED") == "1":
+            return
         try:
             if not patch_mask_refinement():
                 print("[WARN] Runtime patch sync did not complete successfully.")
@@ -5319,8 +5344,18 @@ class TranslatorEngine:
                 }
             )
 
-    def _normalize_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
-        raw_config = raw_config or {}
+    def _normalize_config(
+        self,
+        raw_config: dict[str, Any] | None,
+        *,
+        include_persisted_secrets: bool = True,
+    ) -> dict[str, Any]:
+        raw_config = dict(raw_config or {})
+        if include_persisted_secrets:
+            stored = self.paths.load_settings()
+            for secret_key in self.SECRET_CONFIG_KEYS:
+                if not str(raw_config.get(secret_key) or "").strip():
+                    raw_config[secret_key] = str(stored.get(secret_key) or "").strip()
         selected_translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
         if selected_translator == "custom_openai":
             selected_translator = "doubao-ark"
@@ -5672,6 +5707,9 @@ class TranslatorEngine:
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
             return ""
+        if font_key == self.DEFAULT_FONT_KEY:
+            default_font = find_default_system_font()
+            return str(default_font) if default_font is not None else ""
 
         candidate = Path(font_key)
         if candidate.exists():
@@ -6746,7 +6784,7 @@ class TranslatorEngine:
         device: str,
     ) -> np.ndarray:
         self._ensure_vendor_import_path()
-        patch_mask_refinement()
+        self._ensure_runtime_patches()
         from manga_translator.config import Inpainter, InpainterConfig, InpaintPrecision
         from manga_translator.inpainting import dispatch as dispatch_inpainting
         from manga_translator.utils import ModelWrapper

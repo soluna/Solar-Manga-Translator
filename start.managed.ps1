@@ -23,6 +23,14 @@ $browserProfileDir = Join-Path $browserProfileBase "browser-profile"
 $logDir = Join-Path $browserProfileBase "logs"
 $backendLogPath = Join-Path $logDir "backend-managed.log"
 $frontendLogPath = Join-Path $logDir "frontend-managed.log"
+$randomBytes = New-Object byte[] 32
+$randomNumberGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $randomNumberGenerator.GetBytes($randomBytes)
+} finally {
+    $randomNumberGenerator.Dispose()
+}
+$apiToken = [Convert]::ToBase64String($randomBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
 $backendProcess = $null
 $frontendProcess = $null
@@ -213,12 +221,12 @@ try {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     $frontendPort = Resolve-FrontendPort
     $frontendUrl = "http://127.0.0.1:$frontendPort"
-    $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
+    $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && set "VITE_API_TOKEN=' + $apiToken + '" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
 
     $backendProcess = Start-CmdWindow `
         -Title "Manga Translator API" `
         -WorkingDirectory $backendDir `
-        -Command 'call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port 8000' `
+        -Command ('set "APP_API_TOKEN=' + $apiToken + '" && call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port 8000') `
         -LogPath $backendLogPath
 
     if (-not (Wait-HttpReady -Url $backendUrl -TimeoutSeconds 90 -Process $backendProcess)) {

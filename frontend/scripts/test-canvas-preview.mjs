@@ -1,78 +1,35 @@
 import { createServer } from 'node:http'
-import { createReadStream } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { chromium } from 'playwright'
+import { launchChromium } from './playwright-launcher.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const frontendDir = path.resolve(__dirname, '..')
-const repoRoot = path.resolve(frontendDir, '..')
 const smokeHtmlPath = path.join(frontendDir, 'public', 'dev-canvas-preview-smoke.html')
 const artifactDir = path.join(frontendDir, 'test-artifacts')
 
-const FONT_EXTENSIONS = new Set(['.ttf', '.ttc', '.otf'])
-const FONT_DIRECTORIES = {
-  project: path.join(repoRoot, 'fonts'),
-  builtin: path.join(repoRoot, 'backend', 'manga-image-translator', 'fonts'),
-}
-
-function extensionToFormatHint(extension) {
-  if (extension === '.ttf') return 'truetype'
-  if (extension === '.otf') return 'opentype'
-  return ''
-}
-
-async function pathExists(targetPath) {
-  try {
-    await fs.access(targetPath)
-    return true
-  } catch {
-    return false
-  }
-}
-
 async function listAvailableFonts() {
-  const fonts = []
-  const preferredOrder = new Map([
-    ['msyh.ttc', 0],
-    ['msgothic.ttc', 1],
-    ['Arial-Unicode-Regular.ttf', 2],
-    ['NotoSansMonoCJK-VF.ttf.ttc', 3],
-  ])
-
-  for (const [source, fontDir] of Object.entries(FONT_DIRECTORIES)) {
-    if (!(await pathExists(fontDir))) continue
-
-    const entries = await fs.readdir(fontDir, { withFileTypes: true })
-    const fontPaths = entries
-      .filter((entry) => entry.isFile() && FONT_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
-      .sort((left, right) => {
-        const leftRank = preferredOrder.get(left.name) ?? 99
-        const rightRank = preferredOrder.get(right.name) ?? 99
-        if (leftRank !== rightRank) return leftRank - rightRank
-        return left.name.localeCompare(right.name)
-      })
-
-    for (const entry of fontPaths) {
-      const extension = path.extname(entry.name).toLowerCase()
-      const sourceLabel = source === 'project' ? '自定义' : '内置'
-      fonts.push({
-        id: `${source}:${entry.name}`,
-        name: entry.name,
-        label: `${path.parse(entry.name).name} (${sourceLabel})`,
-        source,
-        extension,
-        format_hint: extensionToFormatHint(extension),
-        url: `/api/fonts/file/${source}/${encodeURIComponent(entry.name)}`,
-        absPath: path.join(fontDir, entry.name),
-      })
-    }
-  }
-
-  return fonts
+  return [
+    {
+      id: 'test:system-sans',
+      name: 'system-sans',
+      label: 'System Sans (测试)',
+      source: 'system',
+      local_family: 'Arial',
+      url: '',
+    },
+    {
+      id: 'test:system-serif',
+      name: 'system-serif',
+      label: 'System Serif (测试)',
+      source: 'system',
+      local_family: 'Times New Roman',
+      url: '',
+    },
+  ]
 }
 
 function writeJson(response, statusCode, payload) {
@@ -103,7 +60,6 @@ function writeNoContent(response) {
 
 async function createSmokeServer() {
   const fonts = await listAvailableFonts()
-  const fontLookup = new Map(fonts.map((font) => [`${font.source}/${font.name}`, font]))
   const html = await fs.readFile(smokeHtmlPath, 'utf8')
 
   const server = createServer(async (request, response) => {
@@ -122,32 +78,7 @@ async function createSmokeServer() {
       }
 
       if (pathname === '/api/fonts') {
-        writeJson(response, 200, {
-          fonts: fonts.map(({ absPath, ...font }) => font),
-        })
-        return
-      }
-
-      if (pathname.startsWith('/api/fonts/file/')) {
-        const segments = pathname.replace('/api/fonts/file/', '').split('/')
-        const source = decodeURIComponent(segments.shift() || '')
-        const fontName = decodeURIComponent(segments.join('/'))
-        const font = fontLookup.get(`${source}/${fontName}`)
-        if (!font) {
-          writeNotFound(response)
-          return
-        }
-        const mediaType = {
-          '.ttf': 'font/ttf',
-          '.otf': 'font/otf',
-          '.ttc': 'font/collection',
-        }[font.extension] || 'application/octet-stream'
-
-        response.writeHead(200, {
-          'Content-Type': mediaType,
-          'Cache-Control': 'no-store',
-        })
-        createReadStream(font.absPath).pipe(response)
+        writeJson(response, 200, { fonts })
         return
       }
 
@@ -214,7 +145,7 @@ async function main() {
 
   let browser
   try {
-    browser = await chromium.launch({ headless: true })
+    browser = await launchChromium({ headless: true })
     const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } })
     const browserConsole = []
     page.on('console', (message) => {

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ BACKEND_DIR = ROOT / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
 from engine.translator import TranslatorEngine  # noqa: E402
+from system_fonts import find_default_system_font  # noqa: E402
 
 
 PROJECT_ID = "canvas-e2e-fixture"
@@ -30,29 +30,14 @@ def now_iso() -> str:
 
 
 def pick_font() -> tuple[str, str]:
-    font_dirs = [
-        ROOT / "fonts",
-        BACKEND_DIR / "manga-image-translator" / "fonts",
-    ]
-    preferred = [
-        "華康儷中黑.ttf",
-        "msyh.ttc",
-        "Arial-Unicode-Regular.ttf",
-        "NotoSansMonoCJK-VF.ttf.ttc",
-    ]
-    for font_dir in font_dirs:
-        if not font_dir.exists():
-            continue
-        for name in preferred:
-            path = font_dir / name
-            if path.exists():
-                source = "project" if font_dir == ROOT / "fonts" else "builtin"
-                return f"{source}:{name}", str(path)
-    return "", ""
+    path = find_default_system_font()
+    return ("system:auto", str(path)) if path is not None else ("", "")
 
 
 def safe_remove(path: Path) -> None:
     if path.exists():
+        import shutil
+
         shutil.rmtree(path, ignore_errors=True)
 
 
@@ -256,8 +241,8 @@ def create_fixture(project_id: str) -> dict[str, Any]:
     engine = TranslatorEngine(BACKEND_DIR)
     font_key, font_path = pick_font()
     project_dir = engine.projects_root / project_id
-    source_dir = BACKEND_DIR / "output_images" / project_id / "source"
-    translated_dir = BACKEND_DIR / "output_images" / project_id / "translated"
+    source_dir = engine.output_root / project_id / "source"
+    translated_dir = engine.output_root / project_id / "translated"
     rerender_cache_dir = engine._rerender_cache_dir(project_id)
     pages_dir = project_dir / "pages"
 

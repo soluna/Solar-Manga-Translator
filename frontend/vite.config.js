@@ -8,7 +8,7 @@ export default defineConfig(({ command }) => ({
   base: command === 'build' ? './' : '/',
   plugins: [vue()],
   server: {
-    host: '0.0.0.0',
+    host: '127.0.0.1',
     port: Number.isFinite(devPort) && devPort > 0 ? devPort : 5173,
     strictPort: false,
     proxy: {

@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createWriteStream, existsSync, mkdirSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +14,8 @@ const isWindows = process.platform === 'win32'
 let mainWindow = null
 let backendProcess = null
 let backendRuntime = null
+let apiToken = ''
+let rendererAccessPolicy = null
 
 function ensureDir(path) {
   mkdirSync(path, { recursive: true })
@@ -42,11 +45,13 @@ async function findFreePort() {
   })
 }
 
-async function waitForBackendReady(baseUrl, timeoutMs = 60000) {
+async function waitForBackendReady(baseUrl, token, timeoutMs = 60000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(`${baseUrl}/api/status`)
+      const response = await fetch(`${baseUrl}/api/status`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       if (response.ok) {
         return
       }
@@ -85,7 +90,7 @@ function detectPythonExecutable() {
     : { command: 'python3', prefixArgs: [] }
 }
 
-function resolveBackendLaunch(userDataDir, port) {
+function resolveBackendLaunch(userDataDir, port, token) {
   const logsDir = join(userDataDir, 'logs')
   const env = {
     ...process.env,
@@ -95,6 +100,8 @@ function resolveBackendLaunch(userDataDir, port) {
     APP_LOG_DIR: logsDir,
     APP_BACKEND_HOST: '127.0.0.1',
     APP_BACKEND_PORT: String(port),
+    APP_API_TOKEN: token,
+    APP_RUNTIME_PATCHES_PREPARED: app.isPackaged ? '1' : '0',
   }
 
   if (app.isPackaged) {
@@ -129,8 +136,9 @@ function resolveBackendLaunch(userDataDir, port) {
 async function startBackend() {
   const userDataDir = app.getPath('userData')
   const port = await findFreePort()
+  apiToken = randomBytes(32).toString('base64url')
   const backendBaseUrl = `http://127.0.0.1:${port}`
-  const launch = resolveBackendLaunch(userDataDir, port)
+  const launch = resolveBackendLaunch(userDataDir, port, apiToken)
   ensureDir(launch.logsDir)
 
   const commandLooksLikePath = launch.command.includes('/') || launch.command.includes('\\')
@@ -159,11 +167,12 @@ async function startBackend() {
     }
   })
 
-  await waitForBackendReady(backendBaseUrl)
+  await waitForBackendReady(backendBaseUrl, apiToken)
 
   backendRuntime = {
     desktop_mode: true,
     apiBaseUrl: backendBaseUrl,
+    apiToken,
     appVersion: app.getVersion(),
     dataDir: userDataDir,
     logsDir: launch.logsDir,
@@ -179,6 +188,7 @@ function stopBackend() {
 
   const processToStop = backendProcess
   backendProcess = null
+  apiToken = ''
 
   if (isWindows) {
     const killer = spawn('taskkill', ['/pid', String(processToStop.pid), '/t', '/f'], {
@@ -196,9 +206,89 @@ function stopBackend() {
   }
 }
 
+function isLoopbackHostname(hostname) {
+  return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(hostname || '').toLowerCase())
+}
+
+function assertAllowedDevRendererUrl(value) {
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`无效的渲染器地址: ${value}`)
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopbackHostname(parsed.hostname)) {
+    throw new Error('开发态渲染器地址必须使用本机回环地址。')
+  }
+  return parsed.toString()
+}
+
+function isPathInside(candidatePath, rootPath) {
+  const relativePath = relative(resolve(rootPath), resolve(candidatePath))
+  return relativePath === '' || (
+    Boolean(relativePath)
+    && !relativePath.startsWith('..')
+    && !isAbsolute(relativePath)
+  )
+}
+
+function createRendererAccessPolicy(target) {
+  if (target.type === 'url') {
+    return {
+      type: 'url',
+      origin: new URL(target.value).origin,
+    }
+  }
+  return {
+    type: 'file',
+    root: dirname(resolve(target.value)),
+  }
+}
+
+function isAllowedRendererNavigation(url) {
+  if (!rendererAccessPolicy) {
+    return false
+  }
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (rendererAccessPolicy.type === 'url') {
+    return parsed.origin === rendererAccessPolicy.origin
+  }
+  return parsed.protocol === 'file:' && isPathInside(fileURLToPath(parsed), rendererAccessPolicy.root)
+}
+
+function isSafeExternalUrl(url) {
+  try {
+    const parsed = new URL(url)
+    return ['https:', 'http:'].includes(parsed.protocol)
+  } catch {
+    return false
+  }
+}
+
+function isTrustedIpcEvent(event) {
+  const senderUrl = event.senderFrame?.url || event.sender?.getURL?.() || ''
+  return isAllowedRendererNavigation(senderUrl)
+}
+
+function sanitizeRevealPath(targetPath) {
+  if (!backendRuntime?.dataDir || typeof targetPath !== 'string') {
+    return null
+  }
+  const resolvedTarget = resolve(targetPath)
+  return isPathInside(resolvedTarget, backendRuntime.dataDir) ? resolvedTarget : null
+}
+
 function resolveRendererTarget() {
-  if (process.env.ELECTRON_RENDERER_URL) {
-    return { type: 'url', value: process.env.ELECTRON_RENDERER_URL }
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+    return {
+      type: 'url',
+      value: assertAllowedDevRendererUrl(process.env.ELECTRON_RENDERER_URL),
+    }
   }
 
   if (!app.isPackaged) {
@@ -227,11 +317,40 @@ async function createMainWindow() {
       preload: join(__dirname, 'preload.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      navigateOnDragDrop: false,
     },
   })
 
   const target = resolveRendererTarget()
+  rendererAccessPolicy = createRendererAccessPolicy(target)
+
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false)
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false)
+  })
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedRendererNavigation(url)) {
+      return
+    }
+    event.preventDefault()
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url)
+    }
+  })
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault()
+  })
+
   if (target.type === 'url') {
     await mainWindow.loadURL(target.value)
   } else {
@@ -239,15 +358,24 @@ async function createMainWindow() {
   }
 }
 
-ipcMain.handle('desktop:get-runtime', async () => backendRuntime)
-ipcMain.handle('desktop:reveal-path', async (_event, targetPath) => {
-  if (!targetPath) {
+ipcMain.handle('desktop:get-runtime', async (event) => (
+  isTrustedIpcEvent(event) ? backendRuntime : null
+))
+ipcMain.handle('desktop:reveal-path', async (event, targetPath) => {
+  if (!isTrustedIpcEvent(event)) {
     return false
   }
-  shell.showItemInFolder(targetPath)
+  const safePath = sanitizeRevealPath(targetPath)
+  if (!safePath) {
+    return false
+  }
+  shell.showItemInFolder(safePath)
   return true
 })
-ipcMain.handle('desktop:open-user-fonts', async () => {
+ipcMain.handle('desktop:open-user-fonts', async (event) => {
+  if (!isTrustedIpcEvent(event)) {
+    return { ok: false, path: '', error: '不受信任的渲染器来源。' }
+  }
   const fontsDir = join(app.getPath('userData'), 'fonts')
   ensureDir(fontsDir)
   const error = await shell.openPath(fontsDir)

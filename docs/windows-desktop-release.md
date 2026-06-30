@@ -1,22 +1,24 @@
-# Windows 本地分享版发布说明
+# Windows Desktop Release Notes
 
-## 当前方案
+The Windows desktop build packages the Vue frontend, the FastAPI backend, the
+pinned upstream translation runtime, and a Python runtime into an Electron app.
 
-第一版分享方案采用：
+## Support Matrix
 
-- Electron 作为 Windows 桌面壳
-- 本地 Python 后端作为实际翻译服务
-- 用户数据写入 `%LOCALAPPDATA%/MangaTranslator/`
+- OS: Windows 10/11 x64
+- GPU: NVIDIA CUDA recommended
+- CPU-only mode: allowed, but performance is not a release promise
 
-这套方案的目标是让普通用户安装后即可运行，而不是再手工装 Python / Node / Git。
+Document expected model download size and GPU memory requirements in every
+public release note.
 
-## 数据目录
+## Runtime Data
 
-桌面版启动后，所有可写数据都不再落到仓库目录，而是统一放到：
+Writable data lives under:
 
 - `%LOCALAPPDATA%/MangaTranslator/`
 
-目录结构：
+Subdirectories:
 
 - `projects/`
 - `output/`
@@ -25,96 +27,63 @@
 - `cache/`
 - `config/settings.json`
 
-旧版仓库目录中的 `backend/temp_uploads`、`backend/output_images` 会在首次启动时提示迁移。
+The install directory should stay read-only application code.
 
-## 支持矩阵
+## Build Flow
 
-第一版建议按下面的范围发布：
-
-- 系统：Windows 10 / 11 x64
-- GPU：NVIDIA + CUDA 推荐
-- CPU：允许运行，但不承诺体验
-
-建议在对外说明里明确：
-
-- 推荐显卡与显存
-- 首次模型下载大小
-- 无 GPU 时会变慢
-
-## 发布前检查
-
-### 安装与启动
-
-- 目标机器无需安装 Python / Node / Git
-- 安装后可直接双击启动
-- 关闭桌面窗口时，本地后端会一起退出
-
-### 数据隔离
-
-- 升级后历史项目保留
-- 卸载默认不删除用户数据
-- 应用安装目录不承担用户写入
-
-### 运行时健康
-
-- 后端仅监听 `127.0.0.1`
-- 端口为动态分配
-- `config/settings.json` 可正确保存翻译设置与 API Key
-- 日志写入 `logs/backend.log`
-
-### 模型下载
-
-当前策略是不把所有模型直接塞进安装包，而是在首次使用时下载到：
-
-- `%LOCALAPPDATA%/MangaTranslator/models/`
-
-对外发布前，建议至少验证：
-
-- 国内网络环境下首次下载是否可完成
-- 下载失败后的重试体验
-- 模型目录空间不足时的错误提示
-
-## 打包流程
-
-### 1. 准备 Windows 后端运行时
-
-先在 Windows 上确保 `backend/venv` 可正常运行。
-
-### 2. 构建前端
+Prepare the Windows Python runtime first:
 
 ```powershell
-cd \path\to\manga-translator\frontend
-npm install
-npm run build
+cd backend
+py -3.11 -m venv venv
+venv\Scripts\python -m pip install --upgrade pip
+venv\Scripts\python install_deps.py
+venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-### 3. 构建桌面壳
+Build the desktop app:
 
 ```powershell
-cd \path\to\manga-translator\desktop
-npm install
+cd desktop
+npm ci
 npm run dist:win
 ```
 
-这个命令会自动：
+The build script:
 
-1. 重新构建前端
-2. 把前端 dist、后端源码、字体和 Python runtime 复制到 `desktop/resources-staging/`
-3. 调用 `electron-builder` 输出 Windows 安装包
+1. Builds `frontend/dist`.
+2. Runs `backend/install_deps.py --prepare-only`.
+3. Stages an allowlisted runtime subset into `desktop/resources-staging/`.
+4. Runs `electron-builder`.
 
-## 已实现的产品态能力
+## What Must Not Be Packaged
 
-- 用户数据目录与应用目录分离
-- API 地址不再写死为固定端口
-- 桌面模式优先使用配置文件持久化，而不是只依赖浏览器 localStorage
-- 首次启动引导
-- 旧数据迁移提示
-- 后端运行时诊断接口
-- 日志尾部读取接口
+- Repository or user font files
+- Manga/comic source pages or translated outputs
+- `.env` files or API keys
+- Logs, temporary uploads, output folders, cache, screenshots, or fixtures from
+  real user material
+- Upstream `.git`, examples, model caches, test folders, or result folders
+- Developer machine absolute paths in generated manifests
 
-## 还需要继续验证的地方
+## Release Verification
 
-- Windows 真机打包与安装流程
-- 便携式 Python runtime 在不同机器上的兼容性
-- 模型下载与字体合法分发
-- 桌面版自动更新策略
+Before distributing an installer:
+
+- Run the full test set listed in `docs/release-checklist.md`.
+- Inspect `desktop/resources-staging/release-manifest.json`.
+- Scan `desktop/resources-staging/` for secrets, personal paths, fonts, comic
+  media, and large unexpected files.
+- Install in a clean Windows VM.
+- Confirm the backend listens only on loopback and requires the runtime token.
+- Confirm settings persist while saved API keys are redacted in renderer data.
+- Confirm uninstall leaves or removes user data according to the published
+  release note.
+
+## Known Open Items
+
+- Code signing is not configured yet.
+- A fully reproducible Python runtime build is still needed.
+- SBOM generation and installer checksum publication are still needed.
+- The clean release runtime must pass dependency audit, or explicitly document
+  any remaining upstream Torch advisory before installer distribution.

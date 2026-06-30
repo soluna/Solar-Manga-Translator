@@ -1,9 +1,5 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import reviewJaPlaceholder from './assets/v2/review-ja.jpg'
-import reviewZhPlaceholder from './assets/v2/review-zh.png'
-import thumbAPlaceholder from './assets/v2/thumb-a.jpg'
-import thumbBPlaceholder from './assets/v2/thumb-b.jpg'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 
 const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
@@ -11,6 +7,7 @@ const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && ty
   : null
 const runtimeApiBaseUrl = String(desktopBridge?.runtime?.apiBaseUrl || '').trim()
 const defaultApiBaseUrl = (runtimeApiBaseUrl || import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const apiAccessToken = String(desktopBridge?.runtime?.apiToken || import.meta.env.VITE_API_TOKEN || '').trim()
 const configStorageKey = 'manga-translator.ui-config'
 const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
 const IMAGE_THUMBNAIL_MAX_SIDE = 480
@@ -97,7 +94,7 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
-const defaultBuiltinFontId = 'builtin:NotoSansCJKtc-Regular.otf'
+const defaultSystemFontId = 'system:auto'
 const projectGlossaryCategoryOptions = ['人名', '组织/团体', '地点', '作品/道具/技能', '行业术语', '其他']
 const textDirectionOptions = [
   { value: 'auto', label: '自动（中文默认竖排）' },
@@ -129,12 +126,12 @@ const defaultReviewComparePaneModes = ['final', 'frame']
 const reviewComparePaneOrder = reviewComparePaneOptions.map((option) => option.key)
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
 const defaultStyleFontNameMap = {
-  gothic: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
-  mincho: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
-  rounded: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
-  cartoon: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
-  handwritten: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular'],
-  sfx: ['NotoSansCJKtc-Regular.otf', 'NotoSansCJKtc-Regular']
+  gothic: [],
+  mincho: [],
+  rounded: [],
+  cartoon: [],
+  handwritten: [],
+  sfx: []
 }
 const previewFallbackFontNameMap = {
   gothic: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
@@ -158,10 +155,7 @@ const styleFontConfigKeyMap = {
   sfx: 'style_font_sfx_key'
 }
 const v2PlaceholderThumbs = [
-  reviewJaPlaceholder,
-  reviewZhPlaceholder,
-  thumbAPlaceholder,
-  thumbBPlaceholder
+  'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
 ]
 const emptyRuntimeInfo = {
   desktop_mode: false,
@@ -314,14 +308,14 @@ function createDefaultConfig() {
     api_key: '',
     openai_base_url: '',
     openai_model: '',
-    font_key: defaultBuiltinFontId,
+    font_key: defaultSystemFontId,
     font_style_mode: 'auto-map',
-    style_font_gothic_key: defaultBuiltinFontId,
-    style_font_mincho_key: defaultBuiltinFontId,
-    style_font_rounded_key: defaultBuiltinFontId,
-    style_font_cartoon_key: defaultBuiltinFontId,
-    style_font_handwritten_key: defaultBuiltinFontId,
-    style_font_sfx_key: defaultBuiltinFontId,
+    style_font_gothic_key: defaultSystemFontId,
+    style_font_mincho_key: defaultSystemFontId,
+    style_font_rounded_key: defaultSystemFontId,
+    style_font_cartoon_key: defaultSystemFontId,
+    style_font_handwritten_key: defaultSystemFontId,
+    style_font_sfx_key: defaultSystemFontId,
     render_alignment: 'center',
     render_letter_spacing: 1.08,
     rerender_output_format: 'png',
@@ -521,9 +515,7 @@ function saveStoredConfig(value) {
   }
 
   try {
-    const nextValue = isDesktopRuntime.value
-      ? createBrowserConfigCache(value)
-      : normalizeStoredConfig(value)
+    const nextValue = createBrowserConfigCache(value)
     window.localStorage.setItem(configStorageKey, JSON.stringify(nextValue))
   } catch (error) {
     console.warn('Failed to persist UI config locally.', error)
@@ -755,6 +747,11 @@ const apiBaseUrl = ref(defaultApiBaseUrl)
 const appSettingsLoading = ref(false)
 const appSettingsSaving = ref(false)
 const appSettingsLoaded = ref(false)
+const configuredSecrets = ref({
+  api_key: false,
+  image_cleanup_api_key: false,
+  advanced_erase_api_key: false
+})
 const appSettingsValidation = ref({ ok: null, message: '', preview: '' })
 const onboardingOpen = ref(false)
 const migrationModalOpen = ref(false)
@@ -1410,7 +1407,9 @@ const translatorApiKeyLabel = computed(() => (
     : 'Gemini API Key'
 ))
 const translatorApiKeyPlaceholder = computed(() => (
-  config.value.translator === 'doubao-ark'
+  configuredSecrets.value.api_key && !String(config.value.api_key || '').trim()
+    ? '已安全保存，输入新值可替换'
+    : config.value.translator === 'doubao-ark'
     ? '输入火山方舟 Ark API Key'
     : config.value.translator === 'openai-compatible'
     ? '输入 OpenAI Compatible API Key'
@@ -1423,13 +1422,20 @@ const imageCleanupApiKeyLabel = computed(() => (
     : 'Gemini Image API Key'
 ))
 const imageCleanupApiKeyPlaceholder = computed(() => (
-  config.value.image_cleanup_mode === 'seedream-image'
+  configuredSecrets.value.image_cleanup_api_key && !String(config.value.image_cleanup_api_key || '').trim()
+    ? '已安全保存，输入新值可替换'
+    : config.value.image_cleanup_mode === 'seedream-image'
     ? '输入火山方舟 Ark API Key'
     : '输入 Gemini Image API Key'
 ))
 const advancedEraseProviderLabel = computed(() => (
   advancedEraseProviderOptions.find((option) => option.value === config.value.advanced_erase_provider)?.label
   || advancedEraseProviderOptions[0].label
+))
+const advancedEraseApiKeyPlaceholder = computed(() => (
+  configuredSecrets.value.advanced_erase_api_key && !String(config.value.advanced_erase_api_key || '').trim()
+    ? '已安全保存，输入新值可替换'
+    : '输入火山引擎 Ark API Key'
 ))
 const v2HasProject = computed(() => Boolean(sessionId.value || currentProject.value))
 const isDesktopRuntime = computed(() => Boolean(appRuntime.value?.desktop_mode))
@@ -1482,9 +1488,9 @@ const fontLibraryStatusText = computed(() => {
   if (fontLibraryMessage.value) {
     return fontLibraryMessage.value
   }
-  const builtinCount = availableFonts.value.filter((font) => font?.source === 'builtin').length
+  const systemCount = availableFonts.value.filter((font) => font?.source === 'system').length
   const customCount = availableFonts.value.filter((font) => font?.source === 'project').length
-  return `当前共读取 ${availableFonts.value.length} 个字体（系统 ${builtinCount} / 自定义 ${customCount}）。`
+  return `当前共读取 ${availableFonts.value.length} 个字体（系统 ${systemCount} / 自定义 ${customCount}）。`
 })
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
@@ -1791,8 +1797,12 @@ const projectMetaDirty = computed(() => {
 })
 const previewFontFaceCss = computed(() => {
   const rules = []
+  const usedFontIds = collectUsedPreviewFontIds()
   for (const font of availableFonts.value) {
     if (!font?.id || !font?.url) {
+      continue
+    }
+    if (!usedFontIds.has(String(font.id))) {
       continue
     }
     if (isPreviewFontDecodeDenied(font)) {
@@ -1858,6 +1868,27 @@ function toApiUrl(path) {
   }
 
   return `${apiBaseUrl.value}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+function apiFetch(input, init = {}) {
+  const headers = new Headers(init.headers || {})
+  if (apiAccessToken) {
+    headers.set('Authorization', `Bearer ${apiAccessToken}`)
+  }
+  return window.fetch(input, {
+    ...init,
+    headers
+  })
+}
+
+function createApiWebSocket(path) {
+  if (!apiAccessToken) {
+    return new WebSocket(toWebSocketUrl(path))
+  }
+  return new WebSocket(toWebSocketUrl(path), [
+    'manga-translator',
+    `auth.${apiAccessToken}`
+  ])
 }
 
 async function readApiJson(response, fallbackMessage) {
@@ -2101,7 +2132,7 @@ async function loadAppRuntime() {
   }
 
   try {
-    const response = await fetch(toApiUrl('/api/app/runtime'))
+    const response = await apiFetch(toApiUrl('/api/app/runtime'))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取应用运行时信息失败')
@@ -2130,7 +2161,7 @@ async function loadAppRuntime() {
 
 async function loadAppDiagnostics() {
   try {
-    const response = await fetch(toApiUrl('/api/app/diagnostics'))
+    const response = await apiFetch(toApiUrl('/api/app/diagnostics'))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取运行时诊断失败')
@@ -2147,16 +2178,23 @@ async function loadAppDiagnostics() {
 async function loadPersistedAppSettings() {
   appSettingsLoading.value = true
   try {
-    const response = await fetch(toApiUrl('/api/app/settings'))
+    const response = await apiFetch(toApiUrl('/api/app/settings'))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取设置失败')
     }
     const nextSettings = payload.settings || {}
     config.value = mergeProjectConfigWithLocalPreferences(nextSettings, config.value)
+    configuredSecrets.value = {
+      ...configuredSecrets.value,
+      ...(nextSettings.configured_secrets || {})
+    }
     appSettingsLoaded.value = true
     const translatorNeedsKey = ['gemini', 'doubao-ark'].includes(String(nextSettings?.translator || config.value.translator || ''))
-    const hasPrimaryKey = Boolean(String(nextSettings?.api_key || config.value.api_key || '').trim())
+    const hasPrimaryKey = Boolean(
+      configuredSecrets.value.api_key
+      || String(config.value.api_key || '').trim()
+    )
     onboardingOpen.value = isDesktopRuntime.value && (
       !Boolean(appRuntime.value?.settings_exists)
       || (translatorNeedsKey && !hasPrimaryKey)
@@ -2169,16 +2207,24 @@ async function loadPersistedAppSettings() {
 }
 
 let persistAppSettingsTimer = null
-async function persistAppSettings(value) {
+async function persistAppSettings(value, clearSecrets = []) {
   try {
-    const response = await fetch(toApiUrl('/api/app/settings'), {
+    const requestPayload = {
+      ...value,
+      ...(clearSecrets.length ? { _clear_secrets: clearSecrets } : {})
+    }
+    const response = await apiFetch(toApiUrl('/api/app/settings'), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(value)
+      body: JSON.stringify(requestPayload)
     })
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '保存设置失败')
+    }
+    configuredSecrets.value = {
+      ...configuredSecrets.value,
+      ...(payload.settings?.configured_secrets || {})
     }
     appRuntime.value = {
       ...appRuntime.value,
@@ -2208,7 +2254,7 @@ function queuePersistAppSettings(value) {
 async function validateCurrentSettings() {
   appSettingsValidation.value = { ok: null, message: '正在验证…', preview: '' }
   try {
-    const response = await fetch(toApiUrl('/api/app/settings/validate'), {
+    const response = await apiFetch(toApiUrl('/api/app/settings/validate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config.value)
@@ -2237,7 +2283,7 @@ async function validateCurrentSettings() {
 
 async function handleLegacyMigration(action) {
   try {
-    const response = await fetch(toApiUrl('/api/app/migrate-legacy'), {
+    const response = await apiFetch(toApiUrl('/api/app/migrate-legacy'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action })
@@ -2308,7 +2354,7 @@ async function exportCurrentPageOcrDebug() {
   exportingOcrDebug.value = true
   errorMessage.value = ''
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/ocr-debug`)
     )
     const payload = await response.json()
@@ -2344,7 +2390,7 @@ async function exportCurrentPageTranslationInputDebug() {
   exportingTranslationInputDebug.value = true
   errorMessage.value = ''
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       toApiUrl(`/api/pages/${sessionId.value}/${selectedEditPage.value.stored_name}/translation-input-debug`)
     )
     const payload = await response.json()
@@ -2380,7 +2426,7 @@ async function exportCurrentProjectTranslationRequestDebug() {
   exportingTranslationRequestDebug.value = true
   errorMessage.value = ''
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       toApiUrl(`/api/projects/${sessionId.value}/translation-request-debug`)
     )
     const payload = await response.json()
@@ -2573,7 +2619,7 @@ async function recoverCompletedTranslationIfIdle(context = {}, token = translati
 
   const attempt = Number(context.attempt || 1)
   try {
-    const projectsResponse = await fetch(toApiUrl('/api/projects'))
+    const projectsResponse = await apiFetch(toApiUrl('/api/projects'))
     const projectsPayload = await projectsResponse.json()
     if (projectsResponse.ok) {
       const project = (projectsPayload.projects || []).find((item) => String(item?.project_id || '') === projectId)
@@ -2585,7 +2631,7 @@ async function recoverCompletedTranslationIfIdle(context = {}, token = translati
       }
     }
 
-    const restoreResponse = await fetch(toApiUrl(`/api/projects/${encodeURIComponent(projectId)}/restore`), {
+    const restoreResponse = await apiFetch(toApiUrl(`/api/projects/${encodeURIComponent(projectId)}/restore`), {
       method: 'POST'
     })
     const payload = await restoreResponse.json()
@@ -2978,7 +3024,7 @@ async function loadProjectHistory(options = {}) {
     historyLoading.value = true
   }
   try {
-    const response = await fetch(toApiUrl('/api/projects'))
+    const response = await apiFetch(toApiUrl('/api/projects'))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取历史翻译列表失败')
@@ -3004,7 +3050,7 @@ async function loadProjectSnapshots(projectId, options = {}) {
     snapshotLoadingProjectId.value = projectId
   }
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots`))
+    const response = await apiFetch(toApiUrl(`/api/projects/${projectId}/snapshots`))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取项目快照失败')
@@ -3051,7 +3097,7 @@ async function restoreProject(projectId) {
   errorMessage.value = ''
   closeSocket()
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${projectId}/restore`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${projectId}/restore`), {
       method: 'POST'
     })
     const payload = await response.json()
@@ -3081,7 +3127,7 @@ async function restoreSnapshot(projectId, snapshotId) {
   errorMessage.value = ''
   closeSocket()
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshotId}/restore`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshotId}/restore`), {
       method: 'POST'
     })
     const payload = await response.json()
@@ -3104,7 +3150,7 @@ async function toggleSnapshotPin(projectId, snapshot) {
   }
   errorMessage.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshot.snapshot_id}/pin`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${projectId}/snapshots/${snapshot.snapshot_id}/pin`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -3147,7 +3193,7 @@ async function deleteProject(project) {
   errorMessage.value = ''
   deletingProjectId.value = project.project_id
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${project.project_id}`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${project.project_id}`), {
       method: 'DELETE'
     })
     const payload = await response.json()
@@ -3196,7 +3242,7 @@ async function saveProjectMetadata() {
   savingProjectMeta.value = true
   errorMessage.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}`), {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json'
@@ -3251,7 +3297,7 @@ async function loadProjectGlossary(options = {}) {
   glossaryError.value = ''
   try {
     const suffix = includeOccurrences ? '?include_occurrences=1' : '?include_occurrences=0'
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary${suffix}`))
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/glossary${suffix}`))
     const payload = await response.json()
     if (!response.ok) {
       throw new Error(payload.detail || '读取专有名词库失败')
@@ -3310,7 +3356,7 @@ async function saveProjectGlossaryDraft(options = {}) {
   }
   glossaryError.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/glossary`), {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json'
@@ -3344,7 +3390,7 @@ async function extractProjectGlossary() {
   glossaryExtracting.value = true
   glossaryError.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/extract`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/extract`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -3373,7 +3419,7 @@ async function previewProjectGlossaryApplication() {
   glossaryPreviewing.value = true
   glossaryError.value = ''
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/preview`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/preview`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -3406,7 +3452,7 @@ async function applyProjectGlossary() {
   glossaryError.value = ''
   status.value = '正在应用专有名词库并重新嵌字…'
   try {
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/apply`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/glossary/apply`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -3623,6 +3669,29 @@ function getFollowRegionFontId(region) {
 
 function getEffectiveRegionFontId(region) {
   return getRegionFontOverrideId(region) || getFollowRegionFontId(region)
+}
+
+function collectUsedPreviewFontIds() {
+  const fontIds = new Set()
+  const addFontId = (value) => {
+    const fontId = String(value || '').trim()
+    if (fontId) {
+      fontIds.add(fontId)
+    }
+  }
+
+  addFontId(config.value.font_key)
+  for (const styleBucket of styleBucketOptions.map((option) => option.value)) {
+    addFontId(getConfiguredStyleFontId(styleBucket))
+  }
+  for (const override of Object.values(translationRegionLayoutOverrides.value || {})) {
+    addFontId(override?.font_key)
+  }
+  for (const region of selectedEditPage.value?.regions || []) {
+    addFontId(getEffectiveRegionFontId(region))
+  }
+
+  return fontIds
 }
 
 function getRegionFontPlaceholderLabel(_region) {
@@ -5843,7 +5912,7 @@ async function submitManualDraw(page, bbox) {
         bbox
       })
     } else {
-      const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -6089,7 +6158,7 @@ async function deleteManualRegion(region) {
       return
     }
 
-    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -6240,7 +6309,7 @@ async function loadReviewInspection(options = {}) {
     reviewInspectionLoading.value = true
   }
   try {
-    const response = await fetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
+    const response = await apiFetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -6288,7 +6357,7 @@ async function loadStyleInspection(options = {}) {
     styleInspectionLoading.value = true
   }
   try {
-    const response = await fetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
+    const response = await apiFetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -6614,7 +6683,7 @@ async function requestPageCommands(pageId, commands, runtimeConfig) {
   if (!sessionId.value || !pageId || !Array.isArray(commands) || !commands.length) {
     return null
   }
-  const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/commands`), {
+  const response = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/commands`), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -7901,7 +7970,7 @@ async function mergeSelectedRegions() {
       return
     }
 
-    const response = await fetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -7975,36 +8044,39 @@ function clearStyleOverrides() {
   void loadEditInspection({ silent: true })
 }
 
-function clearStoredApiKey() {
+async function clearStoredApiKey() {
   config.value.api_key = ''
   saveStoredConfig(config.value)
-  status.value = '已清除本机浏览器里保存的 API Key。'
+  await persistAppSettings(normalizeStoredConfig(config.value), ['api_key'])
+  status.value = '已清除本机保存的 API Key。'
 }
 
-function clearStoredImageApiKey() {
+async function clearStoredImageApiKey() {
   config.value.image_cleanup_api_key = ''
   saveStoredConfig(config.value)
-  status.value = '已清除本机浏览器里保存的图像去字 API Key。'
+  await persistAppSettings(normalizeStoredConfig(config.value), ['image_cleanup_api_key'])
+  status.value = '已清除本机保存的图像去字 API Key。'
 }
 
-function clearStoredAdvancedEraseApiKey() {
+async function clearStoredAdvancedEraseApiKey() {
   config.value.advanced_erase_api_key = ''
   saveStoredConfig(config.value)
-  status.value = '已清除本机浏览器里保存的高级擦除 API Key。'
+  await persistAppSettings(normalizeStoredConfig(config.value), ['advanced_erase_api_key'])
+  status.value = '已清除本机保存的高级擦除 API Key。'
 }
 
 function clearTranslatorApiKey() {
-  clearStoredApiKey()
+  void clearStoredApiKey()
   appSettingsValidation.value = { ok: null, message: '', preview: '' }
 }
 
 function clearImageCleanupApiKey() {
-  clearStoredImageApiKey()
+  void clearStoredImageApiKey()
   appSettingsValidation.value = { ok: null, message: '', preview: '' }
 }
 
 function clearAdvancedEraseApiKey() {
-  clearStoredAdvancedEraseApiKey()
+  void clearStoredAdvancedEraseApiKey()
   appSettingsValidation.value = { ok: null, message: '', preview: '' }
 }
 
@@ -8240,7 +8312,7 @@ function getBackendLogHint() {
 
 async function checkBackendStatus() {
   try {
-    const response = await fetch(toApiUrl('/api/status'))
+    const response = await apiFetch(toApiUrl('/api/status'))
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`)
     }
@@ -8256,10 +8328,13 @@ async function checkBackendStatus() {
 
 function pickRecommendedFont(fonts, targetLang) {
   const preferredNames = targetLang === 'JPN'
-    ? ['NotoSansCJKtc-Regular.otf', 'msgothic.ttc', 'NotoSansMonoCJK-VF.ttf.ttc']
-    : ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf', 'msyh.ttc']
+    ? ['msgothic.ttc', 'YuGothM.ttc', 'NotoSansCJK-Regular.ttc']
+    : ['msyh.ttc', 'PingFang.ttc', 'NotoSansCJK-Regular.ttc']
 
-  return fonts.find((font) => preferredNames.includes(font.name)) || fonts[0] || null
+  return fonts.find((font) => font.id === defaultSystemFontId)
+    || fonts.find((font) => preferredNames.includes(font.name))
+    || fonts[0]
+    || null
 }
 
 function normalizeFontLookupValue(value) {
@@ -8309,7 +8384,7 @@ async function loadFonts({ forceRefresh = false } = {}) {
     const requestPath = forceRefresh
       ? `/api/fonts?refresh=${Date.now()}`
       : '/api/fonts'
-    const response = await fetch(
+    const response = await apiFetch(
       toApiUrl(requestPath),
       forceRefresh ? { cache: 'no-store' } : undefined
     )
@@ -8537,7 +8612,7 @@ async function submitV2SupplementFile(file) {
   try {
     const formData = new FormData()
     formData.append('file', file)
-    const response = await fetch(toApiUrl(`/api/projects/${sessionId.value}/base-images`), {
+    const response = await apiFetch(toApiUrl(`/api/projects/${sessionId.value}/base-images`), {
       method: 'POST',
       body: formData
     })
@@ -8746,7 +8821,10 @@ function getAdvancedEraseConfigError() {
   if (config.value.advanced_erase_provider !== 'volcengine-ark') {
     return '高级擦除第一版仅支持火山引擎 Ark / Seedream。'
   }
-  if (!String(config.value.advanced_erase_api_key || '').trim()) {
+  if (
+    !configuredSecrets.value.advanced_erase_api_key
+    && !String(config.value.advanced_erase_api_key || '').trim()
+  ) {
     return '请先在“高级擦除 API”里填写火山引擎 Ark API Key。'
   }
   if (!String(config.value.advanced_erase_base_url || '').trim()) {
@@ -8902,7 +8980,7 @@ function getAdvancedEraseActionLabel(action) {
 async function loadLocalModelInfo() {
   localModelInfoLoading.value = true
   try {
-    const response = await fetch(toApiUrl('/api/app/local-models/lama-large'))
+    const response = await apiFetch(toApiUrl('/api/app/local-models/lama-large'))
     const payload = await readApiJson(response, '读取本地模型状态失败')
     if (!response.ok) {
       throw new Error(payload.detail || '读取本地模型状态失败')
@@ -9386,7 +9464,7 @@ async function confirmBrushEdit() {
   const pageId = page.stored_name
 
   try {
-    const response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/brush-edit`), {
+    const response = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/brush-edit`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -9454,7 +9532,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     }
     let response
     try {
-      response = await fetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
+      response = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -9740,7 +9818,7 @@ async function submitFile() {
     }
     formData.append('review_mode', config.value.default_review_mode)
 
-    const response = await fetch(toApiUrl('/api/upload'), {
+    const response = await apiFetch(toApiUrl('/api/upload'), {
       method: 'POST',
       body: formData
     })
@@ -9796,7 +9874,7 @@ function startTranslation(action = 'translate') {
         : '正在启动翻译任务...'
   closeSocket()
 
-  const currentSocket = new WebSocket(toWebSocketUrl(`/ws/translate/${sessionId.value}`))
+  const currentSocket = createApiWebSocket(`/ws/translate/${sessionId.value}`)
   socket = currentSocket
 
   currentSocket.onopen = () => {
@@ -10023,30 +10101,7 @@ async function warmPreviewFonts() {
     return
   }
 
-  const fontIds = new Set()
-  for (const font of availableFonts.value) {
-    if (font?.id) {
-      if (isPreviewFontDecodeDenied(font)) {
-        continue
-      }
-      fontIds.add(String(font.id))
-    }
-  }
-  if (config.value.font_key) {
-    fontIds.add(String(config.value.font_key))
-  }
-  for (const styleBucket of styleBucketOptions.map((option) => option.value)) {
-    const fontId = getConfiguredStyleFontId(styleBucket)
-    if (fontId) {
-      fontIds.add(fontId)
-    }
-  }
-  for (const override of Object.values(translationRegionLayoutOverrides.value || {})) {
-    const fontId = String(override?.font_key || '').trim()
-    if (fontId) {
-      fontIds.add(fontId)
-    }
-  }
+  const fontIds = collectUsedPreviewFontIds()
 
   const nextState = { ...previewFontLoadState.value }
   await Promise.all(
@@ -10294,6 +10349,7 @@ watch(
     <input
       ref="v2UploadInputRef"
       class="v2-hidden-input"
+      data-testid="v2-project-file-input"
       :accept="acceptValue"
       type="file"
       @change="handleV2FileChange"
@@ -10301,6 +10357,7 @@ watch(
     <input
       ref="v2FolderUploadInputRef"
       class="v2-hidden-input"
+      data-testid="v2-project-folder-input"
       type="file"
       multiple
       webkitdirectory
@@ -10310,6 +10367,7 @@ watch(
     <input
       ref="v2SupplementInputRef"
       class="v2-hidden-input"
+      data-testid="v2-supplement-file-input"
       :accept="acceptValue"
       type="file"
       @change="handleV2SupplementFileChange"
@@ -12333,7 +12391,7 @@ watch(
               >
                 <span class="v2-font-map-label">{{ bucket.label }}</span>
                 <select v-model="config[styleFontConfigKeyMap[bucket.value]]">
-                  <option value="">使用内置默认</option>
+                  <option :value="defaultSystemFontId">使用系统默认</option>
                   <option v-for="font in availableFonts" :key="font.id" :value="font.id">
                     {{ font.label }}
                   </option>
@@ -12342,7 +12400,7 @@ watch(
             </div>
 
             <p class="v2-settings-inline-note">
-              系统字体随应用放在 fonts/system；把自己的字体文件放入自定义字体目录后，可在上方逐项覆盖，不需要安装到 Windows 系统字体。
+              应用不会捆绑字体。默认使用操作系统字体；也可把自己有权使用的字体放入自定义字体目录后逐项覆盖。
             </p>
 
             <label class="v2-field">
@@ -12447,7 +12505,7 @@ watch(
               <span>{{ advancedEraseProviderLabel }} API Key</span>
               <input
                 v-model="config.advanced_erase_api_key"
-                placeholder="输入火山引擎 Ark API Key"
+                :placeholder="advancedEraseApiKeyPlaceholder"
                 type="password"
                 autocomplete="off"
               />

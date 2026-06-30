@@ -2150,33 +2150,73 @@ print(json.dumps({
             self.assertEqual(sanitized["advanced_erase_api_key"], "")
             self.assertEqual(sanitized["image_cleanup_api_key"], "")
 
-    def test_default_font_mapping_uses_bundled_open_font(self) -> None:
+    def test_persisted_settings_redact_and_preserve_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            saved = engine.save_persisted_settings({
+                "translator": "gemini",
+                "api_key": "top-secret",
+            })
+            self.assertEqual(saved["api_key"], "")
+            self.assertTrue(saved["configured_secrets"]["api_key"])
+            self.assertEqual(engine.paths.load_settings()["api_key"], "top-secret")
+
+            updated = engine.save_persisted_settings({
+                "target_lang": "ENG",
+                "api_key": "",
+            })
+            self.assertEqual(updated["api_key"], "")
+            self.assertTrue(updated["configured_secrets"]["api_key"])
+            self.assertEqual(engine.paths.load_settings()["api_key"], "top-secret")
+            self.assertEqual(engine.normalize_user_config({})["api_key"], "top-secret")
+
+    def test_persisted_settings_require_explicit_secret_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            engine.save_persisted_settings({"api_key": "top-secret"})
+
+            cleared = engine.save_persisted_settings({
+                "api_key": "",
+                "_clear_secrets": ["api_key"],
+            })
+
+            self.assertFalse(cleared["configured_secrets"]["api_key"])
+            self.assertEqual(engine.paths.load_settings()["api_key"], "")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes are not portable to Windows")
+    def test_persisted_settings_file_is_owner_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            engine.save_persisted_settings({"api_key": "top-secret"})
+
+            mode = engine.paths.settings_path.stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+
+    def test_default_font_mapping_uses_system_font(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
             base_dir.mkdir()
-            test_font_dir = root / "fonts" / "builtin"
-            test_font_dir.mkdir(parents=True)
-            (test_font_dir / "NotoSansCJKtc-Regular.otf").write_bytes(b"test-font")
+            test_font = root / "SystemSans.ttf"
+            test_font.write_bytes(b"test-font")
             engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
 
-            config = engine.normalize_user_config({})
+            with mock.patch.object(translator_module, "find_default_system_font", return_value=test_font):
+                config = engine.normalize_user_config({})
 
             self.assertEqual(config["font_style_mode"], "auto-map")
             self.assertEqual(config["font_key"], engine.DEFAULT_FONT_KEY)
             for style in engine.STYLE_BUCKETS:
                 self.assertEqual(config["style_font_keys"][style], engine.DEFAULT_FONT_KEY)
-                self.assertTrue(config["style_font_paths"][style].endswith("NotoSansCJKtc-Regular.otf"))
+                self.assertTrue(config["style_font_paths"][style].endswith("SystemSans.ttf"))
 
     def test_font_mapping_keeps_user_style_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
             base_dir.mkdir()
-            builtin_font_dir = root / "fonts" / "builtin"
-            builtin_font_dir.mkdir(parents=True)
-            (builtin_font_dir / "NotoSansCJKtc-Regular.otf").write_bytes(b"test-font")
-            custom_font_dir = root / "fonts"
+            custom_font_dir = make_test_paths(root).user_fonts_dir
             custom_font_dir.mkdir(parents=True, exist_ok=True)
             custom_font = custom_font_dir / "CustomDialogue.otf"
             custom_font.write_bytes(b"custom-font")

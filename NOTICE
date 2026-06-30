@@ -1,0 +1,8 @@
+Manga Auto-Translator WebUI
+
+This project integrates and patches zyddnys/manga-image-translator, which is
+licensed under GPL-3.0-only.
+
+This repository intentionally does not include copyrighted manga/comic pages,
+translated manga outputs, proprietary fonts, model weights, API credentials, or
+private user data.

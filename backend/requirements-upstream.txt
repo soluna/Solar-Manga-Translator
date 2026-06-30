@@ -1,0 +1,66 @@
+# Snapshot of zyddnys/manga-image-translator requirements.txt at
+# 8e256098da2a85f6b99ec1f4cec3c28118c00bfd.
+# pydensecrf is intentionally omitted because backend/patch_pydensecrf.py
+# patches the upstream runtime to avoid that optional native build dependency.
+networkx
+torch
+groq
+torchvision
+torch-summary
+einops
+scikit-image
+opencv-python
+pyclipper
+shapely
+requests
+cryptography
+freetype-py
+aiohttp
+tqdm
+deepl
+ImageHash
+kornia
+backports.cached-property
+huggingface_hub
+transformers
+py3langid==0.2.2
+sentencepiece
+editdistance
+numpy==1.26.4
+tensorboardX
+websockets
+protobuf<6.0.0,>=3.20.2
+ctranslate2
+colorama
+openai==1.63.0
+tiktoken
+httpx==0.27.2
+open_clip_torch
+safetensors
+pandas
+onnxruntime
+timm
+omegaconf
+python-dotenv
+nest-asyncio
+marshmallow
+cython
+aioshutil
+aiofiles
+arabic-reshaper
+pyhyphen
+langcodes[data]
+manga-ocr
+langdetect
+accelerate
+bitsandbytes
+uvicorn
+fastapi
+pydantic==2.5.0
+python-multipart
+google-genai
+rich
+regex
+--extra-index-url https://frederik-uni.github.io/manga-image-translator-rust/python/wheels/simple/
+rusty-manga-image-translator
+python-bidi

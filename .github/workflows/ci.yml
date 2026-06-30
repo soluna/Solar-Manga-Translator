@@ -17,7 +17,7 @@ jobs:
       - name: Install backend test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements.txt pillow numpy opencv-python httpx
+          python -m pip install -r backend/requirements.txt pillow numpy opencv-python httpx tqdm
       - name: Compile backend
         run: |
           python -m py_compile \
@@ -70,6 +70,7 @@ jobs:
             echo "Font binaries must not be tracked."
             exit 1
           fi
+          if git grep -n -E '(/Users/|/Volumes/|C:\\Users\\|iCloud~md~obsidian|ClaudeDev|Mobile Documents|Mobile%20Documents|Documents/SOL)' -- . ':(exclude).github/workflows/ci.yml'; then
             echo "Personal/local path found in tracked files."
             exit 1
           fi

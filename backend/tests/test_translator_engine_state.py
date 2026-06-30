@@ -45,6 +45,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
         return TranslatorEngine(BACKEND_DIR, app_paths=make_test_paths(root))
 
     def load_patched_text_mask_utils(self):
+        vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
+        if not vendor_root.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
         sys.path.insert(0, str(BACKEND_DIR / "manga-image-translator"))
         spec = importlib.util.spec_from_file_location(
             "manga_translator.mask_refinement.patched_text_mask_utils_test",

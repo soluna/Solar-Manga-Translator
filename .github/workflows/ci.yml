@@ -32,6 +32,7 @@ jobs:
           python -m unittest \
             backend.tests.test_file_handler \
             backend.tests.test_api_security \
+            backend.tests.test_runtime_paths \
             backend.tests.test_translator_engine_state \
             -v
 

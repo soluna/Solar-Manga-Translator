@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import uuid
 from urllib.parse import quote
@@ -527,6 +528,20 @@ def read_log_tail(path: Path, max_lines: int = 200) -> list[str]:
     return lines[-max(1, min(max_lines, 2000)):]
 
 
+def open_directory_in_file_manager(path: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
 @app.get("/api/status")
 async def get_status():
     return {"status": "running", "auth_required": bool(API_TOKEN)}
@@ -584,6 +599,16 @@ async def get_app_logs_tail(lines: int = 200):
     return {
         "path": str(APP_PATHS.backend_log_path),
         "lines": read_log_tail(APP_PATHS.backend_log_path, max_lines=lines),
+    }
+
+
+@app.post("/api/app/open-user-fonts")
+async def open_user_fonts_directory():
+    error = open_directory_in_file_manager(APP_PATHS.user_fonts_dir)
+    return {
+        "ok": not error,
+        "path": str(APP_PATHS.user_fonts_dir),
+        "error": error,
     }
 
 

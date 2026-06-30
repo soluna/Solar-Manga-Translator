@@ -1472,14 +1472,17 @@ const appRuntimeCustomFontDirLabel = computed(() => {
   return dirs.join('；')
 })
 const appRuntimeSystemFontDirLabel = computed(() => {
-  const systemDirs = appRuntime.value?.font_dirs?.builtin
+  const systemDirs = appRuntime.value?.font_dirs?.system || appRuntime.value?.font_dirs?.builtin
   const dirs = Array.isArray(systemDirs)
     ? systemDirs.map((path) => String(path || '').trim()).filter(Boolean)
     : []
   return dirs.join('；')
 })
 const canOpenFontLibraryDirectory = computed(() => (
-  Boolean(isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
+  Boolean(
+    (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
+    || backendOnline.value
+  )
 ))
 const fontLibraryStatusText = computed(() => {
   if (fontLibraryRefreshing.value) {
@@ -8436,19 +8439,28 @@ async function refreshFontLibrary() {
     return
   }
 
-  const builtinCount = result.fonts.filter((font) => font?.source === 'builtin').length
+  const systemCount = result.fonts.filter((font) => font?.source === 'system' || font?.source === 'builtin').length
   const customCount = result.fonts.filter((font) => font?.source === 'project').length
-  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个字体（系统 ${builtinCount} / 自定义 ${customCount}）。`
+  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个字体（系统 ${systemCount} / 自定义 ${customCount}）。`
 }
 
 async function openFontLibraryDirectory() {
   if (!canOpenFontLibraryDirectory.value) {
-    fontLibraryMessage.value = '请在 Windows 桌面版中打开自定义字库文件夹。'
+    fontLibraryMessage.value = '请先确认本地后端在线，再打开自定义字库文件夹。'
     return
   }
 
   try {
-    const result = await desktopBridge.openUserFonts()
+    let result = null
+    if (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function') {
+      result = await desktopBridge.openUserFonts()
+    } else {
+      const response = await apiFetch(toApiUrl('/api/app/open-user-fonts'), { method: 'POST' })
+      result = await response.json()
+      if (!response.ok) {
+        throw new Error(result?.detail || '后端未能打开目录。')
+      }
+    }
     if (!result?.ok) {
       throw new Error(result?.error || '系统文件管理器未能打开目录。')
     }
@@ -12394,7 +12406,7 @@ watch(
                 type="button"
                 class="v2-secondary-button"
                 :disabled="!canOpenFontLibraryDirectory"
-                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开自定义字库文件夹' : '仅 Windows 桌面版支持'"
+                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开自定义字库文件夹' : '本地后端在线后可打开'"
                 @click="openFontLibraryDirectory"
               >
                 打开字库文件夹
@@ -12419,7 +12431,7 @@ watch(
             </div>
 
             <p class="v2-settings-inline-note">
-              应用不会捆绑字体。默认使用操作系统字体；也可把自己有权使用的字体放入自定义字体目录后逐项覆盖。
+              系统字体来自操作系统字体目录；自定义字体才放入应用字库文件夹。应用不会捆绑字体，请只放入自己有权使用的字体。
             </p>
 
             <label class="v2-field">

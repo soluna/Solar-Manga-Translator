@@ -12,6 +12,12 @@ from typing import Any
 
 
 APP_NAME = "Solar-Manga-Translator"
+LEGACY_APP_NAMES = (
+    "MangaTranslator",
+    "Manga Translator",
+    "manga-translator",
+    "manga-translator-desktop",
+)
 
 
 def _now_iso() -> str:
@@ -26,6 +32,19 @@ def _default_user_data_dir() -> Path:
     if sys_platform() == "darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME
     return Path.home() / ".local" / "share" / APP_NAME
+
+
+def _platform_app_data_bases() -> list[Path]:
+    bases: list[Path] = []
+    if os.name == "nt":
+        for env_name in ("LOCALAPPDATA", "APPDATA"):
+            value = os.getenv(env_name)
+            if value:
+                bases.append(Path(value))
+        return bases
+    if sys_platform() == "darwin":
+        return [Path.home() / "Library" / "Application Support"]
+    return [Path.home() / ".local" / "share"]
 
 
 def sys_platform() -> str:
@@ -56,6 +75,53 @@ def _write_json_file(path: Path, payload: Any) -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             temp_path.unlink()
+
+
+def _merge_project_index_items(left: Any, right: Any) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for raw_items in (left, right):
+        if not isinstance(raw_items, list):
+            continue
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            project_id = str(item.get("project_id") or "").strip()
+            if not project_id:
+                continue
+            current = merged.get(project_id)
+            if current is None or str(item.get("updated_at") or "") >= str(current.get("updated_at") or ""):
+                merged[project_id] = item
+    items = list(merged.values())
+    items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return items
+
+
+def _project_ids_from_index(index_path: Path) -> set[str]:
+    payload = _read_json_file(index_path, [])
+    if not isinstance(payload, list):
+        return set()
+    return {
+        str(item.get("project_id") or "").strip()
+        for item in payload
+        if isinstance(item, dict) and str(item.get("project_id") or "").strip()
+    }
+
+
+def _project_ids_from_projects_dir(projects_dir: Path) -> set[str]:
+    project_ids = set(_project_ids_from_index(projects_dir / "project_index.json"))
+    if not projects_dir.exists():
+        return project_ids
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        manifest = _read_json_file(project_dir / "project.json", {})
+        if isinstance(manifest, dict):
+            project_id = str(manifest.get("project_id") or project_dir.name).strip()
+        else:
+            project_id = project_dir.name
+        if project_id:
+            project_ids.add(project_id)
+    return project_ids
 
 
 @dataclass(slots=True)
@@ -115,6 +181,24 @@ class AppPaths:
             self.code_dir.parent / "models",
         ]
 
+    @property
+    def legacy_app_data_dirs(self) -> list[Path]:
+        candidates: list[Path] = []
+        candidates.extend(self.app_data_dir.parent / name for name in LEGACY_APP_NAMES)
+        for base in _platform_app_data_bases():
+            candidates.extend(base / name for name in LEGACY_APP_NAMES)
+
+        directories: list[Path] = []
+        seen: set[str] = {str(self.app_data_dir.resolve())}
+        for candidate in candidates:
+            with contextlib.suppress(OSError):
+                normalized = str(candidate.expanduser().resolve())
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                directories.append(candidate.expanduser())
+        return directories
+
     def ensure_directories(self) -> None:
         for path in (
             self.app_data_dir,
@@ -160,21 +244,83 @@ class AppPaths:
         legacy_index = self.legacy_temp_uploads_dir / "project_index.json"
         legacy_output = self.legacy_output_dir
         legacy_models = [path for path in self.legacy_model_dirs if path.exists()]
+        legacy_app_data = [
+            {
+                "app_data": path,
+                "projects": path / "projects",
+                "project_index": path / "projects" / "project_index.json",
+                "output": path / "output",
+                "models": path / "models",
+                "fonts": path / "fonts",
+                "settings": path / "config" / "settings.json",
+            }
+            for path in self.legacy_app_data_dirs
+        ]
+        existing_legacy_app_data = [
+            source for source in legacy_app_data if source["app_data"].exists()
+        ]
 
         has_legacy_projects = legacy_projects.exists() and any(legacy_projects.iterdir())
         has_legacy_index = legacy_index.exists()
         has_legacy_output = legacy_output.exists() and any(legacy_output.iterdir())
         has_legacy_models = any(path.exists() and any(path.iterdir()) for path in legacy_models)
-        needed = any((has_legacy_projects, has_legacy_index, has_legacy_output, has_legacy_models))
+        has_legacy_app_projects = any(
+            source["projects"].exists() and any(source["projects"].iterdir())
+            for source in existing_legacy_app_data
+        )
+        has_legacy_app_output = any(
+            source["output"].exists() and any(source["output"].iterdir())
+            for source in existing_legacy_app_data
+        )
+        has_legacy_app_models = any(
+            source["models"].exists() and any(source["models"].iterdir())
+            for source in existing_legacy_app_data
+        )
+        has_legacy_app_fonts = any(
+            source["fonts"].exists() and any(source["fonts"].iterdir())
+            for source in existing_legacy_app_data
+        )
+        has_legacy_app_settings = any(
+            source["settings"].exists()
+            for source in existing_legacy_app_data
+        )
+        target_project_ids = _project_ids_from_projects_dir(self.projects_dir)
+        legacy_project_ids = set(_project_ids_from_index(legacy_index))
+        legacy_project_ids.update(_project_ids_from_projects_dir(legacy_projects))
+        for source in existing_legacy_app_data:
+            legacy_project_ids.update(_project_ids_from_projects_dir(source["projects"]))
+        has_unmigrated_projects = bool(legacy_project_ids - target_project_ids)
+        has_any_legacy = any((
+            has_legacy_projects,
+            has_legacy_index,
+            has_legacy_output,
+            has_legacy_models,
+            has_legacy_app_projects,
+            has_legacy_app_output,
+            has_legacy_app_models,
+            has_legacy_app_fonts,
+            has_legacy_app_settings,
+        ))
+        migration_finished = migration_state.get("status") in {"completed", "skipped"}
+        needed = bool(has_any_legacy and (not migration_finished or has_unmigrated_projects))
 
         return {
-            "needed": bool(needed and migration_state.get("status") not in {"completed", "skipped"}),
+            "needed": needed,
             "status": str(migration_state.get("status") or "pending"),
             "updated_at": str(migration_state.get("updated_at") or ""),
             "legacy": {
                 "projects": str(legacy_projects),
                 "output": str(legacy_output),
                 "models": [str(path) for path in legacy_models],
+                "app_data": [
+                    {
+                        "path": str(source["app_data"]),
+                        "projects": str(source["projects"]),
+                        "output": str(source["output"]),
+                        "fonts": str(source["fonts"]),
+                    }
+                    for source in existing_legacy_app_data
+                ],
             },
             "target": {
                 "app_data": str(self.app_data_dir),
@@ -189,13 +335,35 @@ class AppPaths:
                 "has_legacy_index": has_legacy_index,
                 "has_legacy_output": has_legacy_output,
                 "has_legacy_models": has_legacy_models,
+                "has_legacy_app_projects": has_legacy_app_projects,
+                "has_legacy_app_output": has_legacy_app_output,
+                "has_legacy_app_models": has_legacy_app_models,
+                "has_legacy_app_fonts": has_legacy_app_fonts,
+                "has_legacy_app_settings": has_legacy_app_settings,
+                "has_unmigrated_projects": has_unmigrated_projects,
                 "legacy_bytes": (
                     self._dir_size_bytes(legacy_projects)
                     + self._dir_size_bytes(legacy_output)
                     + sum(self._dir_size_bytes(path) for path in legacy_models)
+                    + sum(
+                        self._dir_size_bytes(source["projects"])
+                        + self._dir_size_bytes(source["output"])
+                        + self._dir_size_bytes(source["models"])
+                        + self._dir_size_bytes(source["fonts"])
+                        for source in existing_legacy_app_data
+                    )
                 ),
             },
         }
+
+    def _merge_project_index_file(self, source_index_path: Path) -> None:
+        if not source_index_path.exists():
+            return
+        source_items = _read_json_file(source_index_path, [])
+        target_items = _read_json_file(self.project_index_path, [])
+        merged = _merge_project_index_items(target_items, source_items)
+        if merged:
+            _write_json_file(self.project_index_path, merged)
 
     def migrate_legacy(self, action: str) -> dict[str, Any]:
         normalized = str(action or "").strip().lower()
@@ -214,14 +382,40 @@ class AppPaths:
 
         if legacy_projects.exists():
             shutil.copytree(legacy_projects, self.projects_dir, dirs_exist_ok=True)
-        if legacy_index.exists() and not self.project_index_path.exists():
-            shutil.copy2(legacy_index, self.project_index_path)
+        self._merge_project_index_file(legacy_index)
         if legacy_output.exists():
             shutil.copytree(legacy_output, self.output_dir, dirs_exist_ok=True)
 
         for legacy_model_dir in self.legacy_model_dirs:
             if legacy_model_dir.exists():
                 shutil.copytree(legacy_model_dir, self.models_dir, dirs_exist_ok=True)
+
+        for legacy_app_data_dir in self.legacy_app_data_dirs:
+            if not legacy_app_data_dir.exists():
+                continue
+            legacy_app_projects = legacy_app_data_dir / "projects"
+            legacy_app_output = legacy_app_data_dir / "output"
+            legacy_app_models = legacy_app_data_dir / "models"
+            legacy_app_fonts = legacy_app_data_dir / "fonts"
+            legacy_app_settings = legacy_app_data_dir / "config" / "settings.json"
+
+            if legacy_app_projects.exists():
+                self._merge_project_index_file(legacy_app_projects / "project_index.json")
+                shutil.copytree(
+                    legacy_app_projects,
+                    self.projects_dir,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(self.project_index_path.name),
+                )
+            if legacy_app_output.exists():
+                shutil.copytree(legacy_app_output, self.output_dir, dirs_exist_ok=True)
+            if legacy_app_models.exists():
+                shutil.copytree(legacy_app_models, self.models_dir, dirs_exist_ok=True)
+            if legacy_app_fonts.exists():
+                shutil.copytree(legacy_app_fonts, self.user_fonts_dir, dirs_exist_ok=True)
+            if legacy_app_settings.exists() and not self.settings_path.exists():
+                self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_app_settings, self.settings_path)
 
         payload = {"status": "completed", "updated_at": _now_iso()}
         self.save_migration_state(payload)

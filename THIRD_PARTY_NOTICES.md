@@ -31,5 +31,12 @@ dependency/license report for the packaged runtime.
 
 ## Assets, Fonts, Models
 
-This repository does not ship manga/comic media, font binaries, or model
-weights. Users are responsible for using lawful input material and fonts.
+This repository does not ship manga/comic media, proprietary font binaries, or
+model weights. Users are responsible for using lawful input material.
+
+Bundled open-source fonts:
+
+- Source Han Sans SC Regular, Medium, and Bold
+- Source: https://github.com/adobe-fonts/source-han-sans
+- License: SIL Open Font License 1.1, included at
+  `backend/typefaces/OFL-1.1-Source-Han-Sans.txt`

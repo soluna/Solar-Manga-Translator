@@ -1,68 +1,31 @@
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 
 FONT_EXTENSIONS = {".ttf", ".ttc", ".otf"}
+BUNDLED_DEFAULT_FONT_NAME = "SourceHanSansSC-Regular-2.otf"
+BUNDLED_PREFERRED_FONT_NAMES = (
+    BUNDLED_DEFAULT_FONT_NAME,
+    "SourceHanSansSC-Medium-2.otf",
+    "SourceHanSansSC-Bold.otf",
+)
 
 
-def system_font_directories() -> tuple[Path, ...]:
-    home = Path.home()
-    if os.name == "nt":
-        windows_dir = Path(os.getenv("WINDIR") or "C:/Windows")
-        candidates = (windows_dir / "Fonts",)
-    elif sys.platform == "darwin":
-        candidates = (
-            Path("/System/Library/Fonts"),
-            Path("/Library/Fonts"),
-            home / "Library" / "Fonts",
-        )
-    else:
-        candidates = (
-            Path("/usr/share/fonts"),
-            Path("/usr/local/share/fonts"),
-            home / ".local" / "share" / "fonts",
-            home / ".fonts",
-        )
-
+def bundled_font_directories(code_dir: Path) -> tuple[Path, ...]:
+    candidates = (
+        Path(code_dir).resolve() / "typefaces",
+    )
     return tuple(path for path in candidates if path.exists() and path.is_dir())
 
 
-def find_default_system_font() -> Path | None:
-    preferred_names = (
-        "msyh.ttc",
-        "msyhbd.ttc",
-        "msgothic.ttc",
-        "YuGothM.ttc",
-        "PingFang.ttc",
-        "Hiragino Sans GB.ttc",
-        "NotoSansCJK-Regular.ttc",
-        "NotoSansCJKsc-Regular.otf",
-        "NotoSansSC-Regular.otf",
-        "DejaVuSans.ttf",
-    )
-    directories = system_font_directories()
-
-    for name in preferred_names:
+def find_default_bundled_font(code_dir: Path) -> Path | None:
+    directories = bundled_font_directories(code_dir)
+    for name in BUNDLED_PREFERRED_FONT_NAMES:
         for directory in directories:
-            direct = directory / name
-            if direct.is_file():
-                return direct.resolve()
-            try:
-                nested = next(
-                    (
-                        path
-                        for path in directory.rglob(name)
-                        if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS
-                    ),
-                    None,
-                )
-            except OSError:
-                nested = None
-            if nested is not None:
-                return nested.resolve()
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate.resolve()
 
     for directory in directories:
         try:

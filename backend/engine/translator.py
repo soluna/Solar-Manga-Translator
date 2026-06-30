@@ -27,9 +27,10 @@ from urllib import request as urllib_request
 import cv2
 import numpy as np
 
+from http_requests import build_json_post_request
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
-from system_fonts import find_default_system_font, system_font_directories
+from system_fonts import BUNDLED_DEFAULT_FONT_NAME, FONT_EXTENSIONS, bundled_font_directories, find_default_bundled_font
 from .image_cleanup import (
     ADVANCED_IMAGE_ERASE_PROMPT,
     ADVANCED_IMAGE_CONTAINER_MASK_PROMPT,
@@ -59,7 +60,8 @@ class TranslatorEngine:
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
-    DEFAULT_FONT_KEY = "system:auto"
+    DEFAULT_FONT_KEY = f"project:{BUNDLED_DEFAULT_FONT_NAME}"
+    LEGACY_DEFAULT_FONT_KEYS = {"system:auto"}
     DEFAULT_STYLE_FONT_KEYS = {
         "gothic": DEFAULT_FONT_KEY,
         "mincho": DEFAULT_FONT_KEY,
@@ -113,8 +115,7 @@ class TranslatorEngine:
         self.output_root = self.paths.output_dir
         self.logs_dir = self.paths.logs_dir
         self.config_dir = self.paths.config_dir
-        self.user_font_dir = self.paths.user_fonts_dir
-        self.project_font_custom_dir = self.base_dir.parent / "fonts" / "custom"
+        self.bundled_font_dirs = list(bundled_font_directories(self.base_dir))
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
@@ -429,15 +430,7 @@ class TranslatorEngine:
         api_key: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        request = urllib_request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
+        request = build_json_post_request(url, api_key=api_key, payload=payload)
         try:
             with urllib_request.urlopen(request, timeout=30) as response:
                 body = response.read().decode("utf-8")
@@ -539,11 +532,7 @@ class TranslatorEngine:
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
-            "project": [
-                self.user_font_dir,
-                self.project_font_custom_dir,
-            ],
-            "system": list(system_font_directories()),
+            "project": self.bundled_font_dirs,
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
@@ -5389,6 +5378,10 @@ class TranslatorEngine:
             or style_font_keys.get("gothic")
             or self.DEFAULT_FONT_KEY
         ).strip()
+        if font_key in self.LEGACY_DEFAULT_FONT_KEYS:
+            font_key = self.DEFAULT_FONT_KEY
+        if not self._resolve_font_path(font_key):
+            font_key = self.DEFAULT_FONT_KEY
         font_path = self._resolve_font_path(font_key)
         image_cleanup_mode = self._normalize_image_cleanup_mode(raw_config.get("image_cleanup_mode"))
         image_cleanup_model = self._normalize_image_cleanup_model(
@@ -5559,7 +5552,10 @@ class TranslatorEngine:
         normalized: dict[str, str] = {}
         for style in self.STYLE_BUCKETS:
             raw_key = str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
-            normalized[style] = raw_key or self.DEFAULT_STYLE_FONT_KEYS.get(style, self.DEFAULT_FONT_KEY)
+            if raw_key in self.LEGACY_DEFAULT_FONT_KEYS:
+                raw_key = self.DEFAULT_FONT_KEY
+            fallback_key = self.DEFAULT_STYLE_FONT_KEYS.get(style, self.DEFAULT_FONT_KEY)
+            normalized[style] = raw_key if raw_key and self._resolve_font_path(raw_key) else fallback_key
         return normalized
 
     def _normalize_style_region_overrides(self, raw_value: Any) -> dict[str, str]:
@@ -5707,30 +5703,43 @@ class TranslatorEngine:
     def _resolve_font_path(self, font_key: str) -> str:
         if not font_key:
             return ""
-        if font_key == self.DEFAULT_FONT_KEY:
-            default_font = find_default_system_font()
+        if font_key == self.DEFAULT_FONT_KEY or font_key in self.LEGACY_DEFAULT_FONT_KEYS:
+            default_font = find_default_bundled_font(self.base_dir)
             return str(default_font) if default_font is not None else ""
-
-        candidate = Path(font_key)
-        if candidate.exists():
-            return str(candidate.resolve())
 
         font_dirs = self._font_directories_by_source()
 
         if ":" in font_key:
             source, font_name = font_key.split(":", 1)
             for font_dir in font_dirs.get(source, []):
-                resolved = font_dir / font_name
-                if resolved.exists():
-                    return str(resolved.resolve())
+                resolved = self._resolve_font_path_inside(font_dir, font_name)
+                if resolved:
+                    return resolved
 
         for font_dir_group in font_dirs.values():
             for font_dir in font_dir_group:
-                resolved = font_dir / font_key
-                if resolved.exists():
-                    return str(resolved.resolve())
+                resolved = self._resolve_font_path_inside(font_dir, font_key)
+                if resolved:
+                    return resolved
 
         print(f"[WARN] Requested font not found: {font_key}")
+        return ""
+
+    def _resolve_font_path_inside(self, font_dir: Path, font_name: str) -> str:
+        normalized_name = str(font_name or "").replace("\\", "/").strip("/")
+        if not normalized_name or any(part in {"", ".", ".."} for part in normalized_name.split("/")):
+            return ""
+        try:
+            root = font_dir.resolve()
+            candidate = (font_dir / Path(*normalized_name.split("/"))).resolve()
+        except OSError:
+            return ""
+        if (
+            candidate.is_file()
+            and candidate.suffix.lower() in FONT_EXTENSIONS
+            and root in candidate.parents
+        ):
+            return str(candidate)
         return ""
 
     def _translated_output_path(

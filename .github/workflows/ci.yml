@@ -10,8 +10,8 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install backend test dependencies
@@ -22,15 +22,18 @@ jobs:
         run: |
           python -m py_compile \
             backend/main.py \
+            backend/http_requests.py \
             backend/runtime_paths.py \
             backend/system_fonts.py \
             backend/utils/file_handler.py \
             backend/engine/translator.py \
+            backend/patched_custom_openai.py \
             backend/install_deps.py
       - name: Run focused backend tests
         run: |
           python -m unittest \
             backend.tests.test_file_handler \
+            backend.tests.test_http_requests \
             backend.tests.test_api_security \
             backend.tests.test_runtime_paths \
             backend.tests.test_translator_engine_state \
@@ -39,8 +42,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
@@ -67,8 +70,10 @@ jobs:
             echo "Forbidden generated or binary-content directory is tracked."
             exit 1
           fi
-          if git ls-files | grep -Ei '\.(otf|ttf|ttc|woff2?|eot)$'; then
-            echo "Font binaries must not be tracked."
+          disallowed_fonts="$(git ls-files | grep -Ei '\.(otf|ttf|ttc|woff2?|eot)$' | grep -Ev '^backend/typefaces/SourceHanSansSC-(Regular-2|Medium-2|Bold)\.otf$' || true)"
+          if [ -n "$disallowed_fonts" ]; then
+            echo "$disallowed_fonts"
+            echo "Only allowlisted open-source bundled fonts may be tracked."
             exit 1
           fi
           if git grep -n -E '(/Users/|/Volumes/|C:\\Users\\|iCloud~md~obsidian|ClaudeDev|Mobile Documents|Mobile%20Documents|Documents/SOL)' -- . ':(exclude).github/workflows/ci.yml'; then

@@ -94,7 +94,8 @@ const styleBucketOptions = [
   { value: 'handwritten', label: '手写' },
   { value: 'sfx', label: '拟声' }
 ]
-const defaultSystemFontId = 'system:auto'
+const defaultSystemFontId = 'project:SourceHanSansSC-Regular-2.otf'
+const legacyDefaultFontIds = new Set(['system:auto'])
 const projectGlossaryCategoryOptions = ['人名', '组织/团体', '地点', '作品/道具/技能', '行业术语', '其他']
 const textDirectionOptions = [
   { value: 'auto', label: '自动（中文默认竖排）' },
@@ -400,6 +401,14 @@ function normalizeStoredConfig(rawValue) {
     : defaults.workspace_width_mode
   const renderAlignment = normalizeRenderAlignmentValue(rawValue.render_alignment, defaults.render_alignment)
 
+  const normalizeFontKey = (value, fallback = defaultSystemFontId) => {
+    const normalized = typeof value === 'string' ? value.trim() : ''
+    if (!normalized || legacyDefaultFontIds.has(normalized)) {
+      return fallback
+    }
+    return normalized
+  }
+
   return {
     translator,
     translator_model: translatorModel,
@@ -409,32 +418,28 @@ function normalizeStoredConfig(rawValue) {
     api_key: typeof rawValue.api_key === 'string' ? rawValue.api_key : defaults.api_key,
     openai_base_url: typeof rawValue.openai_base_url === 'string' ? rawValue.openai_base_url : defaults.openai_base_url,
     openai_model: typeof rawValue.openai_model === 'string' ? rawValue.openai_model : defaults.openai_model,
-    font_key: typeof rawValue.font_key === 'string' && rawValue.font_key.trim()
-      ? rawValue.font_key
-      : defaults.font_key,
+    font_key: normalizeFontKey(rawValue.font_key, defaults.font_key),
     font_style_mode: fontStyleMode,
-    style_font_gothic_key: typeof rawValue.style_font_gothic_key === 'string' && rawValue.style_font_gothic_key.trim()
-      ? rawValue.style_font_gothic_key
-      : defaults.style_font_gothic_key,
+    style_font_gothic_key: normalizeFontKey(rawValue.style_font_gothic_key, defaults.style_font_gothic_key),
     style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
       && rawValue.style_font_mincho_key.trim()
-      ? rawValue.style_font_mincho_key
+      ? normalizeFontKey(rawValue.style_font_mincho_key, defaults.style_font_mincho_key)
       : defaults.style_font_mincho_key,
     style_font_rounded_key: typeof rawValue.style_font_rounded_key === 'string'
       && rawValue.style_font_rounded_key.trim()
-      ? rawValue.style_font_rounded_key
+      ? normalizeFontKey(rawValue.style_font_rounded_key, defaults.style_font_rounded_key)
       : defaults.style_font_rounded_key,
     style_font_cartoon_key: typeof rawValue.style_font_cartoon_key === 'string'
       && rawValue.style_font_cartoon_key.trim()
-      ? rawValue.style_font_cartoon_key
+      ? normalizeFontKey(rawValue.style_font_cartoon_key, defaults.style_font_cartoon_key)
       : defaults.style_font_cartoon_key,
     style_font_handwritten_key: typeof rawValue.style_font_handwritten_key === 'string'
       && rawValue.style_font_handwritten_key.trim()
-      ? rawValue.style_font_handwritten_key
+      ? normalizeFontKey(rawValue.style_font_handwritten_key, defaults.style_font_handwritten_key)
       : defaults.style_font_handwritten_key,
     style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
       && rawValue.style_font_sfx_key.trim()
-      ? rawValue.style_font_sfx_key
+      ? normalizeFontKey(rawValue.style_font_sfx_key, defaults.style_font_sfx_key)
       : defaults.style_font_sfx_key,
     render_alignment: renderAlignment,
     render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
@@ -1464,17 +1469,10 @@ const appRuntimeGpuLabel = computed(() => {
   return gpu.cuda_version ? `${primary} / CUDA ${gpu.cuda_version}` : primary
 })
 const appRuntimeDiskLabel = computed(() => formatBytes(appDiagnostics.value?.disk?.free_bytes || 0))
-const appRuntimeCustomFontDirLabel = computed(() => {
+const appRuntimeBundledFontDirLabel = computed(() => {
   const projectDirs = appRuntime.value?.font_dirs?.project
   const dirs = Array.isArray(projectDirs)
     ? projectDirs.map((path) => String(path || '').trim()).filter(Boolean)
-    : []
-  return dirs.join('；')
-})
-const appRuntimeSystemFontDirLabel = computed(() => {
-  const systemDirs = appRuntime.value?.font_dirs?.system || appRuntime.value?.font_dirs?.builtin
-  const dirs = Array.isArray(systemDirs)
-    ? systemDirs.map((path) => String(path || '').trim()).filter(Boolean)
     : []
   return dirs.join('；')
 })
@@ -1491,9 +1489,8 @@ const fontLibraryStatusText = computed(() => {
   if (fontLibraryMessage.value) {
     return fontLibraryMessage.value
   }
-  const systemCount = availableFonts.value.filter((font) => font?.source === 'system').length
-  const customCount = availableFonts.value.filter((font) => font?.source === 'project').length
-  return `当前共读取 ${availableFonts.value.length} 个字体（系统 ${systemCount} / 自定义 ${customCount}）。`
+  const bundledCount = availableFonts.value.filter((font) => font?.source === 'project').length
+  return `当前共读取 ${availableFonts.value.length} 个内置字体（项目字体 ${bundledCount}）。`
 })
 const v2ProjectTitle = computed(() => (
   String(currentProject.value?.title || '').trim()
@@ -8439,14 +8436,13 @@ async function refreshFontLibrary() {
     return
   }
 
-  const systemCount = result.fonts.filter((font) => font?.source === 'system' || font?.source === 'builtin').length
-  const customCount = result.fonts.filter((font) => font?.source === 'project').length
-  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个字体（系统 ${systemCount} / 自定义 ${customCount}）。`
+  const bundledCount = result.fonts.filter((font) => font?.source === 'project').length
+  fontLibraryMessage.value = `字库已刷新：共 ${result.fonts.length} 个内置字体（项目字体 ${bundledCount}）。`
 }
 
 async function openFontLibraryDirectory() {
   if (!canOpenFontLibraryDirectory.value) {
-    fontLibraryMessage.value = '请先确认本地后端在线，再打开自定义字库文件夹。'
+    fontLibraryMessage.value = '请先确认本地后端在线，再打开项目内置字体文件夹。'
     return
   }
 
@@ -8464,7 +8460,7 @@ async function openFontLibraryDirectory() {
     if (!result?.ok) {
       throw new Error(result?.error || '系统文件管理器未能打开目录。')
     }
-    fontLibraryMessage.value = `已打开自定义字库文件夹：${result.path || appRuntimeCustomFontDirLabel.value}`
+    fontLibraryMessage.value = `已打开项目内置字体文件夹：${result.path || appRuntimeBundledFontDirLabel.value}`
   } catch (error) {
     fontLibraryMessage.value = `打开字库文件夹失败：${error instanceof Error ? error.message : String(error || '')}`
   }
@@ -12250,14 +12246,9 @@ watch(
               <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
             </div>
 
-            <div v-if="appRuntimeSystemFontDirLabel" class="v2-readonly-field">
-              <span>系统字体目录</span>
-              <strong :title="appRuntimeSystemFontDirLabel">{{ appRuntimeSystemFontDirLabel }}</strong>
-            </div>
-
-            <div v-if="appRuntimeCustomFontDirLabel" class="v2-readonly-field">
-              <span>自定义字体目录</span>
-              <strong :title="appRuntimeCustomFontDirLabel">{{ appRuntimeCustomFontDirLabel }}</strong>
+            <div v-if="appRuntimeBundledFontDirLabel" class="v2-readonly-field">
+              <span>内置字体目录</span>
+              <strong :title="appRuntimeBundledFontDirLabel">{{ appRuntimeBundledFontDirLabel }}</strong>
             </div>
           </section>
 
@@ -12406,7 +12397,7 @@ watch(
                 type="button"
                 class="v2-secondary-button"
                 :disabled="!canOpenFontLibraryDirectory"
-                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开自定义字库文件夹' : '本地后端在线后可打开'"
+                :title="canOpenFontLibraryDirectory ? '用系统文件管理器打开项目内置字体文件夹' : '本地后端在线后可打开'"
                 @click="openFontLibraryDirectory"
               >
                 打开字库文件夹
@@ -12422,7 +12413,7 @@ watch(
               >
                 <span class="v2-font-map-label">{{ bucket.label }}</span>
                 <select v-model="config[styleFontConfigKeyMap[bucket.value]]">
-                  <option :value="defaultSystemFontId">使用系统默认</option>
+                  <option :value="defaultSystemFontId">使用内置默认</option>
                   <option v-for="font in availableFonts" :key="font.id" :value="font.id">
                     {{ font.label }}
                   </option>
@@ -12431,7 +12422,7 @@ watch(
             </div>
 
             <p class="v2-settings-inline-note">
-              系统字体来自操作系统字体目录；自定义字体才放入应用字库文件夹。应用不会捆绑字体，请只放入自己有权使用的字体。
+              应用只读取项目内置字体目录，不扫描操作系统字体。当前内置字体为开源授权字体。
             </p>
 
             <label class="v2-field">

@@ -31,6 +31,7 @@ const ignoredExtensions = new Set(['.pyc', '.pyo'])
 
 const backendFiles = [
   'desktop_server.py',
+  'http_requests.py',
   'install_deps.py',
   'main.py',
   'patch_pydensecrf.py',
@@ -49,7 +50,7 @@ const backendFiles = [
   'upstream.json',
 ]
 
-const backendDirs = ['engine', 'utils']
+const backendDirs = ['engine', 'typefaces', 'utils']
 const upstreamFiles = ['LICENSE']
 const upstreamDirs = ['dict', 'manga_translator']
 
@@ -203,6 +204,7 @@ function main() {
           commit: currentUpstreamCommit(),
           staged_paths: ['manga_translator/', 'dict/', 'LICENSE'],
         },
+        bundled_typefaces: ['backend/typefaces/SourceHanSansSC-*.otf'],
         excluded: ['fonts/', 'models/', 'examples/', 'result/', 'temp_uploads/', '.git/'],
       },
       null,

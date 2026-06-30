@@ -19,8 +19,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from engine.translator import TranslatorEngine
 from runtime_paths import resolve_app_paths
+from system_fonts import BUNDLED_DEFAULT_FONT_NAME
 from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
-from system_fonts import find_default_system_font, system_font_directories
+from system_fonts import bundled_font_directories
 from utils.file_handler import extract_archive, verify_supported_image
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
@@ -57,10 +58,8 @@ ALLOWED_EXTENSIONS = (".zip", ".cbz", ".jpg", ".jpeg", ".png", ".webp")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 FONT_EXTENSIONS = tuple(sorted(SYSTEM_FONT_EXTENSIONS))
 FONT_DIRECTORIES = {
-    "system": system_font_directories(),
     "project": (
-        APP_PATHS.user_fonts_dir,
-        BASE_DIR.parent / "fonts" / "custom",
+        *bundled_font_directories(BASE_DIR),
     ),
 }
 LOCAL_LAMA_MODEL_FILENAME = "lama_large_512px.ckpt"
@@ -80,6 +79,8 @@ def iter_font_directories(source: str) -> list[Path]:
         seen.add(normalized)
         directories.append(directory)
     return directories
+
+
 SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
 logger = logging.getLogger("manga_translator.api")
@@ -260,37 +261,10 @@ def prepare_session_images(session_id: str, image_paths: list[str]) -> tuple[Pat
 def list_available_fonts() -> list[dict[str, str]]:
     fonts: list[dict[str, str]] = []
     preferred_order = {
-        "NotoSansCJKtc-Regular.otf": 0,
-        "msyh.ttc": 10,
-        "msgothic.ttc": 11,
-        "Arial-Unicode-Regular.ttf": 12,
-        "NotoSansMonoCJK-VF.ttf.ttc": 13,
+        BUNDLED_DEFAULT_FONT_NAME: 0,
+        "SourceHanSansSC-Medium-2.otf": 1,
+        "SourceHanSansSC-Bold.otf": 2,
     }
-
-    default_system_font = find_default_system_font()
-    if default_system_font is not None:
-        default_extension = default_system_font.suffix.lower()
-        default_format_hint = {
-            ".ttf": "truetype",
-            ".otf": "opentype",
-        }.get(default_extension, "")
-        default_root = next(
-            (root for root in FONT_DIRECTORIES["system"] if root.resolve() in default_system_font.parents),
-            None,
-        )
-        if default_root is not None:
-            relative_name = default_system_font.relative_to(default_root.resolve()).as_posix()
-            fonts.append(
-                {
-                    "id": "system:auto",
-                    "name": default_system_font.name,
-                    "label": f"{default_system_font.stem} (系统默认)",
-                    "source": "system",
-                    "extension": default_extension,
-                    "format_hint": default_format_hint,
-                    "url": f"/api/fonts/file/system/{quote(relative_name, safe='/')}",
-                }
-            )
 
     for source in FONT_DIRECTORIES:
         seen_ids: set[str] = set()
@@ -312,10 +286,10 @@ def list_available_fonts() -> list[dict[str, str]]:
             for path in font_paths:
                 relative_name = path.relative_to(font_dir).as_posix()
                 font_id = f"{source}:{relative_name}"
-                if font_id in seen_ids or (source == "system" and default_system_font == path.resolve()):
+                if font_id in seen_ids:
                     continue
                 seen_ids.add(font_id)
-                source_label = "自定义" if source == "project" else "系统"
+                source_label = "内置"
                 suffix = path.suffix.lower()
                 format_hint = {
                     ".ttf": "truetype",
@@ -604,10 +578,12 @@ async def get_app_logs_tail(lines: int = 200):
 
 @app.post("/api/app/open-user-fonts")
 async def open_user_fonts_directory():
-    error = open_directory_in_file_manager(APP_PATHS.user_fonts_dir)
+    font_dirs = iter_font_directories("project")
+    target_dir = font_dirs[0] if font_dirs else (BASE_DIR / "typefaces")
+    error = open_directory_in_file_manager(target_dir)
     return {
         "ok": not error,
-        "path": str(APP_PATHS.user_fonts_dir),
+        "path": str(target_dir),
         "error": error,
     }
 

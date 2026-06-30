@@ -22,6 +22,6 @@ desktop/resources-staging/
 design/
 
 # User-provided or legacy local fonts should stay out of git and release
-# packages. The app discovers OS fonts and user-installed custom fonts at
-# runtime instead of shipping font files in the repository.
+# packages. Allowlisted open-source bundled typefaces live under
+# backend/typefaces/ instead.
 fonts/

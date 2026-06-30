@@ -24,6 +24,23 @@ from .common import CommonTranslator, VALID_LANGUAGES
 from .keys import CUSTOM_OPENAI_API_KEY, CUSTOM_OPENAI_API_BASE, CUSTOM_OPENAI_MODEL, CUSTOM_OPENAI_MODEL_CONF
 
 
+APP_USER_AGENT = "Solar-Manga-Translator/0.1"
+
+
+def build_json_post_request(url: str, *, api_key: str, payload: dict):
+    return urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": APP_USER_AGENT,
+        },
+        method="POST",
+    )
+
+
 class ResponsesHTTPError(Exception):
     def __init__(self, status_code: int, body: str):
         super().__init__(f"Responses API request failed: HTTP {status_code} {body}")
@@ -576,14 +593,10 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             "model": model_name,
             "input": prompt_input,
         }
-        request = urllib_request.Request(
+        request = build_json_post_request(
             self._responses_endpoint_url(),
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
+            api_key=self.api_key,
+            payload=payload,
         )
         try:
             with urllib_request.urlopen(request, timeout=self._TIMEOUT) as response:

@@ -16,7 +16,7 @@ BACKEND_DIR = ROOT / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
 from engine.translator import TranslatorEngine  # noqa: E402
-from system_fonts import find_default_system_font  # noqa: E402
+from system_fonts import BUNDLED_DEFAULT_FONT_NAME, find_default_bundled_font  # noqa: E402
 
 
 PROJECT_ID = "canvas-e2e-fixture"
@@ -30,8 +30,8 @@ def now_iso() -> str:
 
 
 def pick_font() -> tuple[str, str]:
-    path = find_default_system_font()
-    return ("system:auto", str(path)) if path is not None else ("", "")
+    path = find_default_bundled_font(BACKEND_DIR)
+    return (f"project:{BUNDLED_DEFAULT_FONT_NAME}", str(path)) if path is not None else ("", "")
 
 
 def safe_remove(path: Path) -> None:

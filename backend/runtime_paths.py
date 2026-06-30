@@ -207,7 +207,6 @@ class AppPaths:
             self.logs_dir,
             self.cache_dir,
             self.config_dir,
-            self.user_fonts_dir,
             self.projects_dir,
             self.cache_uploads_dir,
             self.cache_extracted_dir,
@@ -396,7 +395,6 @@ class AppPaths:
             legacy_app_projects = legacy_app_data_dir / "projects"
             legacy_app_output = legacy_app_data_dir / "output"
             legacy_app_models = legacy_app_data_dir / "models"
-            legacy_app_fonts = legacy_app_data_dir / "fonts"
             legacy_app_settings = legacy_app_data_dir / "config" / "settings.json"
 
             if legacy_app_projects.exists():
@@ -411,8 +409,6 @@ class AppPaths:
                 shutil.copytree(legacy_app_output, self.output_dir, dirs_exist_ok=True)
             if legacy_app_models.exists():
                 shutil.copytree(legacy_app_models, self.models_dir, dirs_exist_ok=True)
-            if legacy_app_fonts.exists():
-                shutil.copytree(legacy_app_fonts, self.user_fonts_dir, dirs_exist_ok=True)
             if legacy_app_settings.exists() and not self.settings_path.exists():
                 self.settings_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy_app_settings, self.settings_path)

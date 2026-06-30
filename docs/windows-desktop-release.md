@@ -58,7 +58,7 @@ The build script:
 
 ## What Must Not Be Packaged
 
-- Repository or user font files
+- Non-allowlisted repository or user font files
 - Manga/comic source pages or translated outputs
 - `.env` files or API keys
 - Logs, temporary uploads, output folders, cache, screenshots, or fixtures from
@@ -72,8 +72,8 @@ Before distributing an installer:
 
 - Run the full test set listed in `docs/release-checklist.md`.
 - Inspect `desktop/resources-staging/release-manifest.json`.
-- Scan `desktop/resources-staging/` for secrets, personal paths, fonts, comic
-  media, and large unexpected files.
+- Scan `desktop/resources-staging/` for secrets, personal paths,
+  non-allowlisted fonts, comic media, and large unexpected files.
 - Install in a clean Windows VM.
 - Confirm the backend listens only on loopback and requires the runtime token.
 - Confirm settings persist while saved API keys are redacted in renderer data.

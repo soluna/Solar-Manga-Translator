@@ -49,8 +49,9 @@ The packaging flow runs:
 3. `desktop/scripts/stage-runtime.mjs`.
 4. `electron-builder`.
 
-The staging script does not copy repository fonts, local models, examples,
-temporary uploads, output folders, or the upstream `.git` directory.
+The staging script copies only allowlisted bundled typefaces. It does not copy
+local fonts, local models, examples, temporary uploads, output folders, or the
+upstream `.git` directory.
 
 ## Runtime Data
 

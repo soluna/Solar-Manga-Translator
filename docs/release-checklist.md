@@ -7,8 +7,8 @@ installer.
 
 - `git status` contains only intentional changes.
 - No tracked manga/comic pages, translated outputs, screenshots containing
-  recognizable comic pages, font binaries, model weights, `.env` files, logs, or
-  local caches.
+  recognizable comic pages, non-allowlisted font binaries, model weights, `.env`
+  files, logs, or local caches.
 - `git grep` finds no personal absolute paths such as macOS home/volume paths,
   Windows user-profile paths, cloud-notes paths, or machine-local directories.
 - Secret scanning reports no API keys, private keys, tokens, or passwords.
@@ -35,8 +35,9 @@ installer.
 - Build from a clean Windows environment.
 - Run `backend/install_deps.py --prepare-only` before staging.
 - Review `desktop/resources-staging/release-manifest.json`.
-- Scan `desktop/resources-staging/` for secrets, personal paths, fonts,
-  copyrighted media, large unexpected files, and `.git` directories.
+- Scan `desktop/resources-staging/` for secrets, personal paths,
+  non-allowlisted fonts, copyrighted media, large unexpected files, and `.git`
+  directories.
 - Install, launch, translate a synthetic fixture, close, and uninstall in a
   clean Windows VM.
 - Publish installer SHA-256 checksums.

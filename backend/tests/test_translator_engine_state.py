@@ -533,6 +533,47 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertFalse(missing_model.get("ok"))
             self.assertIn("模型名称", str(missing_model.get("message")))
 
+    def test_openai_compatible_validation_request_uses_app_user_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            captured = {}
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return json.dumps({
+                        "choices": [{
+                            "message": {
+                                "content": "测试"
+                            }
+                        }]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured["url"] = request.full_url
+                captured["timeout"] = timeout
+                captured["headers"] = dict(request.header_items())
+                return FakeResponse()
+
+            with mock.patch.object(translator_module.urllib_request, "urlopen", fake_urlopen):
+                result = engine._request_chat_completions_validation_sync(
+                    provider_label="OpenAI Compatible",
+                    base_url="https://api.example.com/v1/chat/completions",
+                    model="example-model",
+                    api_key="secret",
+                )
+
+            self.assertEqual(result, "测试")
+            self.assertEqual(captured["url"], "https://api.example.com/v1/chat/completions")
+            self.assertEqual(captured["timeout"], 30)
+            self.assertIn("Solar-Manga-Translator", captured["headers"].get("User-agent", ""))
+            self.assertEqual(captured["headers"].get("Accept"), "application/json")
+
     def test_rerender_imports_avoid_vendor_utils_aggregate(self) -> None:
         render_files = [
             BACKEND_DIR / "patched_manga_translator_init.py",
@@ -2197,33 +2238,32 @@ print(json.dumps({
             mode = engine.paths.settings_path.stat().st_mode & 0o777
             self.assertEqual(mode, 0o600)
 
-    def test_default_font_mapping_uses_system_font(self) -> None:
+    def test_default_font_mapping_uses_bundled_font(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            base_dir.mkdir()
-            test_font = root / "SystemSans.ttf"
+            typefaces_dir = base_dir / "typefaces"
+            typefaces_dir.mkdir(parents=True)
+            test_font = typefaces_dir / "SourceHanSansSC-Regular-2.otf"
             test_font.write_bytes(b"test-font")
             engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
 
-            with mock.patch.object(translator_module, "find_default_system_font", return_value=test_font):
-                config = engine.normalize_user_config({})
+            config = engine.normalize_user_config({})
 
             self.assertEqual(config["font_style_mode"], "auto-map")
             self.assertEqual(config["font_key"], engine.DEFAULT_FONT_KEY)
             for style in engine.STYLE_BUCKETS:
                 self.assertEqual(config["style_font_keys"][style], engine.DEFAULT_FONT_KEY)
-                self.assertTrue(config["style_font_paths"][style].endswith("SystemSans.ttf"))
+                self.assertTrue(config["style_font_paths"][style].endswith("SourceHanSansSC-Regular-2.otf"))
 
-    def test_font_mapping_keeps_user_style_override(self) -> None:
+    def test_font_mapping_keeps_bundled_style_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            base_dir.mkdir()
-            custom_font_dir = make_test_paths(root).user_fonts_dir
-            custom_font_dir.mkdir(parents=True, exist_ok=True)
-            custom_font = custom_font_dir / "CustomDialogue.otf"
-            custom_font.write_bytes(b"custom-font")
+            bundled_font_dir = base_dir / "typefaces"
+            bundled_font_dir.mkdir(parents=True)
+            custom_font = bundled_font_dir / "CustomDialogue.otf"
+            custom_font.write_bytes(b"bundled-font")
             engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
 
             config = engine.normalize_user_config({
@@ -2234,6 +2274,28 @@ print(json.dumps({
             self.assertEqual(config["style_font_keys"]["gothic"], f"project:{custom_font.name}")
             self.assertEqual(config["style_font_keys"]["sfx"], engine.DEFAULT_FONT_KEY)
             self.assertEqual(Path(config["style_font_paths"]["gothic"]).name, custom_font.name)
+
+    def test_font_mapping_rejects_arbitrary_local_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "backend"
+            typefaces_dir = base_dir / "typefaces"
+            typefaces_dir.mkdir(parents=True)
+            default_font = typefaces_dir / "SourceHanSansSC-Regular-2.otf"
+            default_font.write_bytes(b"bundled-font")
+            outside_font = root / "outside.otf"
+            outside_font.write_bytes(b"outside-font")
+            engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
+
+            config = engine.normalize_user_config({
+                "font_key": str(outside_font),
+                "style_font_gothic_key": f"project:../{outside_font.name}",
+            })
+
+            self.assertEqual(config["font_key"], engine.DEFAULT_FONT_KEY)
+            self.assertEqual(Path(config["font_path"]).name, default_font.name)
+            self.assertEqual(config["style_font_keys"]["gothic"], engine.DEFAULT_FONT_KEY)
+            self.assertEqual(Path(config["style_font_paths"]["gothic"]).name, default_font.name)
 
     def test_advanced_erase_rejection_saves_debug_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

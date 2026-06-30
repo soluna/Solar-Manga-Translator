@@ -12,5 +12,5 @@
 
 - [ ] No API keys, tokens, `.env` files, or private paths
 - [ ] No manga/comic pages or translated outputs
-- [ ] No font binaries or model weights
+- [ ] No non-allowlisted font binaries or model weights
 - [ ] No generated logs, caches, or local runtime artifacts

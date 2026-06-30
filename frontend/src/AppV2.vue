@@ -10375,10 +10375,10 @@ watch(
 
     <header :class="['v2-topbar', v2View === 'review' ? 'is-review' : '']">
       <div class="v2-topbar-brand">
-        <div class="v2-brand-mark">M</div>
+        <div class="v2-brand-mark">S</div>
         <div>
-          <p class="v2-brand-kicker">MANGAFLOW</p>
-          <h1 class="v2-brand-title">{{ v2View === 'review' ? '审校工作台' : '漫画翻译工作台' }}</h1>
+          <p class="v2-brand-kicker">SOLAR</p>
+          <h1 class="v2-brand-title">{{ v2View === 'review' ? '审校工作台' : 'Solar-Manga-Translator' }}</h1>
         </div>
       </div>
 

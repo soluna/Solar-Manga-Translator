@@ -2,10 +2,11 @@
 
 - Last updated: 2026-06-30
 - Scope: current working tree for public repository and future desktop releases
-- Conclusion: the current source tree passed the 2026-06-30 local test and
-  tracked-file audit pass. Public source release is gated mainly by the Git
-  history decision; desktop installer publication still needs a clean release
-  build, SBOM/checksum work, and dependency re-audit.
+- Conclusion: the current source tree and rewritten local Git history passed the
+  2026-06-30 local test and audit pass. Public source release is gated mainly by
+  pushing the cleaned history to GitHub and removing stale remote work branches;
+  desktop installer publication still needs a clean release build,
+  SBOM/checksum work, and dependency re-audit.
 
 ## Severity Model
 
@@ -35,7 +36,6 @@ Major P0 risks in the tracked tree have been addressed:
 
 Remaining blockers are mostly release-process issues:
 
-- The Git history may still contain removed media/fonts/personal metadata.
 - Desktop binary release must account for the currently reported upstream Torch
   advisory before shipping an installer.
 - Desktop binary release still needs clean-machine packaging, SBOM/checksums,
@@ -45,31 +45,37 @@ Remaining blockers are mostly release-process issues:
 
 ## P0 Findings
 
-### P0-01 Git History May Still Contain Removed Media, Fonts, And Personal Metadata
+### P0-01 Git History Contained Removed Media, Fonts, And Personal Metadata
 
-Status: Open until history cleanup is confirmed.
+Status: Closed locally; pending force-push of cleaned history and deletion of
+stale remote branches.
 
-Current tree mitigation:
+Current mitigation:
 
 - Deleted tracked comic/design media and font files.
 - Added `.gitignore` coverage for fonts, design files, runtime caches, staging,
   virtual environments, and `.env.*`.
 - Added CI checks to block tracked fonts, generated runtime directories, and
   common personal path patterns.
+- Rewrote local Git history on 2026-06-30 to remove historical fonts, raster
+  comic/design media, `.pen` files, committed `node_modules`, internal planning
+  documents, and personal absolute/cloud-notes paths.
+- Removed local rewrite backup refs and pruned unreachable objects after
+  creating an offline backup bundle outside the repository.
+- Re-ran all-history scans for forbidden paths/assets, personal paths, and
+  common secret/key patterns; no hits remained in local reachable refs.
 
 Remaining risk:
 
-- Public Git history can still expose files that were removed from the current
-  tree.
 - Commit author metadata may expose personal email addresses.
+- GitHub will keep the old remote objects reachable until the cleaned `main` is
+  force-pushed and stale remote work branches are deleted.
 
-Required closure:
+Required closure on GitHub:
 
-1. Decide whether to rewrite history before making the repository public.
-2. If yes, use a history rewrite tool to remove media/font/private paths and to
-   normalize author metadata where needed.
-3. Re-run secret scanning and path/media scans across all refs after rewrite.
-4. Force-push only after explicitly accepting the disruption to existing clones.
+1. Force-push cleaned `main` with lease checking.
+2. Delete stale remote branches that still point at old history.
+3. Re-run remote/ref scans after fetching the cleaned GitHub state.
 
 ### P0-02 License Baseline
 
@@ -257,9 +263,9 @@ Before making the repository public:
 1. Run all tests in `docs/release-checklist.md`.
 2. Run a tracked-file scan for secrets, personal paths, media, fonts, and large
    binary files.
-3. Decide whether to rewrite Git history.
-4. If history is rewritten, re-run all scans across all refs.
-5. Push only the reviewed branch/state.
+3. Re-run all-history scans across local refs.
+4. Push only the reviewed branch/state.
+5. Confirm GitHub has no stale branches pointing to old history.
 
 2026-06-30 local source-tree gate result:
 
@@ -269,6 +275,8 @@ Before making the repository public:
   images, example env files, personal absolute paths, or unexpected media.
 - Tracked/unignored file scans found no font binaries, comic images, `.pen`
   files, private keys, common API-key patterns, or personal absolute paths.
+- Local reachable Git history was rewritten and re-scanned; no forbidden
+  historical assets, personal paths, or common key patterns remained.
 - Known remaining dependency audit item: upstream Torch advisory above.
 
 Before publishing any installer:

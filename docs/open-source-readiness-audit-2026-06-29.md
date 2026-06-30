@@ -2,11 +2,11 @@
 
 - Last updated: 2026-06-30
 - Scope: current working tree for public repository and future desktop releases
-- Conclusion: the current source tree and rewritten local Git history passed the
-  2026-06-30 local test and audit pass. Public source release is gated mainly by
-  pushing the cleaned history to GitHub and removing stale remote work branches;
-  desktop installer publication still needs a clean release build,
-  SBOM/checksum work, and dependency re-audit.
+- Conclusion: the current source tree, rewritten local Git history, and GitHub
+  `main` branch passed the 2026-06-30 local test and audit pass. Public source
+  release is no longer blocked by tracked assets, stale remote branches, or
+  known private path/key patterns. Desktop installer publication still needs a
+  clean release build, SBOM/checksum work, and dependency re-audit.
 
 ## Severity Model
 
@@ -47,8 +47,7 @@ Remaining blockers are mostly release-process issues:
 
 ### P0-01 Git History Contained Removed Media, Fonts, And Personal Metadata
 
-Status: Closed locally; pending force-push of cleaned history and deletion of
-stale remote branches.
+Status: Closed for local and GitHub reachable refs.
 
 Current mitigation:
 
@@ -68,14 +67,14 @@ Current mitigation:
 Remaining risk:
 
 - Commit author metadata may expose personal email addresses.
-- GitHub will keep the old remote objects reachable until the cleaned `main` is
-  force-pushed and stale remote work branches are deleted.
+- GitHub may retain unreachable objects temporarily according to its own garbage
+  collection behavior, but they are no longer referenced by repository branches.
 
-Required closure on GitHub:
+Closure completed on GitHub:
 
-1. Force-push cleaned `main` with lease checking.
-2. Delete stale remote branches that still point at old history.
-3. Re-run remote/ref scans after fetching the cleaned GitHub state.
+1. Force-pushed cleaned `main` with lease checking.
+2. Deleted stale remote work branches that pointed at old history.
+3. Fetched/pruned the remote and confirmed GitHub exposes only `main`.
 
 ### P0-02 License Baseline
 
@@ -277,6 +276,8 @@ Before making the repository public:
   files, private keys, common API-key patterns, or personal absolute paths.
 - Local reachable Git history was rewritten and re-scanned; no forbidden
   historical assets, personal paths, or common key patterns remained.
+- Cleaned `main` was force-pushed to GitHub and stale remote work branches were
+  deleted; remote branch listing showed only `refs/heads/main`.
 - Known remaining dependency audit item: upstream Torch advisory above.
 
 Before publishing any installer:

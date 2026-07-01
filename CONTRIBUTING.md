@@ -14,6 +14,9 @@ Thank you for helping improve Solar-Manga-Translator.
 
 ## Development Setup
 
+Use Python 3.10 or 3.11 and Node.js 24 LTS. The minimum supported Node.js
+version is 22.12.
+
 Backend:
 
 ```bash

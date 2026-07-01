@@ -1,109 +1,156 @@
 # Solar-Manga-Translator
 
-Solar-Manga-Translator 是一个本地优先的漫画图片翻译工作台。它把上传、OCR、翻译、修图、嵌字、人工校对和导出整理在同一个 Web UI / 桌面应用流程里，适合中文用户在自己的电脑上处理合法拥有或获授权处理的漫画、图像文本和条漫素材。
+[![CI](https://github.com/soluna/Solar-Manga-Translator/actions/workflows/ci.yml/badge.svg)](https://github.com/soluna/Solar-Manga-Translator/actions/workflows/ci.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
+[![Node.js 22.12+](https://img.shields.io/badge/Node.js-%3E%3D22.12-339933.svg)](https://nodejs.org/)
 
-项目的目标不是把翻译过程做成不可见的黑盒，而是给你一个可以检查、可以调整、可以复现的本地工具：先让程序完成批量识别和初稿生成，再由你在校对界面里逐页修正文本、排版和样式。
+面向中文用户的本地漫画翻译与审校工作台。它把图片导入、OCR、AI 翻译、擦字修补、自动嵌字、人工校对和导出放进同一个流程，适合在自己的电脑上处理有权使用的漫画、条漫和图像文本。
 
-## 界面预览
+```text
+导入图片 / ZIP / CBZ -> 文本检测与 OCR -> AI 翻译 -> 擦字与修补 -> 自动嵌字 -> 人工审校 -> 导出
+```
 
-以下截图使用项目内生成的合成演示素材，不包含真实漫画页面或版权内容。
+> 当前仓库提供可运行源码，尚未发布预构建安装包。Windows 桌面打包仍处于实验阶段。
+> 实际翻译建议使用 Windows + NVIDIA GPU，macOS 和 Linux 更适合开发、调试与轻量测试。
 
-![上传首页](docs/screenshots/upload-home.png)
+![Solar-Manga-Translator 审校工作台](docs/screenshots/review-workspace.png)
 
-![项目页面列表](docs/screenshots/project-pages.png)
+截图使用项目生成的合成演示素材，不包含真实漫画页面或受版权保护的内容。
 
-![审校工作台](docs/screenshots/review-workspace.png)
+## 它能做什么
 
-![历史项目](docs/screenshots/history-projects.png)
+| 阶段 | 能力 |
+| --- | --- |
+| 导入 | 单张图片、图片文件夹、`.zip`、`.cbz` |
+| 识别 | 自动检测文本区域并执行 OCR |
+| 翻译 | Gemini、豆包 Ark、OpenAI Compatible 等可配置服务 |
+| 图像处理 | 擦除原文、背景修补、自动嵌入译文 |
+| 人工审校 | 修改原文与译文、文本框、字体、字号、颜色、描边、排版方向和位置 |
+| 项目管理 | 自动保存项目、创建快照、恢复历史项目、继续未完成工作 |
+| 导出 | 导出处理后的图片或归档结果 |
 
-## 基本使用流程
+它不是一个只给出最终图片的黑盒。程序先完成批量初稿，你可以在审校工作台逐页检查识别、翻译、修图和排版结果，再决定何时导出。
 
-1. 启动应用：Windows 用户运行 `start.bat`，macOS 用户运行 `start.mac.sh`，Linux 用户运行 `start.sh`。
-2. 上传素材：在首页拖入单张图片、图片文件夹、`.zip` 或 `.cbz`。
-3. 配置服务：在设置面板中选择翻译服务、目标语言、字体映射和图像处理方式；需要密钥的服务会保存在本地配置中，前端只看到脱敏状态。
-4. 执行翻译：让后端依次完成 OCR、翻译、擦字、修补和嵌字流程；长任务会在顶部状态区显示进度。
-5. 人工审校：进入审校工作台，逐页调整文本框、译文、字号、字体、排版方向和对照视图。
-6. 导出结果：确认后导出图片或归档文件；历史项目可以从本地项目列表恢复继续编辑。
+## 快速开始
 
-## 项目状态
-
-- 当前源码仓库已经按公开开源发布标准做过清理。
-- 许可证为 GPL-3.0-only。
-- 桌面安装包仍处于实验阶段，正式分发前需要在干净 Windows 环境重新构建、审计和生成校验信息。
-- 实际翻译工作建议使用 Windows + NVIDIA GPU + CUDA 兼容 PyTorch。macOS 和 Linux 更适合作为开发、调试和轻量测试环境。
-
-## 主要功能
-
-- 支持导入单张图片、文件夹、`.zip` 和 `.cbz` 漫画包。
-- 支持 OCR、翻译、文字擦除、图像修补和自动嵌字流程。
-- 支持长任务进度流式更新，便于观察每一步处理状态。
-- 提供浏览器校对工作区，可编辑文本区域、译文、布局和基础样式。
-- `fonts/system` 内置少量开源中文字体，`fonts/custom` 可放入自己的授权字体；应用不会扫描操作系统字体。
-- 支持导出处理后的图片和归档结果。
-- 默认使用本机回环地址启动服务，并通过临时 API Token 保护会修改本地状态的接口。
-
-## 仓库不包含什么
-
-本仓库不会、也不应该包含以下内容：
-
-- 漫画原图、翻译后的漫画成品、测试用版权图页。
-- `fonts/custom` 中的商业字体、私有字体或个人字体包。仓库仅允许 `fonts/system` 下白名单内的开源字体文件。
-- 模型权重、模型缓存、运行时下载缓存。
-- API Key、`.env`、本地日志、个人项目数据、个人机器路径。
-- 打包产生的安装器、临时上传目录、输出目录和其他本地运行产物。
-
-请只处理你拥有权利或获得授权的图片内容。提交 Pull Request 时，也不要加入版权漫画页面、翻译成品截图、非白名单字体文件、模型权重或任何凭据。
-
-## 目录结构
-
-- `backend/`：FastAPI 后端、上传与归档校验、本地路径管理、设置存储、翻译引擎集成。
-- `frontend/`：Vue 3 + Vite 前端界面，以及 Playwright 冒烟测试脚本。
-- `fonts/system/`：随项目发布的白名单开源预置字体。
-- `fonts/custom/`：用户本地自定义字体目录；字体文件会被 git 忽略。
-- `desktop/`：Electron 桌面壳和 Windows 打包脚本。
-- `scripts/`：本地辅助脚本和合成测试素材生成脚本。
-- `docs/`：发布检查清单、开源发布审计记录和桌面打包说明。
-
-## 环境要求
+### 准备环境
 
 - Git
 - Python 3.10 或 3.11
-- Node.js 18 或更新版本
-- Windows 用户建议准备 NVIDIA GPU 和 CUDA 兼容的 PyTorch 环境
+- Node.js 24 LTS；最低支持版本为 22.12
+- 需要联网下载 Python 依赖、核心引擎和所选模型
+- 使用在线翻译服务时，需要自行准备对应服务商的 API Key
 
-首次安装可能会下载较大的 Python 包和模型文件，具体取决于你启用的 OCR、翻译和修图后端。
-
-## 快速开始
+首次启动会安装较大的机器学习依赖，耗时取决于网络与电脑性能。
 
 ### Windows
 
 ```bat
+git clone https://github.com/soluna/Solar-Manga-Translator.git
+cd Solar-Manga-Translator
 start.bat
 ```
 
-脚本会创建 `backend/venv`，安装依赖，准备固定版本的核心翻译引擎，安装前端依赖，启动本地后端和前端，并打开浏览器窗口。
+脚本会创建 `backend/venv`、安装依赖、准备固定版本的核心翻译引擎、启动前后端，并打开浏览器。
 
 ### macOS
 
 ```bash
+git clone https://github.com/soluna/Solar-Manga-Translator.git
+cd Solar-Manga-Translator
 chmod +x start.mac.sh
 bash ./start.mac.sh
 ```
 
-macOS 脚本会使用 `backend/.venv-mac`，避免影响 Windows 侧常用的 `backend/venv`。
+macOS 脚本使用独立的 `backend/.venv-mac`，不会影响 Windows 常用的 `backend/venv`。
 
 ### Linux
 
 ```bash
+git clone https://github.com/soluna/Solar-Manga-Translator.git
+cd Solar-Manga-Translator
 chmod +x start.sh
 ./start.sh
 ```
 
-默认启动脚本会把本地服务绑定到 `127.0.0.1`，并为浏览器请求生成临时 API Token。
+启动脚本默认只在本机回环地址提供服务，并生成临时 API Token 保护会修改本地状态的接口。
 
-## 手动开发启动
+## 使用流程
 
-启动后端：
+### 1. 导入图片
+
+在首页拖入图片、图片文件夹、`.zip` 或 `.cbz`。应用会创建一个本地项目，原始素材和后续进度不会上传到本项目维护者的服务器。
+
+![上传图片或图片包](docs/screenshots/upload-home.png)
+
+### 2. 选择页面并配置翻译
+
+确认页面顺序，在设置中选择翻译服务、目标语言、字体映射和图像处理方式。需要密钥的服务会把配置保存在本地，前端接口只返回脱敏状态。
+
+![项目页面列表](docs/screenshots/project-pages.png)
+
+### 3. 执行自动处理
+
+开始翻译后，后端依次完成文本检测、OCR、翻译、擦字、修补和嵌字。长任务的当前步骤和进度会显示在界面顶部。
+
+### 4. 人工审校
+
+进入审校工作台，逐页修正文本区域、译文和样式。可以对照原图、擦除图与嵌字结果，也可以重新翻译、重新擦除或手动调整文本框。
+
+![调整译文、文本框和排版样式](docs/screenshots/review-workspace.png)
+
+### 5. 保存、恢复与导出
+
+编辑会保存到本地项目。你可以创建快照、从历史列表恢复项目，完成检查后再导出图片或归档文件。
+
+![历史项目列表](docs/screenshots/history-projects.png)
+
+## 字体与本地数据
+
+- `fonts/system` 存放项目随附的开源预置字体。
+- `fonts/custom` 存放你自己拥有授权的字体，字体文件会被 Git 忽略。
+- 应用只读取这两个目录，不扫描操作系统字体。
+- “打开字体文件夹”会打开项目使用的 `fonts` 根目录。
+- 项目、输出、设置、模型、缓存和日志保存在本机应用数据目录，不会提交到 Git。设置面板会显示当前运行实际使用的目录。
+
+升级代码不会主动删除历史项目。迁移旧版本数据前，建议先备份旧应用数据目录；若历史列表为空，请检查设置面板显示的应用数据目录是否与旧版本一致。
+
+## 安全与隐私
+
+- 后端默认只监听 `127.0.0.1`。
+- 修改本地状态的 HTTP 接口和 WebSocket 会话由临时 API Token 保护。
+- 保存的服务商密钥只保留在服务端本地配置中，API 响应会脱敏。
+- 上传和归档处理会校验大小、路径、归档结构、文件类型和图片完整性。
+- 桌面打包采用允许列表，只带入白名单开源字体和必要运行文件。
+
+请只处理你拥有权利或获得授权的内容。安全问题请按照 [SECURITY.md](SECURITY.md) 私下报告。
+
+## 当前状态与限制
+
+- 源码启动流程可用，CI 会检查后端测试、前端构建、桌面脚本和仓库内容边界。
+- 尚未发布正式 Windows 安装包，也没有完成代码签名。
+- CPU 可以运行部分流程，但 OCR、修图和模型推理通常更适合 NVIDIA GPU。
+- 首次运行可能下载较大的模型与依赖。
+- 在线翻译的可用性、费用、限额和输出质量由所选服务商决定。
+- 翻译与图像修补结果仍需要人工检查。
+
+正式分发桌面安装包前，还需要在干净 Windows 环境执行 [发布检查清单](docs/release-checklist.md)，重新审计依赖并生成校验信息。
+
+## 开发
+
+仓库主要目录：
+
+| 路径 | 说明 |
+| --- | --- |
+| `backend/` | FastAPI 后端、本地路径管理、设置存储和翻译引擎集成 |
+| `frontend/` | Vue 3 + Vite 前端及 Playwright 冒烟测试 |
+| `desktop/` | Electron 桌面壳与 Windows 打包脚本 |
+| `fonts/system/` | 允许随项目分发的开源预置字体 |
+| `fonts/custom/` | 用户本地字体目录，文件不会进入 Git |
+| `scripts/` | 本地辅助脚本与合成测试素材生成工具 |
+| `docs/` | 发布检查、开源审计和桌面打包文档 |
+
+后端开发：
 
 ```bash
 cd backend
@@ -112,21 +159,14 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python install_deps.py
 python -m pip install -r requirements.txt
-export APP_API_TOKEN="$(python - <<'PY'
-import secrets
-print(secrets.token_urlsafe(32))
-PY
-)"
-printf 'APP_API_TOKEN=%s\n' "$APP_API_TOKEN"
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-另开一个终端启动前端，把下面的 `<same-token>` 替换成后端终端打印出的 Token：
+前端开发：
 
 ```bash
 cd frontend
 npm ci
-VITE_API_BASE_URL=http://127.0.0.1:8000 VITE_API_TOKEN="<same-token>" npm run dev -- --host 127.0.0.1
+npm run dev
 ```
 
 桌面开发：
@@ -137,90 +177,83 @@ npm ci
 npm run dev
 ```
 
-## 安全默认值
+### 前后端分开启动（可选）
 
-- 除非设置 `APP_ENABLE_API_DOCS=1`，否则后端不会暴露 Swagger/OpenAPI 文档页面。
-- 本地服务默认只监听回环地址。
-- `APP_API_TOKEN` 或 `MANGA_TRANSLATOR_API_TOKEN` 会保护修改本地状态的 API 和 WebSocket 会话。
-- 保存的服务商密钥只保留在服务端，本地 API 响应会做脱敏处理。
-- 上传和归档处理会校验大小、路径、归档结构、文件类型和图片完整性。
-- 桌面打包使用 allowlist，只带入 `fonts/system` 的白名单开源字体；安装后使用可写的 `fonts/custom` 保存用户字体，并排除本地字体、模型、缓存、输出、示例、临时上传和核心引擎 `.git` 目录。
+后端终端：
 
-安全问题报告方式见 `SECURITY.md`。
+```bash
+cd backend
+source venv/bin/activate
+export APP_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+printf 'APP_API_TOKEN=%s\n' "$APP_API_TOKEN"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+另开一个终端，把 `<same-token>` 替换为后端打印的 Token：
+
+```bash
+cd frontend
+VITE_API_BASE_URL=http://127.0.0.1:8000 \
+VITE_API_TOKEN="<same-token>" \
+npm run dev -- --host 127.0.0.1
+```
+
+完整的贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，
+桌面构建说明见 [desktop/README.md](desktop/README.md)。
 
 ## 测试
 
-后端测试：
-
 ```bash
+# 后端
 python -m unittest discover backend/tests -v
-```
 
-前端构建：
-
-```bash
+# 前端
 cd frontend
 npm ci
 npm run build
-```
-
-浏览器冒烟测试：
-
-```bash
-cd frontend
 npm run test:canvas-preview
 npm run test:review-workspace
 npm run test:v2-workspace
-```
 
-桌面脚本语法检查：
-
-```bash
-node --check desktop/main.mjs
-node --check desktop/preload.mjs
-node --check desktop/scripts/dev.mjs
-node --check desktop/scripts/stage-runtime.mjs
-node --check desktop/scripts/package-win.mjs
-```
-
-准备发布候选版本时，还应执行 `docs/release-checklist.md` 中列出的依赖、内容和打包检查。
-
-## Windows 桌面打包
-
-Electron 桌面包仍是实验功能。请在干净 Windows 环境构建：
-
-```powershell
-cd desktop
+# 桌面脚本
+cd ../desktop
 npm ci
-npm run dist:win
+node --check main.mjs
+node --check preload.mjs
+node --check scripts/dev.mjs
+node --check scripts/stage-runtime.mjs
+node --check scripts/package-win.mjs
 ```
 
-发布安装包前至少需要完成：
+## 仓库内容边界
 
-- 从干净 Python runtime 重新构建。
-- 检查 `desktop/resources-staging/release-manifest.json`。
-- 扫描暂存目录和最终安装包，确认没有密钥、个人路径、非白名单字体、版权媒体、模型权重和异常大文件。
-- 生成 SBOM 或等价的许可证/依赖报告。
-- 发布 SHA-256 校验和。
-- 决定是否需要代码签名。
+本仓库不应包含：
 
-最近一次本地审计仍提示机器学习依赖栈中的 Torch 相关安全公告没有可由 `pip-audit` 自动建议的修复版本。正式分发桌面安装包前，请对干净 release runtime 重新审计。
+- 漫画原图、翻译成品或含版权页面的测试截图
+- `fonts/custom` 中的商业、私有或个人字体
+- 模型权重、模型缓存和运行时下载缓存
+- API Key、`.env`、本地日志、个人项目数据和个人机器路径
+- 安装器、临时上传、输出目录和其他本地运行产物
+
+提交 Pull Request 前，请确认没有把以上内容加入 Git。
 
 ## 贡献
 
-欢迎提交 Issue 和 Pull Request。开始前请阅读 `CONTRIBUTING.md` 和 `CODE_OF_CONDUCT.md`。
+欢迎通过 [Issues](https://github.com/soluna/Solar-Manga-Translator/issues)
+报告问题或提出建议，也欢迎提交 Pull Request。
+开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)
+与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
-提交 Pull Request 时请说明：
+提交代码时请说明改动原因、运行过的测试、迁移或兼容性影响，并确认没有加入私有数据、版权媒体、非白名单字体、模型权重或凭据。
 
-- 改了什么，为什么要改。
-- 运行过哪些测试。
-- 是否涉及迁移、兼容性或打包影响。
-- 是否确认没有加入私有数据、版权媒体、非白名单字体、模型权重或凭据。
+## 许可证与致谢
 
-## 来源、许可证与致谢
+Solar-Manga-Translator 以 GPL-3.0-only 发布，详见 [LICENSE](LICENSE)。
 
-Solar-Manga-Translator 以 GPL-3.0-only 发布，详见 `LICENSE`。
+本项目集成并固定使用 `manga-image-translator` 作为核心图片翻译引擎，
+并维护必要的运行时补丁。上游来源、许可证和第三方声明见
+[NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-本项目集成并固定使用 `manga-image-translator` 作为核心图片翻译引擎，并在本仓库中维护必要的运行时补丁。相关上游来源、许可证和第三方声明见 `NOTICE` 与 `THIRD_PARTY_NOTICES.md`。
-
-核心引擎版本配置见 `backend/upstream.json`，依赖快照见 `backend/requirements-upstream.txt`，运行时补丁见 `backend/patch_pydensecrf.py` 与 `backend/patched_*.py`。正式发布构建不要把固定 commit 替换成未固定的分支。
+核心引擎版本配置见 `backend/upstream.json`，
+依赖快照见 `backend/requirements-upstream.txt`。
+正式发布构建不应把固定 commit 替换为未固定分支。

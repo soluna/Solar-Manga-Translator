@@ -25,9 +25,9 @@ assert.equal(
   resolveApplicationDataDir({
     platform: 'darwin',
     env: {},
-    fallbackUserData: '/Users/test/Library/Application Support/Solar-Manga-Translator',
+    fallbackUserData: '/tmp/solar-manga-user-data',
   }),
-  '/Users/test/Library/Application Support/Solar-Manga-Translator',
+  '/tmp/solar-manga-user-data',
 )
 
 console.log('Desktop runtime path checks passed.')

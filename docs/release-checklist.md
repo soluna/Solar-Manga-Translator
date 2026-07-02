@@ -25,7 +25,13 @@ installer.
 - `python -m unittest discover -s backend/tests -t . -v`
 - `cd frontend && npm ci && npm run build`
 - `cd frontend && npm run test:canvas-local`
-- `node --check desktop/main.mjs desktop/preload.mjs desktop/runtime-paths.mjs desktop/scripts/dev.mjs desktop/scripts/test-runtime-paths.mjs desktop/scripts/stage-runtime.mjs desktop/scripts/package-win.mjs`
+- `node --check desktop/main.mjs`
+- `node --check desktop/preload.mjs`
+- `node --check desktop/runtime-paths.mjs`
+- `node --check desktop/scripts/dev.mjs`
+- `node --check desktop/scripts/test-runtime-paths.mjs`
+- `node --check desktop/scripts/stage-runtime.mjs`
+- `node --check desktop/scripts/package-win.mjs`
 - `cd desktop && npm run test:runtime-paths`
 - `cd frontend && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`
 - `cd desktop && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`

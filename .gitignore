@@ -6,7 +6,11 @@ dist/
 venv/
 .venv-mac/
 __pycache__/
+.pytest_cache/
 *.pyc
+.coverage
+coverage.xml
+htmlcov/
 .DS_Store
 temp_uploads/
 temp_extracted/
@@ -14,12 +18,17 @@ output_images/
 .superpowers/.worktrees/
 backend/manga-image-translator/
 frontend/test-artifacts/
+playwright-report/
+test-results/
 .runtime/
+.worktrees/
 desktop/node_modules/
 desktop/dist/
 desktop/resources-staging/
 *.pen
 design/
+models/
+backend/models/
 
 # Only allowlisted open-source presets are versioned. User fonts stay local.
 fonts/*

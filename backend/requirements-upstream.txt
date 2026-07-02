@@ -3,9 +3,9 @@
 # pydensecrf is intentionally omitted because backend/patch_pydensecrf.py
 # patches the upstream runtime to avoid that optional native build dependency.
 networkx
-torch
+torch>=2.12.1
 groq
-torchvision
+torchvision>=0.27.1
 torch-summary
 einops
 scikit-image

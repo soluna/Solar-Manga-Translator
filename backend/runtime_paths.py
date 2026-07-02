@@ -186,7 +186,7 @@ class AppPaths:
         candidates: list[Path] = []
         candidates.extend(self.app_data_dir.parent / name for name in LEGACY_APP_NAMES)
         for base in _platform_app_data_bases():
-            candidates.extend(base / name for name in LEGACY_APP_NAMES)
+            candidates.extend(base / name for name in (APP_NAME, *LEGACY_APP_NAMES))
 
         directories: list[Path] = []
         seen: set[str] = {str(self.app_data_dir.resolve())}

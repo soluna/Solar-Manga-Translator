@@ -41,5 +41,13 @@ Bundled open-source fonts:
 - License: SIL Open Font License 1.1, included at
   `fonts/system/OFL-1.1-Source-Han-Sans.txt`
 
+Optional model downloaded by users:
+
+- AnimeMangaInpainting `lama_large_512px.ckpt`
+- Source: https://huggingface.co/dreMaz/AnimeMangaInpainting
+- License declared by the model repository: MIT
+- Expected SHA-256:
+  `11d30fbb3000fb2eceae318b75d9ced9229d99ae990a7f8b3ac35c8d31f2c935`
+
 User-provided fonts belong under `fonts/custom/`. They are not part of the
 repository or release payload and remain the user's licensing responsibility.

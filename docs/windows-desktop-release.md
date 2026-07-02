@@ -18,6 +18,10 @@ Writable data lives under:
 
 - `%LOCALAPPDATA%/Solar-Manga-Translator/`
 
+Versions that briefly used Electron's default `%APPDATA%/Solar-Manga-Translator/`
+location are detected by the in-app legacy-data migration flow. Complete that
+migration before deleting the old directory.
+
 Subdirectories:
 
 - `projects/`

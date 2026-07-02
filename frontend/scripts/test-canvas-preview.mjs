@@ -8,7 +8,7 @@ import { launchChromium } from './playwright-launcher.mjs'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const frontendDir = path.resolve(__dirname, '..')
-const smokeHtmlPath = path.join(frontendDir, 'public', 'dev-canvas-preview-smoke.html')
+const smokeHtmlPath = path.join(frontendDir, 'test-fixtures', 'dev-canvas-preview-smoke.html')
 const artifactDir = path.join(frontendDir, 'test-artifacts')
 
 async function listAvailableFonts() {

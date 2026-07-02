@@ -22,12 +22,11 @@ installer.
 
 ## Tests
 
-- `python -m unittest discover backend/tests -v`
+- `python -m unittest discover -s backend/tests -t . -v`
 - `cd frontend && npm ci && npm run build`
-- `cd frontend && npm run test:canvas-preview`
-- `cd frontend && npm run test:review-workspace`
-- `cd frontend && npm run test:v2-workspace`
-- `node --check desktop/main.mjs desktop/preload.mjs desktop/scripts/dev.mjs desktop/scripts/stage-runtime.mjs desktop/scripts/package-win.mjs`
+- `cd frontend && npm run test:canvas-local`
+- `node --check desktop/main.mjs desktop/preload.mjs desktop/runtime-paths.mjs desktop/scripts/dev.mjs desktop/scripts/test-runtime-paths.mjs desktop/scripts/stage-runtime.mjs desktop/scripts/package-win.mjs`
+- `cd desktop && npm run test:runtime-paths`
 - `cd frontend && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`
 - `cd desktop && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`
 - `python -m pip_audit --local` in the prepared backend runtime
@@ -46,10 +45,9 @@ installer.
   clean Windows VM.
 - Publish installer SHA-256 checksums.
 
-## Known Release Gaps
+## Known Installer Release Gaps
 
 - Code signing is not configured.
 - SBOM generation is not automated.
-- The current local Python audit reports an upstream Torch advisory without a
-  `pip-audit` fix version; re-audit the clean release runtime before publishing
-  any installer.
+- Re-audit the clean release runtime and confirm it keeps
+  `torch>=2.12.1` before publishing any installer.

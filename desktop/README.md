@@ -59,6 +59,10 @@ Desktop builds use:
 
 - Windows: `%LOCALAPPDATA%/Solar-Manga-Translator/`
 
+If an earlier build wrote data to `%APPDATA%/Solar-Manga-Translator/`, the
+backend reports it through the existing legacy-data migration flow and can copy
+it into the current location.
+
 Expected subdirectories:
 
 - `projects/`

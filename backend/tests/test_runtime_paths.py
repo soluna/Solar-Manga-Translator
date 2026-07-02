@@ -103,6 +103,27 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertTrue(status["needed"])
             self.assertTrue(status["summary"]["has_unmigrated_projects"])
 
+    def test_migrate_canonical_app_name_from_alternate_windows_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = make_paths(root / "Local")
+            roaming_dir = root / "Roaming" / runtime_paths_module.APP_NAME
+            self.write_project(roaming_dir / "projects", "roaming-project")
+
+            with mock.patch.object(
+                runtime_paths_module,
+                "_platform_app_data_bases",
+                return_value=[root / "Local", root / "Roaming"],
+            ):
+                status = paths.legacy_status()
+                self.assertTrue(status["needed"])
+                migrated = paths.migrate_legacy("migrate")
+
+            self.assertFalse(migrated["needed"])
+            self.assertTrue(
+                (paths.projects_dir / "roaming-project" / "project.json").exists(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

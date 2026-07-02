@@ -41,6 +41,10 @@ if ! command -v npm >/dev/null 2>&1; then
   echo "[错误] 未找到 npm，请先安装 Node.js。"
   exit 1
 fi
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)'; then
+  echo "[错误] 需要 Node.js 22.12 或更高版本。"
+  exit 1
+fi
 
 if ! MAC_PYTHON="$(find_python)"; then
   echo "[错误] 未找到 Python 3.10 或 3.11。"

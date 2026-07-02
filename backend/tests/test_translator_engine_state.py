@@ -24,7 +24,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import engine.translator as translator_module
 from engine.image_cleanup import SeedreamImageCleanupClient
-from engine.translator import TranslatorEngine
+from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from runtime_paths import AppPaths
 
 
@@ -85,6 +85,38 @@ class TranslatorEngineStateTests(unittest.TestCase):
             engine.clear_session_busy("project-a")
             self.assertFalse(engine.is_session_busy("project-a"))
             self.assertTrue(engine.try_mark_session_busy("project-a", "rerender"))
+
+    def test_project_storage_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            sentinel = engine.paths.app_data_dir / "keep.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+
+            for invalid_project_id in ("", ".", "..", "../outside", "nested/project", "nested\\project", "\x00"):
+                with self.subTest(project_id=repr(invalid_project_id)):
+                    with self.assertRaises(InvalidStorageIdentifierError):
+                        engine.delete_project(invalid_project_id)
+
+            self.assertTrue(sentinel.exists())
+            self.assertEqual(
+                engine._project_dir("legacy.project_1-test"),
+                engine.projects_root.resolve() / "legacy.project_1-test",
+            )
+
+    def test_page_storage_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            for invalid_page_id in ("", ".", "..", "../page.png", "nested/page.png", "nested\\page.png", "\x00"):
+                with self.subTest(page_id=repr(invalid_page_id)):
+                    with self.assertRaises(InvalidStorageIdentifierError):
+                        engine._project_page_document_path("project-a", invalid_page_id)
+
+            self.assertEqual(
+                engine._project_page_document_path("project-a", "0001.png"),
+                engine.projects_root.resolve() / "project-a" / "pages" / "0001.png" / "page_document.json",
+            )
 
     def test_stroke_strength_accepts_values_above_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

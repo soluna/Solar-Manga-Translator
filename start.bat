@@ -18,11 +18,23 @@ if %errorlevel% neq 0 (
     pause
     exit /b
 )
+python -c "import sys; raise SystemExit(0 if sys.version_info[:2] in {(3, 10), (3, 11)} else 1)" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Python 3.10 or 3.11 is required.
+    pause
+    exit /b
+)
 
 :: Check Node.js
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [Error] Node.js not found. Please install Node.js.
+    pause
+    exit /b
+)
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Node.js 22.12 or newer is required.
     pause
     exit /b
 )
@@ -38,8 +50,8 @@ if not exist venv (
 call venv\Scripts\activate.bat
 set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
 
-echo Installing PyTorch (CUDA 11.8)...
-"%VENV_PYTHON%" -m pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+echo Installing a supported PyTorch runtime...
+"%VENV_PYTHON%" -m pip install --upgrade "torch>=2.12.1" "torchvision>=0.27.1" torchaudio
 echo Installing critical runtime dependencies...
 "%VENV_PYTHON%" -m pip install python-dotenv colorama
 echo Installing and preparing pinned manga-image-translator core engine...
@@ -74,7 +86,7 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr /r /c:":%TARGET_PORT% .*LISTE
     set "PID=%%P"
     if not "!PID!"=="" (
         set "PROCESS_CMD="
-        for /f "tokens=* delims=" %%C in ('wmic process where "ProcessId=!PID!" get CommandLine ^| findstr /r /v "^$"') do (
+        for /f "usebackq delims=" %%C in (`powershell -NoProfile -Command "$process = Get-CimInstance Win32_Process -Filter 'ProcessId=!PID!' -ErrorAction SilentlyContinue; if ($null -ne $process) { $process.CommandLine }"`) do (
             set "PROCESS_CMD=%%C"
         )
         echo !PROCESS_CMD! | findstr /i /c:"%MATCH_TEXT%" >nul

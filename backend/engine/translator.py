@@ -53,6 +53,10 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 logger = logging.getLogger("manga_translator.engine")
 
 
+class InvalidStorageIdentifierError(ValueError):
+    pass
+
+
 class TranslatorEngine:
     SECRET_CONFIG_KEYS = ("api_key", "image_cleanup_api_key", "advanced_erase_api_key")
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
@@ -111,6 +115,7 @@ class TranslatorEngine:
         "doubao-seed-2-0-lite-260215",
         "doubao-seed-2-0-mini-260215",
     }
+    PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
     def __init__(self, base_dir: Path, app_paths: AppPaths | None = None):
         self.base_dir = Path(base_dir)
@@ -138,8 +143,39 @@ class TranslatorEngine:
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+    def _validated_project_id(self, project_id: str) -> str:
+        normalized = str(project_id or "")
+        if normalized in {".", ".."} or not self.PROJECT_ID_PATTERN.fullmatch(normalized):
+            raise InvalidStorageIdentifierError("项目标识无效，请刷新后重试。")
+        return normalized
+
+    def _validated_page_id(self, page_id: str) -> str:
+        normalized = str(page_id or "")
+        if (
+            not normalized
+            or len(normalized) > 255
+            or normalized in {".", ".."}
+            or "\x00" in normalized
+            or "/" in normalized
+            or "\\" in normalized
+            or Path(normalized).name != normalized
+        ):
+            raise InvalidStorageIdentifierError("页面标识无效，请刷新后重试。")
+        return normalized
+
+    def _safe_storage_child(self, root: Path, name: str, *, label: str) -> Path:
+        resolved_root = root.resolve()
+        candidate = (resolved_root / name).resolve()
+        if candidate == resolved_root or resolved_root not in candidate.parents:
+            raise InvalidStorageIdentifierError(f"{label}无效，请刷新后重试。")
+        return candidate
+
     def _project_dir(self, project_id: str) -> Path:
-        return self.projects_root / project_id
+        return self._safe_storage_child(
+            self.projects_root,
+            self._validated_project_id(project_id),
+            label="项目标识",
+        )
 
     def _project_manifest_path(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "project.json"
@@ -148,7 +184,11 @@ class TranslatorEngine:
         return self._project_dir(project_id) / "session.json"
 
     def _project_output_dir(self, project_id: str) -> Path:
-        return self.output_root / project_id
+        return self._safe_storage_child(
+            self.output_root,
+            self._validated_project_id(project_id),
+            label="项目标识",
+        )
 
     def _project_source_dir(self, project_id: str) -> Path:
         return self._project_output_dir(project_id) / "source"
@@ -163,13 +203,31 @@ class TranslatorEngine:
         return self._project_dir(project_id) / "pages"
 
     def _project_page_dir(self, project_id: str, page_id: str) -> Path:
-        return self._project_pages_dir(project_id) / page_id
+        return self._safe_storage_child(
+            self._project_pages_dir(project_id),
+            self._validated_page_id(page_id),
+            label="页面标识",
+        )
 
     def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
         return self._project_page_dir(project_id, page_id) / "page_document.json"
 
     def _translation_request_debug_path(self, project_id: str) -> Path:
-        return self.temp_dir / f"{project_id}_translation-request-debug.jsonl"
+        normalized_project_id = self._validated_project_id(project_id)
+        return self._safe_storage_child(
+            self.temp_dir,
+            f"{normalized_project_id}_translation-request-debug.jsonl",
+            label="项目标识",
+        )
+
+    def _project_temp_path(self, project_id: str, suffix: str) -> Path:
+        normalized_project_id = self._validated_project_id(project_id)
+        normalized_suffix = self._validated_page_id(suffix)
+        return self._safe_storage_child(
+            self.temp_dir,
+            f"{normalized_project_id}_{normalized_suffix}",
+            label="项目临时路径",
+        )
 
     def load_persisted_settings(self) -> dict[str, Any]:
         normalized = self._normalize_config(
@@ -2334,7 +2392,7 @@ class TranslatorEngine:
         source_cache_dir = self._rerender_cache_dir(project_id)
 
         new_project_id = str(uuid.uuid4())
-        new_output_root = self.output_root / new_project_id
+        new_output_root = self._project_output_dir(new_project_id)
         new_source_dir = new_output_root / "source"
         new_translated_dir = new_output_root / "translated"
         new_output_root.mkdir(parents=True, exist_ok=True)
@@ -2399,14 +2457,15 @@ class TranslatorEngine:
         return new_project_id, new_session
 
     def delete_project(self, project_id: str) -> None:
+        normalized_project_id = self._validated_project_id(project_id)
         if self.is_session_busy(project_id):
             raise RuntimeError("该项目仍有任务在运行，请等待识别/翻译完成后再删除。")
-        project_dir = self._project_dir(project_id)
-        output_dir = self.output_root / project_id
-        rerender_cache_dir = self._rerender_cache_dir(project_id)
-        mask_debug_dir = self._mask_debug_dir(project_id)
-        style_debug_dir = self._style_rerender_debug_dir(project_id)
-        image_preview_cache_dir = self._image_preview_project_cache_dir(project_id)
+        project_dir = self._project_dir(normalized_project_id)
+        output_dir = self._project_output_dir(normalized_project_id)
+        rerender_cache_dir = self._rerender_cache_dir(normalized_project_id)
+        mask_debug_dir = self._mask_debug_dir(normalized_project_id)
+        style_debug_dir = self._style_rerender_debug_dir(normalized_project_id)
+        image_preview_cache_dir = self._image_preview_project_cache_dir(normalized_project_id)
 
         for path in (project_dir, output_dir, rerender_cache_dir, mask_debug_dir, style_debug_dir, image_preview_cache_dir):
             if path.exists():
@@ -2416,7 +2475,7 @@ class TranslatorEngine:
                     with contextlib.suppress(OSError):
                         path.unlink()
 
-        for extra_path in self.temp_dir.glob(f"{project_id}_*"):
+        for extra_path in self.temp_dir.glob(f"{normalized_project_id}_*"):
             if extra_path in {project_dir, mask_debug_dir, style_debug_dir}:
                 continue
             if extra_path.is_dir():
@@ -2428,7 +2487,7 @@ class TranslatorEngine:
         existing = self._read_json_file(self.project_index_path, [])
         next_items = [
             item for item in existing
-            if isinstance(item, dict) and str(item.get("project_id") or "") != project_id
+            if isinstance(item, dict) and str(item.get("project_id") or "") != normalized_project_id
         ]
         self._write_project_index(next_items)
 
@@ -3688,9 +3747,10 @@ class TranslatorEngine:
         raise FileNotFoundError("当前页面底图不存在，请先完成一次识别或翻译。")
 
     def get_page_source_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
+        normalized_page_id = self._validated_page_id(page_id)
         candidate_paths = [
-            Path(session.get("source_dir") or "") / page_id,
-            self._project_source_dir(project_id) / page_id,
+            Path(session.get("source_dir") or "") / normalized_page_id,
+            self._project_source_dir(project_id) / normalized_page_id,
         ]
         for source_path in candidate_paths:
             if source_path.exists():
@@ -3802,11 +3862,13 @@ class TranslatorEngine:
         return self._save_image_preview_atomic(resized_image, output_base, has_alpha)
 
     def _image_preview_project_cache_dir(self, project_id: str) -> Path:
-        project_key = hashlib.sha1(str(project_id or "").encode("utf-8")).hexdigest()[:12]
+        normalized_project_id = self._validated_project_id(project_id)
+        project_key = hashlib.sha1(normalized_project_id.encode("utf-8")).hexdigest()[:12]
         return self.temp_dir / "image_previews" / project_key
 
     def _image_preview_cache_dir(self, project_id: str, page_id: str) -> Path:
-        page_key = hashlib.sha1(str(page_id or "").encode("utf-8")).hexdigest()[:12]
+        normalized_page_id = self._validated_page_id(page_id)
+        page_key = hashlib.sha1(normalized_page_id.encode("utf-8")).hexdigest()[:12]
         return self._image_preview_project_cache_dir(project_id) / page_key
 
     def _save_image_preview_atomic(self, image: Any, output_base: Path, has_alpha: bool) -> Path:
@@ -4713,7 +4775,7 @@ class TranslatorEngine:
             self._translation_request_debug_path(session_id).unlink()
 
         config_path = self._write_config(session_id, config, profile="detect")
-        log_path = self.temp_dir / f"{session_id}_detect.log"
+        log_path = self._project_temp_path(session_id, "detect.log")
         expected_outputs = [
             output_dir / Path(image["stored_name"])
             for image in session["source_images"]
@@ -5214,7 +5276,7 @@ class TranslatorEngine:
             for index, file_path in enumerate(archive_files, start=1)
         ]
         archive_path = self._make_named_archive(
-            self.temp_dir / f"{session_id}_result.zip",
+            self._project_temp_path(session_id, "result.zip"),
             named_files,
         )
         session["download_path"] = archive_path
@@ -5235,7 +5297,7 @@ class TranslatorEngine:
             suffix = base_path.suffix.lower() if base_path.suffix else ".png"
             named_files.append((base_path, f"{project_name}_blank_{index:04d}{suffix}"))
         return self._make_named_archive(
-            self.temp_dir / f"{session_id}_blank.zip",
+            self._project_temp_path(session_id, "blank.zip"),
             named_files,
         )
 
@@ -5922,7 +5984,7 @@ class TranslatorEngine:
         return False
 
     def _write_config(self, session_id: str, config: dict[str, Any], profile: str = "default") -> Path:
-        config_path = self.temp_dir / f"{session_id}_{profile}_config.json"
+        config_path = self._project_temp_path(session_id, f"{profile}_config.json")
         is_complex_profile = profile == "complex"
         strength = config.get("mask_cleanup_strength", "standard")
         strength_overrides = {
@@ -6094,7 +6156,7 @@ class TranslatorEngine:
         )
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
-        temp_output_dir = self.temp_dir / f"{session_id}_style_rerender"
+        temp_output_dir = self._project_temp_path(session_id, "style_rerender")
         temp_output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(temp_output_dir)
         self._prepare_style_rerender_debug_dir(session_id, reset=True)
@@ -6382,8 +6444,8 @@ class TranslatorEngine:
 
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
-        enhanced_source_dir = self.temp_dir / f"{session_id}_complex_source"
-        enhanced_output_dir = self.temp_dir / f"{session_id}_complex_output"
+        enhanced_source_dir = self._project_temp_path(session_id, "complex_source")
+        enhanced_output_dir = self._project_temp_path(session_id, "complex_output")
         shutil.rmtree(enhanced_source_dir, ignore_errors=True)
         shutil.rmtree(enhanced_output_dir, ignore_errors=True)
         enhanced_source_dir.mkdir(parents=True, exist_ok=True)
@@ -6393,7 +6455,7 @@ class TranslatorEngine:
             shutil.copy2(source_dir / image["stored_name"], enhanced_source_dir / image["stored_name"])
 
         complex_config_path = self._write_config(session_id, config, profile="complex")
-        complex_log_path = self.temp_dir / f"{session_id}_complex_translation.log"
+        complex_log_path = self._project_temp_path(session_id, "complex_translation.log")
         complex_command = self._build_command(
             enhanced_source_dir,
             enhanced_output_dir,
@@ -7852,10 +7914,19 @@ class TranslatorEngine:
         return mask[crop_y1:crop_y2, crop_x1:crop_x2]
 
     def _rerender_cache_dir(self, session_id: str) -> Path:
-        return self.rerender_cache_root / session_id
+        return self._safe_storage_child(
+            self.rerender_cache_root,
+            self._validated_project_id(session_id),
+            label="项目标识",
+        )
 
     def _mask_debug_dir(self, session_id: str) -> Path:
-        return self.temp_dir / f"{session_id}_mask_debug"
+        normalized_session_id = self._validated_project_id(session_id)
+        return self._safe_storage_child(
+            self.temp_dir,
+            f"{normalized_session_id}_mask_debug",
+            label="项目标识",
+        )
 
     def _prepare_rerender_cache_dir(self, session_id: str, reset: bool) -> Path:
         cache_dir = self._rerender_cache_dir(session_id)
@@ -7872,7 +7943,12 @@ class TranslatorEngine:
         return debug_dir
 
     def _style_rerender_debug_dir(self, session_id: str) -> Path:
-        return self.temp_dir / f"{session_id}_style_rerender_debug"
+        normalized_session_id = self._validated_project_id(session_id)
+        return self._safe_storage_child(
+            self.temp_dir,
+            f"{normalized_session_id}_style_rerender_debug",
+            label="项目标识",
+        )
 
     def _prepare_style_rerender_debug_dir(self, session_id: str, reset: bool) -> Path:
         debug_dir = self._style_rerender_debug_dir(session_id)
@@ -7901,7 +7977,11 @@ class TranslatorEngine:
         project_id: str,
         page_id: str,
     ) -> Path:
-        return self._session_rerender_cache_dir(session, project_id) / page_id
+        return self._safe_storage_child(
+            self._session_rerender_cache_dir(session, project_id),
+            self._validated_page_id(page_id),
+            label="页面标识",
+        )
 
     def _has_rerenderable_page_cache(self, page_cache_dir: Path) -> bool:
         return (

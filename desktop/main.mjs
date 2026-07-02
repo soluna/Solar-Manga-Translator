@@ -7,6 +7,8 @@ import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
+import { resolveApplicationDataDir } from './runtime-paths.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
 const isWindows = process.platform === 'win32'
@@ -156,7 +158,9 @@ function resolveBackendLaunch(userDataDir, port, token) {
 }
 
 async function startBackend() {
-  const userDataDir = app.getPath('userData')
+  const userDataDir = resolveApplicationDataDir({
+    fallbackUserData: app.getPath('userData'),
+  })
   const port = await findFreePort()
   apiToken = randomBytes(32).toString('base64url')
   const backendBaseUrl = `http://127.0.0.1:${port}`
@@ -400,7 +404,9 @@ ipcMain.handle('desktop:open-user-fonts', async (event) => {
   if (!isTrustedIpcEvent(event)) {
     return { ok: false, path: '', error: '不受信任的渲染器来源。' }
   }
-  const fontsDir = backendRuntime?.fontsDir || prepareFontDirectory(app.getPath('userData'))
+  const fontsDir = backendRuntime?.fontsDir || prepareFontDirectory(resolveApplicationDataDir({
+    fallbackUserData: app.getPath('userData'),
+  }))
   ensureDir(fontsDir)
   const error = await shell.openPath(fontsDir)
   return {

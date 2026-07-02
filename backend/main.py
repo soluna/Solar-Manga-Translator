@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from engine.translator import TranslatorEngine
+from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from runtime_paths import resolve_app_paths
 from system_fonts import BUNDLED_DEFAULT_FONT_NAME
 from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
@@ -189,6 +189,11 @@ async def protect_local_api(request: Request, call_next):
 @app.exception_handler(UploadTooLargeError)
 async def handle_upload_too_large(_request: Request, exc: UploadTooLargeError):
     return JSONResponse(status_code=413, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidStorageIdentifierError)
+async def handle_invalid_storage_identifier(_request: Request, exc: InvalidStorageIdentifierError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 def copy_upload_to_path(upload: UploadFile, destination: Path) -> None:

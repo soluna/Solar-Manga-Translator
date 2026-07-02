@@ -54,19 +54,23 @@ def ensure_upstream_checkout() -> None:
     repository = metadata["repository"]
     commit = metadata["commit"]
 
+    created_checkout = False
     if not UPSTREAM_CHECKOUT_DIR.exists():
-        run(["git", "clone", "--no-checkout", repository, str(UPSTREAM_CHECKOUT_DIR)])
+        UPSTREAM_CHECKOUT_DIR.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "init", "--initial-branch", "main", str(UPSTREAM_CHECKOUT_DIR)])
+        run(["git", "remote", "add", "origin", repository], cwd=UPSTREAM_CHECKOUT_DIR)
+        created_checkout = True
     elif not (UPSTREAM_CHECKOUT_DIR / ".git").exists():
         raise RuntimeError(
             f"{UPSTREAM_CHECKOUT_DIR} exists but is not a git checkout. "
             "Move it aside and rerun this script."
         )
 
-    current = current_upstream_commit()
+    current = None if created_checkout else current_upstream_commit()
     if current == commit:
         print(f"manga-image-translator already at pinned commit {commit}.")
     else:
-        if current and upstream_has_local_changes():
+        if not created_checkout and current and upstream_has_local_changes():
             raise RuntimeError(
                 "The existing manga-image-translator checkout has local changes and "
                 f"is not at the pinned commit {commit}. Move it aside before rerunning."

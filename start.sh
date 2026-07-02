@@ -10,10 +10,18 @@ if ! command -v python3 &> /dev/null; then
     echo "[错误] 未找到 Python3，请确保已安装。"
     exit 1
 fi
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] in {(3, 10), (3, 11)} else 1)'; then
+    echo "[错误] 需要 Python 3.10 或 3.11。"
+    exit 1
+fi
 
 # 检查 Node.js 环境
-if ! command -v npm &> /dev/null; then
+if ! command -v node &> /dev/null || ! command -v npm &> /dev/null; then
     echo "[错误] 未找到 Node.js (npm)，请确保已安装。"
+    exit 1
+fi
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)'; then
+    echo "[错误] 需要 Node.js 22.12 或更高版本。"
     exit 1
 fi
 
@@ -26,8 +34,8 @@ fi
 source venv/bin/activate
 VENV_PYTHON="$(pwd)/venv/bin/python"
 
-echo "安装 PyTorch (如果是在 Windows 下请手动调整 CUDA 版本, 此脚本提供兼容支持)..."
-"$VENV_PYTHON" -m pip install --upgrade torch torchvision torchaudio
+echo "安装安全版本的 PyTorch..."
+"$VENV_PYTHON" -m pip install --upgrade "torch>=2.12.1" "torchvision>=0.27.1" torchaudio
 
 echo "安装关键运行时依赖..."
 "$VENV_PYTHON" -m pip install python-dotenv colorama

@@ -97,6 +97,16 @@ class ApiSecurityTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
 
+    def test_delete_project_rejects_encoded_parent_directory(self) -> None:
+        sentinel = TEST_APP_DATA_DIR / "path-traversal-sentinel.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+
+        with mock.patch.object(main, "API_TOKEN", ""):
+            response = self.client.delete("/api/projects/%2E%2E")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(sentinel.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

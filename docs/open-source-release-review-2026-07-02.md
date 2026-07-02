@@ -3,7 +3,7 @@
 - 复审日期：2026-07-02
 - 范围：源码、Git 历史、运行时数据边界、依赖、前后端测试、Electron
   暂存内容、许可证和 GitHub 发布配置
-- 源码仓库结论：**可以公开**
+- 源码仓库结论：**已公开**
 - Windows 安装包结论：**暂不发布正式安装包**
 
 本文记录 2026-07-02 实际完成的修复和验证结果，取代此前的开源准备审计。
@@ -26,8 +26,9 @@
 - 所有可达提交的 author 和 committer 邮箱已重写。
 - 重写前已在仓库外创建并验证完整 Git bundle 备份。
 - 已删除不再使用的本地工作分支。
-- 最终检查要求：`git log --all --format='%ae' | sort -u` 只能返回 noreply
-  地址，GitHub 远端只能暴露重写后的 `main`。
+- 旧 GitHub 仓库因关闭 PR 仍保留不可改写的旧引用，现已改名并保持私有。
+- 新公开仓库仅包含重写后的 `main`，没有历史 PR 引用。
+- `git log --all --format='%ae' | sort -u` 只返回 noreply 地址。
 
 ### P0-02 项目路径穿越和数据删除
 
@@ -97,14 +98,12 @@
 
 ### P1-05 GitHub 仓库保护
 
-状态：**公开后立即配置**
+状态：**已关闭**
 
-仓库改为 public 后应：
-
-1. 启用 Dependabot alerts 和 security updates。
-2. 启用 secret scanning、push protection 和 private vulnerability reporting。
-3. 为 `main` 添加 ruleset 或 branch protection，要求 CI 通过。
-4. 禁止普通 force push，仅保留经审计的管理员应急流程。
+- Dependabot alerts 和 security updates 已启用。
+- Secret scanning、push protection 和 private vulnerability reporting 已启用。
+- `main` 要求 `backend` 和 `frontend` 两项 CI 通过。
+- 普通 force push 和分支删除已禁用，管理员保留应急通道。
 
 ## 已完成的清理
 
@@ -171,12 +170,7 @@
 
 ## 最终发布判断
 
-源码仓库满足公开条件，但应按以下顺序操作：
-
-1. 对重写后的 Git 历史和最终源码归档执行最后一次 Gitleaks、个人路径、媒体和大文件扫描。
-2. 使用带旧远端 commit 保护的 `force-with-lease` 推送重写后的 `main`。
-3. 等待 GitHub Actions 在远端通过。
-4. 将仓库改为 public。
-5. 立即启用 P1-05 所列 GitHub 安全功能和分支保护。
+源码仓库已经公开。公开仓库只有 `main`，无旧 PR 引用；最终历史、源码归档、依赖、
+密钥、个人路径、媒体和大文件扫描均通过，远端 CI 与 GitHub 安全设置已经生效。
 
 Windows 安装包继续保持未正式发布状态，直到 P1-03 和 P1-04 的安装包门禁完成。

@@ -13,12 +13,15 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
+from diagnostics_bundle import build_diagnostics_zip
 from runtime_paths import resolve_app_paths
+from logging_config import configure_rotating_file_logging
+from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
 from system_fonts import BUNDLED_DEFAULT_FONT_NAME
 from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
 from system_fonts import bundled_font_directories
@@ -216,30 +219,7 @@ def copy_upload_to_path(upload: UploadFile, destination: Path) -> None:
 
 
 def configure_app_logging() -> None:
-    log_path = APP_PATHS.backend_log_path
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-
-    normalized_log_path = str(log_path.resolve())
-    has_file_handler = any(
-        isinstance(handler, logging.FileHandler)
-        and str(Path(getattr(handler, "baseFilename", "")).resolve()) == normalized_log_path
-        for handler in root_logger.handlers
-    )
-    has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
-        for handler in root_logger.handlers
-    )
-    if not has_file_handler:
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-        root_logger.addHandler(file_handler)
-
-    if not has_stream_handler:
-        stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-        root_logger.addHandler(stream_handler)
+    configure_rotating_file_logging(APP_PATHS.backend_log_path)
 
 
 configure_app_logging()
@@ -444,28 +424,62 @@ def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
 
 def build_runtime_diagnostics() -> dict[str, Any]:
     disk_total, disk_used, disk_free = shutil.disk_usage(APP_PATHS.app_data_dir)
-    gpu = {
-        "available": False,
-        "device_count": 0,
-        "devices": [],
-        "cuda_version": "",
-    }
     try:
         import torch  # type: ignore
-
-        gpu["available"] = bool(torch.cuda.is_available())
-        gpu["device_count"] = int(torch.cuda.device_count()) if gpu["available"] else 0
-        gpu["cuda_version"] = str(getattr(torch.version, "cuda", "") or "")
-        if gpu["available"]:
-            gpu["devices"] = [
-                {
-                    "index": index,
-                    "name": str(torch.cuda.get_device_name(index)),
-                }
-                for index in range(gpu["device_count"])
-            ]
-    except Exception as exc:
-        gpu["error"] = str(exc)
+    except Exception:
+        torch = None
+    gpu = build_gpu_diagnostics(torch, detect_nvidia_gpus())
+    fonts = list_available_fonts()
+    critical_gpu_statuses = {
+        "torch_unavailable",
+        "torch_cpu_build",
+        "cuda_initialization_failed",
+        "cuda_query_failed",
+        "unsupported_gpu_architecture",
+    }
+    writable_paths = {
+        "data": os.access(APP_PATHS.app_data_dir, os.W_OK),
+        "output": os.access(APP_PATHS.output_dir, os.W_OK),
+        "logs": os.access(APP_PATHS.logs_dir, os.W_OK),
+    }
+    disk_status = "ready" if disk_free >= 5 * 1024 * 1024 * 1024 else "warning"
+    gpu_status = "error" if gpu.get("status") in critical_gpu_statuses else (
+        "ready" if gpu.get("available") else "warning"
+    )
+    checks = [
+        {
+            "id": "storage",
+            "label": "本地存储",
+            "status": "ready" if all(writable_paths.values()) else "error",
+            "message": (
+                f"可用空间 {disk_free / (1024 ** 3):.1f} GB，目录可写。"
+                if all(writable_paths.values())
+                else "应用数据、输出或日志目录不可写。"
+            ),
+        },
+        {
+            "id": "disk",
+            "label": "磁盘空间",
+            "status": disk_status,
+            "message": (
+                "空间充足。"
+                if disk_status == "ready"
+                else "可用空间低于 5 GB，模型下载或批量处理可能失败。"
+            ),
+        },
+        {
+            "id": "gpu",
+            "label": "推理设备",
+            "status": gpu_status,
+            "message": str(gpu.get("message") or ""),
+        },
+        {
+            "id": "fonts",
+            "label": "预置字体",
+            "status": "ready" if any(font.get("source") == "system" for font in fonts) else "error",
+            "message": f"已读取 {len(fonts)} 个字体。",
+        },
+    ]
 
     return {
         "platform": sys.platform,
@@ -476,6 +490,9 @@ def build_runtime_diagnostics() -> dict[str, Any]:
             "free_bytes": disk_free,
         },
         "gpu": gpu,
+        "checks": checks,
+        "writable_paths": writable_paths,
+        "font_count": len(fonts),
         "paths": {
             "data_dir": str(APP_PATHS.app_data_dir),
             "models_dir": str(APP_PATHS.models_dir),
@@ -543,6 +560,23 @@ async def get_app_diagnostics():
     return {"diagnostics": build_runtime_diagnostics()}
 
 
+@app.get("/api/app/diagnostics/export")
+async def export_app_diagnostics(request: Request):
+    bundle = build_diagnostics_zip(
+        diagnostics=build_runtime_diagnostics(),
+        runtime=build_runtime_payload(request),
+        settings=translator_engine.load_persisted_settings(),
+        logs_dir=APP_PATHS.logs_dir,
+    )
+    return Response(
+        content=bundle,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="solar-manga-translator-diagnostics.zip"',
+        },
+    )
+
+
 @app.get("/api/app/local-models/lama-large")
 async def get_local_lama_model_status():
     return {"model": build_local_lama_model_payload()}
@@ -585,6 +619,16 @@ async def get_app_logs_tail(lines: int = 200):
     return {
         "path": str(APP_PATHS.backend_log_path),
         "lines": read_log_tail(APP_PATHS.backend_log_path, max_lines=lines),
+    }
+
+
+@app.post("/api/app/open-logs")
+async def open_logs_directory():
+    error = open_directory_in_file_manager(APP_PATHS.logs_dir)
+    return {
+        "ok": not error,
+        "path": str(APP_PATHS.logs_dir),
+        "error": error,
     }
 
 
@@ -864,6 +908,36 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 persist_page_documents=True,
             )
             return {"ok": True, "action": "merge", "region": region}
+
+        if action == "recognize":
+            stored_name = str(payload.get("stored_name") or "").strip()
+            region_id = str(payload.get("region_id") or "").strip()
+            if not stored_name or not region_id:
+                raise HTTPException(status_code=400, detail="缺少需要识别的页面或手动框信息。")
+            region = await translator_engine.recognize_manual_region(
+                session_id=session_id,
+                session=session,
+                raw_config=payload.get("config", {}),
+                stored_name=stored_name,
+                region_id=region_id,
+            )
+            translator_engine.persist_project_state(
+                session_id,
+                session,
+                persist_page_documents=True,
+                page_ids=[stored_name],
+            )
+            recognition_ok = str(region.get("recognition_status") or "") == "ready"
+            return {
+                "ok": recognition_ok,
+                "action": "recognize",
+                "region": region,
+                "message": (
+                    "手动框识别完成。"
+                    if recognition_ok
+                    else f"手动框已保留，但识别失败：{region.get('recognition_error') or '未知错误'}"
+                ),
+            }
 
         translator_engine.capture_session_config(session, payload.get("config", {}))
         stored_name = str(payload.get("stored_name") or "").strip()

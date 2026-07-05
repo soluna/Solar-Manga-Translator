@@ -7,6 +7,7 @@ from pathlib import Path
 
 import uvicorn
 
+from logging_config import configure_rotating_file_logging
 from runtime_paths import resolve_app_paths
 
 
@@ -28,14 +29,7 @@ def configure_logging() -> Path:
     paths = resolve_app_paths(backend_dir)
     log_path = paths.backend_log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    configure_rotating_file_logging(log_path)
     return log_path
 
 

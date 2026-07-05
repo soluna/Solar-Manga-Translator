@@ -51,6 +51,7 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm run test:config-persistence
           npm run build
       - name: Check desktop scripts
         run: |

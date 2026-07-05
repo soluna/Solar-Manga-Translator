@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 
 const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
@@ -195,7 +196,8 @@ const emptyDiagnosticsInfo = {
     device_count: 0,
     devices: [],
     cuda_version: ''
-  }
+  },
+  checks: []
 }
 
 function getDefaultImageCleanupModel(mode) {
@@ -1479,14 +1481,20 @@ const settingsStatusLabel = computed(() => {
 const appRuntimeGpuLabel = computed(() => {
   const gpu = appDiagnostics.value?.gpu || {}
   if (!gpu.available) {
-    return gpu.error ? `未启用 (${gpu.error})` : '未检测到可用 GPU'
+    return gpu.message || (gpu.error ? `未启用 (${gpu.error})` : '未检测到可用 GPU')
   }
   const devices = Array.isArray(gpu.devices) ? gpu.devices : []
   const primary = devices[0]?.name || `${gpu.device_count || 1} 块设备`
-  return gpu.cuda_version ? `${primary} / CUDA ${gpu.cuda_version}` : primary
+  const runtime = gpu.cuda_version ? `CUDA ${gpu.cuda_version}` : String(gpu.accelerator || '').toUpperCase()
+  return runtime ? `${primary} / ${runtime}` : primary
 })
+const appRuntimeGpuAction = computed(() => String(appDiagnostics.value?.gpu?.action || '').trim())
 const appRuntimeDiskLabel = computed(() => formatBytes(appDiagnostics.value?.disk?.free_bytes || 0))
 const appRuntimeFontRootLabel = computed(() => String(appRuntime.value?.font_root || '').trim())
+const canOpenLogDirectory = computed(() => Boolean(
+  (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openLogs === 'function')
+  || backendOnline.value
+))
 const canOpenFontLibraryDirectory = computed(() => (
   Boolean(
     (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
@@ -2196,20 +2204,32 @@ async function loadPersistedAppSettings() {
       throw new Error(payload.detail || '读取设置失败')
     }
     const nextSettings = payload.settings || {}
-    config.value = mergeProjectConfigWithLocalPreferences(nextSettings, config.value)
+    config.value = normalizeStoredConfig(mergePersistedConfigWithBrowserPreferences(
+      nextSettings,
+      config.value,
+      browserConfigKeys,
+    ))
     configuredSecrets.value = {
       ...configuredSecrets.value,
       ...(nextSettings.configured_secrets || {})
     }
     appSettingsLoaded.value = true
-    const translatorNeedsKey = ['gemini', 'doubao-ark'].includes(String(nextSettings?.translator || config.value.translator || ''))
+    const translatorNeedsKey = ['gemini', 'doubao-ark', 'openai-compatible'].includes(String(nextSettings?.translator || config.value.translator || ''))
     const hasPrimaryKey = Boolean(
       configuredSecrets.value.api_key
       || String(config.value.api_key || '').trim()
     )
+    const runtimeNeedsAttention = [
+      'torch_unavailable',
+      'torch_cpu_build',
+      'cuda_initialization_failed',
+      'cuda_query_failed',
+      'unsupported_gpu_architecture',
+    ].includes(String(appDiagnostics.value?.gpu?.status || ''))
     onboardingOpen.value = isDesktopRuntime.value && (
       !Boolean(appRuntime.value?.settings_exists)
       || (translatorNeedsKey && !hasPrimaryKey)
+      || runtimeNeedsAttention
     )
   } catch (error) {
     console.warn('Failed to load persisted settings.', error)
@@ -2243,8 +2263,11 @@ async function persistAppSettings(value, clearSecrets = []) {
       settings_exists: true
     }
     appSettingsLoaded.value = true
+    return true
   } catch (error) {
     console.warn('Failed to persist app settings.', error)
+    errorMessage.value = `保存设置失败：${error instanceof Error ? error.message : String(error || '')}`
+    return false
   }
 }
 
@@ -2266,6 +2289,16 @@ function queuePersistAppSettings(value) {
 async function validateCurrentSettings() {
   appSettingsValidation.value = { ok: null, message: '正在验证…', preview: '' }
   try {
+    if (persistAppSettingsTimer) {
+      window.clearTimeout(persistAppSettingsTimer)
+      persistAppSettingsTimer = null
+    }
+    appSettingsSaving.value = true
+    const settingsSaved = await persistAppSettings(normalizeStoredConfig(config.value))
+    appSettingsSaving.value = false
+    if (!settingsSaved) {
+      throw new Error('设置没有保存成功，请先检查后端和日志。')
+    }
     const response = await apiFetch(toApiUrl('/api/app/settings/validate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2285,6 +2318,7 @@ async function validateCurrentSettings() {
       status.value = '设置验证成功，已经可以开始使用。'
     }
   } catch (error) {
+    appSettingsSaving.value = false
     appSettingsValidation.value = {
       ok: false,
       message: error instanceof Error ? error.message : '验证失败',
@@ -3758,6 +3792,7 @@ function hasRegionWarning(region) {
       isPreviewFontUnsupported(getEffectiveRegionFontId(region))
       || isPreviewFontIdDecodeDenied(getEffectiveRegionFontId(region))
     ))
+    || String(region?.recognition_status || '') === 'failed'
     || !regionText
     || (Number.isFinite(confidence) && confidence > 0 && confidence < 0.72)
   )
@@ -5915,9 +5950,8 @@ async function submitManualDraw(page, bbox) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
-    setTopbarTaskProgress('已完成画框，正在准备手动框…', 1, 3)
+    setTopbarTaskProgress('正在保存新的手动框…', 1, 3)
     await flushUiFrame()
-    setTopbarTaskProgress('正在识别新框内的文字…', 2, 3)
     if (isCanvasReviewMode.value) {
       await runCanvasStructuredAction(page, {
         kind: 'create_region',
@@ -5943,10 +5977,11 @@ async function submitManualDraw(page, bbox) {
       await loadEditInspection({ silent: true })
       selectedEditPageKey.value = page.stored_name
       selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
-      status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
+      status.value = '手动框已保存，正在尝试识别框内文字。'
+      await recognizeManualRegion(page, payload.region?.id)
     }
 
-    setTopbarTaskProgress('正在生成新的可编辑文本框…', 3, 3)
+    setTopbarTaskProgress('手动框已可编辑。', 3, 3)
     await flushUiFrame()
     scheduleClearTopbarTaskProgress()
   } catch (error) {
@@ -5954,6 +5989,55 @@ async function submitManualDraw(page, bbox) {
     errorMessage.value = error instanceof Error ? error.message : '新增手动框失败'
   } finally {
     creatingManualRegion.value = false
+  }
+}
+
+async function recognizeManualRegion(page, regionId) {
+  const normalizedRegionId = String(regionId || '').trim()
+  if (!sessionId.value || !page?.stored_name || !normalizedRegionId) {
+    return false
+  }
+
+  setTopbarTaskProgress('框已保存，正在识别框内文字…', 2, 3)
+  try {
+    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'recognize',
+        stored_name: page.stored_name,
+        region_id: normalizedRegionId,
+        config: buildRuntimeConfig()
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '识别手动框失败')
+    }
+
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = normalizedRegionId
+    markCanvasPreviewDirty(page.stored_name)
+    if (!payload.ok) {
+      status.value = payload.message || '手动框已保留，但文字识别失败；可以稍后重新识别或直接填写译文。'
+      errorMessage.value = status.value
+      return false
+    }
+    status.value = payload.region?.translation_status === 'failed'
+      ? '文字识别完成，翻译失败；手动框已保留，可直接填写译文或重试。'
+      : '手动框识别完成。'
+    errorMessage.value = ''
+    return true
+  } catch (error) {
+    await loadEditInspection({ silent: true })
+    selectedEditPageKey.value = page.stored_name
+    selectedEditRegionKey.value = normalizedRegionId
+    status.value = '手动框已保存，但识别服务连接失败；可以稍后重新识别或直接填写译文。'
+    errorMessage.value = `${status.value} ${error instanceof Error ? error.message : ''}`.trim()
+    return false
   }
 }
 
@@ -6977,10 +7061,11 @@ async function runCanvasStructuredAction(page, options) {
     }
     pushCanvasHistory(page.stored_name, historyEntry)
     if (result?.isLatest !== false) {
-      status.value = '已新增手动框，并自动尝试 OCR / 翻译。'
+      status.value = '手动框已保存，正在尝试识别框内文字。'
       selectedEditPageKey.value = page.stored_name
       selectedEditRegionKey.value = createdRegionId || selectedEditRegionKey.value
     }
+    await recognizeManualRegion(page, createdRegionId)
     return
   }
 
@@ -8476,6 +8561,52 @@ async function openFontLibraryDirectory() {
     fontLibraryMessage.value = `已打开 fonts 字体文件夹：${result.path || appRuntimeFontRootLabel.value}`
   } catch (error) {
     fontLibraryMessage.value = `打开字库文件夹失败：${error instanceof Error ? error.message : String(error || '')}`
+  }
+}
+
+async function openLogDirectory() {
+  if (!canOpenLogDirectory.value) {
+    errorMessage.value = '请先确认本地后端在线，再打开日志目录。'
+    return
+  }
+  try {
+    let result = null
+    if (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openLogs === 'function') {
+      result = await desktopBridge.openLogs()
+    } else {
+      const response = await apiFetch(toApiUrl('/api/app/open-logs'), { method: 'POST' })
+      result = await response.json()
+      if (!response.ok) {
+        throw new Error(result?.detail || '后端未能打开日志目录。')
+      }
+    }
+    if (!result?.ok) {
+      throw new Error(result?.error || '系统文件管理器未能打开日志目录。')
+    }
+    status.value = `已打开日志目录：${result.path || appRuntime.value.logs_dir}`
+  } catch (error) {
+    errorMessage.value = `打开日志目录失败：${error instanceof Error ? error.message : String(error || '')}`
+  }
+}
+
+async function downloadDiagnosticsBundle() {
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/diagnostics/export'))
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'solar-manga-translator-diagnostics.zip'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    status.value = '已导出脱敏诊断包。'
+  } catch (error) {
+    errorMessage.value = `导出诊断包失败：${error instanceof Error ? error.message : String(error || '')}`
   }
 }
 
@@ -11479,12 +11610,27 @@ watch(
                   <div v-if="isManualRegion(region)" class="v2-region-card-footer">
                     <button
                       type="button"
+                      class="v2-secondary-button"
+                      :disabled="creatingManualRegion"
+                      @click="recognizeManualRegion(selectedEditPage, region.id)"
+                    >
+                      {{ region.recognition_status === 'failed' ? '重新识别' : '识别此框' }}
+                    </button>
+                    <button
+                      type="button"
                       class="v2-danger-link"
                       @click="deleteManualRegion(region)"
                     >
                       删除手动框
                     </button>
                   </div>
+                  <p
+                    v-if="isManualRegion(region) && region.recognition_status === 'failed'"
+                    class="v2-region-recognition-error"
+                    role="status"
+                  >
+                    识别失败，框已保留：{{ region.recognition_error || '未知错误' }}
+                  </p>
                 </div>
               </article>
             </div>
@@ -11856,6 +12002,32 @@ watch(
           <button type="button" class="v2-icon-button" aria-label="关闭首次设置" @click="onboardingOpen = false">✕</button>
         </header>
         <div class="v2-settings-content">
+          <section class="v2-settings-group">
+            <header>
+              <strong>运行环境检查</strong>
+              <span>开始导入前确认本地运行时已经就绪</span>
+            </header>
+            <div
+              v-for="check in appDiagnostics.checks || []"
+              :key="check.id"
+              class="v2-readonly-field"
+            >
+              <span>{{ check.label }}</span>
+              <strong :class="`v2-preflight-${check.status}`">{{ check.message }}</strong>
+            </div>
+            <p v-if="appRuntimeGpuAction" class="v2-onboarding-copy is-error">
+              {{ appRuntimeGpuAction }}
+            </p>
+            <div class="v2-inline-actions">
+              <button type="button" class="v2-secondary-button" @click="loadAppDiagnostics">
+                重新检查
+              </button>
+              <button type="button" class="v2-secondary-button" @click="downloadDiagnosticsBundle">
+                导出诊断包
+              </button>
+            </div>
+          </section>
+
           <section class="v2-settings-group">
             <header>
               <strong>翻译服务</strong>
@@ -12262,6 +12434,9 @@ watch(
               <span>GPU / CUDA</span>
               <strong :title="appRuntimeGpuLabel">{{ appRuntimeGpuLabel }}</strong>
             </div>
+            <p v-if="appRuntimeGpuAction" class="v2-settings-inline-note is-error">
+              {{ appRuntimeGpuAction }}
+            </p>
 
             <div class="v2-readonly-field">
               <span>可用磁盘空间</span>
@@ -12271,6 +12446,19 @@ watch(
             <div v-if="appRuntime.logs_dir" class="v2-readonly-field">
               <span>日志目录</span>
               <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
+            </div>
+            <div class="v2-inline-actions">
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="!canOpenLogDirectory"
+                @click="openLogDirectory"
+              >
+                打开日志目录
+              </button>
+              <button type="button" class="v2-secondary-button" @click="downloadDiagnosticsBundle">
+                导出诊断包
+              </button>
             </div>
 
             <div v-if="appRuntimeFontRootLabel" class="v2-readonly-field">

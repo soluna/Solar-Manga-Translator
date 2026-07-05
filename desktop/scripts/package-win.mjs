@@ -75,6 +75,12 @@ async function main() {
     env: process.env,
   })
 
+  await run(detectPythonRuntimeExecutable(), [resolve(backendDir, 'runtime_bootstrap.py'), '--install'], {
+    cwd: backendDir,
+    env: process.env,
+    windowsCommandWrapper: false,
+  })
+
   await run(detectPythonRuntimeExecutable(), [resolve(backendDir, 'install_deps.py'), '--prepare-only'], {
     cwd: backendDir,
     env: process.env,

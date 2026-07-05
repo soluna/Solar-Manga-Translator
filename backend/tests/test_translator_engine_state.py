@@ -923,6 +923,81 @@ print(json.dumps({
             self.assertEqual(payload["fg_color"], [8, 8, 8])
             self.assertEqual(payload["bg_color"], [255, 255, 255])
 
+    def test_manual_region_is_created_before_ocr_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            Image.new("RGB", (240, 320), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "manual_regions": {},
+            }
+
+            async def fail_ocr(*_args, **_kwargs):
+                raise RuntimeError("OCR runtime unavailable")
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._ocr_manual_region = fail_ocr  # type: ignore[method-assign]
+
+            region = asyncio.run(engine.create_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                bbox=[20, 30, 140, 190],
+            ))
+
+            self.assertEqual(region["bbox"], [20, 30, 140, 190])
+            self.assertEqual(region["source_text"], "")
+            self.assertEqual(
+                session["manual_regions"]["page-1.png"][0]["id"],
+                region["id"],
+            )
+
+    def test_manual_region_survives_ocr_failure_and_can_be_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            Image.new("RGB", (240, 320), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "manual_regions": {},
+            }
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            region = asyncio.run(engine.create_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                bbox=[20, 30, 140, 190],
+            ))
+
+            async def fail_ocr(*_args, **_kwargs):
+                raise RuntimeError("OCR runtime unavailable")
+
+            engine._ocr_manual_region = fail_ocr  # type: ignore[method-assign]
+            retried = asyncio.run(engine.recognize_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                region_id=region["id"],
+            ))
+
+            self.assertEqual(retried["id"], region["id"])
+            self.assertEqual(retried["recognition_status"], "failed")
+            self.assertIn("OCR runtime unavailable", retried["recognition_error"])
+            self.assertEqual(
+                session["manual_regions"]["page-1.png"][0]["id"],
+                region["id"],
+            )
+
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2247,6 +2322,24 @@ print(json.dumps({
             self.assertTrue(updated["configured_secrets"]["api_key"])
             self.assertEqual(engine.paths.load_settings()["api_key"], "top-secret")
             self.assertEqual(engine.normalize_user_config({})["api_key"], "top-secret")
+
+    def test_openai_compatible_settings_survive_save_and_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            engine.save_persisted_settings({
+                "translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "top-secret",
+            })
+            reloaded = engine.load_persisted_settings()
+
+            self.assertEqual(reloaded["translator"], "openai-compatible")
+            self.assertEqual(reloaded["selected_translator"], "openai-compatible")
+            self.assertEqual(reloaded["openai_base_url"], "https://api.example.com/v1")
+            self.assertEqual(reloaded["openai_model"], "example-model")
+            self.assertTrue(reloaded["configured_secrets"]["api_key"])
 
     def test_persisted_settings_require_explicit_secret_clear(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

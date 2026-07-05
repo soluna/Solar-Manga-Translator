@@ -34,8 +34,8 @@ fi
 source venv/bin/activate
 VENV_PYTHON="$(pwd)/venv/bin/python"
 
-echo "安装安全版本的 PyTorch..."
-"$VENV_PYTHON" -m pip install --upgrade "torch>=2.12.1" "torchvision>=0.27.1" torchaudio
+echo "检测硬件并准备对应的 PyTorch 运行时..."
+"$VENV_PYTHON" runtime_bootstrap.py --install
 
 echo "安装关键运行时依赖..."
 "$VENV_PYTHON" -m pip install python-dotenv colorama

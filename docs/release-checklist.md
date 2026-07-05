@@ -24,6 +24,7 @@ installer.
 
 - `python -m unittest discover -s backend/tests -t . -v`
 - `cd frontend && npm ci && npm run build`
+- `cd frontend && npm run test:config-persistence`
 - `cd frontend && npm run test:canvas-local`
 - `node --check desktop/main.mjs`
 - `node --check desktop/preload.mjs`
@@ -49,6 +50,8 @@ installer.
   `fonts/custom/`, never the developer's local custom fonts.
 - Install, launch, translate a synthetic fixture, close, and uninstall in a
   clean Windows VM.
+- On an NVIDIA machine, confirm `runtime_bootstrap.py --json` reports the
+  expected CUDA build and supported GPU architecture before translation.
 - Publish installer SHA-256 checksums.
 
 ## Known Installer Release Gaps

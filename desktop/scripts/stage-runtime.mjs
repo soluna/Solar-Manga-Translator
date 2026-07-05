@@ -32,8 +32,10 @@ const ignoredExtensions = new Set(['.pyc', '.pyo'])
 
 const backendFiles = [
   'desktop_server.py',
+  'diagnostics_bundle.py',
   'http_requests.py',
   'install_deps.py',
+  'logging_config.py',
   'main.py',
   'patch_pydensecrf.py',
   'patched_custom_openai.py',
@@ -46,6 +48,7 @@ const backendFiles = [
   'patched_utils_init.py',
   'requirements-upstream.txt',
   'requirements.txt',
+  'runtime_bootstrap.py',
   'runtime_paths.py',
   'system_fonts.py',
   'upstream.json',

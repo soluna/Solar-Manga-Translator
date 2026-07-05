@@ -13,7 +13,7 @@ if ([string]::IsNullOrWhiteSpace($normalizedRootDir)) {
 $root = (Resolve-Path -LiteralPath $normalizedRootDir).Path
 $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
-$backendUrl = "http://127.0.0.1:8000/api/status"
+$backendUrl = $null
 $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
     Join-Path $env:LOCALAPPDATA "Solar-Manga-Translator"
 } else {
@@ -128,6 +128,30 @@ function Get-LogTail {
     }
 }
 
+function Rotate-LogFile {
+    param(
+        [string]$Path,
+        [long]$MaxBytes = 5242880,
+        [int]$BackupCount = 5
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $file = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($null -eq $file -or $file.Length -lt $MaxBytes) {
+        return
+    }
+    Remove-Item -LiteralPath "$Path.$BackupCount" -Force -ErrorAction SilentlyContinue
+    for ($index = $BackupCount - 1; $index -ge 1; $index--) {
+        $source = "$Path.$index"
+        if (Test-Path -LiteralPath $source) {
+            Move-Item -LiteralPath $source -Destination "$Path.$($index + 1)" -Force
+        }
+    }
+    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force
+}
+
 function New-StartupFailureMessage {
     param(
         [string]$ServiceName,
@@ -172,7 +196,8 @@ function Start-CmdWindow {
     $safeTitle = $Title.Replace('"', "'")
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     $quotedLogPath = '"' + $LogPath + '"'
-    $fullCommand = 'title "' + $safeTitle + '" && echo [' + $timestamp + '] Starting ' + $safeTitle + ' > ' + $quotedLogPath + ' && ' + $Command + ' 1>> ' + $quotedLogPath + ' 2>&1'
+    Rotate-LogFile -Path $LogPath
+    $fullCommand = 'title "' + $safeTitle + '" && echo. >> ' + $quotedLogPath + ' && echo [' + $timestamp + '] Starting ' + $safeTitle + ' >> ' + $quotedLogPath + ' && ' + $Command + ' 1>> ' + $quotedLogPath + ' 2>&1'
     return Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $fullCommand) -WorkingDirectory $WorkingDirectory -PassThru
 }
 
@@ -219,14 +244,21 @@ try {
     Write-Host "==================================================="
 
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $env:APP_DESKTOP_MODE = "1"
+    $env:APP_DATA_DIR = $browserProfileBase
+    $env:APP_LOG_DIR = $logDir
+    $env:APP_FONT_DIR = Join-Path $root "fonts"
+    $backendPort = Find-FreeTcpPort -PreferredPort 8000 -HostName "127.0.0.1"
+    $backendBaseUrl = "http://127.0.0.1:$backendPort"
+    $backendUrl = "$backendBaseUrl/api/status"
     $frontendPort = Resolve-FrontendPort
     $frontendUrl = "http://127.0.0.1:$frontendPort"
-    $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=http://127.0.0.1:8000" && set "VITE_API_BASE_URL=http://127.0.0.1:8000" && set "VITE_API_TOKEN=' + $apiToken + '" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
+    $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=' + $backendBaseUrl + '" && set "VITE_API_BASE_URL=' + $backendBaseUrl + '" && set "VITE_API_TOKEN=' + $apiToken + '" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
 
     $backendProcess = Start-CmdWindow `
         -Title "Solar-Manga-Translator API" `
         -WorkingDirectory $backendDir `
-        -Command ('set "APP_API_TOKEN=' + $apiToken + '" && call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port 8000') `
+        -Command ('set "APP_API_TOKEN=' + $apiToken + '" && call venv\Scripts\activate.bat && python -m uvicorn main:app --host 127.0.0.1 --port ' + $backendPort) `
         -LogPath $backendLogPath
 
     if (-not (Wait-HttpReady -Url $backendUrl -TimeoutSeconds 90 -Process $backendProcess)) {
@@ -255,7 +287,7 @@ try {
         )
         $browserProcess = Start-Process -FilePath $browserExe -ArgumentList $browserArgs -PassThru
         Write-Host ""
-        Write-Host "Backend API:  http://localhost:8000"
+        Write-Host "Backend API:  $backendBaseUrl"
         Write-Host "Frontend UI:  $frontendUrl"
         Write-Host "Browser mode: dedicated app window"
         Write-Host "Logs:          $logDir"

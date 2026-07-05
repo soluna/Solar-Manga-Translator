@@ -18,6 +18,8 @@ const artifactDir = path.join(frontendDir, 'test-artifacts', 'v2-workspace')
 
 const FIXTURE_PROJECT_ID = 'canvas-e2e-fixture'
 const FIXTURE_PROJECT_TITLE = 'Canvas E2E Fixture'
+const FIXTURE_OPENAI_BASE_URL = 'https://api.example.invalid/v1'
+const FIXTURE_OPENAI_MODEL = 'fixture-model'
 const ownsAppDataDir = !process.env.APP_DATA_DIR
 const E2E_APP_DATA_DIR = process.env.APP_DATA_DIR || await fs.mkdtemp(path.join(os.tmpdir(), 'manga-translator-v2-e2e-'))
 const E2E_API_TOKEN = process.env.CANVAS_E2E_API_TOKEN || process.env.APP_API_TOKEN || randomBytes(32).toString('base64url')
@@ -152,6 +154,25 @@ async function ensureFixture() {
   })
 }
 
+async function seedPersistedSettings() {
+  const response = await fetch(`${BACKEND_URL}/api/app/settings`, {
+    method: 'PATCH',
+    headers: {
+      ...apiHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      translator: 'openai-compatible',
+      target_lang: 'CHS',
+      openai_base_url: FIXTURE_OPENAI_BASE_URL,
+      openai_model: FIXTURE_OPENAI_MODEL,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error(`无法准备持久设置夹具：HTTP ${response.status}`)
+  }
+}
+
 async function ensureServices() {
   const started = []
 
@@ -273,6 +294,7 @@ async function main() {
   try {
     started = await ensureServices()
     await ensureFixture()
+    await seedPersistedSettings()
 
     browser = await launchChromium({ headless: true })
     const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } })
@@ -293,6 +315,19 @@ async function main() {
       throw new Error(`首页仍然保留了示例卡片：${homeGalleryCount}`)
     }
     const homeShot = await saveScreenshot(page, 'v2-home.png')
+
+    await page.getByRole('banner').getByRole('button', { name: '打开设置' }).click()
+    await page.getByTestId('v2-settings-panel').waitFor({ state: 'visible', timeout: 20000 })
+    const persistedBaseUrl = await page.getByTestId('v2-settings-panel').getByLabel('API Base URL').inputValue()
+    const persistedModel = await page.getByTestId('v2-settings-panel')
+      .getByPlaceholder('gpt-4o / deepseek-chat / ...')
+      .inputValue()
+    if (persistedBaseUrl !== FIXTURE_OPENAI_BASE_URL || persistedModel !== FIXTURE_OPENAI_MODEL) {
+      throw new Error(
+        `OpenAI Compatible 设置重载后丢失：base=${persistedBaseUrl} model=${persistedModel}`
+      )
+    }
+    await page.getByTestId('v2-settings-panel').getByRole('button', { name: '关闭设置' }).click()
 
     await page.getByRole('banner').getByRole('button', { name: '历史项目' }).click()
     await page.getByTestId('v2-history-modal').waitFor({ state: 'visible', timeout: 20000 })

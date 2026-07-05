@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { cpSync, createWriteStream, existsSync, mkdirSync } from 'node:fs'
+import { cpSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -25,7 +25,22 @@ function ensureDir(path) {
 
 function createLogStream(path) {
   ensureDir(dirname(path))
+  rotateLogFile(path)
   return createWriteStream(path, { flags: 'a' })
+}
+
+function rotateLogFile(path, maxBytes = 5 * 1024 * 1024, backupCount = 5) {
+  if (!existsSync(path) || statSync(path).size < maxBytes) {
+    return
+  }
+  rmSync(`${path}.${backupCount}`, { force: true })
+  for (let index = backupCount - 1; index >= 1; index -= 1) {
+    const source = `${path}.${index}`
+    if (existsSync(source)) {
+      renameSync(source, `${path}.${index + 1}`)
+    }
+  }
+  renameSync(path, `${path}.1`)
 }
 
 async function findFreePort() {
@@ -412,6 +427,22 @@ ipcMain.handle('desktop:open-user-fonts', async (event) => {
   return {
     ok: !error,
     path: fontsDir,
+    error,
+  }
+})
+ipcMain.handle('desktop:open-logs', async (event) => {
+  if (!isTrustedIpcEvent(event)) {
+    return { ok: false, path: '', error: '不受信任的渲染器来源。' }
+  }
+  const logsDir = backendRuntime?.logsDir
+  if (!logsDir) {
+    return { ok: false, path: '', error: '日志目录尚未初始化。' }
+  }
+  ensureDir(logsDir)
+  const error = await shell.openPath(logsDir)
+  return {
+    ok: !error,
+    path: logsDir,
     error,
   }
 })

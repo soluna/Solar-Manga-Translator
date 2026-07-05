@@ -4,10 +4,21 @@ setlocal enabledelayedexpansion
 
 :: Get absolute path to the directory containing this script, without a trailing slash.
 for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
+if defined LOCALAPPDATA (
+    set "APP_DATA_ROOT=%LOCALAPPDATA%\Solar-Manga-Translator"
+) else (
+    set "APP_DATA_ROOT=%ROOT_DIR%\.runtime"
+)
+set "BOOTSTRAP_LOG_DIR=%APP_DATA_ROOT%\logs"
+set "BOOTSTRAP_LOG=%BOOTSTRAP_LOG_DIR%\bootstrap.log"
+if not exist "%BOOTSTRAP_LOG_DIR%" mkdir "%BOOTSTRAP_LOG_DIR%"
+echo.>> "%BOOTSTRAP_LOG%"
+echo [%date% %time%] Starting dependency bootstrap.>> "%BOOTSTRAP_LOG%"
 
 echo ===================================================
 echo Solar-Manga-Translator Start Script
 echo ===================================================
+echo Detailed installation log: %BOOTSTRAP_LOG%
 
 call :stop_existing_service_on_port 8000 "uvicorn main:app"
 
@@ -45,19 +56,49 @@ cd /d "%ROOT_DIR%"
 cd backend
 if not exist venv (
     echo Creating Python venv...
-    python -m venv venv
+    python -m venv venv >> "%BOOTSTRAP_LOG%" 2>&1
+    if !errorlevel! neq 0 (
+        echo [Error] Failed to create the Python virtual environment.
+        call :show_bootstrap_log
+        pause
+        exit /b 1
+    )
 )
 call venv\Scripts\activate.bat
 set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
 
-echo Installing a supported PyTorch runtime...
-"%VENV_PYTHON%" -m pip install --upgrade "torch>=2.12.1" "torchvision>=0.27.1" torchaudio
+echo Detecting GPU and preparing the matching PyTorch runtime...
+"%VENV_PYTHON%" runtime_bootstrap.py --install >> "%BOOTSTRAP_LOG%" 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] PyTorch runtime setup failed. Read the message above, then rerun start.bat.
+    call :show_bootstrap_log
+    pause
+    exit /b 1
+)
 echo Installing critical runtime dependencies...
-"%VENV_PYTHON%" -m pip install python-dotenv colorama
+"%VENV_PYTHON%" -m pip install python-dotenv colorama >> "%BOOTSTRAP_LOG%" 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Failed to install critical Python dependencies.
+    call :show_bootstrap_log
+    pause
+    exit /b 1
+)
 echo Installing and preparing pinned manga-image-translator core engine...
-"%VENV_PYTHON%" install_deps.py
+"%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Failed to install or prepare manga-image-translator.
+    call :show_bootstrap_log
+    pause
+    exit /b 1
+)
 echo Installing FastAPI project requirements and security constraints...
-"%VENV_PYTHON%" -m pip install -r requirements.txt
+"%VENV_PYTHON%" -m pip install -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Failed to install backend requirements.
+    call :show_bootstrap_log
+    pause
+    exit /b 1
+)
 
 echo.
 echo [2/3] Installing Frontend Dependencies...
@@ -68,7 +109,13 @@ if not exist frontend\package.json (
     exit /b
 )
 cd frontend
-call npm install
+call npm install >> "%BOOTSTRAP_LOG%" 2>&1
+if %errorlevel% neq 0 (
+    echo [Error] Failed to install frontend dependencies.
+    call :show_bootstrap_log
+    pause
+    exit /b 1
+)
 
 echo.
 echo [3/3] Starting Services...
@@ -76,6 +123,13 @@ echo Launching managed browser session...
 set "MANAGED_SCRIPT=%ROOT_DIR%\start.managed.ps1"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%MANAGED_SCRIPT%" -RootDir "%ROOT_DIR%"
 exit /b %errorlevel%
+
+:show_bootstrap_log
+echo.
+echo Last installation log lines:
+powershell -NoProfile -Command "Get-Content -LiteralPath '%BOOTSTRAP_LOG%' -Tail 80 -ErrorAction SilentlyContinue"
+echo Full log: %BOOTSTRAP_LOG%
+exit /b
 
 :stop_existing_service_on_port
 set "TARGET_PORT=%~1"

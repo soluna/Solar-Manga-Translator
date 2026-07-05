@@ -307,6 +307,11 @@ class TranslatorEngine:
 
     def _redact_settings(self, normalized: dict[str, Any]) -> dict[str, Any]:
         redacted = copy.deepcopy(normalized)
+        redacted["translator"] = str(
+            normalized.get("selected_translator")
+            or normalized.get("translator")
+            or "gemini"
+        )
         redacted["configured_secrets"] = {
             secret_key: bool(str(normalized.get(secret_key) or "").strip())
             for secret_key in self.SECRET_CONFIG_KEYS
@@ -3525,6 +3530,12 @@ class TranslatorEngine:
                 "edited": str(getattr(region, "translation_override", "") or ""),
                 "resolved": self._region_preview_text(region),
             },
+            "recognition": {
+                "status": str(manual_payload.get("recognition_status") or ""),
+                "error": str(manual_payload.get("recognition_error") or ""),
+                "translation_status": str(manual_payload.get("translation_status") or ""),
+                "translation_error": str(manual_payload.get("translation_error") or ""),
+            },
             "style": {
                 "auto_font_style": str(getattr(region, "auto_font_style", "") or ""),
                 "font_style_override": str(getattr(region, "override_font_style", "") or ""),
@@ -4264,6 +4275,10 @@ class TranslatorEngine:
                     "manual": str(region.get("kind") or "") in {"manual", "merged"},
                     "source_text": str(region.get("source_text") or ""),
                     "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
+                    "recognition_status": str((region.get("recognition") or {}).get("status") or ""),
+                    "recognition_error": str((region.get("recognition") or {}).get("error") or ""),
+                    "translation_status": str((region.get("recognition") or {}).get("translation_status") or ""),
+                    "translation_error": str((region.get("recognition") or {}).get("translation_error") or ""),
                     "direction": str(region.get("direction") or "auto"),
                     "machine_translation": str(translation.get("machine") or ""),
                     "override_translation": str(translation.get("edited") or ""),
@@ -4313,6 +4328,10 @@ class TranslatorEngine:
                     "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
                     "manual": str(region.get("kind") or "") in {"manual", "merged"},
                     "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
+                    "recognition_status": str((region.get("recognition") or {}).get("status") or ""),
+                    "recognition_error": str((region.get("recognition") or {}).get("error") or ""),
+                    "translation_status": str((region.get("recognition") or {}).get("translation_status") or ""),
+                    "translation_error": str((region.get("recognition") or {}).get("translation_error") or ""),
                     "auto_style": str(style.get("auto_font_style") or ""),
                     "override_style": str(style.get("font_style_override") or ""),
                     "resolved_style": str(style.get("font_style") or ""),
@@ -5420,7 +5439,12 @@ class TranslatorEngine:
                     raw_config[secret_key] = str(stored.get(secret_key) or "").strip()
         selected_translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
         if selected_translator == "custom_openai":
-            selected_translator = "doubao-ark"
+            persisted_selected = str(raw_config.get("selected_translator") or "").strip()
+            selected_translator = (
+                persisted_selected
+                if persisted_selected in {"doubao-ark", "openai-compatible"}
+                else "doubao-ark"
+            )
         translator = selected_translator
         target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
         translator_model = self._normalize_translator_model(
@@ -8547,6 +8571,10 @@ class TranslatorEngine:
         normalized["target_lang"] = str(payload.get("target_lang") or "")
         normalized["manual"] = True
         normalized["created_at"] = float(payload.get("created_at") or time.time())
+        normalized["recognition_status"] = str(payload.get("recognition_status") or "pending")
+        normalized["recognition_error"] = str(payload.get("recognition_error") or "")
+        normalized["translation_status"] = str(payload.get("translation_status") or "pending")
+        normalized["translation_error"] = str(payload.get("translation_error") or "")
         if bool(payload.get("allow_overlap")):
             normalized["allow_overlap"] = True
         if bool(payload.get("preserve_background")):
@@ -8772,7 +8800,6 @@ class TranslatorEngine:
         stored_name: str,
         bbox: Any,
     ) -> dict[str, Any]:
-        self._ensure_runtime_patches()
         config = self._normalize_config(raw_config)
         source_dir = Path(session["source_dir"])
         source_path = source_dir / stored_name
@@ -8789,27 +8816,122 @@ class TranslatorEngine:
         if not self._ensure_page_base_image_cache(source_path, cache_page_dir):
             raise RuntimeError("无法为当前页面准备底图，请刷新后重试。")
 
-        ocr_result = await self._ocr_manual_region(source_rgb, normalized_bbox, config.get("use_gpu", True))
-        translation = ""
-        if self._session_workflow_stage(session) != "detected":
-            try:
-                translation = await self._translate_manual_text(ocr_result.get("source_text", ""), config, session_id)
-            except Exception as exc:
-                print(f"[WARN] Manual region translation failed for {stored_name}: {exc}")
-
         payload = self._build_manual_region_payload(
             stored_name=stored_name,
             bbox=normalized_bbox,
-            source_text=ocr_result.get("source_text", ""),
-            translation=translation,
+            source_text="",
+            translation="",
             target_lang=config["target_lang"],
-            direction=ocr_result.get("direction"),
-            font_size=ocr_result.get("font_size"),
-            fg_color=ocr_result.get("fg_color"),
-            bg_color=ocr_result.get("bg_color"),
+            direction=self._direction_from_bbox(normalized_bbox),
+            font_size=max(min(normalized_bbox[2] - normalized_bbox[0], normalized_bbox[3] - normalized_bbox[1]), 14),
+            fg_color=(0, 0, 0),
+            bg_color=(255, 255, 255),
         )
+        payload.update({
+            "recognition_status": "pending",
+            "recognition_error": "",
+            "translation_status": "pending",
+            "translation_error": "",
+        })
         manual_regions = self._ensure_manual_regions_store(session)
         manual_regions.setdefault(stored_name, []).append(payload)
+        return payload
+
+    async def recognize_manual_region(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        stored_name: str,
+        region_id: str,
+    ) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        page_regions = self._manual_regions_for_page(session, stored_name)
+        payload = next(
+            (
+                item
+                for item in page_regions
+                if str(item.get("id") or "") == str(region_id or "").strip()
+            ),
+            None,
+        )
+        if payload is None:
+            raise FileNotFoundError("没有找到需要识别的手动框。")
+
+        source_path = Path(session["source_dir"]) / stored_name
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            payload["recognition_status"] = "failed"
+            payload["recognition_error"] = "无法读取当前页面原图。"
+            return payload
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        bbox = self._normalize_manual_bbox(
+            payload.get("bbox"),
+            source_rgb.shape[1],
+            source_rgb.shape[0],
+        )
+        payload["recognition_status"] = "running"
+        payload["recognition_error"] = ""
+        payload["translation_status"] = "pending"
+        payload["translation_error"] = ""
+
+        try:
+            self._ensure_runtime_patches()
+            ocr_result = await self._ocr_manual_region(
+                source_rgb,
+                bbox,
+                config.get("use_gpu", True),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Manual region OCR failed. project=%s page=%s region=%s",
+                session_id,
+                stored_name,
+                region_id,
+            )
+            payload["recognition_status"] = "failed"
+            payload["recognition_error"] = str(exc)[:1000]
+            payload["translation_status"] = "skipped"
+            return payload
+
+        payload.update({
+            "bbox": bbox,
+            "lines": self._manual_region_lines(bbox),
+            "source_text": str(ocr_result.get("source_text") or "").strip(),
+            "direction": self._resolve_region_direction(
+                bbox,
+                ocr_result.get("direction"),
+                config["target_lang"],
+            ),
+            "font_size": max(8, int(round(float(ocr_result.get("font_size") or 14)))),
+            "fg_color": self._rgb_color_payload(ocr_result.get("fg_color"), (0, 0, 0)),
+            "bg_color": self._rgb_color_payload(ocr_result.get("bg_color"), (255, 255, 255)),
+            "recognition_status": "ready",
+            "recognition_error": "",
+        })
+
+        if self._session_workflow_stage(session) == "detected" or not payload["source_text"]:
+            payload["translation_status"] = "skipped"
+            return payload
+
+        try:
+            translation = await self._translate_manual_text(
+                payload["source_text"],
+                config,
+                session_id,
+            )
+            payload["machine_translation"] = translation
+            payload["translation"] = translation
+            payload["translation_status"] = "ready"
+        except Exception as exc:
+            logger.exception(
+                "Manual region translation failed. project=%s page=%s region=%s",
+                session_id,
+                stored_name,
+                region_id,
+            )
+            payload["translation_status"] = "failed"
+            payload["translation_error"] = str(exc)[:1000]
         return payload
 
     def duplicate_region(

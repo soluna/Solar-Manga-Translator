@@ -16,3 +16,13 @@
 - Added safe project path validation, fresh pinned-upstream setup, and Windows
   `%LOCALAPPDATA%` migration coverage.
 - Added open-source governance documents and release guidance.
+- Added hardware-aware PyTorch setup for Windows/Linux, including RTX 50
+  diagnostics and explicit CUDA wheel selection.
+- Fixed OpenAI Compatible provider, Base URL, model, and secret persistence
+  across application restarts.
+- Decoupled manual region creation from OCR and translation so failed
+  recognition no longer removes the user's box.
+- Added rotating persistent logs, log-folder access, and redacted diagnostic
+  bundle export.
+- Added first-run runtime checks, dependency failure stops, and dynamic backend
+  port selection for the managed Windows launcher.

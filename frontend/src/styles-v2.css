@@ -2150,6 +2150,26 @@ img {
   gap: 8px;
 }
 
+.v2-region-recognition-error {
+  margin: 8px 0 0;
+  color: var(--v2-danger);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.v2-preflight-ready {
+  color: var(--v2-success);
+}
+
+.v2-preflight-warning {
+  color: var(--v2-warning);
+}
+
+.v2-preflight-error {
+  color: var(--v2-danger);
+}
+
 .v2-inline-checkbox {
   display: inline-flex;
   align-items: center;

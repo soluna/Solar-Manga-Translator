@@ -40,6 +40,7 @@
 - Node.js 24 LTS；最低支持版本为 22.12
 - 需要联网下载 Python 依赖、核心引擎和所选模型
 - 使用在线翻译服务时，需要自行准备对应服务商的 API Key
+- NVIDIA GPU 用户建议安装最新驱动；当前 CUDA 13 运行时要求 R580 或更高版本
 
 首次启动会安装较大的机器学习依赖，耗时取决于网络与电脑性能。
 
@@ -51,7 +52,9 @@ cd Solar-Manga-Translator
 start.bat
 ```
 
-脚本会创建 `backend/venv`、安装依赖、准备固定版本的核心翻译引擎、启动前后端，并打开浏览器。
+脚本会创建 `backend/venv`、检测 NVIDIA GPU、安装匹配的官方 PyTorch
+CUDA/CPU 运行时、准备固定版本的核心翻译引擎、启动前后端并打开浏览器。RTX 50
+显卡会使用支持 Blackwell 的 CUDA 运行时；若驱动过旧，脚本会在启动前给出明确提示。
 
 ### macOS
 
@@ -112,6 +115,7 @@ chmod +x start.sh
 - 应用只读取这两个目录，不扫描操作系统字体。
 - “打开字体文件夹”会打开项目使用的 `fonts` 根目录。
 - 项目、输出、设置、模型、缓存和日志保存在本机应用数据目录，不会提交到 Git。设置面板会显示当前运行实际使用的目录。
+- 后端日志会持续追加并自动轮转；设置面板可以直接打开日志目录或导出脱敏诊断包。
 
 升级代码不会主动删除历史项目。迁移旧版本数据前，建议先备份旧应用数据目录；若历史列表为空，请检查设置面板显示的应用数据目录是否与旧版本一致。
 
@@ -135,6 +139,36 @@ chmod +x start.sh
 - 翻译与图像修补结果仍需要人工检查。
 
 正式分发桌面安装包前，还需要在干净 Windows 环境执行 [发布检查清单](docs/release-checklist.md)，重新审计依赖并生成校验信息。
+
+## 常见问题
+
+### 设置里显示“检测到 NVIDIA 显卡，但当前安装的是 CPU 版 PyTorch”
+
+关闭应用后重新运行 `start.bat`。脚本会改用 PyTorch 官方 CUDA wheel。RTX 50
+用户还需要 NVIDIA R580 或更高驱动。可在 PowerShell 中检查：
+
+```powershell
+nvidia-smi
+backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+### API Base URL 或模型重启后不见了
+
+新版会把设置写到设置面板显示的本地配置文件。“测试连接”和“保存并开始”都会先确认写入完成。
+若仍失败，请导出诊断包并检查其中的 `diagnostics.json`；密钥会被脱敏。
+
+### 手动添加框后 OCR 失败
+
+框会先保存，再单独执行 OCR 和翻译。识别失败不会删除框，可以在右侧文本框中点击
+“重新识别”，也可以直接填写译文。
+
+### 到哪里找日志
+
+打开设置，在“应用运行环境”中点击“打开日志目录”。需要反馈问题时可点击“导出诊断包”；
+诊断包包含最近日志和运行环境信息，并会清理 API Key、Authorization 和 token。
+
+更完整的首次使用问题分级和修复记录见
+[首次使用就绪度复审](docs/first-run-readiness-review-2026-07-05.md)。
 
 ## 开发
 

@@ -26,3 +26,7 @@
   bundle export.
 - Added first-run runtime checks, dependency failure stops, and dynamic backend
   port selection for the managed Windows launcher.
+- Fixed clean Windows setup by removing the unused `torchaudio` package from
+  the PyTorch runtime plan; its pinned CUDA 13 wheel was not published.
+- Changed the Windows bootstrap log timestamp to a locale-independent format
+  so Chinese weekday names are not written as mojibake.

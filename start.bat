@@ -12,8 +12,9 @@ if defined LOCALAPPDATA (
 set "BOOTSTRAP_LOG_DIR=%APP_DATA_ROOT%\logs"
 set "BOOTSTRAP_LOG=%BOOTSTRAP_LOG_DIR%\bootstrap.log"
 if not exist "%BOOTSTRAP_LOG_DIR%" mkdir "%BOOTSTRAP_LOG_DIR%"
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm:ss'"`) do set "BOOTSTRAP_TIMESTAMP=%%T"
 echo.>> "%BOOTSTRAP_LOG%"
-echo [%date% %time%] Starting dependency bootstrap.>> "%BOOTSTRAP_LOG%"
+echo [!BOOTSTRAP_TIMESTAMP!] Starting dependency bootstrap.>> "%BOOTSTRAP_LOG%"
 
 echo ===================================================
 echo Solar-Manga-Translator Start Script
@@ -70,7 +71,7 @@ set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
 echo Detecting GPU and preparing the matching PyTorch runtime...
 "%VENV_PYTHON%" runtime_bootstrap.py --install >> "%BOOTSTRAP_LOG%" 2>&1
 if %errorlevel% neq 0 (
-    echo [Error] PyTorch runtime setup failed. Read the message above, then rerun start.bat.
+    echo [Error] PyTorch runtime setup failed. See the log excerpt below, then rerun start.bat.
     call :show_bootstrap_log
     pause
     exit /b 1

@@ -10,7 +10,6 @@ from typing import Any, Sequence
 
 PYTORCH_VERSION = "2.12.1"
 TORCHVISION_VERSION = "0.27.1"
-TORCHAUDIO_VERSION = "2.12.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +100,6 @@ def choose_pytorch_runtime(
     packages = (
         f"torch=={PYTORCH_VERSION}",
         f"torchvision=={TORCHVISION_VERSION}",
-        f"torchaudio=={TORCHAUDIO_VERSION}",
     )
     if platform_name.startswith(("win", "linux")) and gpus:
         capability = _compute_capability(gpus)

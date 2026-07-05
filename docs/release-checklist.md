@@ -41,6 +41,8 @@ installer.
 ## Desktop Installer
 
 - Build from a clean Windows environment.
+- For the source workflow, delete `backend\venv`, run `start.bat`, and confirm
+  the complete dependency bootstrap succeeds before testing an upgrade.
 - Run `backend/install_deps.py --prepare-only` before staging.
 - Review `desktop/resources-staging/release-manifest.json`.
 - Scan `desktop/resources-staging/` for secrets, personal paths,

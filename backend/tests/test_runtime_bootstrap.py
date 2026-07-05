@@ -34,8 +34,10 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertEqual(plan.accelerator, "cuda")
         self.assertEqual(plan.index_url, "https://download.pytorch.org/whl/cu130")
-        self.assertIn("torch==2.12.1", plan.packages)
-        self.assertIn("torchvision==0.27.1", plan.packages)
+        self.assertEqual(
+            plan.packages,
+            ("torch==2.12.1", "torchvision==0.27.1"),
+        )
 
     def test_windows_without_nvidia_gpu_uses_cpu_runtime(self) -> None:
         plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[])
@@ -144,6 +146,12 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertIn("runtime_bootstrap.py", start_script)
         self.assertNotIn("-m pip install --upgrade \"torch", start_script)
+
+    def test_windows_start_script_writes_locale_independent_timestamp(self) -> None:
+        start_script = (BACKEND_DIR.parent / "start.bat").read_text(encoding="utf-8")
+
+        self.assertNotIn("%date%", start_script.lower())
+        self.assertIn("Get-Date -Format 'yyyy-MM-dd HH:mm:ss'", start_script)
 
 
 if __name__ == "__main__":

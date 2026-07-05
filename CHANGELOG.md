@@ -30,3 +30,6 @@
   the PyTorch runtime plan; its pinned CUDA 13 wheel was not published.
 - Changed the Windows bootstrap log timestamp to a locale-independent format
   so Chinese weekday names are not written as mojibake.
+- Made Windows CUDA setup install pinned official PyTorch wheels directly,
+  avoiding intermittent empty package-index responses, and added runtime
+  platform details to the bootstrap log.

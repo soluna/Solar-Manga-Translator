@@ -54,6 +54,8 @@ installer.
   clean Windows VM.
 - On an NVIDIA machine, confirm `runtime_bootstrap.py --json` reports the
   expected CUDA build and supported GPU architecture before translation.
+- On Windows x64 with Python 3.10 and 3.11, confirm the CUDA bootstrap selects
+  the pinned official wheel URLs without package-index version discovery.
 - Publish installer SHA-256 checksums.
 
 ## Known Installer Release Gaps

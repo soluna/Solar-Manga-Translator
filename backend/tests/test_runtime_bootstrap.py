@@ -16,6 +16,7 @@ from runtime_bootstrap import (
     _installed_runtime_matches,
     build_gpu_diagnostics,
     choose_pytorch_runtime,
+    install_pytorch_runtime,
 )
 
 
@@ -44,6 +45,44 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertEqual(plan.accelerator, "cpu")
         self.assertEqual(plan.index_url, "https://download.pytorch.org/whl/cpu")
+
+    def test_windows_cuda_install_uses_direct_official_wheels(self) -> None:
+        gpu = NvidiaGpu(
+            name="NVIDIA GeForce RTX 5060 Ti",
+            driver_version="580.88",
+            compute_capability="12.0",
+        )
+        plan = choose_pytorch_runtime(
+            platform_name="win32",
+            nvidia_gpus=[gpu],
+        )
+
+        for python_tag in ("cp310", "cp311"):
+            with (
+                self.subTest(python_tag=python_tag),
+                mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
+                mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=False),
+                mock.patch("runtime_bootstrap.subprocess.run") as run,
+            ):
+                install_pytorch_runtime(
+                    plan,
+                    platform_name="win32",
+                    python_tag=python_tag,
+                    machine="AMD64",
+                )
+
+                command = run.call_args.args[0]
+                self.assertIn(
+                    "https://download-r2.pytorch.org/whl/cu130/"
+                    f"torch-2.12.1%2Bcu130-{python_tag}-{python_tag}-win_amd64.whl",
+                    command,
+                )
+                self.assertIn(
+                    "https://download-r2.pytorch.org/whl/cu130/"
+                    f"torchvision-0.27.1%2Bcu130-{python_tag}-{python_tag}-win_amd64.whl",
+                    command,
+                )
+                self.assertNotIn("--index-url", command)
 
     def test_blackwell_plan_rejects_same_torch_version_with_wrong_cuda_build(self) -> None:
         plan = choose_pytorch_runtime(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -291,7 +292,40 @@ def _installed_runtime_matches(plan: PytorchRuntimePlan) -> bool:
     return True
 
 
-def install_pytorch_runtime(plan: PytorchRuntimePlan) -> None:
+def _windows_cuda_wheel_urls(
+    plan: PytorchRuntimePlan,
+    *,
+    platform_name: str,
+    python_tag: str,
+    machine: str,
+) -> tuple[str, ...]:
+    architecture = machine.lower()
+    runtime = plan.index_url.rstrip("/").rsplit("/", 1)[-1]
+    if (
+        not platform_name.startswith("win")
+        or plan.accelerator != "cuda"
+        or architecture not in {"amd64", "x86_64"}
+        or runtime not in {"cu126", "cu130"}
+        or python_tag not in {"cp310", "cp311"}
+    ):
+        return ()
+
+    base_url = f"https://download-r2.pytorch.org/whl/{runtime}"
+    return (
+        f"{base_url}/torch-{PYTORCH_VERSION}%2B{runtime}"
+        f"-{python_tag}-{python_tag}-win_amd64.whl",
+        f"{base_url}/torchvision-{TORCHVISION_VERSION}%2B{runtime}"
+        f"-{python_tag}-{python_tag}-win_amd64.whl",
+    )
+
+
+def install_pytorch_runtime(
+    plan: PytorchRuntimePlan,
+    *,
+    platform_name: str = sys.platform,
+    python_tag: str | None = None,
+    machine: str | None = None,
+) -> None:
     detected_gpus = detect_nvidia_gpus()
     capability = _compute_capability(detected_gpus)
     driver_major = _driver_major(detected_gpus)
@@ -311,6 +345,14 @@ def install_pytorch_runtime(plan: PytorchRuntimePlan) -> None:
         print(f"[PyTorch] 已就绪：{plan.reason}")
         return
 
+    resolved_python_tag = python_tag or f"cp{sys.version_info.major}{sys.version_info.minor}"
+    resolved_machine = machine or platform.machine()
+    direct_wheels = _windows_cuda_wheel_urls(
+        plan,
+        platform_name=platform_name,
+        python_tag=resolved_python_tag,
+        machine=resolved_machine,
+    )
     command = [
         sys.executable,
         "-m",
@@ -318,12 +360,19 @@ def install_pytorch_runtime(plan: PytorchRuntimePlan) -> None:
         "install",
         "--upgrade",
         "--force-reinstall",
-        *plan.packages,
+        *(direct_wheels or plan.packages),
     ]
-    if plan.index_url:
+    if plan.index_url and not direct_wheels:
         command.extend(["--index-url", plan.index_url])
+    print(
+        f"[Runtime] Python {sys.version.split()[0]} / {platform_name} / "
+        f"{resolved_machine or 'unknown'} / {resolved_python_tag}"
+    )
     print(f"[PyTorch] {plan.reason}")
-    print(f"[PyTorch] 安装源：{plan.index_url or 'PyPI'}")
+    print(
+        "[PyTorch] 安装源："
+        + ("PyTorch 官方固定 wheel" if direct_wheels else (plan.index_url or "PyPI"))
+    )
     subprocess.run(command, check=True)
 
 

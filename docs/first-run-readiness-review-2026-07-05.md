@@ -32,6 +32,7 @@
 | FR-12 | P1 | Windows + RTX 50 的最终行为尚未在本轮 macOS 开发机上实测 | 待实机验收 |
 | FR-13 | P0 | 删除 `venv` 后首次安装被不存在的 `torchaudio 2.12.1+cu130` 阻断 | 已修复 |
 | FR-14 | P0 | PyTorch 官方索引临时返回空版本列表，再次阻断 Windows CUDA 安装 | 已修复 |
+| FR-15 | P0 | 约 2 GB 的 CUDA wheel 静默下载，无进度、超时或中国大陆镜像回退 | 已修复 |
 
 ## 已修复问题
 
@@ -63,6 +64,10 @@ PyTorch 2.12.1，并从 PyTorch 官方 CUDA 13.0 wheel 源安装。CUDA 13.x
   PyTorch 官方固定 wheel，不再依赖 pip 从索引页枚举版本。
 - bootstrap 日志记录 Python 版本、系统、CPU 架构和 wheel 标签，后续可直接
   区分网络问题与不受支持的平台。
+- Windows 会分别读取官方源与阿里云镜像的 256 KiB 样本并按实测速率排序。
+- pip 下载进度直接显示在终端，同时通过 pip 原生日志写入 `bootstrap.log`。
+- 连接连续 30 秒无数据时重试或切换；单个下载源总时限为 20 分钟。
+- 官方源和镜像使用同一组 PyTorch 官方 SHA-256，镜像文件校验不一致时拒绝安装。
 
 **诊断改进**
 
@@ -212,7 +217,7 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 
 本轮自动验证：
 
-- 后端 unittest：108 项通过；
+- 后端 unittest：110 项通过；
 - OpenAI Compatible 保存/重载回归测试通过；
 - RTX 50 CUDA 安装计划与 CPU wheel 诊断测试通过；
 - 手动画框 OCR 失败保留测试通过；

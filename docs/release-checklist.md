@@ -56,6 +56,9 @@ installer.
   expected CUDA build and supported GPU architecture before translation.
 - On Windows x64 with Python 3.10 and 3.11, confirm the CUDA bootstrap selects
   the pinned official wheel URLs without package-index version discovery.
+- Test both the PyTorch official source and Aliyun mirror: confirm speed-based
+  ordering, visible progress, timeout handling, fallback, official SHA-256
+  verification, and bootstrap logging.
 - Publish installer SHA-256 checksums.
 
 ## Known Installer Release Gaps

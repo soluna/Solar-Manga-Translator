@@ -42,7 +42,9 @@
 - 使用在线翻译服务时，需要自行准备对应服务商的 API Key
 - NVIDIA GPU 用户建议安装最新驱动；当前 CUDA 13 运行时要求 R580 或更高版本
 
-首次启动会安装较大的机器学习依赖，耗时取决于网络与电脑性能。
+首次启动会安装较大的机器学习依赖。Windows CUDA 运行时约 2 GB，终端会显示
+下载进度；脚本会对 PyTorch 官方源和阿里云镜像做小流量测速，优先使用较快的
+下载源，并在连接停滞或安装超时后自动切换。
 
 ### Windows
 
@@ -52,7 +54,7 @@ cd Solar-Manga-Translator
 start.bat
 ```
 
-脚本会创建 `backend/venv`、检测 NVIDIA GPU、安装匹配的官方 PyTorch
+脚本会创建 `backend/venv`、检测 NVIDIA GPU、安装匹配的 PyTorch
 CUDA/CPU 运行时、准备固定版本的核心翻译引擎、启动前后端并打开浏览器。RTX 50
 显卡会使用支持 Blackwell 的 CUDA 运行时；若驱动过旧，脚本会在启动前给出明确提示。
 
@@ -150,6 +152,15 @@ chmod +x start.sh
 ```powershell
 nvidia-smi
 backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+### PyTorch 下载长时间没有进度
+
+新版会实时显示下载进度，并在 PyTorch 官方源与阿里云镜像之间测速和自动切换。
+单个连接连续 30 秒没有数据会重试或换源，单个下载源最长等待 20 分钟。详细记录位于：
+
+```text
+%LOCALAPPDATA%\Solar-Manga-Translator\logs\bootstrap.log
 ```
 
 ### API Base URL 或模型重启后不见了

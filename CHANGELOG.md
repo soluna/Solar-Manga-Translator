@@ -33,3 +33,7 @@
 - Made Windows CUDA setup install pinned official PyTorch wheels directly,
   avoiding intermittent empty package-index responses, and added runtime
   platform details to the bootstrap log.
+- Added PyTorch official/Aliyun mirror speed probing, automatic source
+  fallback, bounded download timeouts, visible pip progress, and persistent
+  pip installation logs for Windows setup. Mirror downloads retain the
+  official PyTorch SHA-256 checks.

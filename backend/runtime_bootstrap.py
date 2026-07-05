@@ -2,15 +2,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
 
 PYTORCH_VERSION = "2.12.1"
 TORCHVISION_VERSION = "0.27.1"
+DOWNLOAD_PROBE_BYTES = 256 * 1024
+DOWNLOAD_PROBE_TIMEOUT_SECONDS = 8
+PIP_SOCKET_TIMEOUT_SECONDS = 30
+PYTORCH_INSTALL_TIMEOUT_SECONDS = 20 * 60
+WINDOWS_WHEEL_SHA256 = {
+    ("cu126", "cp310", "torch"): "75b223d98517a4f14d1cf4f53767ddbc953f2e6f7d811f3fd045b7cbbb129b05",
+    ("cu126", "cp310", "torchvision"): "cc1dbe9fa2507a27ebdcb1d415fff4f40f28349743dd0fd28eec8e86a24179d3",
+    ("cu126", "cp311", "torch"): "b7d68e60097b75d7dd507d1268144c7770de3b019f2a4cb3fe36550c9b4f3320",
+    ("cu126", "cp311", "torchvision"): "9f994c24e7ef9e9b9149a6f83c235cc6e9794862339350abb35fbe66858a923b",
+    ("cu130", "cp310", "torch"): "3b6e6e3ce55c3ebd688b00001cd44ff1a43fa30823f0394d20c8fd9910fb7087",
+    ("cu130", "cp310", "torchvision"): "1649be85c5ffde20a6fb68b659df4114a8a507ed11613de26ceb4a063075ed2b",
+    ("cu130", "cp311", "torch"): "5ff38932260cb4d5a52170d955642f6ede17f565de64e62eaca12a875851471b",
+    ("cu130", "cp311", "torchvision"): "14da1217bef76488d3a1647bca9da8b1bc0f52238b027a4a69036d461e60102a",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +316,7 @@ def _windows_cuda_wheel_urls(
     platform_name: str,
     python_tag: str,
     machine: str,
+    base_url: str | None = None,
 ) -> tuple[str, ...]:
     architecture = machine.lower()
     runtime = plan.index_url.rstrip("/").rsplit("/", 1)[-1]
@@ -310,13 +329,115 @@ def _windows_cuda_wheel_urls(
     ):
         return ()
 
-    base_url = f"https://download-r2.pytorch.org/whl/{runtime}"
+    resolved_base_url = (
+        base_url or f"https://download-r2.pytorch.org/whl/{runtime}"
+    ).rstrip("/")
+    torch_sha256 = WINDOWS_WHEEL_SHA256[(runtime, python_tag, "torch")]
+    torchvision_sha256 = WINDOWS_WHEEL_SHA256[(runtime, python_tag, "torchvision")]
     return (
-        f"{base_url}/torch-{PYTORCH_VERSION}%2B{runtime}"
-        f"-{python_tag}-{python_tag}-win_amd64.whl",
-        f"{base_url}/torchvision-{TORCHVISION_VERSION}%2B{runtime}"
-        f"-{python_tag}-{python_tag}-win_amd64.whl",
+        f"{resolved_base_url}/torch-{PYTORCH_VERSION}%2B{runtime}"
+        f"-{python_tag}-{python_tag}-win_amd64.whl#sha256={torch_sha256}",
+        f"{resolved_base_url}/torchvision-{TORCHVISION_VERSION}%2B{runtime}"
+        f"-{python_tag}-{python_tag}-win_amd64.whl#sha256={torchvision_sha256}",
     )
+
+
+def _probe_wheel_source(
+    wheel_urls: Sequence[str],
+    *,
+    timeout: int = DOWNLOAD_PROBE_TIMEOUT_SECONDS,
+) -> float:
+    request = urllib.request.Request(
+        wheel_urls[0],
+        headers={
+            "Range": f"bytes=0-{DOWNLOAD_PROBE_BYTES - 1}",
+            "User-Agent": "Solar-Manga-Translator/bootstrap",
+        },
+    )
+    started_at = time.monotonic()
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        sample = response.read(DOWNLOAD_PROBE_BYTES)
+    if not sample:
+        raise OSError("下载源未返回数据")
+    return max(time.monotonic() - started_at, 0.001)
+
+
+def _ranked_windows_cuda_wheel_sources(
+    plan: PytorchRuntimePlan,
+    *,
+    platform_name: str,
+    python_tag: str,
+    machine: str,
+) -> list[tuple[str, tuple[str, ...]]]:
+    official_urls = _windows_cuda_wheel_urls(
+        plan,
+        platform_name=platform_name,
+        python_tag=python_tag,
+        machine=machine,
+    )
+    if not official_urls:
+        return []
+
+    runtime = plan.index_url.rstrip("/").rsplit("/", 1)[-1]
+    aliyun_urls = _windows_cuda_wheel_urls(
+        plan,
+        platform_name=platform_name,
+        python_tag=python_tag,
+        machine=machine,
+        base_url=f"https://mirrors.aliyun.com/pytorch-wheels/{runtime}",
+    )
+    candidates = [
+        ("PyTorch 官方", official_urls),
+        ("阿里云镜像", aliyun_urls),
+    ]
+    available: list[tuple[float, str, tuple[str, ...]]] = []
+    unavailable: list[tuple[str, tuple[str, ...]]] = []
+    for name, wheel_urls in candidates:
+        print(f"[Download] 正在测速：{name}...")
+        try:
+            elapsed = _probe_wheel_source(wheel_urls)
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            print(f"[Download] {name}测速失败：{exc}")
+            unavailable.append((name, wheel_urls))
+            continue
+        speed_kib = DOWNLOAD_PROBE_BYTES / elapsed / 1024
+        print(f"[Download] {name}可用：{speed_kib:.0f} KiB/s")
+        available.append((elapsed, name, wheel_urls))
+
+    ranked = [
+        (name, wheel_urls)
+        for _elapsed, name, wheel_urls in sorted(available, key=lambda item: item[0])
+    ]
+    ranked.extend(unavailable)
+    print("[Download] 下载顺序：" + " -> ".join(name for name, _urls in ranked))
+    return ranked
+
+
+def _pip_install_command(
+    packages: Sequence[str],
+    *,
+    index_url: str = "",
+) -> list[str]:
+    command = [sys.executable, "-m", "pip"]
+    bootstrap_log = os.environ.get("BOOTSTRAP_LOG", "").strip()
+    if bootstrap_log:
+        command.extend(["--log", bootstrap_log])
+    command.extend([
+        "--disable-pip-version-check",
+        "install",
+        "--upgrade",
+        "--force-reinstall",
+        "--timeout",
+        str(PIP_SOCKET_TIMEOUT_SECONDS),
+        "--retries",
+        "1",
+        "--progress-bar",
+        "on",
+        *packages,
+    ])
+    if index_url:
+        command.extend(["--index-url", index_url])
+    return command
 
 
 def install_pytorch_runtime(
@@ -347,33 +468,48 @@ def install_pytorch_runtime(
 
     resolved_python_tag = python_tag or f"cp{sys.version_info.major}{sys.version_info.minor}"
     resolved_machine = machine or platform.machine()
-    direct_wheels = _windows_cuda_wheel_urls(
+    direct_sources = _ranked_windows_cuda_wheel_sources(
         plan,
         platform_name=platform_name,
         python_tag=resolved_python_tag,
         machine=resolved_machine,
     )
-    command = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--force-reinstall",
-        *(direct_wheels or plan.packages),
-    ]
-    if plan.index_url and not direct_wheels:
-        command.extend(["--index-url", plan.index_url])
     print(
         f"[Runtime] Python {sys.version.split()[0]} / {platform_name} / "
         f"{resolved_machine or 'unknown'} / {resolved_python_tag}"
     )
     print(f"[PyTorch] {plan.reason}")
-    print(
-        "[PyTorch] 安装源："
-        + ("PyTorch 官方固定 wheel" if direct_wheels else (plan.index_url or "PyPI"))
+    if direct_sources:
+        failures = []
+        for index, (source_name, wheel_urls) in enumerate(direct_sources, start=1):
+            print(
+                f"[PyTorch] 下载源 {index}/{len(direct_sources)}：{source_name}。"
+                f"若连续 {PIP_SOCKET_TIMEOUT_SECONDS} 秒无数据会自动重试或切换。"
+            )
+            command = _pip_install_command(wheel_urls)
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    timeout=PYTORCH_INSTALL_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                failures.append(f"{source_name}：超过 20 分钟")
+                print(f"[PyTorch] {source_name}下载超时，正在切换下载源...")
+                continue
+            except subprocess.CalledProcessError as exc:
+                failures.append(f"{source_name}：pip 退出码 {exc.returncode}")
+                print(f"[PyTorch] {source_name}安装失败，正在切换下载源...")
+                continue
+            return
+        raise RuntimeError("所有 PyTorch 下载源均失败：" + "；".join(failures))
+
+    print(f"[PyTorch] 安装源：{plan.index_url or 'PyPI'}")
+    subprocess.run(
+        _pip_install_command(plan.packages, index_url=plan.index_url),
+        check=True,
+        timeout=PYTORCH_INSTALL_TIMEOUT_SECONDS,
     )
-    subprocess.run(command, check=True)
 
 
 def verify_runtime(plan: PytorchRuntimePlan) -> dict[str, Any]:

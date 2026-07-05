@@ -69,7 +69,7 @@ call venv\Scripts\activate.bat
 set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
 
 echo Detecting GPU and preparing the matching PyTorch runtime...
-"%VENV_PYTHON%" runtime_bootstrap.py --install >> "%BOOTSTRAP_LOG%" 2>&1
+"%VENV_PYTHON%" runtime_bootstrap.py --install
 if %errorlevel% neq 0 (
     echo [Error] PyTorch runtime setup failed. See the log excerpt below, then rerun start.bat.
     call :show_bootstrap_log

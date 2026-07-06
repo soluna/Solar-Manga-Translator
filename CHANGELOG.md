@@ -34,6 +34,7 @@
   avoiding intermittent empty package-index responses, and added runtime
   platform details to the bootstrap log.
 - Added PyTorch official/Aliyun mirror speed probing, automatic source
-  fallback, bounded download timeouts, visible pip progress, and persistent
-  pip installation logs for Windows setup. Mirror downloads retain the
-  official PyTorch SHA-256 checks.
+  fallback, inactivity timeouts, visible pip progress, and persistent pip
+  installation logs for Windows setup. Active downloads no longer have a
+  total time limit, and mirror downloads retain the official PyTorch SHA-256
+  checks.

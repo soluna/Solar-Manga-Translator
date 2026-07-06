@@ -18,7 +18,6 @@ TORCHVISION_VERSION = "0.27.1"
 DOWNLOAD_PROBE_BYTES = 256 * 1024
 DOWNLOAD_PROBE_TIMEOUT_SECONDS = 8
 PIP_SOCKET_TIMEOUT_SECONDS = 30
-PYTORCH_INSTALL_TIMEOUT_SECONDS = 20 * 60
 WINDOWS_WHEEL_SHA256 = {
     ("cu126", "cp310", "torch"): "75b223d98517a4f14d1cf4f53767ddbc953f2e6f7d811f3fd045b7cbbb129b05",
     ("cu126", "cp310", "torchvision"): "cc1dbe9fa2507a27ebdcb1d415fff4f40f28349743dd0fd28eec8e86a24179d3",
@@ -491,12 +490,7 @@ def install_pytorch_runtime(
                 subprocess.run(
                     command,
                     check=True,
-                    timeout=PYTORCH_INSTALL_TIMEOUT_SECONDS,
                 )
-            except subprocess.TimeoutExpired:
-                failures.append(f"{source_name}：超过 20 分钟")
-                print(f"[PyTorch] {source_name}下载超时，正在切换下载源...")
-                continue
             except subprocess.CalledProcessError as exc:
                 failures.append(f"{source_name}：pip 退出码 {exc.returncode}")
                 print(f"[PyTorch] {source_name}安装失败，正在切换下载源...")
@@ -508,7 +502,6 @@ def install_pytorch_runtime(
     subprocess.run(
         _pip_install_command(plan.packages, index_url=plan.index_url),
         check=True,
-        timeout=PYTORCH_INSTALL_TIMEOUT_SECONDS,
     )
 
 

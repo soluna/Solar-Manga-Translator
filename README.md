@@ -157,7 +157,7 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 ### PyTorch 下载长时间没有进度
 
 新版会实时显示下载进度，并在 PyTorch 官方源与阿里云镜像之间测速和自动切换。
-单个连接连续 30 秒没有数据会重试或换源，单个下载源最长等待 20 分钟。详细记录位于：
+单个连接连续 30 秒没有数据会重试或换源；只要下载仍在持续接收数据，就不会因为总耗时较长而中止。详细记录位于：
 
 ```text
 %LOCALAPPDATA%\Solar-Manga-Translator\logs\bootstrap.log

@@ -118,7 +118,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
             mock.patch(
                 "runtime_bootstrap.subprocess.run",
                 side_effect=[
-                    subprocess.TimeoutExpired(["pip"], 20 * 60),
+                    subprocess.CalledProcessError(1, ["pip"]),
                     None,
                 ],
             ) as run,
@@ -135,7 +135,37 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertIn(aliyun[1][0], run.call_args_list[1].args[0])
         self.assertIn("--timeout", run.call_args_list[0].args[0])
         self.assertIn("--progress-bar", run.call_args_list[0].args[0])
-        self.assertIsNotNone(run.call_args_list[0].kwargs.get("timeout"))
+        self.assertNotIn("timeout", run.call_args_list[0].kwargs)
+
+    def test_windows_cuda_install_has_no_total_download_deadline(self) -> None:
+        gpu = NvidiaGpu(
+            name="NVIDIA GeForce RTX 5060 Ti",
+            driver_version="580.88",
+            compute_capability="12.0",
+        )
+        plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[gpu])
+        source = (
+            "阿里云镜像",
+            ("https://mirrors.aliyun.com/torch.whl",),
+        )
+
+        with (
+            mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
+            mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=False),
+            mock.patch(
+                "runtime_bootstrap._ranked_windows_cuda_wheel_sources",
+                return_value=[source],
+            ),
+            mock.patch("runtime_bootstrap.subprocess.run") as run,
+        ):
+            install_pytorch_runtime(
+                plan,
+                platform_name="win32",
+                python_tag="cp311",
+                machine="AMD64",
+            )
+
+        self.assertNotIn("timeout", run.call_args.kwargs)
 
     def test_windows_cuda_download_prefers_faster_mirror(self) -> None:
         plan = choose_pytorch_runtime(

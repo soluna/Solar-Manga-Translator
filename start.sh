@@ -37,14 +37,15 @@ VENV_PYTHON="$(pwd)/venv/bin/python"
 echo "检测硬件并准备对应的 PyTorch 运行时..."
 "$VENV_PYTHON" runtime_bootstrap.py --install
 
-echo "安装关键运行时依赖..."
-"$VENV_PYTHON" -m pip install python-dotenv colorama
-
-echo "安装并准备固定版本的 manga-image-translator 核心引擎..."
-"$VENV_PYTHON" install_deps.py
-
-echo "安装 FastAPI 等项目依赖和安全约束..."
-"$VENV_PYTHON" -m pip install -r requirements.txt
+BACKEND_DEPS_STAMP="$(pwd)/venv/.solar-dependencies.json"
+if ! "$VENV_PYTHON" dependency_state.py check backend --root "$(cd .. && pwd)" --stamp "$BACKEND_DEPS_STAMP"; then
+    echo "后端依赖有变化或缺失，正在安装..."
+    "$VENV_PYTHON" pip_install.py -r requirements.txt
+    "$VENV_PYTHON" install_deps.py
+    "$VENV_PYTHON" dependency_state.py mark backend --root "$(cd .. && pwd)" --stamp "$BACKEND_DEPS_STAMP"
+else
+    echo "后端依赖未变化，跳过 pip 与 Git 准备。"
+fi
 
 echo -e "\n[2/3] 正在检查并安装前端依赖..."
 if [ ! -f "../frontend/package.json" ]; then
@@ -52,7 +53,13 @@ if [ ! -f "../frontend/package.json" ]; then
     exit 1
 fi
 cd ../frontend
-npm install
+FRONTEND_DEPS_STAMP="$(pwd)/node_modules/.solar-dependencies.json"
+if ! "$VENV_PYTHON" ../backend/dependency_state.py check frontend --root "$(cd .. && pwd)" --stamp "$FRONTEND_DEPS_STAMP"; then
+    npm install --registry https://registry.npmmirror.com || npm install --registry https://registry.npmjs.org
+    "$VENV_PYTHON" ../backend/dependency_state.py mark frontend --root "$(cd .. && pwd)" --stamp "$FRONTEND_DEPS_STAMP"
+else
+    echo "前端依赖未变化，跳过 npm install。"
+fi
 
 echo -e "\n[3/3] 正在启动服务..."
 API_TOKEN="$("$VENV_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(32))')"

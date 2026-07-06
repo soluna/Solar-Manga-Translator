@@ -47,6 +47,7 @@ def save_rerender_cache(source_path: str, ctx: Any) -> None:
             "region_count": len(serialized_regions),
             "has_inpainted": bool(img_inpainted is not None),
             "has_gimp_mask": has_gimp_mask,
+            "base_kind": "source" if os.getenv("MT_DETECT_ONLY") == "1" else "inpainted",
         }
 
         (page_dir / "meta.json").write_text(
@@ -68,5 +69,13 @@ def save_rerender_cache(source_path: str, ctx: Any) -> None:
                 str(page_dir / "inpainted.png"),
                 cv2.cvtColor(img_inpainted, cv2.COLOR_RGB2BGR),
             )
+        else:
+            input_image = getattr(ctx, "input", None)
+            if input_image is not None:
+                input_rgb = np.asarray(input_image.convert("RGB"))
+                cv2.imwrite(
+                    str(page_dir / "inpainted.png"),
+                    cv2.cvtColor(input_rgb, cv2.COLOR_RGB2BGR),
+                )
     except Exception:
         return

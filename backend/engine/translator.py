@@ -229,6 +229,17 @@ class TranslatorEngine:
             label="项目临时路径",
         )
 
+    def _project_log_path(self, project_id: str, suffix: str) -> Path:
+        normalized_project_id = self._validated_project_id(project_id)
+        normalized_suffix = self._validated_page_id(suffix)
+        task_log_dir = self._safe_storage_child(
+            self.logs_dir / "tasks",
+            normalized_project_id,
+            label="项目日志目录",
+        )
+        task_log_dir.mkdir(parents=True, exist_ok=True)
+        return self._safe_storage_child(task_log_dir, normalized_suffix, label="项目日志文件")
+
     def load_persisted_settings(self) -> dict[str, Any]:
         normalized = self._normalize_config(
             self.paths.load_settings(),
@@ -2077,6 +2088,18 @@ class TranslatorEngine:
         persist_page_documents: bool = False,
         page_ids: list[str] | None = None,
     ) -> None:
+        deferred = session.get("_artifact_transaction_deferred_persistence")
+        if isinstance(deferred, list):
+            deferred.append(
+                {
+                    "snapshot_kind": snapshot_kind,
+                    "snapshot_summary": snapshot_summary,
+                    "persist_page_documents": persist_page_documents,
+                    "page_ids": list(page_ids) if page_ids else None,
+                }
+            )
+            return
+
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
         self._project_snapshots_dir(project_id).mkdir(parents=True, exist_ok=True)
@@ -4742,6 +4765,89 @@ class TranslatorEngine:
             },
         }
 
+    @contextlib.contextmanager
+    def _project_artifact_transaction(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        *,
+        seed_existing: bool = False,
+    ):
+        previous_session = copy.deepcopy(session)
+        live_output_dir = Path(session["translated_dir"])
+        live_cache_dir = self._session_rerender_cache_dir(session, project_id)
+        transaction_id = uuid.uuid4().hex
+        staging_output_dir = live_output_dir.parent / f".{live_output_dir.name}.staging-{transaction_id}"
+        staging_cache_dir = live_cache_dir.parent / f".{live_cache_dir.name}.staging-{transaction_id}"
+        backup_output_dir = live_output_dir.parent / f".{live_output_dir.name}.backup-{transaction_id}"
+        backup_cache_dir = live_cache_dir.parent / f".{live_cache_dir.name}.backup-{transaction_id}"
+
+        for path in (
+            staging_output_dir,
+            staging_cache_dir,
+            backup_output_dir,
+            backup_cache_dir,
+        ):
+            shutil.rmtree(path, ignore_errors=True)
+        if seed_existing and live_output_dir.exists():
+            shutil.copytree(live_output_dir, staging_output_dir)
+        else:
+            staging_output_dir.mkdir(parents=True, exist_ok=True)
+        if seed_existing and live_cache_dir.exists():
+            shutil.copytree(live_cache_dir, staging_cache_dir)
+        else:
+            staging_cache_dir.mkdir(parents=True, exist_ok=True)
+        session["translated_dir"] = str(staging_output_dir)
+        session["rerender_cache_dir"] = str(staging_cache_dir)
+        session["_artifact_transaction_deferred_persistence"] = []
+
+        committed_paths: list[tuple[Path, Path]] = []
+        try:
+            yield
+
+            replacements = (
+                (live_output_dir, staging_output_dir, backup_output_dir),
+                (live_cache_dir, staging_cache_dir, backup_cache_dir),
+            )
+            for live_dir, staging_dir, backup_dir in replacements:
+                live_dir.parent.mkdir(parents=True, exist_ok=True)
+                if live_dir.exists():
+                    live_dir.rename(backup_dir)
+                try:
+                    staging_dir.rename(live_dir)
+                except BaseException:
+                    if backup_dir.exists() and not live_dir.exists():
+                        backup_dir.rename(live_dir)
+                    raise
+                committed_paths.append((live_dir, backup_dir))
+
+            session["translated_dir"] = str(live_output_dir)
+            session["rerender_cache_dir"] = str(live_cache_dir)
+            deferred_persistence = session.pop("_artifact_transaction_deferred_persistence", [])
+            if deferred_persistence:
+                for request in deferred_persistence:
+                    self.persist_project_state(project_id, session, **request)
+            else:
+                self.persist_project_state(project_id, session, persist_page_documents=True)
+            for _live_dir, backup_dir in committed_paths:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        except BaseException:
+            for live_dir, backup_dir in reversed(committed_paths):
+                shutil.rmtree(live_dir, ignore_errors=True)
+                if backup_dir.exists():
+                    backup_dir.rename(live_dir)
+            session.clear()
+            session.update(previous_session)
+            raise
+        finally:
+            for path in (
+                staging_output_dir,
+                staging_cache_dir,
+                backup_output_dir,
+                backup_cache_dir,
+            ):
+                shutil.rmtree(path, ignore_errors=True)
+
     async def translate_session(
         self,
         session_id: str,
@@ -4749,26 +4855,31 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
-        await self.detect_session(
-            session_id=session_id,
-            session=session,
-            raw_config=raw_config,
-            progress_callback=progress_callback,
-            auto_continue=True,
-        )
-        return await self.resume_translation_session(
-            session_id=session_id,
-            session=session,
-            raw_config={
-                **dict(raw_config or session.get("last_config") or {}),
-                "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
-                "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
-                "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
-                "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
-                "style_region_overrides": dict(session.get("style_region_overrides") or {}),
-            },
-            progress_callback=progress_callback,
-        )
+        with self._project_artifact_transaction(session_id, session):
+            await self.detect_session(
+                session_id=session_id,
+                session=session,
+                raw_config=raw_config,
+                progress_callback=progress_callback,
+                auto_continue=True,
+                _transactional=False,
+            )
+            result = await self.resume_translation_session(
+                session_id=session_id,
+                session=session,
+                raw_config={
+                    **dict(raw_config or session.get("last_config") or {}),
+                    "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
+                    "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
+                    "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
+                    "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+                    "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+                },
+                progress_callback=progress_callback,
+                _transactional=False,
+            )
+        result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
+        return result
 
     async def detect_session(
         self,
@@ -4777,12 +4888,28 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
         auto_continue: bool = False,
+        _transactional: bool = True,
     ) -> dict[str, str]:
+        if _transactional:
+            with self._project_artifact_transaction(session_id, session):
+                result = await self.detect_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=raw_config,
+                    progress_callback=progress_callback,
+                    auto_continue=auto_continue,
+                    _transactional=False,
+                )
+            result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
+            return result
+
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
-        cache_dir = self._prepare_rerender_cache_dir(session_id, reset=True)
+        cache_dir = self._session_rerender_cache_dir(session, session_id)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
         session["rerender_cache_dir"] = str(cache_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_directory(output_dir)
@@ -4794,7 +4921,7 @@ class TranslatorEngine:
             self._translation_request_debug_path(session_id).unlink()
 
         config_path = self._write_config(session_id, config, profile="detect")
-        log_path = self._project_temp_path(session_id, "detect.log")
+        log_path = self._project_log_path(session_id, "detect.log")
         expected_outputs = [
             output_dir / Path(image["stored_name"])
             for image in session["source_images"]
@@ -4869,7 +4996,22 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
         target_stored_name: str | None = None,
         skip_completed: bool = False,
+        _transactional: bool = True,
     ) -> dict[str, str]:
+        if _transactional:
+            with self._project_artifact_transaction(session_id, session, seed_existing=True):
+                result = await self.resume_translation_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=raw_config,
+                    progress_callback=progress_callback,
+                    target_stored_name=target_stored_name,
+                    skip_completed=skip_completed,
+                    _transactional=False,
+                )
+            result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
+            return result
+
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
         if target_stored_name is None and not self._project_glossary_auto_extract_completed(session):
@@ -4947,6 +5089,22 @@ class TranslatorEngine:
                 session=session,
                 stored_name=stored_name,
                 regions=translated_regions,
+            )
+            cache_meta = self._read_json_file(cache_page_dir / "meta.json", {})
+            if str(cache_meta.get("base_kind") or "").strip().lower() == "source":
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "message": (
+                            f"正在为 {image['name']} 生成无字底图；"
+                            "首次使用会下载并校验 LaMa 模型。"
+                        ),
+                    }
+                )
+            await self._ensure_translation_base_image(
+                source_path=source_path,
+                page_cache_dir=cache_page_dir,
+                config=config,
             )
 
             output_path = output_dir / stored_name
@@ -5345,36 +5503,63 @@ class TranslatorEngine:
         reported: set[Path] | None,
         progress_callback: ProgressCallback | None,
     ) -> int:
-        env = self._build_env(config, session_id)
+        env = self._build_env(config, session_id, session)
+        if "--prep-manual" in command:
+            env["MT_DETECT_ONLY"] = "1"
 
         print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
         print(f"[DEBUG] Log file: {log_path}")
 
-        with log_path.open("wb") as log_file:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(self.base_dir / "manga-image-translator"),
-                env=env,
-                stdout=log_file,
-                stderr=log_file,
-            )
-            wait_task = asyncio.create_task(process.wait())
+        process = None
+        wait_task = None
+        try:
+            with log_path.open("wb") as log_file:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=str(self.base_dir / "manga-image-translator"),
+                    env=env,
+                    stdout=log_file,
+                    stderr=log_file,
+                )
+                wait_task = asyncio.create_task(process.wait())
+                last_download_notice = ""
+                last_runtime_notice = ""
 
-            while not wait_task.done():
-                if expected_outputs is not None and reported is not None and progress_callback is not None:
-                    await self._emit_completed_images(
-                        session_id,
-                        session,
-                        expected_outputs,
-                        reported,
-                        progress_callback,
-                    )
-                await asyncio.sleep(1)
+                while not wait_task.done():
+                    if expected_outputs is not None and reported is not None and progress_callback is not None:
+                        await self._emit_completed_images(
+                            session_id,
+                            session,
+                            expected_outputs,
+                            reported,
+                            progress_callback,
+                        )
+                        download_notice = self._model_download_notice(log_path)
+                        if download_notice and download_notice != last_download_notice:
+                            last_download_notice = download_notice
+                            await progress_callback({"event": "status", "message": download_notice})
+                        runtime_notice = self._runtime_contract_notice(log_path)
+                        if runtime_notice and runtime_notice != last_runtime_notice:
+                            last_runtime_notice = runtime_notice
+                            await progress_callback({"event": "status", "message": runtime_notice})
+                    await asyncio.sleep(1)
 
-            await wait_task
+                await wait_task
+        except BaseException:
+            if process is not None and process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    if wait_task is not None:
+                        await asyncio.wait_for(wait_task, timeout=5)
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    await process.wait()
+            raise
 
         print(f"[DEBUG] Engine finished with return code {process.returncode}")
-        self._dump_log_output(log_path)
+        self._dump_log_output(log_path, failed=bool(process.returncode))
 
         if expected_outputs is not None and reported is not None and progress_callback is not None:
             await self._emit_completed_images(
@@ -5386,6 +5571,43 @@ class TranslatorEngine:
             )
 
         return process.returncode
+
+    def _model_download_notice(self, log_path: Path) -> str:
+        if not log_path.exists():
+            return ""
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, 2)
+                handle.seek(max(0, handle.tell() - 32 * 1024))
+                content = handle.read().decode("utf-8", errors="ignore")
+        except OSError:
+            return ""
+        matches = re.findall(r'-- Downloading:\s*"([^"]+)"', content)
+        if not matches:
+            return ""
+        filename = Path(matches[-1].split("?", 1)[0]).name or "模型文件"
+        return f"首次使用正在下载模型：{filename}。下载失败时会自动切换备用源。"
+
+    def _runtime_contract_notice(self, log_path: Path) -> str:
+        if not log_path.exists():
+            return ""
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, 2)
+                handle.seek(max(0, handle.tell() - 32 * 1024))
+                content = handle.read().decode("utf-8", errors="ignore")
+        except OSError:
+            return ""
+        matches = re.findall(r"\[RuntimeContract\]\s+device=(\S+)\s+model_dir=(.+)", content)
+        if not matches:
+            return ""
+        device, _model_dir = matches[-1]
+        device_label = {
+            "cuda": "NVIDIA CUDA",
+            "mps": "Apple Metal",
+            "cpu": "CPU",
+        }.get(device.lower(), device)
+        return f"推理运行时已确认：{device_label}，模型将写入应用模型目录。"
 
     async def _emit_completed_images(
         self,
@@ -5970,26 +6192,32 @@ class TranslatorEngine:
 
     def _make_selected_archive(self, archive_path: Path, files: list[Path], root_dir: Path) -> str:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        if archive_path.exists():
-            archive_path.unlink()
-
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for file_path in files:
-                if not file_path.exists():
-                    continue
-                archive.write(file_path, arcname=file_path.relative_to(root_dir))
+        temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for file_path in files:
+                    if not file_path.exists():
+                        continue
+                    archive.write(file_path, arcname=file_path.relative_to(root_dir))
+            os.replace(temporary_path, archive_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temporary_path.unlink()
 
         return str(archive_path.resolve())
 
     def _make_named_archive(self, archive_path: Path, files: list[tuple[Path, str]]) -> str:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        if archive_path.exists():
-            archive_path.unlink()
-
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for file_path, archive_name in files:
-                if file_path.exists():
-                    archive.write(file_path, arcname=archive_name)
+        temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for file_path, archive_name in files:
+                    if file_path.exists():
+                        archive.write(file_path, arcname=archive_name)
+            os.replace(temporary_path, archive_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temporary_path.unlink()
 
         return str(archive_path.resolve())
 
@@ -6010,6 +6238,7 @@ class TranslatorEngine:
     def _write_config(self, session_id: str, config: dict[str, Any], profile: str = "default") -> Path:
         config_path = self._project_temp_path(session_id, f"{profile}_config.json")
         is_complex_profile = profile == "complex"
+        is_detect_profile = profile == "detect"
         strength = config.get("mask_cleanup_strength", "standard")
         strength_overrides = {
             "standard": {"dilation": 0, "kernel": 0, "unclip": 0.0},
@@ -6022,7 +6251,7 @@ class TranslatorEngine:
         base_unclip = 3.0 if is_complex_profile else 2.5
         payload = {
             "translator": {
-                "translator": config["translator"],
+                "translator": "none" if is_detect_profile else config["translator"],
                 "target_lang": config["target_lang"],
             },
             # Fix text artifacts (not clean):
@@ -6031,7 +6260,11 @@ class TranslatorEngine:
             # Use larger convolution kernel to erase the text completely.
             "kernel_size": base_kernel + strength_boost["kernel"],
             "inpainter": {
-                "inpainter": "sd" if is_complex_profile else "lama_large",
+                "inpainter": (
+                    "original"
+                    if is_detect_profile
+                    else ("sd" if is_complex_profile else "lama_large")
+                ),
                 # Keep the experimental path conservative enough to avoid
                 # turning normal chapters into an OOM-prone workflow.
                 "inpainting_size": 2048,
@@ -6042,7 +6275,8 @@ class TranslatorEngine:
                 "font_size_minimum": 8,
                 "font_size_offset": -6,
                 "alignment": config["render_alignment"],
-                "direction": "auto"
+                "direction": "auto",
+                "renderer": "none" if is_detect_profile else "default",
             },
             "detector": {
                 # Better bounding boxes logic:
@@ -6071,8 +6305,6 @@ class TranslatorEngine:
             sys.executable,
             "-m",
             "manga_translator",
-            "--model-dir",
-            str(self.model_dir),
             "local",
             "-i",
             str(source_dir),
@@ -6081,18 +6313,51 @@ class TranslatorEngine:
             "--overwrite",
             "--config-file",
             str(config_path),
-            "--verbose",
+            "--model-dir",
+            str(self.model_dir),
         ]
         if config["font_path"]:
             command.extend(["--font-path", config["font_path"]])
         if prep_manual:
             command.append("--prep-manual")
         if config["use_gpu"]:
-            command.insert(3, "--use-gpu")
+            command.append("--use-gpu")
         return command
 
-    def _build_env(self, config: dict[str, Any], session_id: str | None = None) -> dict[str, str]:
+    def build_inference_runtime_contract(
+        self,
+        raw_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config = self._normalize_config(raw_config)
+        command = self._build_command(
+            self.temp_dir / "runtime-probe-source",
+            self.temp_dir / "runtime-probe-output",
+            self.temp_dir / "runtime-probe-config.json",
+            config,
+            prep_manual=True,
+        )
+        mode_index = command.index("local")
+        model_dir_index = command.index("--model-dir")
+        gpu_index = command.index("--use-gpu") if "--use-gpu" in command else -1
+        contract_valid = model_dir_index > mode_index and (
+            not config["use_gpu"] or gpu_index > mode_index
+        )
+        return {
+            "status": "ready" if contract_valid else "error",
+            "mode": "local",
+            "use_gpu_requested": bool(config["use_gpu"]),
+            "model_dir": str(self.model_dir),
+            "general_options_after_mode": contract_valid,
+        }
+
+    def _build_env(
+        self,
+        config: dict[str, Any],
+        session_id: str | None = None,
+        session: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         env = os.environ.copy()
+        env["MT_DISABLE_INTERNAL_LOG_FILE"] = "1"
         env["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
         api_key = config.get("api_key")
         if api_key and config.get("translator") == "gemini":
@@ -6122,17 +6387,32 @@ class TranslatorEngine:
         if session_id and config.get("export_mask_debug"):
             env["MT_MASK_DEBUG_DIR"] = str(self._prepare_mask_debug_dir(session_id, reset=False))
         if session_id:
-            env["MT_RERENDER_CACHE_DIR"] = str(self._prepare_rerender_cache_dir(session_id, reset=False))
+            cache_dir = self._session_rerender_cache_dir(session, session_id)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            env["MT_RERENDER_CACHE_DIR"] = str(cache_dir)
             env["MT_TRANSLATION_DEBUG_FILE"] = str(self._translation_request_debug_path(session_id))
         return env
 
-    def _dump_log_output(self, log_path: Path) -> None:
+    def _dump_log_output(self, log_path: Path, *, failed: bool = False) -> None:
+        if not failed:
+            logger.info("Engine task log saved. path=%s", log_path)
+            return
         try:
             with log_path.open("r", encoding="utf-8", errors="ignore") as file:
-                log_content = file.read()
-                print(f"[DEBUG] ENGINE LOG OUTPUT:\n{log_content}\n[DEBUG] END LOG OUTPUT")
+                lines = deque(file, maxlen=30)
+            technical_lines = [
+                line.strip()
+                for line in lines
+                if line.strip()
+                and not re.search(r"(?i)(ocr|source text|translation|gpt response)", line)
+            ]
+            logger.error(
+                "Engine task failed. task_log=%s summary=%s",
+                log_path,
+                " | ".join(technical_lines[-8:]),
+            )
         except Exception as exc:
-            print(f"[DEBUG] Failed to read log file: {exc}")
+            logger.error("Failed to summarize engine task log. path=%s error=%s", log_path, exc)
 
     def _select_complex_repair_images(
         self,
@@ -6479,7 +6759,7 @@ class TranslatorEngine:
             shutil.copy2(source_dir / image["stored_name"], enhanced_source_dir / image["stored_name"])
 
         complex_config_path = self._write_config(session_id, config, profile="complex")
-        complex_log_path = self._project_temp_path(session_id, "complex_translation.log")
+        complex_log_path = self._project_log_path(session_id, "complex_translation.log")
         complex_command = self._build_command(
             enhanced_source_dir,
             enhanced_output_dir,
@@ -6926,6 +7206,45 @@ class TranslatorEngine:
             device,
             False,
         )
+
+    async def _ensure_translation_base_image(
+        self,
+        *,
+        source_path: Path,
+        page_cache_dir: Path,
+        config: dict[str, Any],
+    ) -> None:
+        meta_path = page_cache_dir / "meta.json"
+        meta = self._read_json_file(meta_path, {})
+        if str(meta.get("base_kind") or "").strip().lower() != "source":
+            return
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图：{source_path}")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        regions = self._load_cached_regions(page_cache_dir)
+        mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        for region in regions:
+            if bool(getattr(region, "disabled_region", False)):
+                continue
+            region_mask = self._build_region_mask(
+                region,
+                source_rgb.shape,
+                dilation_scale=0.24,
+                dilation_min=4,
+                dilation_max=24,
+            )
+            mask = cv2.bitwise_or(mask, region_mask)
+
+        if np.any(mask):
+            device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
+            inpainted_rgb = await self._run_local_lama_inpaint(source_rgb, mask, device=device)
+            self._save_rgb_image_atomic(page_cache_dir / "inpainted.png", inpainted_rgb)
+
+        meta["base_kind"] = "inpainted" if np.any(mask) else "source_no_text"
+        meta["inpainting_region_count"] = len(regions)
+        self._write_json_file(meta_path, meta)
 
     def _composite_local_model_erase_result(
         self,

@@ -163,6 +163,165 @@ def patch_local_mode(target_file: Path) -> bool:
 
     return changed
 
+def patch_detect_only_pipeline(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    marker = "# Solar-Manga-Translator: detection must not initialize translation or inpainting"
+    if marker in content:
+        return False
+
+    updated, _ = _replace_once(
+        content,
+        "        # preload and download models (not strictly necessary, remove to lazy load)\n"
+        "        if ( self.models_ttl == 0 ):\n",
+        f"        {marker}\n"
+        "        if self.prep_manual:\n"
+        "            config.translator.translator = Translator.none\n"
+        "            config.inpainter.inpainter = Inpainter.original\n\n"
+        "        # preload and download models (not strictly necessary, remove to lazy load)\n"
+        "        if ( self.models_ttl == 0 ):\n",
+        "detect-only model selection",
+    )
+    updated, _ = _replace_once(
+        updated,
+        "            await prepare_ocr(config.ocr.ocr, self.device)\n"
+        "            await prepare_inpainting(config.inpainter.inpainter, self.device)\n"
+        "            await prepare_translation(config.translator.translator_gen)\n",
+        "            await prepare_ocr(config.ocr.ocr, self.device)\n"
+        "            if not self.prep_manual:\n"
+        "                await prepare_inpainting(config.inpainter.inpainter, self.device)\n"
+        "                await prepare_translation(config.translator.translator_gen)\n",
+        "detect-only preload boundary",
+    )
+    updated, _ = _replace_once(
+        updated,
+        "        else:\n"
+        "            logger.info(\"No pre-translation replacements made.\")\n"
+        "            \n"
+        "        # -- Translation\n",
+        "        else:\n"
+        "            logger.info(\"No pre-translation replacements made.\")\n"
+        "            \n"
+        "        if self.prep_manual:\n"
+        "            for region in ctx.text_regions:\n"
+        "                region.translation = \"\"\n"
+        "                region.target_lang = config.translator.target_lang\n"
+        "                region._alignment = config.render.alignment\n"
+        "                region._direction = config.render.direction\n"
+        "            ctx.img_inpainted = ctx.img_rgb.copy()\n"
+        "            ctx.result = ctx.upscaled\n"
+        "            return await self._revert_upscale(config, ctx)\n\n"
+        "        # -- Translation\n",
+        "detect-only early return",
+    )
+    target_file.write_text(updated, encoding='utf-8')
+    return True
+
+def patch_runtime_contract_logging(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    marker = "[RuntimeContract]"
+    if marker in content:
+        return False
+    updated, _ = _replace_once(
+        content,
+        "        if params.get('model_dir'):\n"
+        "            ModelWrapper._MODEL_DIR = params.get('model_dir')\n"
+        "        #todo: fix why is kernel size loaded in the constructor\n",
+        "        if params.get('model_dir'):\n"
+        "            ModelWrapper._MODEL_DIR = params.get('model_dir')\n"
+        "        logger.info(\n"
+        f"            '{marker} device=%s model_dir=%s',\n"
+        "            self.device,\n"
+        "            ModelWrapper._MODEL_DIR,\n"
+        "        )\n"
+        "        #todo: fix why is kernel size loaded in the constructor\n",
+        "runtime device and model directory logging",
+    )
+    target_file.write_text(updated, encoding='utf-8')
+    return True
+
+def patch_internal_log_routing(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    marker = "MT_DISABLE_INTERNAL_LOG_FILE"
+    if marker in content:
+        return False
+    updated, _ = _replace_once(
+        content,
+        "    def _setup_log_file(self):\n"
+        "        \"\"\"设置日志文件，在result文件夹下创建带时间戳的log文件\"\"\"\n"
+        "        try:\n",
+        "    def _setup_log_file(self):\n"
+        "        \"\"\"设置日志文件，在result文件夹下创建带时间戳的log文件\"\"\"\n"
+        f"        if os.getenv('{marker}') == '1':\n"
+        "            self._log_file_path = ''\n"
+        "            return\n"
+        "        try:\n",
+        "internal log routing",
+    )
+    target_file.write_text(updated, encoding='utf-8')
+    return True
+
+def patch_model_downloader(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    marker = "from .model_download import download_url_with_progressbar as resilient_model_download"
+    if marker in content:
+        return False
+    updated, _ = _replace_once(
+        content,
+        "def download_url_with_progressbar(url: str, path: str):\n",
+        "def download_url_with_progressbar(url: str, path: str):\n"
+        f"    {marker}\n"
+        "    return resilient_model_download(url, path)\n\n"
+        "    # Upstream implementation retained below for easier pin updates.\n",
+        "resilient model downloader delegation",
+    )
+    target_file.write_text(updated, encoding='utf-8')
+    return True
+
+def patch_model_verification_retry(target_file: Path) -> bool:
+    content = target_file.read_text(encoding='utf-8')
+    marker = "# Solar-Manga-Translator: discard corrupt partial files before retrying"
+    if marker in content:
+        return False
+    updated, _ = _replace_once(
+        content,
+        "        if force or not self.is_downloaded():\n"
+        "            while True:\n"
+        "                try:\n"
+        "                    await self._download()\n"
+        "                    self._downloaded = True\n"
+        "                    break\n"
+        "                except ModelVerificationException:\n"
+        "                    if not prompt_yes_no('Failed to verify signature. Do you want to restart the download?', default=True):\n"
+        "                        print('Aborting.', end='')\n"
+        "                        raise KeyboardInterrupt()\n",
+        "        if force or not self.is_downloaded():\n"
+        "            verification_failures = 0\n"
+        "            while True:\n"
+        "                try:\n"
+        "                    await self._download()\n"
+        "                    self._downloaded = True\n"
+        "                    break\n"
+        "                except ModelVerificationException:\n"
+        f"                    {marker}\n"
+        "                    verification_failures += 1\n"
+        "                    for root, _dirs, files in os.walk(self.model_dir):\n"
+        "                        for filename in files:\n"
+        "                            if filename.endswith('.part'):\n"
+        "                                with contextlib.suppress(OSError):\n"
+        "                                    os.remove(os.path.join(root, filename))\n"
+        "                    if verification_failures >= 2:\n"
+        "                        raise RuntimeError('Model checksum verification failed twice; all downloaded copies were rejected.')\n",
+        "non-interactive model verification retry",
+    )
+    updated, _ = _replace_once(
+        updated,
+        "import filecmp\n",
+        "import contextlib\nimport filecmp\n",
+        "model verification contextlib import",
+    )
+    target_file.write_text(updated, encoding='utf-8')
+    return True
+
 def patch_custom_openai_translator(target_file: Path, patched_file: Path) -> bool:
     if not patched_file.exists():
         raise RuntimeError(f"Could not find patched custom openai translator at {patched_file}")
@@ -418,9 +577,14 @@ def patch_mask_refinement():
     target_custom_openai_file = translator_dir / "manga_translator" / "translators" / "custom_openai.py"
     target_sakura_file = translator_dir / "manga_translator" / "translators" / "sakura.py"
     target_local_file = translator_dir / "manga_translator" / "mode" / "local.py"
+    target_runtime_file = translator_dir / "manga_translator" / "manga_translator.py"
     patched_rerender_cache_file = backend_dir / "patched_rerender_cache.py"
     target_rerender_cache_file = translator_dir / "manga_translator" / "utils" / "rerender_cache.py"
     patched_custom_openai_file = backend_dir / "patched_custom_openai.py"
+    patched_model_download_file = backend_dir / "patched_model_download.py"
+    target_model_download_file = translator_dir / "manga_translator" / "utils" / "model_download.py"
+    target_generic_file = translator_dir / "manga_translator" / "utils" / "generic.py"
+    target_inference_file = translator_dir / "manga_translator" / "utils" / "inference.py"
 
     if not target_file.exists():
         print(f"Error: Could not find {target_file}")
@@ -482,6 +646,10 @@ def patch_mask_refinement():
         print(f"Error: Could not find {target_local_file}")
         return False
 
+    if not target_runtime_file.exists():
+        print(f"Error: Could not find {target_runtime_file}")
+        return False
+
     if not patched_rerender_cache_file.exists():
         print(f"Error: Could not find {patched_rerender_cache_file}")
         return False
@@ -492,6 +660,18 @@ def patch_mask_refinement():
 
     if not patched_custom_openai_file.exists():
         print(f"Error: Could not find {patched_custom_openai_file}")
+        return False
+
+    if not patched_model_download_file.exists():
+        print(f"Error: Could not find {patched_model_download_file}")
+        return False
+
+    if not target_generic_file.exists():
+        print(f"Error: Could not find {target_generic_file}")
+        return False
+
+    if not target_inference_file.exists():
+        print(f"Error: Could not find {target_inference_file}")
         return False
 
     if not target_sakura_file.exists():
@@ -538,6 +718,16 @@ def patch_mask_refinement():
 
         patch_local_mode(target_local_file)
         print("Successfully patched local mode for rerender cache generation!")
+
+        patch_detect_only_pipeline(target_runtime_file)
+        patch_runtime_contract_logging(target_runtime_file)
+        patch_internal_log_routing(target_runtime_file)
+        print("Successfully patched the detect-only pipeline boundary!")
+
+        shutil.copy2(patched_model_download_file, target_model_download_file)
+        patch_model_downloader(target_generic_file)
+        patch_model_verification_retry(target_inference_file)
+        print("Successfully installed the resilient model downloader!")
 
         patch_custom_openai_translator(target_custom_openai_file, patched_custom_openai_file)
         print("Successfully replaced custom_openai.py with the patched Responses-compatible version!")

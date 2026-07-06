@@ -415,5 +415,20 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertNotIn("%date%", start_script.lower())
         self.assertIn("Get-Date -Format 'yyyy-MM-dd HH:mm:ss'", start_script)
 
+    def test_start_scripts_skip_unchanged_dependencies_and_have_mirror_fallbacks(self) -> None:
+        root = BACKEND_DIR.parent
+        windows_script = (root / "start.bat").read_text(encoding="utf-8")
+        shell_scripts = "\n".join(
+            (root / filename).read_text(encoding="utf-8")
+            for filename in ("start.sh", "start.mac.sh")
+        )
+
+        for script in (windows_script, shell_scripts):
+            self.assertIn("dependency_state.py", script)
+            self.assertIn("pip_install.py", script)
+            self.assertIn("https://registry.npmmirror.com", script)
+            self.assertIn("https://registry.npmjs.org", script)
+
+
 if __name__ == "__main__":
     unittest.main()

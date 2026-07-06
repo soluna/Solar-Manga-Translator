@@ -19,6 +19,19 @@ SENSITIVE_KEYS = {
     "secret",
     "token",
 }
+PATH_KEY_SUFFIXES = ("_dir", "_path", "_root", "_file")
+OCR_LINE_PATTERNS = (
+    re.compile(r"(?i)\b(?:model48pxocr|ocr text|recognized text|source text)\b"),
+    re.compile(r"(?i)\b(?:gpt response|translated text|translation result)\b"),
+)
+
+
+def _looks_like_local_path(value: str) -> bool:
+    normalized = str(value or "").strip()
+    return bool(
+        re.match(r"^[A-Za-z]:[\\/]", normalized)
+        or normalized.startswith(("/Users/", "/Volumes/", "/home/", "/private/", "/tmp/"))
+    )
 
 
 def _redact(value: Any, key: str = "") -> Any:
@@ -29,6 +42,11 @@ def _redact(value: Any, key: str = "") -> Any:
     )
     if is_sensitive:
         return "[REDACTED]" if value else value
+    if isinstance(value, str) and (
+        normalized_key.endswith(PATH_KEY_SUFFIXES)
+        or _looks_like_local_path(value)
+    ):
+        return "[LOCAL_PATH]" if value else value
     if isinstance(value, dict):
         return {
             str(child_key): _redact(child_value, str(child_key))
@@ -55,6 +73,23 @@ def _read_log_tail_bytes(path: Path) -> bytes:
         r"\1[REDACTED]",
         content,
     )
+    sanitized_lines: list[str] = []
+    for line in content.splitlines():
+        if any(pattern.search(line) for pattern in OCR_LINE_PATTERNS):
+            sanitized_lines.append("[CONTENT REDACTED]")
+            continue
+        line = re.sub(
+            r"(?i)[A-Za-z]:\\(?:[^\\\r\n\t :]+\\)*[^\\\r\n\t :]*",
+            "[LOCAL_PATH]",
+            line,
+        )
+        line = re.sub(
+            r"(?<!https:)(?<!http:)(?:/Users|/Volumes|/home|/private|/tmp)/[^\s\"']+",
+            "[LOCAL_PATH]",
+            line,
+        )
+        sanitized_lines.append(line)
+    content = "\n".join(sanitized_lines)
     return content.encode("utf-8")
 
 
@@ -77,8 +112,12 @@ def build_diagnostics_zip(
             json.dumps(summary, ensure_ascii=False, indent=2),
         )
         if logs_dir.exists():
-            for path in sorted(logs_dir.glob("*.log*")):
+            for path in sorted(logs_dir.rglob("*.log*")):
                 if not path.is_file():
                     continue
-                archive.writestr(f"logs/{path.name}", _read_log_tail_bytes(path))
+                relative_path = path.relative_to(logs_dir)
+                archive.writestr(
+                    f"logs/{str(relative_path).replace(chr(92), '/')}",
+                    _read_log_tail_bytes(path),
+                )
     return output.getvalue()

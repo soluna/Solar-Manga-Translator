@@ -7,8 +7,8 @@ in the local Python backend.
 ## Goals
 
 - Start from a desktop window without asking end users to run terminal commands.
-- Keep projects, output, logs, models, cache, and settings in the user data
-  directory instead of the application install directory.
+- Keep projects, output, logs, models, cache, and settings together in the
+  project's ignored `.runtime` directory.
 - Inject the local backend URL and per-session API token into the renderer.
 - Package only allowlisted runtime files.
 
@@ -57,11 +57,13 @@ uploads, output folders, or the upstream `.git` directory.
 
 Desktop builds use:
 
-- Windows: `%LOCALAPPDATA%/Solar-Manga-Translator/`
+- Source checkout: `<project>/.runtime/`
+- Packaged Windows app: `<install directory>/.runtime/`
 
-If an earlier build wrote data to `%APPDATA%/Solar-Manga-Translator/`, the
-backend reports it through the existing legacy-data migration flow and can copy
-it into the current location.
+Set `APP_DATA_DIR` before launch to use an explicit location. If an earlier
+build wrote data to `%LOCALAPPDATA%/Solar-Manga-Translator/` or
+`%APPDATA%/Solar-Manga-Translator/`, the backend reports it through the
+existing legacy-data migration flow and can copy it into the current location.
 
 Expected subdirectories:
 

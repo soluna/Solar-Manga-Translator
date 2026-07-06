@@ -14,8 +14,8 @@ $root = (Resolve-Path -LiteralPath $normalizedRootDir).Path
 $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
 $backendUrl = $null
-$browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-    Join-Path $env:LOCALAPPDATA "Solar-Manga-Translator"
+$browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:APP_DATA_DIR)) {
+    [System.IO.Path]::GetFullPath($env:APP_DATA_DIR)
 } else {
     Join-Path $root ".runtime"
 }

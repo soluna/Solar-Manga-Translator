@@ -4,8 +4,8 @@ setlocal enabledelayedexpansion
 
 :: Get absolute path to the directory containing this script, without a trailing slash.
 for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
-if defined LOCALAPPDATA (
-    set "APP_DATA_ROOT=%LOCALAPPDATA%\Solar-Manga-Translator"
+if defined APP_DATA_DIR (
+    set "APP_DATA_ROOT=%APP_DATA_DIR%"
 ) else (
     set "APP_DATA_ROOT=%ROOT_DIR%\.runtime"
 )

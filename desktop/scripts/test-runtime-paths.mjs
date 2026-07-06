@@ -7,27 +7,27 @@ assert.equal(
   resolveApplicationDataDir({
     platform: 'win32',
     env: { LOCALAPPDATA: 'C:\\Users\\Test\\AppData\\Local' },
-    fallbackUserData: 'C:\\Users\\Test\\AppData\\Roaming\\Solar-Manga-Translator',
+    projectDir: 'E:\\Projects\\manga-translator',
   }),
-  'C:\\Users\\Test\\AppData\\Local\\Solar-Manga-Translator',
+  'E:\\Projects\\manga-translator\\.runtime',
 )
 
 assert.equal(
   resolveApplicationDataDir({
     platform: 'win32',
-    env: {},
-    fallbackUserData: 'C:\\Users\\Test\\AppData\\Roaming\\Solar-Manga-Translator',
+    env: { APP_DATA_DIR: 'D:\\MangaData' },
+    projectDir: 'E:\\Projects\\manga-translator',
   }),
-  'C:\\Users\\Test\\AppData\\Roaming\\Solar-Manga-Translator',
+  'D:\\MangaData',
 )
 
 assert.equal(
   resolveApplicationDataDir({
     platform: 'darwin',
     env: {},
-    fallbackUserData: '/tmp/solar-manga-user-data',
+    projectDir: '/tmp/manga-translator',
   }),
-  '/tmp/solar-manga-user-data',
+  '/tmp/manga-translator/.runtime',
 )
 
 console.log('Desktop runtime path checks passed.')

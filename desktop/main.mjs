@@ -88,6 +88,13 @@ function resolvePackagedResourcePath(...segments) {
   return join(process.resourcesPath, ...segments)
 }
 
+function resolveProjectDataDir() {
+  const projectDir = app.isPackaged
+    ? dirname(app.getPath('exe'))
+    : repoRoot
+  return resolveApplicationDataDir({ projectDir })
+}
+
 function prepareFontDirectory(userDataDir) {
   const fontsDir = app.isPackaged
     ? join(userDataDir, 'fonts')
@@ -173,9 +180,7 @@ function resolveBackendLaunch(userDataDir, port, token) {
 }
 
 async function startBackend() {
-  const userDataDir = resolveApplicationDataDir({
-    fallbackUserData: app.getPath('userData'),
-  })
+  const userDataDir = resolveProjectDataDir()
   const port = await findFreePort()
   apiToken = randomBytes(32).toString('base64url')
   const backendBaseUrl = `http://127.0.0.1:${port}`
@@ -419,9 +424,7 @@ ipcMain.handle('desktop:open-user-fonts', async (event) => {
   if (!isTrustedIpcEvent(event)) {
     return { ok: false, path: '', error: '不受信任的渲染器来源。' }
   }
-  const fontsDir = backendRuntime?.fontsDir || prepareFontDirectory(resolveApplicationDataDir({
-    fallbackUserData: app.getPath('userData'),
-  }))
+  const fontsDir = backendRuntime?.fontsDir || prepareFontDirectory(resolveProjectDataDir())
   ensureDir(fontsDir)
   const error = await shell.openPath(fontsDir)
   return {

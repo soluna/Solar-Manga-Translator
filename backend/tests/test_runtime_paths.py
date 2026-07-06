@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ from runtime_paths import AppPaths
 
 
 def make_paths(root: Path) -> AppPaths:
-    app_data_dir = root / "Solar-Manga-Translator"
+    app_data_dir = root / "repo" / ".runtime"
     return AppPaths(
         code_dir=root / "repo" / "backend",
         app_data_dir=app_data_dir,
@@ -49,6 +50,33 @@ class RuntimePathsTests(unittest.TestCase):
             }]),
             encoding="utf-8",
         )
+
+    def test_default_app_data_lives_under_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "manga-translator"
+            backend_dir = project_root / "backend"
+            backend_dir.mkdir(parents=True)
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                paths = runtime_paths_module.resolve_app_paths(backend_dir)
+
+            self.assertEqual(paths.app_data_dir, (project_root / ".runtime").resolve())
+            self.assertEqual(paths.models_dir, (project_root / ".runtime" / "models").resolve())
+            self.assertTrue(paths.projects_dir.is_dir())
+
+    def test_app_data_environment_override_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            configured_data_dir = root / "custom-data"
+
+            with mock.patch.dict(
+                os.environ,
+                {"APP_DATA_DIR": str(configured_data_dir)},
+                clear=True,
+            ):
+                paths = runtime_paths_module.resolve_app_paths(root / "repo" / "backend")
+
+            self.assertEqual(paths.app_data_dir, configured_data_dir.resolve())
 
     def test_migrate_legacy_app_data_from_old_app_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

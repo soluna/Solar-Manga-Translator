@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Moved default projects, output, models, settings, caches, and logs from the
+  operating-system user-data directory into the project's ignored `.runtime/`
+  directory, while preserving `APP_DATA_DIR` overrides and legacy migration.
 - Removed bundled manga/comic assets, design exports, private planning files,
   and non-redistributable fonts from the tracked project.
 - Added three OFL-licensed Source Han Sans SC presets while keeping

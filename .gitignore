@@ -20,6 +20,7 @@ backend/manga-image-translator/
 frontend/test-artifacts/
 playwright-report/
 test-results/
+# Local projects, outputs, models, settings, caches, browser state, and logs.
 .runtime/
 .worktrees/
 desktop/node_modules/

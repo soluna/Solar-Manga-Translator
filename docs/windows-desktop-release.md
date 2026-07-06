@@ -16,11 +16,14 @@ public release note.
 
 Writable data lives under:
 
-- `%LOCALAPPDATA%/Solar-Manga-Translator/`
+- Source checkout: `<project>/.runtime/`
+- Packaged app: `<install directory>/.runtime/`
 
-Versions that briefly used Electron's default `%APPDATA%/Solar-Manga-Translator/`
-location are detected by the in-app legacy-data migration flow. Complete that
-migration before deleting the old directory.
+`APP_DATA_DIR` can override this default. Versions that used
+`%LOCALAPPDATA%/Solar-Manga-Translator/` or Electron's default
+`%APPDATA%/Solar-Manga-Translator/` location are detected by the in-app
+legacy-data migration flow. Complete that migration before deleting the old
+directory.
 
 Subdirectories:
 
@@ -31,7 +34,7 @@ Subdirectories:
 - `cache/`
 - `config/settings.json`
 
-The install directory should stay read-only application code.
+The selected install directory must be writable because it contains `.runtime/`.
 
 ## Build Flow
 

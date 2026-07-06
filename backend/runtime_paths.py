@@ -12,6 +12,7 @@ from typing import Any
 
 
 APP_NAME = "Solar-Manga-Translator"
+RUNTIME_DATA_DIR_NAME = ".runtime"
 LEGACY_APP_NAMES = (
     "MangaTranslator",
     "Manga Translator",
@@ -24,14 +25,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _default_user_data_dir() -> Path:
-    if os.name == "nt":
-        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-        if base:
-            return Path(base) / APP_NAME
-    if sys_platform() == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_NAME
-    return Path.home() / ".local" / "share" / APP_NAME
+def _default_project_data_dir(code_dir: Path) -> Path:
+    return Path(code_dir).resolve().parent / RUNTIME_DATA_DIR_NAME
 
 
 def _platform_app_data_bases() -> list[Path]:
@@ -435,7 +430,9 @@ class AppPaths:
 
 def resolve_app_paths(code_dir: Path) -> AppPaths:
     base_dir = Path(code_dir).resolve()
-    app_data_dir = Path(os.getenv("APP_DATA_DIR") or _default_user_data_dir()).expanduser().resolve()
+    app_data_dir = Path(
+        os.getenv("APP_DATA_DIR") or _default_project_data_dir(base_dir),
+    ).expanduser().resolve()
     models_dir = Path(os.getenv("APP_MODELS_DIR") or (app_data_dir / "models")).expanduser().resolve()
     output_dir = Path(os.getenv("APP_OUTPUT_DIR") or (app_data_dir / "output")).expanduser().resolve()
     logs_dir = Path(os.getenv("APP_LOG_DIR") or (app_data_dir / "logs")).expanduser().resolve()

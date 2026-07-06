@@ -1,21 +1,25 @@
-import { join, win32 } from 'node:path'
+import { join, resolve, win32 } from 'node:path'
 
-export const APP_DATA_DIR_NAME = 'Solar-Manga-Translator'
+export const RUNTIME_DATA_DIR_NAME = '.runtime'
 
 export function resolveApplicationDataDir({
   platform = process.platform,
   env = process.env,
-  fallbackUserData = '',
+  projectDir = '',
 } = {}) {
-  const fallback = String(fallbackUserData || '').trim()
+  const explicitDataDir = String(env.APP_DATA_DIR || '').trim()
+  if (explicitDataDir) {
+    return platform === 'win32'
+      ? win32.resolve(explicitDataDir)
+      : resolve(explicitDataDir)
+  }
+
+  const root = String(projectDir || '').trim()
+  if (!root) {
+    throw new Error('无法确定项目目录。')
+  }
   if (platform === 'win32') {
-    const localAppData = String(env.LOCALAPPDATA || '').trim()
-    if (localAppData) {
-      return win32.join(localAppData, APP_DATA_DIR_NAME)
-    }
+    return win32.join(root, RUNTIME_DATA_DIR_NAME)
   }
-  if (!fallback) {
-    throw new Error('无法确定应用数据目录。')
-  }
-  return join(fallback)
+  return join(root, RUNTIME_DATA_DIR_NAME)
 }

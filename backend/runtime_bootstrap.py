@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import platform
@@ -165,6 +166,34 @@ def _safe_cuda_error(torch_module: Any) -> str:
     return ""
 
 
+def _parse_cuda_architecture(architecture: str) -> tuple[str, int, int] | None:
+    prefix, separator, encoded = str(architecture).lower().partition("_")
+    if separator != "_" or prefix not in {"sm", "compute"} or not encoded.isdigit():
+        return None
+    if len(encoded) < 2:
+        return None
+    return prefix, int(encoded[:-1]), int(encoded[-1])
+
+
+def _cuda_architecture_is_compatible(
+    device_capability: tuple[int, int],
+    compiled_architectures: Sequence[str],
+) -> bool:
+    device_major, device_minor = device_capability
+    for architecture in compiled_architectures:
+        parsed = _parse_cuda_architecture(str(architecture))
+        if parsed is None:
+            continue
+        kind, compiled_major, compiled_minor = parsed
+        if kind == "sm":
+            if compiled_major == device_major and compiled_minor <= device_minor:
+                return True
+            continue
+        if (compiled_major, compiled_minor) <= (device_major, device_minor):
+            return True
+    return False
+
+
 def build_gpu_diagnostics(
     torch_module: Any | None,
     nvidia_gpus: Sequence[NvidiaGpu] | None = None,
@@ -213,9 +242,9 @@ def build_gpu_diagnostics(
                     architecture = f"sm_{int(major)}{int(minor)}"
                     device["compute_capability"] = f"{int(major)}.{int(minor)}"
                     device["architecture"] = architecture
-                    if arch_list and not any(
-                        str(supported).startswith(architecture)
-                        for supported in arch_list
+                    if arch_list and not _cuda_architecture_is_compatible(
+                        (int(major), int(minor)),
+                        arch_list,
                     ):
                         unsupported_architectures.append(architecture)
                 devices.append(device)
@@ -288,25 +317,38 @@ def build_gpu_diagnostics(
 
 def _installed_runtime_matches(plan: PytorchRuntimePlan) -> bool:
     try:
-        import torch  # type: ignore
-        import torchvision  # type: ignore
-    except Exception:
+        torch_version = importlib.metadata.version("torch")
+        torchvision_version = importlib.metadata.version("torchvision")
+    except importlib.metadata.PackageNotFoundError:
         return False
 
-    torch_version = str(getattr(torch, "__version__", "") or "")
-    torchvision_version = str(getattr(torchvision, "__version__", "") or "")
     if not torch_version.startswith(PYTORCH_VERSION):
         return False
     if not torchvision_version.startswith(TORCHVISION_VERSION):
         return False
     if plan.accelerator == "cuda":
-        cuda_version = str(getattr(torch.version, "cuda", "") or "")
-        if plan.index_url.endswith("/cu130"):
-            return cuda_version.startswith("13.")
-        if plan.index_url.endswith("/cu126"):
-            return cuda_version.startswith("12.6")
-        return bool(cuda_version)
+        runtime = plan.index_url.rstrip("/").rsplit("/", 1)[-1]
+        build_tag = f"+{runtime}"
+        return build_tag in torch_version and build_tag in torchvision_version
     return True
+
+
+def _remove_obsolete_torchaudio() -> None:
+    try:
+        installed_version = importlib.metadata.version("torchaudio")
+    except importlib.metadata.PackageNotFoundError:
+        return
+
+    print(
+        f"[PyTorch] 正在移除项目未使用的旧 torchaudio {installed_version}，"
+        "避免与目标 torch 运行时冲突。"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "--yes", "torchaudio"],
+        check=False,
+    )
+    if completed.returncode != 0:
+        print("[PyTorch] torchaudio 清理未完成；它不影响本项目，将继续准备运行时。")
 
 
 def _windows_cuda_wheel_urls(
@@ -461,6 +503,7 @@ def install_pytorch_runtime(
             f"CUDA 13 运行时要求 NVIDIA R580 或更高版本{architecture_hint}。"
             "请先从 NVIDIA 官方更新驱动，再重新运行启动脚本。"
         )
+    _remove_obsolete_torchaudio()
     if _installed_runtime_matches(plan):
         print(f"[PyTorch] 已就绪：{plan.reason}")
         return

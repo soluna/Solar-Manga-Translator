@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import subprocess
 import sys
 import unittest
@@ -167,6 +168,35 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertNotIn("timeout", run.call_args.kwargs)
 
+    def test_matching_runtime_removes_obsolete_torchaudio(self) -> None:
+        gpu = NvidiaGpu(
+            name="NVIDIA GeForce RTX 4090",
+            driver_version="580.88",
+            compute_capability="8.9",
+        )
+        plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[gpu])
+
+        with (
+            mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
+            mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=True),
+            mock.patch("importlib.metadata.version", return_value="2.7.1+cu118"),
+            mock.patch(
+                "runtime_bootstrap.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+        ):
+            install_pytorch_runtime(
+                plan,
+                platform_name="win32",
+                python_tag="cp311",
+                machine="AMD64",
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [sys.executable, "-m", "pip", "uninstall", "--yes", "torchaudio"],
+        )
+
     def test_windows_cuda_download_prefers_faster_mirror(self) -> None:
         plan = choose_pytorch_runtime(
             platform_name="win32",
@@ -213,17 +243,46 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 )
             ],
         )
-        fake_torch = SimpleNamespace(
-            __version__="2.12.1+cu126",
-            version=SimpleNamespace(cuda="12.6"),
-        )
-        fake_torchvision = SimpleNamespace(__version__="0.27.1+cu126")
+        def installed_version(distribution: str) -> str:
+            return {
+                "torch": "2.12.1+cu126",
+                "torchvision": "0.27.1+cu126",
+            }[distribution]
 
-        with mock.patch.dict(
-            sys.modules,
-            {"torch": fake_torch, "torchvision": fake_torchvision},
-        ):
+        with mock.patch("importlib.metadata.version", side_effect=installed_version):
             self.assertFalse(_installed_runtime_matches(plan))
+
+    def test_installed_runtime_check_does_not_import_torch_in_bootstrap_process(self) -> None:
+        plan = choose_pytorch_runtime(
+            platform_name="win32",
+            nvidia_gpus=[
+                NvidiaGpu(
+                    name="NVIDIA GeForce RTX 4090",
+                    driver_version="580.88",
+                    compute_capability="8.9",
+                )
+            ],
+        )
+
+        class LockedTorch:
+            @property
+            def __version__(self) -> str:
+                raise AssertionError("bootstrap process imported and locked the existing torch DLLs")
+
+        def installed_version(distribution: str) -> str:
+            return {
+                "torch": "2.12.1+cu130",
+                "torchvision": "0.27.1+cu130",
+            }[distribution]
+
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {"torch": LockedTorch(), "torchvision": SimpleNamespace()},
+            ),
+            mock.patch("importlib.metadata.version", side_effect=installed_version),
+        ):
+            self.assertTrue(_installed_runtime_matches(plan))
 
     def test_diagnostics_explain_cpu_torch_build_on_nvidia_machine(self) -> None:
         class FakeCuda:
@@ -298,6 +357,48 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertEqual(diagnostics["status"], "unsupported_gpu_architecture")
         self.assertIn("sm_120", diagnostics["message"])
 
+    def test_diagnostics_accepts_compatible_sm86_cubin_on_sm89_gpu(self) -> None:
+        class FakeCuda:
+            @staticmethod
+            def is_available() -> bool:
+                return True
+
+            @staticmethod
+            def device_count() -> int:
+                return 1
+
+            @staticmethod
+            def get_device_name(_index: int) -> str:
+                return "NVIDIA GeForce RTX 4090"
+
+            @staticmethod
+            def get_device_capability(_index: int) -> tuple[int, int]:
+                return (8, 9)
+
+            @staticmethod
+            def get_arch_list() -> list[str]:
+                return ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
+
+        class FakeTorch:
+            __version__ = "2.12.1+cu130"
+            version = type("Version", (), {"cuda": "13.0"})()
+            cuda = FakeCuda()
+
+        diagnostics = build_gpu_diagnostics(
+            FakeTorch(),
+            [
+                NvidiaGpu(
+                    name="NVIDIA GeForce RTX 4090",
+                    driver_version="580.88",
+                    compute_capability="8.9",
+                )
+            ],
+        )
+
+        self.assertTrue(diagnostics["available"])
+        self.assertEqual(diagnostics["status"], "ready")
+        self.assertEqual(diagnostics["devices"][0]["architecture"], "sm_89")
+
     def test_windows_start_script_uses_runtime_bootstrap(self) -> None:
         start_script = (BACKEND_DIR.parent / "start.bat").read_text(encoding="utf-8")
 
@@ -313,7 +414,6 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertNotIn("%date%", start_script.lower())
         self.assertIn("Get-Date -Format 'yyyy-MM-dd HH:mm:ss'", start_script)
-
 
 if __name__ == "__main__":
     unittest.main()

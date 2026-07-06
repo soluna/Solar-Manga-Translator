@@ -204,6 +204,20 @@ img {
   white-space: nowrap;
 }
 
+.v2-status-detail-button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  flex: 0 0 24px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--v2-danger);
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+
 .v2-topbar-status-dot {
   width: 8px;
   height: 8px;
@@ -492,6 +506,12 @@ img {
   font-size: 0.95rem;
 }
 
+.v2-cancel-task-button {
+  border-color: rgba(213, 59, 82, 0.24);
+  color: var(--v2-danger);
+  background: rgba(255, 246, 247, 0.96);
+}
+
 .v2-danger-link {
   padding: 0;
   color: var(--v2-danger);
@@ -752,6 +772,14 @@ img {
   justify-content: center;
   gap: 10px;
   padding: 12px 0 4px;
+}
+
+.v2-upload-error {
+  margin: 8px auto 0;
+  color: var(--v2-danger);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-align: center;
 }
 
 .v2-secondary-actions,
@@ -3334,6 +3362,37 @@ img {
   width: min(620px, 100%);
   max-height: min(720px, calc(100vh - 48px));
   grid-template-rows: auto minmax(0, 1fr);
+}
+
+.v2-task-error-modal {
+  width: min(560px, 100%);
+}
+
+.v2-task-error-content {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.v2-task-error-content p {
+  margin: 0;
+  color: var(--v2-text-soft);
+  line-height: 1.55;
+}
+
+.v2-task-error-content pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-panel-muted);
+  color: var(--v2-text);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .v2-onboarding-copy,

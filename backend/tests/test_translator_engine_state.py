@@ -328,6 +328,18 @@ class TranslatorEngineStateTests(unittest.TestCase):
                     "cpu",
                 )
 
+    def test_inference_device_uses_mps_when_cuda_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            fake_torch = SimpleNamespace(
+                cuda=SimpleNamespace(is_available=lambda: False),
+                backends=SimpleNamespace(
+                    mps=SimpleNamespace(is_available=lambda: True),
+                ),
+            )
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                self.assertEqual(engine._select_inference_device(True), "mps")
+
     def test_successful_detect_atomically_commits_staged_outputs_and_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

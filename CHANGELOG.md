@@ -65,3 +65,13 @@
 - Added a mocked upload-to-export workflow contract test and a browser
   workspace E2E job to CI, including bounded runtime and reliable service
   process-tree cleanup on Linux runners.
+- Added connection-independent project tasks with stable task IDs, resumable
+  event streams, task status APIs, cancellation, and browser refresh recovery.
+- Preserved the current workspace when a new upload fails and added browser
+  regression coverage for damaged archives.
+- Prevented migration and first-run dialogs from overlapping, and made
+  "skip migration" persist for the current application version.
+- Unified CUDA, Apple MPS, and CPU device selection across manual OCR,
+  translation, and local inpainting.
+- Replaced raw task exception output with stable error codes, user-facing
+  recovery actions, redacted technical details, and full server-side logging.

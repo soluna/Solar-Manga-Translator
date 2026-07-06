@@ -28,6 +28,7 @@ from system_fonts import FONT_EXTENSIONS as SYSTEM_FONT_EXTENSIONS
 from system_fonts import bundled_font_directories
 from system_fonts import custom_font_directories
 from system_fonts import ensure_project_font_directories
+from task_manager import ProjectTaskConflictError, TaskManager, TaskNotFoundError
 from utils.file_handler import extract_archive, verify_supported_image
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
@@ -94,6 +95,7 @@ def iter_font_directories(source: str) -> list[Path]:
 SESSIONS: dict[str, dict[str, Any]] = {}
 translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
 logger = logging.getLogger("manga_translator.api")
+task_manager = TaskManager(logger=logger)
 
 allowed_hosts = [
     host.strip()
@@ -710,6 +712,9 @@ async def update_project(project_id: str, payload: dict[str, Any] | None = None)
 
 @app.post("/api/projects/{project_id}/restore")
 async def restore_project(project_id: str):
+    if translator_engine.is_session_busy(project_id):
+        session = get_or_restore_session(project_id)
+        return translator_engine.build_client_session_payload(project_id, session)
     try:
         session = translator_engine.restore_project_session(project_id)
     except FileNotFoundError as exc:
@@ -1321,6 +1326,115 @@ async def download_blank_archive(session_id: str):
     )
 
 
+def start_translation_task(
+    *,
+    session_id: str,
+    session: dict[str, Any],
+    action: str,
+    config: dict[str, Any],
+    target_stored_name: str,
+) -> str:
+    if not translator_engine.try_mark_session_busy(session_id, action):
+        raise ProjectTaskConflictError("Project already has an active task")
+
+    async def run_task(publish):
+        try:
+            if action == "rerender":
+                result = await translator_engine.rerender_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=publish,
+                    target_stored_name=target_stored_name or None,
+                )
+            elif action == "detect":
+                result = await translator_engine.detect_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=publish,
+                )
+            elif action == "resume-translate":
+                result = await translator_engine.resume_translation_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=publish,
+                    skip_completed=True,
+                )
+            elif action == "translate-page":
+                result = await translator_engine.resume_translation_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=publish,
+                    target_stored_name=target_stored_name or None,
+                )
+            else:
+                result = await translator_engine.translate_session(
+                    session_id=session_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=publish,
+                )
+
+            completed_payload = {
+                **translator_engine.build_client_session_payload(session_id, session),
+                **result,
+            }
+            if isinstance(completed_payload.get("project"), dict):
+                completed_payload["project"] = {
+                    **completed_payload["project"],
+                    "is_busy": False,
+                    "busy_action": "",
+                }
+            logger.info(
+                "Translation task completed. session_id=%s action=%s",
+                session_id,
+                action,
+            )
+            return completed_payload
+        finally:
+            translator_engine.clear_session_busy(session_id)
+
+    try:
+        return task_manager.start(
+            session_id,
+            action,
+            run_task,
+            metadata={"target_stored_name": target_stored_name},
+        )
+    except Exception:
+        translator_engine.clear_session_busy(session_id)
+        raise
+
+
+def get_task_snapshot_or_404(task_id: str) -> dict[str, Any]:
+    try:
+        return task_manager.snapshot(task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期。") from exc
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: str):
+    return get_task_snapshot_or_404(task_id)
+
+
+@app.get("/api/projects/{project_id}/task")
+async def get_project_task(project_id: str):
+    get_or_restore_session(project_id)
+    return {"task": task_manager.project_snapshot(project_id)}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    try:
+        return await task_manager.cancel(task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期。") from exc
+
+
 @app.websocket("/ws/translate/{session_id}")
 async def translate_session(websocket: WebSocket, session_id: str):
     if not websocket_has_valid_api_token(websocket):
@@ -1335,9 +1449,8 @@ async def translate_session(websocket: WebSocket, session_id: str):
     }
     selected_protocol = "manga-translator" if "manga-translator" in offered_protocols else None
     await websocket.accept(subprotocol=selected_protocol)
-    busy_cleared = False
+    task_id = ""
     action = "translate"
-    target_stored_name = ""
 
     try:
         session = get_or_restore_session(session_id)
@@ -1349,109 +1462,76 @@ async def translate_session(websocket: WebSocket, session_id: str):
 
     try:
         payload = await websocket.receive_json()
-        action = str(payload.get("action") or "translate").strip().lower()
-        config = payload.get("config", {})
-        target_stored_name = str(payload.get("target_stored_name") or "").strip()
-        logger.info(
-            "Translation websocket started. session_id=%s action=%s target=%s",
-            session_id,
-            action,
-            target_stored_name or "*",
-        )
+        task_id = str(payload.get("task_id") or "").strip()
+        after_sequence = max(0, int(payload.get("after_sequence") or 0))
 
-        if not translator_engine.try_mark_session_busy(session_id, action):
-            logger.warning("Translation websocket rejected because session is busy. session_id=%s action=%s", session_id, action)
-            await websocket.send_json({"event": "error", "message": "该项目已有任务在运行，请等待当前任务完成。"})
-            await websocket.close()
-            return
-
-        async def send_event(event: dict[str, Any]) -> None:
-            try:
-                await websocket.send_json(event)
-            except Exception:
-                logger.exception(
-                    "Failed to send translation progress event. session_id=%s action=%s event=%s",
-                    session_id,
-                    action,
-                    event.get("event") if isinstance(event, dict) else type(event).__name__,
-                )
-                raise
-
-        if action == "rerender":
-            result = await translator_engine.rerender_session(
-                session_id=session_id,
-                session=session,
-                raw_config=config,
-                progress_callback=send_event,
-                target_stored_name=target_stored_name or None,
-            )
-        elif action == "detect":
-            result = await translator_engine.detect_session(
-                session_id=session_id,
-                session=session,
-                raw_config=config,
-                progress_callback=send_event,
-            )
-        elif action == "resume-translate":
-            result = await translator_engine.resume_translation_session(
-                session_id=session_id,
-                session=session,
-                raw_config=config,
-                progress_callback=send_event,
-                skip_completed=True,
-            )
-        elif action == "translate-page":
-            result = await translator_engine.resume_translation_session(
-                session_id=session_id,
-                session=session,
-                raw_config=config,
-                progress_callback=send_event,
-                target_stored_name=target_stored_name or None,
+        if task_id:
+            snapshot = get_task_snapshot_or_404(task_id)
+            if snapshot["project_id"] != session_id:
+                raise HTTPException(status_code=404, detail="该项目中不存在此任务。")
+            action = str(snapshot["action"])
+            logger.info(
+                "Translation websocket subscribed. session_id=%s task_id=%s after_sequence=%s",
+                session_id,
+                task_id,
+                after_sequence,
             )
         else:
-            result = await translator_engine.translate_session(
+            action = str(payload.get("action") or "translate").strip().lower()
+            config = payload.get("config", {})
+            if not isinstance(config, dict):
+                config = {}
+            target_stored_name = str(payload.get("target_stored_name") or "").strip()
+            task_id = start_translation_task(
                 session_id=session_id,
                 session=session,
-                raw_config=config,
-                progress_callback=send_event,
+                action=action,
+                config=config,
+                target_stored_name=target_stored_name,
             )
-        logger.info("Translation websocket completed. session_id=%s action=%s", session_id, action)
-        completed_payload = {
-            "event": "completed",
-            **translator_engine.build_client_session_payload(session_id, session),
-            **result,
-        }
-        if isinstance(completed_payload.get("project"), dict):
-            completed_payload["project"] = {
-                **completed_payload["project"],
-                "is_busy": False,
-                "busy_action": "",
-            }
-        await websocket.send_json(completed_payload)
-        translator_engine.clear_session_busy(session_id)
-        busy_cleared = True
+            logger.info(
+                "Translation task started. session_id=%s task_id=%s action=%s target=%s",
+                session_id,
+                task_id,
+                action,
+                target_stored_name or "*",
+            )
+
+        async for event in task_manager.subscribe(
+            task_id,
+            after_sequence=after_sequence,
+        ):
+            await websocket.send_json(event)
     except WebSocketDisconnect:
-        logger.warning(
-            "Translation websocket disconnected. session_id=%s action=%s target=%s",
+        logger.info(
+            "Translation event subscriber disconnected. session_id=%s task_id=%s action=%s",
             session_id,
+            task_id or "*",
             action,
-            target_stored_name or "*",
         )
-        return
-    except Exception as exc:
+    except (ProjectTaskConflictError, HTTPException) as exc:
+        message = (
+            "该项目已有任务在运行，请等待当前任务完成。"
+            if isinstance(exc, ProjectTaskConflictError)
+            else str(exc.detail)
+        )
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"event": "error", "message": message})
+            await websocket.close()
+    except Exception:
         logger.exception(
-            "Translation websocket failed. session_id=%s action=%s target=%s",
+            "Translation websocket subscription failed. session_id=%s task_id=%s action=%s",
             session_id,
+            task_id or "*",
             action,
-            target_stored_name or "*",
         )
-        try:
-            await websocket.send_json({"event": "error", "message": str(exc)})
-        except Exception:
-            logger.exception("Failed to send websocket error message. session_id=%s action=%s", session_id, action)
-    finally:
-        if not busy_cleared:
-            translator_engine.clear_session_busy(session_id)
+        with contextlib.suppress(Exception):
+            await websocket.send_json(
+                {
+                    "event": "error",
+                    "message": "任务连接失败，请重新连接或导出诊断包。",
+                }
+            )
 
 
 if __name__ == "__main__":

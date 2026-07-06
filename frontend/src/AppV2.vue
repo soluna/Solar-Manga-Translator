@@ -713,6 +713,8 @@ const sessionId = ref('')
 const originalImages = ref([])
 const translatedImages = ref([])
 const errorMessage = ref('')
+const taskErrorDetails = ref(null)
+const taskErrorDetailsOpen = ref(false)
 const downloadUrl = ref('')
 const downloadPath = ref('')
 const translatedDirPath = ref('')
@@ -799,6 +801,9 @@ const topbarTaskProgress = ref({
   current: 0,
   total: 0
 })
+const activeTaskId = ref('')
+const activeTaskSequence = ref(0)
+const activeTaskTargetStoredName = ref('')
 
 const config = ref(loadStoredConfig())
 const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
@@ -861,7 +866,10 @@ const TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS = 20
 let translationCompletionRecoveryTimer = null
 let translationCompletionRecoveryToken = 0
 let translationFinalizationPromise = null
+let taskReconnectTimer = null
+let taskReconnectAttempts = 0
 let miniToastTimer = null
+const TASK_RECONNECT_MAX_ATTEMPTS = 20
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const {
@@ -1562,6 +1570,9 @@ const v2TopbarProgressPercent = computed(() => (
 ))
 const canRunProjectPrimaryAction = computed(
   () => Boolean(sessionId.value) && !translating.value
+)
+const canCancelTask = computed(
+  () => Boolean(translating.value && activeTaskId.value)
 )
 const v2SettingsOpen = computed({
   get() {
@@ -2505,6 +2516,35 @@ async function exportCurrentProjectTranslationRequestDebug() {
   }
 }
 
+function clearTaskReconnectTimer() {
+  if (taskReconnectTimer != null) {
+    window.clearTimeout(taskReconnectTimer)
+    taskReconnectTimer = null
+  }
+}
+
+function resetActiveTaskConnection() {
+  clearTaskReconnectTimer()
+  taskReconnectAttempts = 0
+  activeTaskId.value = ''
+  activeTaskSequence.value = 0
+  activeTaskTargetStoredName.value = ''
+}
+
+function clearTaskError() {
+  taskErrorDetails.value = null
+  taskErrorDetailsOpen.value = false
+}
+
+function applyTaskError(payload, fallbackMessage = '任务执行失败。') {
+  const details = payload?.error && typeof payload.error === 'object'
+    ? payload.error
+    : null
+  taskErrorDetails.value = details
+  taskErrorDetailsOpen.value = false
+  errorMessage.value = String(details?.message || payload?.message || fallbackMessage)
+}
+
 function closeSocket(targetSocket = socket) {
   if (targetSocket) {
     const socketToClose = targetSocket
@@ -2637,6 +2677,7 @@ async function finalizeCompletedTranslation(payload, context = {}) {
       translationFinalizationPromise = null
     }
     translating.value = false
+    resetActiveTaskConnection()
     void loadProjectHistory({ silent: true })
   }
 }
@@ -2957,7 +2998,7 @@ function getBusyActionLabel(project) {
 }
 
 function canRestoreHistoryProject(project) {
-  return !translating.value && !isProjectBusy(project) && (!restoringProjectId.value || restoringProjectId.value === project?.project_id)
+  return !translating.value && (!restoringProjectId.value || restoringProjectId.value === project?.project_id)
 }
 
 function canDeleteHistoryProject(project) {
@@ -3152,7 +3193,10 @@ async function restoreProject(projectId) {
     }
     applySessionPayload(payload, { resetInspectors: true })
     await loadProjectHistory({ silent: true })
-    status.value = `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
+    const taskResumed = await resumeProjectTaskSubscription(projectId)
+    status.value = taskResumed
+      ? `已恢复项目「${currentProject.value?.title || projectId}」，正在重新连接后台任务。`
+      : `已恢复项目「${currentProject.value?.title || projectId}」，可以继续编辑。`
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '恢复历史项目失败'
   } finally {
@@ -9934,28 +9978,13 @@ async function submitFile() {
     errorMessage.value = '请先选择一个 zip/cbz、单张图片文件或图片文件夹。'
     return
   }
+  if (translating.value) {
+    errorMessage.value = '请先停止当前识别或翻译任务，再导入新项目。'
+    return
+  }
 
   uploading.value = true
   errorMessage.value = ''
-  originalImages.value = []
-  translatedImages.value = []
-  sessionId.value = ''
-  currentProject.value = null
-  projectTitleDraft.value = ''
-  projectNoteDraft.value = ''
-  downloadUrl.value = ''
-  downloadPath.value = ''
-  translatedDirPath.value = ''
-  maskDebugDirPath.value = ''
-  projectGlossary.value = { version: 1, entries: [] }
-  glossaryDraftEntries.value = []
-  glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
-  glossaryError.value = ''
-  workflowStage.value = 'idle'
-  progress.value = { current: 0, total: 0 }
-  resetTranslationReview()
-  resetStyleInspector()
-  closeSocket()
 
   try {
     const formData = new FormData()
@@ -9980,6 +10009,9 @@ async function submitFile() {
       throw new Error(payload.detail || '上传失败')
     }
 
+    closeSocket()
+    resetActiveTaskConnection()
+    clearTaskError()
     applySessionPayload(payload, { resetInspectors: true })
     await loadProjectHistory({ silent: true })
     status.value = config.value.pause_after_detection
@@ -9993,16 +10025,351 @@ async function submitFile() {
   }
 }
 
+function getTaskFailureStatus(action = activeAction.value) {
+  if (action === 'rerender') {
+    return '重嵌字失败。'
+  }
+  if (action === 'detect') {
+    return '文本框识别失败。'
+  }
+  if (action === 'translate-page') {
+    return '当前页翻译失败。'
+  }
+  if (action === 'resume-translate') {
+    return '继续翻译失败。'
+  }
+  return '翻译失败。'
+}
+
+async function handleTranslationTaskEvent(payload, currentSocket = socket) {
+  const payloadTaskId = String(payload?.task_id || '').trim()
+  const payloadSequence = Number(payload?.sequence || 0)
+  if (
+    payloadTaskId
+    && payloadTaskId === activeTaskId.value
+    && payloadSequence > 0
+    && payloadSequence <= activeTaskSequence.value
+  ) {
+    return
+  }
+  if (payloadTaskId) {
+    activeTaskId.value = payloadTaskId
+  }
+  if (payloadSequence > 0) {
+    activeTaskSequence.value = Math.max(activeTaskSequence.value, payloadSequence)
+  }
+  if (payload?.action) {
+    activeAction.value = String(payload.action)
+  }
+  if (payload?.metadata?.target_stored_name) {
+    activeTaskTargetStoredName.value = String(payload.metadata.target_stored_name)
+  }
+
+  const pageTargetStoredName = activeTaskTargetStoredName.value
+  if (payload.event === 'task') {
+    taskReconnectAttempts = 0
+    clearTaskReconnectTimer()
+    return
+  }
+
+  if (payload.event === 'start') {
+    progress.value = { current: 0, total: payload.total_pages }
+    status.value = activeAction.value === 'rerender'
+      ? (pageTargetStoredName
+        ? '当前页重嵌字已开始。'
+        : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
+      : activeAction.value === 'detect'
+        ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
+        : activeAction.value === 'translate-page'
+          ? '当前页翻译已开始。'
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
+            : `翻译已开始，共 ${payload.total_pages} 张图片。`
+    return
+  }
+
+  if (payload.event === 'progress') {
+    progress.value = {
+      current: payload.current,
+      total: payload.total
+    }
+    if (payload.stored_name) {
+      markPageImageUpdated(payload.stored_name)
+    }
+    const nextImageUrl = getVersionedPageImageUrl(payload.image_url, payload.stored_name)
+    preloadImageUrl(getReviewPageImageUrl(nextImageUrl, payload.stored_name))
+    translatedImages.value = upsertTranslatedImage(
+      translatedImages.value,
+      payload,
+      nextImageUrl,
+      sessionId.value,
+    )
+    if (payload.stored_name) {
+      reviewInspectionPages.value = updatePagePreviewUrl(
+        reviewInspectionPages.value,
+        payload.stored_name,
+        payload.image_url,
+      )
+      styleInspectionPages.value = updatePagePreviewUrl(
+        styleInspectionPages.value,
+        payload.stored_name,
+        payload.image_url,
+      )
+    }
+    status.value = activeAction.value === 'rerender'
+      ? (pageTargetStoredName
+        ? '当前页重嵌字进行中…'
+        : `重嵌字进行中：${payload.current} / ${payload.total}`)
+      : activeAction.value === 'detect'
+        ? `正在识别并准备校对：${payload.current} / ${payload.total}`
+        : activeAction.value === 'translate-page'
+          ? '当前页翻译进行中…'
+          : activeAction.value === 'resume-translate'
+            ? `继续翻译进行中：${payload.current} / ${payload.total}`
+            : `翻译进行中：${payload.current} / ${payload.total}`
+    if (Number(payload.total || 0) > 0 && Number(payload.current || 0) >= Number(payload.total || 0)) {
+      scheduleTranslationCompletionRecovery({
+        sessionId: sessionId.value,
+        action: activeAction.value,
+        pageTargetStoredName,
+        socket: currentSocket,
+        attempt: 1
+      })
+    }
+    return
+  }
+
+  if (payload.event === 'status') {
+    status.value = payload.message || '正在进行复杂页增强修复...'
+    return
+  }
+
+  if (payload.event === 'completed') {
+    await finalizeCompletedTranslation(payload, {
+      action: activeAction.value,
+      pageTargetStoredName,
+      socket: currentSocket,
+    })
+    return
+  }
+
+  if (payload.event === 'cancelled') {
+    resetTranslationCompletionRecovery()
+    closeSocket(currentSocket)
+    translating.value = false
+    errorMessage.value = ''
+    clearTaskError()
+    status.value = '任务已停止。'
+    resetActiveTaskConnection()
+    void loadProjectHistory({ silent: true })
+    return
+  }
+
+  if (payload.event === 'error') {
+    resetTranslationCompletionRecovery()
+    closeSocket(currentSocket)
+    translating.value = false
+    applyTaskError(payload, '翻译失败')
+    status.value = getTaskFailureStatus()
+    resetActiveTaskConnection()
+  }
+}
+
+function connectTranslationTaskSocket({
+  action = activeAction.value,
+  pageTargetStoredName = activeTaskTargetStoredName.value,
+  taskId = activeTaskId.value,
+} = {}) {
+  if (!sessionId.value || !translating.value) {
+    return
+  }
+
+  clearTaskReconnectTimer()
+  const currentSocket = createApiWebSocket(`/ws/translate/${sessionId.value}`)
+  socket = currentSocket
+
+  currentSocket.onopen = () => {
+    if (taskId) {
+      currentSocket.send(JSON.stringify({
+        task_id: taskId,
+        after_sequence: activeTaskSequence.value
+      }))
+      status.value = '已重新连接，正在同步任务进度…'
+      return
+    }
+    currentSocket.send(JSON.stringify({
+      action,
+      config: buildRuntimeConfig(),
+      target_stored_name: pageTargetStoredName || undefined
+    }))
+  }
+
+  currentSocket.onmessage = (event) => {
+    if (currentSocket !== socket) {
+      return
+    }
+    try {
+      const payload = JSON.parse(event.data)
+      taskReconnectAttempts = 0
+      void handleTranslationTaskEvent(payload, currentSocket)
+    } catch (error) {
+      console.warn('[TranslationTask] invalid task event', error)
+    }
+  }
+
+  currentSocket.onerror = () => {
+    if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
+      return
+    }
+    status.value = '任务仍在后台运行，连接中断后正在恢复…'
+  }
+
+  currentSocket.onclose = () => {
+    if (expectedClosingSockets.has(currentSocket)) {
+      expectedClosingSockets.delete(currentSocket)
+      return
+    }
+    if (currentSocket !== socket) {
+      return
+    }
+    socket = null
+    if (translating.value) {
+      scheduleTaskReconnect()
+    }
+  }
+}
+
+function scheduleTaskReconnect() {
+  if (!translating.value || !sessionId.value) {
+    return
+  }
+  clearTaskReconnectTimer()
+  taskReconnectAttempts += 1
+  if (taskReconnectAttempts > TASK_RECONNECT_MAX_ATTEMPTS) {
+    translating.value = false
+    errorMessage.value = `无法重新连接后台任务。${getBackendLogHint()}`
+    status.value = '任务连接恢复失败。'
+    resetActiveTaskConnection()
+    return
+  }
+
+  status.value = `任务仍在后台运行，正在重新连接（${taskReconnectAttempts}/${TASK_RECONNECT_MAX_ATTEMPTS}）…`
+  const delayMs = Math.min(5000, 750 + taskReconnectAttempts * 250)
+  taskReconnectTimer = window.setTimeout(() => {
+    taskReconnectTimer = null
+    void reconnectTranslationTask()
+  }, delayMs)
+}
+
+async function reconnectTranslationTask() {
+  if (!translating.value || !sessionId.value) {
+    return
+  }
+  try {
+    if (!activeTaskId.value) {
+      const response = await apiFetch(
+        toApiUrl(`/api/projects/${encodeURIComponent(sessionId.value)}/task`)
+      )
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.detail || '查询后台任务失败')
+      }
+      const task = payload?.task
+      if (!task?.task_id) {
+        throw new Error('后台没有找到可恢复的任务')
+      }
+      activeTaskId.value = String(task.task_id)
+      activeAction.value = String(task.action || activeAction.value)
+      activeTaskTargetStoredName.value = String(task.metadata?.target_stored_name || '')
+      const events = Array.isArray(task.events) ? task.events : []
+      for (const event of events) {
+        await handleTranslationTaskEvent(event, null)
+      }
+      if (!translating.value || ['completed', 'failed', 'cancelled'].includes(String(task.status))) {
+        return
+      }
+    }
+    connectTranslationTaskSocket()
+  } catch (error) {
+    console.warn('[TranslationTask] reconnect failed', error)
+    scheduleTaskReconnect()
+  }
+}
+
+async function resumeProjectTaskSubscription(projectId) {
+  const normalizedProjectId = String(projectId || '').trim()
+  if (!normalizedProjectId) {
+    return false
+  }
+  try {
+    const response = await apiFetch(
+      toApiUrl(`/api/projects/${encodeURIComponent(normalizedProjectId)}/task`)
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '查询项目任务失败')
+    }
+    const task = payload?.task
+    if (!task?.task_id || ['completed', 'failed', 'cancelled'].includes(String(task.status))) {
+      return false
+    }
+
+    resetActiveTaskConnection()
+    clearTaskError()
+    translating.value = true
+    activeTaskId.value = String(task.task_id)
+    activeAction.value = String(task.action || 'translate')
+    activeTaskTargetStoredName.value = String(task.metadata?.target_stored_name || '')
+    progress.value = { current: 0, total: 0 }
+    for (const event of Array.isArray(task.events) ? task.events : []) {
+      await handleTranslationTaskEvent(event, null)
+    }
+    if (translating.value) {
+      connectTranslationTaskSocket()
+    }
+    return true
+  } catch (error) {
+    console.warn('[TranslationTask] failed to resume project task', error)
+    return false
+  }
+}
+
+async function cancelActiveTask() {
+  if (!canCancelTask.value) {
+    return
+  }
+  status.value = '正在停止当前任务…'
+  try {
+    const response = await apiFetch(
+      toApiUrl(`/api/tasks/${encodeURIComponent(activeTaskId.value)}/cancel`),
+      { method: 'POST' }
+    )
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '停止任务失败')
+    }
+    if (!socket) {
+      scheduleTaskReconnect()
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '停止任务失败'
+    status.value = '停止任务失败，后台任务可能仍在运行。'
+  }
+}
+
 function startTranslation(action = 'translate') {
   if (!sessionId.value || translating.value) {
     return
   }
 
   resetTranslationCompletionRecovery()
+  resetActiveTaskConnection()
+  clearTaskError()
   activeAction.value = action
   const pageTargetStoredName = (action === 'rerender' || action === 'translate-page')
     ? (selectedEditPage.value?.stored_name || '')
     : ''
+  activeTaskTargetStoredName.value = pageTargetStoredName
   manualDrawDraft.value = null
   renderNonce.value = Date.now()
   if (action === 'translate' || action === 'detect') {
@@ -10021,171 +10388,11 @@ function startTranslation(action = 'translate') {
       ? '正在启动文本框识别任务...'
       : action === 'translate-page'
         ? '正在启动当前页翻译任务...'
-      : action === 'resume-translate'
-        ? '正在继续翻译并嵌字...'
-        : '正在启动翻译任务...'
+        : action === 'resume-translate'
+          ? '正在继续翻译并嵌字...'
+          : '正在启动翻译任务...'
   closeSocket()
-
-  const currentSocket = createApiWebSocket(`/ws/translate/${sessionId.value}`)
-  socket = currentSocket
-
-  currentSocket.onopen = () => {
-    currentSocket.send(JSON.stringify({
-      action,
-      config: buildRuntimeConfig(),
-      target_stored_name: pageTargetStoredName || undefined
-    }))
-  }
-
-  currentSocket.onmessage = async (event) => {
-    if (currentSocket !== socket) {
-      return
-    }
-    const payload = JSON.parse(event.data)
-
-    if (payload.event === 'start') {
-      progress.value = { current: 0, total: payload.total_pages }
-      status.value = activeAction.value === 'rerender'
-        ? (pageTargetStoredName
-          ? `当前页重嵌字已开始。`
-          : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
-        : activeAction.value === 'detect'
-          ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
-          : activeAction.value === 'translate-page'
-            ? '当前页翻译已开始。'
-          : activeAction.value === 'resume-translate'
-            ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
-        : `翻译已开始，共 ${payload.total_pages} 张图片。`
-      return
-    }
-
-    if (payload.event === 'progress') {
-      progress.value = {
-        current: payload.current,
-        total: payload.total
-      }
-      if (payload.stored_name) {
-        markPageImageUpdated(payload.stored_name)
-      }
-      const nextImageUrl = getVersionedPageImageUrl(payload.image_url, payload.stored_name)
-      preloadImageUrl(getReviewPageImageUrl(nextImageUrl, payload.stored_name))
-      translatedImages.value = upsertTranslatedImage(
-        translatedImages.value,
-        payload,
-        nextImageUrl,
-        sessionId.value,
-      )
-      if (payload.stored_name) {
-        reviewInspectionPages.value = updatePagePreviewUrl(
-          reviewInspectionPages.value,
-          payload.stored_name,
-          payload.image_url,
-        )
-        styleInspectionPages.value = updatePagePreviewUrl(
-          styleInspectionPages.value,
-          payload.stored_name,
-          payload.image_url,
-        )
-      }
-      status.value = activeAction.value === 'rerender'
-        ? (pageTargetStoredName
-          ? `当前页重嵌字进行中…`
-          : `重嵌字进行中：${payload.current} / ${payload.total}`)
-        : activeAction.value === 'detect'
-          ? `正在识别并准备校对：${payload.current} / ${payload.total}`
-          : activeAction.value === 'translate-page'
-            ? '当前页翻译进行中…'
-            : activeAction.value === 'resume-translate'
-              ? `继续翻译进行中：${payload.current} / ${payload.total}`
-              : `翻译进行中：${payload.current} / ${payload.total}`
-      if (Number(payload.total || 0) > 0 && Number(payload.current || 0) >= Number(payload.total || 0)) {
-        scheduleTranslationCompletionRecovery({
-          sessionId: sessionId.value,
-          action: activeAction.value,
-          pageTargetStoredName,
-          socket: currentSocket,
-          attempt: 1
-        })
-      }
-      return
-    }
-
-    if (payload.event === 'status') {
-      status.value = payload.message || '正在进行复杂页增强修复...'
-      return
-    }
-
-    if (payload.event === 'completed') {
-      await finalizeCompletedTranslation(payload, {
-        action: activeAction.value,
-        pageTargetStoredName,
-        socket: currentSocket,
-      })
-      return
-    }
-
-    if (payload.event === 'error') {
-      resetTranslationCompletionRecovery()
-      translating.value = false
-      errorMessage.value = payload.message || '翻译失败'
-      status.value = activeAction.value === 'rerender'
-        ? '重嵌字失败。'
-        : activeAction.value === 'detect'
-          ? '文本框识别失败。'
-          : activeAction.value === 'translate-page'
-            ? '当前页翻译失败。'
-          : activeAction.value === 'resume-translate'
-            ? '继续翻译失败。'
-            : '翻译失败。'
-      closeSocket()
-    }
-  }
-
-  currentSocket.onerror = () => {
-    if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
-      return
-    }
-    resetTranslationCompletionRecovery()
-    errorMessage.value = `翻译连接中断。${getBackendLogHint()}`
-    status.value = activeAction.value === 'rerender'
-      ? '重嵌字连接中断。'
-      : activeAction.value === 'detect'
-        ? '识别连接中断。'
-        : activeAction.value === 'translate-page'
-          ? '当前页翻译连接中断。'
-        : activeAction.value === 'resume-translate'
-          ? '继续翻译连接中断。'
-          : '翻译连接中断。'
-    translating.value = false
-    closeSocket()
-  }
-
-  currentSocket.onclose = () => {
-    if (expectedClosingSockets.has(currentSocket)) {
-      expectedClosingSockets.delete(currentSocket)
-      return
-    }
-    if (currentSocket !== socket) {
-      return
-    }
-    if (translating.value) {
-      resetTranslationCompletionRecovery()
-      errorMessage.value = `翻译任务意外断开。${getBackendLogHint()}`
-      status.value = activeAction.value === 'rerender'
-        ? '重嵌字未完成。'
-        : activeAction.value === 'detect'
-          ? '识别未完成。'
-          : activeAction.value === 'translate-page'
-            ? '当前页翻译未完成。'
-          : activeAction.value === 'resume-translate'
-            ? '继续翻译未完成。'
-            : '翻译未完成。'
-      translating.value = false
-    }
-    if (socket === currentSocket) {
-      socket = null
-    }
-  }
+  connectTranslationTaskSocket({ action, pageTargetStoredName, taskId: '' })
 }
 
 onMounted(() => {
@@ -10219,6 +10426,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   resetTranslationCompletionRecovery()
+  clearTaskReconnectTimer()
   closeSocket()
   void flushPendingCanvasNudge()
   clearCanvasNudgeCommitTimer()
@@ -10554,6 +10762,16 @@ watch(
             <div class="v2-topbar-status-copy">
               <span class="v2-topbar-status-dot"></span>
               <span>{{ v2TopbarStatusText }}</span>
+              <button
+                v-if="taskErrorDetails"
+                type="button"
+                class="v2-status-detail-button"
+                aria-label="查看技术详情"
+                title="查看技术详情"
+                @click="taskErrorDetailsOpen = true"
+              >
+                ⓘ
+              </button>
             </div>
             <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
               <div class="v2-topbar-status-track">
@@ -10602,6 +10820,16 @@ watch(
             {{ v2ReviewSaveLabel }}
           </button>
           <button
+            v-if="canCancelTask"
+            type="button"
+            class="v2-icon-button v2-cancel-task-button"
+            aria-label="停止当前任务"
+            title="停止当前任务"
+            @click="cancelActiveTask"
+          >
+            ■
+          </button>
+          <button
             type="button"
             class="v2-icon-button"
             aria-label="打开设置"
@@ -10624,6 +10852,16 @@ watch(
             <div class="v2-topbar-status-copy">
               <span class="v2-topbar-status-dot"></span>
               <span>{{ v2TopbarStatusText }}</span>
+              <button
+                v-if="taskErrorDetails"
+                type="button"
+                class="v2-status-detail-button"
+                aria-label="查看技术详情"
+                title="查看技术详情"
+                @click="taskErrorDetailsOpen = true"
+              >
+                ⓘ
+              </button>
             </div>
             <div v-if="v2TopbarProgressVisible" class="v2-topbar-status-progress">
               <div class="v2-topbar-status-track">
@@ -10718,6 +10956,7 @@ watch(
               上传文件夹
             </button>
           </div>
+          <p v-if="errorMessage" class="v2-upload-error" role="alert">{{ errorMessage }}</p>
         </section>
       </section>
 
@@ -10737,6 +10976,16 @@ watch(
               @click="runV2ProjectPrimaryAction"
             >
               {{ primaryTranslateLabel }}
+            </button>
+            <button
+              v-if="canCancelTask"
+              type="button"
+              class="v2-icon-button v2-cancel-task-button"
+              aria-label="停止当前任务"
+              title="停止当前任务"
+              @click="cancelActiveTask"
+            >
+              ■
             </button>
             <button
               type="button"
@@ -11965,6 +12214,26 @@ watch(
       </section>
     </div>
 
+    <div v-if="taskErrorDetailsOpen && taskErrorDetails" class="v2-overlay" @click.self="taskErrorDetailsOpen = false">
+      <section class="v2-modal v2-task-error-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">任务诊断</p>
+            <h2 class="v2-section-title">技术详情</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭技术详情" @click="taskErrorDetailsOpen = false">✕</button>
+        </header>
+        <div class="v2-task-error-content">
+          <div class="v2-readonly-field">
+            <span>错误代码</span>
+            <strong>{{ taskErrorDetails.code || 'TASK_FAILED' }}</strong>
+          </div>
+          <p>{{ taskErrorDetails.action }}</p>
+          <pre v-if="taskErrorDetails.technical_message">{{ taskErrorDetails.technical_message }}</pre>
+        </div>
+      </section>
+    </div>
+
     <div v-if="migrationModalOpen" class="v2-overlay" @click.self="migrationModalOpen = false">
       <section class="v2-modal v2-onboarding-modal">
         <header class="v2-modal-head">
@@ -11992,7 +12261,7 @@ watch(
       </section>
     </div>
 
-    <div v-if="onboardingOpen" class="v2-overlay" @click.self="onboardingOpen = false">
+    <div v-else-if="onboardingOpen" class="v2-overlay" @click.self="onboardingOpen = false">
       <section class="v2-modal v2-onboarding-modal">
         <header class="v2-modal-head">
           <div>
@@ -12170,10 +12439,16 @@ watch(
                 <button
                   type="button"
                   class="v2-primary-button"
-                  :disabled="!canRestoreHistoryProject(project)"
-                  @click="restoreProjectV2(project.project_id)"
-                >
-                  {{ restoringProjectId === project.project_id ? '恢复中…' : '恢复项目' }}
+                :disabled="!canRestoreHistoryProject(project)"
+                @click="restoreProjectV2(project.project_id)"
+              >
+                  {{
+                    restoringProjectId === project.project_id
+                      ? '恢复中…'
+                      : isProjectBusy(project)
+                        ? '重新连接'
+                        : '恢复项目'
+                  }}
                 </button>
                 <button
                   type="button"

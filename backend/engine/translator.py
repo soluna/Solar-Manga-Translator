@@ -7164,14 +7164,14 @@ class TranslatorEngine:
             return "selection"
         return "text"
 
-    def _select_local_inpainting_device(self, use_gpu: bool) -> str:
+    def _select_inference_device(self, use_gpu: bool) -> str:
         if not use_gpu:
             return "cpu"
 
         try:
             import torch
         except ImportError as exc:
-            raise RuntimeError("本地模型擦除需要 PyTorch，请先安装完整后端依赖。") from exc
+            raise RuntimeError("本地推理需要 PyTorch，请先安装完整后端依赖。") from exc
 
         if torch.cuda.is_available():
             return "cuda"
@@ -7179,6 +7179,9 @@ class TranslatorEngine:
         if mps_backend is not None and mps_backend.is_available():
             return "mps"
         return "cpu"
+
+    def _select_local_inpainting_device(self, use_gpu: bool) -> str:
+        return self._select_inference_device(use_gpu)
 
     async def _run_local_lama_inpaint(
         self,
@@ -8956,7 +8959,7 @@ class TranslatorEngine:
             source_rgb,
             [quad],
             OcrConfig(use_mocr_merge=True, ocr=Ocr.ocr48px),
-            "cuda" if use_gpu else "cpu",
+            self._select_inference_device(use_gpu),
             False,
         )
         if not recognized:
@@ -9025,7 +9028,7 @@ class TranslatorEngine:
                     translator_config=translator_config,
                     use_mtpe=False,
                     args=None,
-                    device="cuda" if config.get("use_gpu") else "cpu",
+                    device=self._select_inference_device(bool(config.get("use_gpu"))),
                 )
             finally:
                 try:

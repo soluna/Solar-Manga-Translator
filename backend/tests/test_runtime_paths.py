@@ -131,6 +131,29 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertTrue(status["needed"])
             self.assertTrue(status["summary"]["has_unmigrated_projects"])
 
+    def test_skip_suppresses_migration_prompt_until_app_version_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = make_paths(root)
+            legacy_projects_dir = root / "MangaTranslator" / "projects"
+            self.write_project(legacy_projects_dir, "old-project")
+
+            with (
+                mock.patch.object(runtime_paths_module, "_platform_app_data_bases", return_value=[root]),
+                mock.patch.dict(os.environ, {"APP_VERSION": "1.2.3"}, clear=False),
+            ):
+                skipped = paths.migrate_legacy("skip")
+                self.assertFalse(skipped["needed"])
+                self.assertEqual(paths.load_migration_state()["version"], "1.2.3")
+
+            with (
+                mock.patch.object(runtime_paths_module, "_platform_app_data_bases", return_value=[root]),
+                mock.patch.dict(os.environ, {"APP_VERSION": "1.3.0"}, clear=False),
+            ):
+                status_after_upgrade = paths.legacy_status()
+
+            self.assertTrue(status_after_upgrade["needed"])
+
     def test_migrate_canonical_app_name_from_alternate_windows_base(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

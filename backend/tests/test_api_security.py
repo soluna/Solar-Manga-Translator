@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 import io
 import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -35,6 +37,12 @@ class DummyUpload:
 class ApiSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(main.app)
+
+    def receive_task_events(self, websocket) -> list[dict]:
+        events = []
+        while not events or events[-1].get("event") not in {"completed", "error", "cancelled"}:
+            events.append(websocket.receive_json())
+        return events
 
     def test_status_is_minimal_and_public(self) -> None:
         with mock.patch.object(main, "API_TOKEN", "local-secret"):
@@ -153,13 +161,15 @@ class ApiSecurityTests(unittest.TestCase):
         ):
             with self.client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                 websocket.send_json({"action": "detect", "config": {}})
-                events = [websocket.receive_json(), websocket.receive_json()]
+                events = self.receive_task_events(websocket)
+            self.assertEqual(events[0]["event"], "task")
+            self.assertTrue(events[0]["task_id"])
             self.assertEqual(events[-1]["event"], "completed")
             self.assertEqual(events[-1]["workflow_stage"], "detected")
 
             with self.client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                 websocket.send_json({"action": "resume-translate", "config": {}})
-                events = [websocket.receive_json(), websocket.receive_json()]
+                events = self.receive_task_events(websocket)
             self.assertEqual(events[-1]["event"], "completed")
             self.assertEqual(events[-1]["workflow_stage"], "translated")
 
@@ -168,6 +178,93 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(download.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
             self.assertEqual(len(archive.namelist()), 1)
+
+    def test_translation_task_survives_websocket_disconnect_and_resumes(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")
+
+        with tempfile.TemporaryDirectory() as tmp, TestClient(main.app) as client:
+            release_path = Path(tmp) / "release"
+            with mock.patch.object(main, "API_TOKEN", ""):
+                upload = client.post(
+                    "/api/upload",
+                    files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+                )
+            project_id = upload.json()["session_id"]
+
+            async def fake_detect_session(*, session, progress_callback, **_kwargs):
+                await progress_callback({"event": "status", "message": "waiting"})
+                while not release_path.exists():
+                    await asyncio.sleep(0.01)
+                session["workflow_stage"] = "detected"
+                return {"workflow_stage": "detected"}
+
+            with (
+                mock.patch.object(main, "API_TOKEN", ""),
+                mock.patch.object(main.translator_engine, "detect_session", side_effect=fake_detect_session),
+            ):
+                with client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
+                    websocket.send_json({"action": "detect", "config": {}})
+                    first_event = websocket.receive_json()
+
+                self.assertEqual(first_event["event"], "task")
+                task_id = first_event["task_id"]
+                running = client.get(f"/api/tasks/{task_id}")
+                self.assertEqual(running.status_code, 200)
+                self.assertIn(running.json()["status"], {"running", "completed"})
+                live_session = main.SESSIONS[project_id]
+                restored = client.post(f"/api/projects/{project_id}/restore")
+                self.assertEqual(restored.status_code, 200)
+                self.assertIs(main.SESSIONS[project_id], live_session)
+
+                release_path.touch()
+                for _ in range(100):
+                    snapshot = client.get(f"/api/tasks/{task_id}").json()
+                    if snapshot["status"] == "completed":
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("后台任务在 WebSocket 断开后没有完成")
+
+                with client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
+                    websocket.send_json({
+                        "task_id": task_id,
+                        "after_sequence": first_event["sequence"],
+                    })
+                    resumed_events = self.receive_task_events(websocket)
+
+            self.assertEqual(resumed_events[-1]["event"], "completed")
+            self.assertEqual(resumed_events[-1]["workflow_stage"], "detected")
+
+    def test_translation_task_can_be_cancelled_through_api(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")
+
+        with TestClient(main.app) as client:
+            with mock.patch.object(main, "API_TOKEN", ""):
+                upload = client.post(
+                    "/api/upload",
+                    files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+                )
+            project_id = upload.json()["session_id"]
+
+            async def fake_detect_session(*, progress_callback, **_kwargs):
+                await progress_callback({"event": "status", "message": "waiting"})
+                await asyncio.Event().wait()
+
+            with (
+                mock.patch.object(main, "API_TOKEN", ""),
+                mock.patch.object(main.translator_engine, "detect_session", side_effect=fake_detect_session),
+            ):
+                with client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
+                    websocket.send_json({"action": "detect", "config": {}})
+                    task_event = websocket.receive_json()
+                    cancelled = client.post(f"/api/tasks/{task_event['task_id']}/cancel")
+                    terminal_events = self.receive_task_events(websocket)
+
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(terminal_events[-1]["event"], "cancelled")
+            self.assertFalse(main.translator_engine.is_session_busy(project_id))
 
 
 if __name__ == "__main__":

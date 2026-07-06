@@ -246,6 +246,12 @@ async function createSupplementFixture() {
   return targetImage
 }
 
+async function createInvalidUploadFixture() {
+  const targetArchive = path.join(artifactDir, 'invalid-upload.zip')
+  await fs.writeFile(targetArchive, 'this is not a zip archive', 'utf8')
+  return targetArchive
+}
+
 async function assertText(locator, expected, message) {
   const text = (await locator.textContent()) || ''
   if (!text.includes(expected)) {
@@ -364,6 +370,29 @@ async function main() {
     if (pageCardCount < 2) {
       throw new Error(`选页页缩略图数量异常：${pageCardCount}`)
     }
+
+    const invalidUpload = await createInvalidUploadFixture()
+    await Promise.all([
+      page.waitForResponse((response) => (
+        response.url().includes('/api/upload')
+        && response.request().method() === 'POST'
+        && !response.ok()
+      )),
+      page.getByTestId('v2-project-file-input').setInputFiles(invalidUpload),
+    ])
+    await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+    await assertText(page.locator('.v2-section-title').first(), FIXTURE_PROJECT_TITLE, '上传失败后原项目标题被清空')
+    if (await pageCards.count() !== pageCardCount) {
+      throw new Error('上传失败后原项目页列表被替换')
+    }
+    await page.waitForTimeout(100)
+    for (let index = consoleErrors.length - 1; index >= 0; index -= 1) {
+      if (consoleErrors[index].includes('status of 400 (Bad Request)')) {
+        consoleErrors.splice(index, 1)
+        break
+      }
+    }
+
     await pageCards.first().click()
 
     await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })

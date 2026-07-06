@@ -25,6 +25,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _current_app_version() -> str:
+    return str(os.getenv("APP_VERSION") or "dev").strip() or "dev"
+
+
 def _default_project_data_dir(code_dir: Path) -> Path:
     return Path(code_dir).resolve().parent / RUNTIME_DATA_DIR_NAME
 
@@ -295,12 +299,21 @@ class AppPaths:
             has_legacy_app_fonts,
             has_legacy_app_settings,
         ))
-        migration_finished = migration_state.get("status") in {"completed", "skipped"}
-        needed = bool(has_any_legacy and (not migration_finished or has_unmigrated_projects))
+        migration_status = str(migration_state.get("status") or "pending")
+        if migration_status == "completed":
+            needed = bool(has_any_legacy and has_unmigrated_projects)
+        elif migration_status == "skipped":
+            needed = bool(
+                has_any_legacy
+                and str(migration_state.get("version") or "") != _current_app_version()
+            )
+        else:
+            needed = bool(has_any_legacy)
 
         return {
             "needed": needed,
-            "status": str(migration_state.get("status") or "pending"),
+            "status": migration_status,
+            "version": str(migration_state.get("version") or ""),
             "updated_at": str(migration_state.get("updated_at") or ""),
             "legacy": {
                 "projects": str(legacy_projects),
@@ -365,7 +378,11 @@ class AppPaths:
             raise ValueError("Unsupported migration action")
 
         if normalized == "skip":
-            payload = {"status": "skipped", "updated_at": _now_iso()}
+            payload = {
+                "status": "skipped",
+                "version": _current_app_version(),
+                "updated_at": _now_iso(),
+            }
             self.save_migration_state(payload)
             return self.legacy_status()
 
@@ -423,7 +440,11 @@ class AppPaths:
                 self.settings_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy_app_settings, self.settings_path)
 
-        payload = {"status": "completed", "updated_at": _now_iso()}
+        payload = {
+            "status": "completed",
+            "version": _current_app_version(),
+            "updated_at": _now_iso(),
+        }
         self.save_migration_state(payload)
         return self.legacy_status()
 

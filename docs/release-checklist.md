@@ -67,6 +67,12 @@ installer.
   project stage.
 - Confirm detect-only completes without a translation API key and does not
   load LaMa or enter mask/inpainting stages.
+- Start a long detection task, disconnect or refresh the browser, and confirm
+  the task continues and the UI resumes from the last event.
+- Stop a running task from the UI and confirm the model process exits, GPU
+  memory is released, the project leaves busy state, and prior outputs remain.
+- Upload a damaged archive while another project is open and confirm the
+  current project, page list, edits, and export state remain available.
 - Publish installer SHA-256 checksums.
 
 ## Known Installer Release Gaps

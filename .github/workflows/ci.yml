@@ -32,6 +32,7 @@ jobs:
             backend/pip_install.py \
             backend/runtime_paths.py \
             backend/system_fonts.py \
+            backend/task_manager.py \
             backend/utils/file_handler.py \
             backend/engine/translator.py \
             backend/patched_custom_openai.py \

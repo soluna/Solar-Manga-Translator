@@ -42,6 +42,44 @@ class DiagnosticsBundleTests(unittest.TestCase):
                 self.assertEqual(diagnostics["settings"]["api_key"], "[REDACTED]")
                 self.assertTrue(diagnostics["settings"]["configured_secrets"]["api_key"])
 
+    def test_bundle_removes_personal_paths_and_recognized_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs_dir = Path(tmp)
+            (logs_dir / "backend.log").write_text(
+                "\n".join(
+                    [
+                        "data_dir=C:\\Users\\SOLUNA\\AppData\\Local\\Solar-Manga-Translator",
+                        "source=/Users/sol/private-manga/page-001.png",
+                        "[Model48pxOCR] 私密漫画对白",
+                        "OCR text: secret speech bubble",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            bundle = build_diagnostics_zip(
+                diagnostics={
+                    "paths": {
+                        "data_dir": "C:\\Users\\SOLUNA\\AppData\\Local\\Solar-Manga-Translator",
+                    }
+                },
+                runtime={
+                    "models_dir": "/Users/sol/Library/Application Support/Solar-Manga-Translator/models",
+                },
+                settings={},
+                logs_dir=logs_dir,
+            )
+
+            self.assertNotIn(b"SOLUNA", bundle)
+            self.assertNotIn(b"/Users/sol", bundle)
+            self.assertNotIn("私密漫画对白".encode("utf-8"), bundle)
+            self.assertNotIn(b"secret speech bubble", bundle)
+            with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                diagnostics = json.loads(archive.read("diagnostics.json"))
+                self.assertEqual(
+                    diagnostics["diagnostics"]["paths"]["data_dir"],
+                    "[LOCAL_PATH]",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,7 +44,8 @@
 
 首次启动会安装较大的机器学习依赖。Windows CUDA 运行时约 2 GB，终端会显示
 下载进度；脚本会对 PyTorch 官方源和阿里云镜像做小流量测速，优先使用较快的
-下载源，并在连接停滞或安装超时后自动切换。
+下载源，并在连接停滞或安装超时后自动切换。普通 Python/npm 依赖和固定版本核心
+引擎也会在国内镜像与官方源之间回退；依赖没有变化时，后续启动会跳过重复安装。
 
 ### Windows
 
@@ -163,6 +164,10 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 %LOCALAPPDATA%\Solar-Manga-Translator\logs\bootstrap.log
 ```
 
+检测、OCR 和 LaMa 模型也使用带连接/读取超时、断点续传和 SHA-256 校验的下载器。
+GitHub 或 Hugging Face 不可达时会尝试备用源，当前模型准备情况可在“运行环境检查”
+中查看。
+
 ### API Base URL 或模型重启后不见了
 
 新版会把设置写到设置面板显示的本地配置文件。“测试连接”和“保存并开始”都会先确认写入完成。
@@ -176,10 +181,13 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 ### 到哪里找日志
 
 打开设置，在“应用运行环境”中点击“打开日志目录”。需要反馈问题时可点击“导出诊断包”；
-诊断包包含最近日志和运行环境信息，并会清理 API Key、Authorization 和 token。
+任务日志统一保存在 `logs/tasks/<项目>/`。诊断包包含最近日志和运行环境信息，并会
+清理 API Key、Authorization、token、个人绝对路径以及 OCR/翻译正文。
 
 更完整的首次使用问题分级和修复记录见
-[首次使用就绪度复审](docs/first-run-readiness-review-2026-07-05.md)。
+[首次使用就绪度复审](docs/first-run-readiness-review-2026-07-05.md)；
+最新的真实端到端检查见
+[全新用户端到端流程审查](docs/new-user-end-to-end-review-2026-07-06.md)。
 
 ## 开发
 

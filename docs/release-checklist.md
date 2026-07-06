@@ -59,6 +59,14 @@ installer.
 - Test both the PyTorch official source and Aliyun mirror: confirm speed-based
   ordering, visible progress, timeout handling, fallback, official SHA-256
   verification, and bootstrap logging.
+- Block the official GitHub/Hugging Face model sources and confirm detector,
+  OCR, and LaMa downloads switch to a mirror, resume partial files, reject
+  checksum mismatches, and remain under the application model directory.
+- Start a previously translated project with an invalid translation API key;
+  confirm a failed retry preserves the previous images, cache, archive, and
+  project stage.
+- Confirm detect-only completes without a translation API key and does not
+  load LaMa or enter mask/inpainting stages.
 - Publish installer SHA-256 checksums.
 
 ## Known Installer Release Gaps

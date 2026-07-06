@@ -19,6 +19,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from diagnostics_bundle import build_diagnostics_zip
+from model_manager import build_model_readiness
 from runtime_paths import resolve_app_paths
 from logging_config import configure_rotating_file_logging
 from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
@@ -430,6 +431,9 @@ def build_runtime_diagnostics() -> dict[str, Any]:
         torch = None
     gpu = build_gpu_diagnostics(torch, detect_nvidia_gpus())
     fonts = list_available_fonts()
+    persisted_settings = translator_engine.load_persisted_settings()
+    engine_runtime = translator_engine.build_inference_runtime_contract(persisted_settings)
+    model_readiness = build_model_readiness(APP_PATHS.models_dir)
     critical_gpu_statuses = {
         "torch_unavailable",
         "torch_cpu_build",
@@ -474,6 +478,30 @@ def build_runtime_diagnostics() -> dict[str, Any]:
             "message": str(gpu.get("message") or ""),
         },
         {
+            "id": "engine-runtime",
+            "label": "推理任务参数",
+            "status": str(engine_runtime["status"]),
+            "message": (
+                f"任务将使用{'GPU' if engine_runtime['use_gpu_requested'] else 'CPU'}，"
+                f"模型目录：{engine_runtime['model_dir']}"
+                if engine_runtime["status"] == "ready"
+                else "推理命令参数校验失败，请导出诊断包后反馈。"
+            ),
+        },
+        {
+            "id": "models",
+            "label": "核心模型",
+            "status": "ready" if model_readiness["status"] == "ready" else "warning",
+            "message": (
+                f"{model_readiness['total_count']} 个核心模型均已准备。"
+                if model_readiness["status"] == "ready"
+                else (
+                    f"已准备 {model_readiness['ready_count']}/{model_readiness['total_count']}；"
+                    "首次执行对应阶段时会下载缺失模型，并自动切换备用源。"
+                )
+            ),
+        },
+        {
             "id": "fonts",
             "label": "预置字体",
             "status": "ready" if any(font.get("source") == "system" for font in fonts) else "error",
@@ -490,6 +518,8 @@ def build_runtime_diagnostics() -> dict[str, Any]:
             "free_bytes": disk_free,
         },
         "gpu": gpu,
+        "engine_runtime": engine_runtime,
+        "models": model_readiness,
         "checks": checks,
         "writable_paths": writable_paths,
         "font_count": len(fonts),

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -85,6 +86,314 @@ class TranslatorEngineStateTests(unittest.TestCase):
             engine.clear_session_busy("project-a")
             self.assertFalse(engine.is_session_busy("project-a"))
             self.assertTrue(engine.try_mark_session_busy("project-a", "rerender"))
+
+    def test_engine_command_places_general_options_after_local_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            config = engine._normalize_config({"use_gpu": True})
+            (root / "source").mkdir()
+            command = engine._build_command(
+                root / "source",
+                root / "output",
+                root / "detect.json",
+                config,
+                prep_manual=True,
+            )
+
+            local_index = command.index("local")
+            self.assertGreater(command.index("--use-gpu"), local_index)
+            self.assertGreater(command.index("--model-dir"), local_index)
+            self.assertEqual(
+                command[command.index("--model-dir") + 1],
+                str(engine.model_dir),
+            )
+
+    def test_engine_command_survives_upstream_parser(self) -> None:
+        vendor_package = (
+            BACKEND_DIR
+            / "manga-image-translator"
+            / "manga_translator"
+            / "args.py"
+        )
+        if not vendor_package.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            config = engine._normalize_config({"use_gpu": True})
+            (root / "source").mkdir()
+            command = engine._build_command(
+                root / "source",
+                root / "output",
+                root / "detect.json",
+                config,
+                prep_manual=True,
+            )
+
+            engine._ensure_vendor_import_path()
+            from manga_translator.args import parser, reparse
+
+            parsed, unknown = parser.parse_known_args(command[3:])
+            effective = Namespace(**{**vars(parsed), **vars(reparse(unknown))})
+            self.assertTrue(effective.use_gpu)
+            self.assertEqual(effective.model_dir, str(engine.model_dir))
+
+    def test_runtime_contract_log_is_reported_as_user_facing_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            log_path = root / "detect.log"
+            log_path.write_text(
+                f"[RuntimeContract] device=cuda model_dir={engine.model_dir}\n",
+                encoding="utf-8",
+            )
+
+            notice = engine._runtime_contract_notice(log_path)
+
+            self.assertIn("NVIDIA CUDA", notice)
+            self.assertNotIn(str(engine.model_dir), notice)
+
+    def test_detect_profile_does_not_initialize_translation_or_inpainting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            config = engine._normalize_config(
+                {
+                    "translator": "gemini",
+                    "api_key": "must-not-be-needed-for-detection",
+                }
+            )
+
+            config_path = engine._write_config("project-a", config, profile="detect")
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["translator"]["translator"], "none")
+            self.assertEqual(payload["inpainter"]["inpainter"], "original")
+            self.assertEqual(payload["render"]["renderer"], "none")
+
+    def test_detect_only_runtime_patch_returns_before_translation_mask_and_inpainting(self) -> None:
+        runtime_path = (
+            BACKEND_DIR
+            / "manga-image-translator"
+            / "manga_translator"
+            / "manga_translator.py"
+        )
+        if not runtime_path.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        content = runtime_path.read_text(encoding="utf-8")
+        early_return = content.index("if self.prep_manual:", content.index("# Apply pre-dictionary"))
+        translation_stage = content.index("# -- Translation", early_return)
+        mask_stage = content.index("# -- Mask refinement", translation_stage)
+
+        self.assertLess(early_return, translation_stage)
+        self.assertLess(translation_stage, mask_stage)
+        preload_block = content[
+            content.index("# Solar-Manga-Translator: detection")
+            : content.index("# translate", content.index("# Solar-Manga-Translator: detection"))
+        ]
+        self.assertIn("if not self.prep_manual:", preload_block)
+        self.assertIn("await prepare_inpainting", preload_block)
+        self.assertIn("await prepare_translation", preload_block)
+        self.assertIn("MT_DISABLE_INTERNAL_LOG_FILE", content)
+
+    def test_engine_environment_routes_logs_to_application_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            env = engine._build_env(engine._normalize_config({}))
+
+            self.assertEqual(env["MT_DISABLE_INTERNAL_LOG_FILE"], "1")
+
+    def test_failed_detect_restores_previous_outputs_cache_and_session_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-a"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (16, 16), (1, 2, 3)).save(output_dir / "page-1.png")
+            cache_dir = engine._prepare_rerender_cache_dir(project_id, reset=True)
+            page_cache_dir = cache_dir / "page-1.png"
+            page_cache_dir.mkdir()
+            (page_cache_dir / "regions.json").write_text("[]", encoding="utf-8")
+            Image.new("RGB", (16, 16), (4, 5, 6)).save(page_cache_dir / "inpainted.png")
+            existing_archive = root / "existing.zip"
+            existing_archive.write_bytes(b"existing")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "download_path": str(existing_archive),
+                "translated_output_map": {"page-1.png": "page-1.png"},
+                "workflow_stage": "translated",
+                "rerender_cache_dir": str(cache_dir),
+                "manual_regions": {},
+            }
+            engine.initialize_project(project_id, session, title="Existing project")
+            persisted_state_path = engine._project_session_state_path(project_id)
+            persisted_state_before = persisted_state_path.read_bytes()
+
+            async def fail_command(**_kwargs):
+                return 1
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._run_translation_command = fail_command  # type: ignore[method-assign]
+            engine._format_failure = lambda _path: "synthetic failure"  # type: ignore[method-assign]
+
+            async def progress(_event):
+                return None
+
+            with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                asyncio.run(
+                    engine.detect_session(
+                        session_id=project_id,
+                        session=session,
+                        raw_config={"translator": "gemini", "api_key": "invalid"},
+                        progress_callback=progress,
+                    )
+                )
+
+            self.assertEqual(session["workflow_stage"], "translated")
+            self.assertEqual(session["download_path"], str(existing_archive))
+            self.assertEqual(session["translated_output_map"], {"page-1.png": "page-1.png"})
+            self.assertEqual(
+                np.asarray(Image.open(output_dir / "page-1.png"))[0, 0].tolist(),
+                [1, 2, 3],
+            )
+            self.assertEqual(
+                np.asarray(Image.open(page_cache_dir / "inpainted.png"))[0, 0].tolist(),
+                [4, 5, 6],
+            )
+            self.assertEqual(persisted_state_path.read_bytes(), persisted_state_before)
+
+    def test_translation_stage_builds_inpainted_base_from_detected_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_path = root / "page-1.png"
+            page_cache = root / "cache" / "page-1.png"
+            page_cache.mkdir(parents=True)
+            Image.new("RGB", (48, 48), (255, 255, 255)).save(source_path)
+            Image.new("RGB", (48, 48), (255, 255, 255)).save(page_cache / "inpainted.png")
+            (page_cache / "meta.json").write_text(
+                json.dumps({"base_kind": "source"}),
+                encoding="utf-8",
+            )
+            region = SimpleNamespace(
+                lines=[[[10, 10], [30, 10], [30, 30], [10, 30]]],
+                xyxy=[10, 10, 30, 30],
+                font_size=16,
+                disabled_region=False,
+            )
+            captured: dict[str, object] = {}
+
+            async def fake_inpaint(base_rgb, selection_mask, *, device):
+                captured["mask_nonzero"] = int(np.count_nonzero(selection_mask))
+                captured["device"] = device
+                return np.zeros_like(base_rgb)
+
+            engine._load_cached_regions = lambda _path: [region]  # type: ignore[method-assign]
+            engine._run_local_lama_inpaint = fake_inpaint  # type: ignore[method-assign]
+
+            asyncio.run(
+                engine._ensure_translation_base_image(
+                    source_path=source_path,
+                    page_cache_dir=page_cache,
+                    config={"use_gpu": False},
+                )
+            )
+
+            self.assertGreater(captured["mask_nonzero"], 0)
+            self.assertEqual(captured["device"], "cpu")
+            self.assertEqual(
+                json.loads((page_cache / "meta.json").read_text(encoding="utf-8"))["base_kind"],
+                "inpainted",
+            )
+            self.assertEqual(
+                np.asarray(Image.open(page_cache / "inpainted.png"))[0, 0].tolist(),
+                [0, 0, 0],
+            )
+
+    def test_cpu_inpainting_device_does_not_import_pytorch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            with mock.patch.dict(sys.modules, {"torch": None}):
+                self.assertEqual(
+                    engine._select_local_inpainting_device(False),
+                    "cpu",
+                )
+
+    def test_successful_detect_atomically_commits_staged_outputs_and_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-a"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (16, 16), (200, 0, 0)).save(output_dir / "page-1.png")
+            live_cache = engine._prepare_rerender_cache_dir(project_id, reset=True)
+            old_cache_page = live_cache / "page-1.png"
+            old_cache_page.mkdir()
+            (old_cache_page / "regions.json").write_text("[]", encoding="utf-8")
+            Image.new("RGB", (16, 16), (200, 0, 0)).save(old_cache_page / "inpainted.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "download_path": None,
+                "translated_output_map": {"page-1.png": "page-1.png"},
+                "workflow_stage": "translated",
+                "rerender_cache_dir": str(live_cache),
+                "manual_regions": {},
+            }
+            engine.initialize_project(project_id, session, title="Existing project")
+
+            async def fake_command(**kwargs):
+                staged_session = kwargs["session"]
+                staged_output = Path(staged_session["translated_dir"])
+                staged_cache_page = Path(staged_session["rerender_cache_dir"]) / "page-1.png"
+                staged_output.mkdir(parents=True, exist_ok=True)
+                staged_cache_page.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (16, 16), (0, 200, 0)).save(staged_output / "page-1.png")
+                Image.new("RGB", (16, 16), (0, 200, 0)).save(staged_cache_page / "inpainted.png")
+                (staged_cache_page / "regions.json").write_text("[]", encoding="utf-8")
+                staged_session["translated_output_map"] = {"page-1.png": "page-1.png"}
+                return 0
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._run_translation_command = fake_command  # type: ignore[method-assign]
+
+            async def progress(_event):
+                return None
+
+            result = asyncio.run(
+                engine.detect_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config={"translator": "none"},
+                    progress_callback=progress,
+                )
+            )
+
+            self.assertEqual(result["translated_dir"], str(output_dir.resolve()))
+            self.assertEqual(session["translated_dir"], str(output_dir))
+            self.assertEqual(session["rerender_cache_dir"], str(live_cache))
+            self.assertEqual(
+                np.asarray(Image.open(output_dir / "page-1.png"))[0, 0].tolist(),
+                [0, 200, 0],
+            )
+            self.assertEqual(
+                np.asarray(Image.open(live_cache / "page-1.png" / "inpainted.png"))[0, 0].tolist(),
+                [0, 200, 0],
+            )
 
     def test_project_storage_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

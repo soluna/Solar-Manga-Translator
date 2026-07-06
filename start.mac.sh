@@ -65,30 +65,27 @@ fi
 
 echo "[2/4] 检查并安装后端依赖..."
 "$MAC_VENV_DIR/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-"$MAC_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
-
-if ! "$MAC_VENV_DIR/bin/python" -c "import cv2, numpy, fastapi, uvicorn, PIL, websockets, dotenv" >/dev/null 2>&1; then
-  "$MAC_VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
-fi
-
-echo "[2.5/4] 准备固定版本的 manga-image-translator 核心引擎..."
-(
-  cd "$BACKEND_DIR"
-  "$MAC_VENV_DIR/bin/python" install_deps.py --prepare-only
-)
-
-if ! PYTHONPATH="$BACKEND_DIR/manga-image-translator" "$MAC_VENV_DIR/bin/python" -c "import langcodes, manga_translator" >/dev/null 2>&1; then
-  echo "[2.6/4] 补齐 manga-image-translator 运行依赖..."
+BACKEND_DEPS_STAMP="$MAC_VENV_DIR/.solar-dependencies.json"
+if ! "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" check backend --root "$ROOT_DIR" --stamp "$BACKEND_DEPS_STAMP"; then
+  "$MAC_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
+  echo "[2.5/4] 准备固定版本的 manga-image-translator 核心引擎..."
   (
     cd "$BACKEND_DIR"
     "$MAC_VENV_DIR/bin/python" install_deps.py
-    "$MAC_VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
   )
+  "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/pip_install.py" -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
+  "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" mark backend --root "$ROOT_DIR" --stamp "$BACKEND_DEPS_STAMP"
+else
+  echo "[2.5/4] 后端依赖未变化，跳过 pip 与 Git 准备。"
 fi
 
 echo "[3/4] 检查前端依赖..."
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-  (cd "$FRONTEND_DIR" && npm install)
+FRONTEND_DEPS_STAMP="$FRONTEND_DIR/node_modules/.solar-dependencies.json"
+if ! "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" check frontend --root "$ROOT_DIR" --stamp "$FRONTEND_DEPS_STAMP"; then
+  (cd "$FRONTEND_DIR" && (npm install --registry https://registry.npmmirror.com || npm install --registry https://registry.npmjs.org))
+  "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" mark frontend --root "$ROOT_DIR" --stamp "$FRONTEND_DEPS_STAMP"
+else
+  echo "[3/4] 前端依赖未变化，跳过 npm install。"
 fi
 
 echo "[4/4] 启动服务..."

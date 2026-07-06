@@ -38,3 +38,27 @@
   installation logs for Windows setup. Active downloads no longer have a
   total time limit, and mirror downloads retain the official PyTorch SHA-256
   checks.
+- Fixed the inference CLI contract so GPU and application model-directory
+  options survive upstream argument parsing; tasks now report the effective
+  runtime device.
+- Split detect/OCR preparation from translation, mask generation, and LaMa
+  inpainting. Detection no longer initializes an online translator or the
+  inpainting model.
+- Added staging transactions for detection and translation so failed retries
+  and disconnected tasks preserve prior outputs, editable caches, archives,
+  and persisted project state.
+- Added resilient detector/OCR/LaMa model downloads with mainland-friendly
+  mirrors, per-read timeouts, resume support, progress messages, and checksum
+  rejection of corrupt mirror responses.
+- Added core-model readiness and inference-command checks to first-run
+  diagnostics.
+- Unified engine task logs under the application log directory and expanded
+  diagnostic-bundle redaction to remove personal paths and recognized or
+  translated content.
+- Added dependency fingerprints, PyPI/npm mirror fallback, and a verified
+  upstream source-archive fallback so unchanged launches skip pip, npm, and
+  Git network work. The application requirements are installed last so the
+  pinned upstream snapshot cannot downgrade the FastAPI runtime.
+- Added a mocked upload-to-export workflow contract test and a browser
+  workspace E2E job to CI, including bounded runtime and reliable service
+  process-tree cleanup on Linux runners.

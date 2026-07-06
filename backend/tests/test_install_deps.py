@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,6 +93,39 @@ class InstallDepsTests(unittest.TestCase):
 
             self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), pinned_commit)
             self.assertEqual((checkout / "version.txt").read_text(encoding="utf-8"), "local change\n")
+
+    def test_archive_fallback_rejects_traversal_and_installs_verified_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source" / "manga-image-translator-pinned"
+            source_root.mkdir(parents=True)
+            (source_root / "version.txt").write_text("pinned\n", encoding="utf-8")
+            archive_path = root / "upstream.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                archive.add(source_root, arcname=source_root.name)
+
+            checkout = root / "checkout"
+            (checkout / ".git").mkdir(parents=True)
+            install_deps._install_upstream_archive(archive_path, checkout, "abc123")
+
+            self.assertEqual((checkout / "version.txt").read_text(encoding="utf-8"), "pinned\n")
+            self.assertEqual(
+                (checkout / install_deps.UPSTREAM_ARCHIVE_MARKER).read_text(encoding="utf-8").strip(),
+                "abc123",
+            )
+
+    def test_github_archive_candidates_keep_official_source_last(self) -> None:
+        urls = install_deps.upstream_archive_urls(
+            "https://github.com/zyddnys/manga-image-translator.git",
+            "abc123",
+        )
+
+        self.assertTrue(urls[0].startswith("https://gh-proxy.com/"))
+        self.assertTrue(urls[1].startswith("https://ghproxy.net/"))
+        self.assertEqual(
+            urls[-1],
+            "https://github.com/zyddnys/manga-image-translator/archive/abc123.tar.gz",
+        )
 
 
 if __name__ == "__main__":

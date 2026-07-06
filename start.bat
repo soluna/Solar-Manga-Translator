@@ -76,29 +76,27 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-echo Installing critical runtime dependencies...
-"%VENV_PYTHON%" -m pip install python-dotenv colorama >> "%BOOTSTRAP_LOG%" 2>&1
+set "BACKEND_DEPS_STAMP=%CD%\venv\.solar-dependencies.json"
+"%VENV_PYTHON%" dependency_state.py check backend --root "%ROOT_DIR%" --stamp "%BACKEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [Error] Failed to install critical Python dependencies.
-    call :show_bootstrap_log
-    pause
-    exit /b 1
-)
-echo Installing and preparing pinned manga-image-translator core engine...
-"%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
-if %errorlevel% neq 0 (
-    echo [Error] Failed to install or prepare manga-image-translator.
-    call :show_bootstrap_log
-    pause
-    exit /b 1
-)
-echo Installing FastAPI project requirements and security constraints...
-"%VENV_PYTHON%" -m pip install -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
-if %errorlevel% neq 0 (
-    echo [Error] Failed to install backend requirements.
-    call :show_bootstrap_log
-    pause
-    exit /b 1
+    echo Backend dependencies changed or are missing; installing...
+    "%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
+    if !errorlevel! neq 0 (
+        echo [Error] Failed to install or prepare manga-image-translator.
+        call :show_bootstrap_log
+        pause
+        exit /b 1
+    )
+    "%VENV_PYTHON%" pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
+    if !errorlevel! neq 0 (
+        echo [Error] Failed to install backend requirements.
+        call :show_bootstrap_log
+        pause
+        exit /b 1
+    )
+    "%VENV_PYTHON%" dependency_state.py mark backend --root "%ROOT_DIR%" --stamp "%BACKEND_DEPS_STAMP%"
+) else (
+    echo Backend dependencies are unchanged; skipping pip and Git setup.
 )
 
 echo.
@@ -110,12 +108,24 @@ if not exist frontend\package.json (
     exit /b
 )
 cd frontend
-call npm install >> "%BOOTSTRAP_LOG%" 2>&1
+set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
+"%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" check frontend --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [Error] Failed to install frontend dependencies.
-    call :show_bootstrap_log
-    pause
-    exit /b 1
+    echo Frontend dependencies changed or are missing; installing...
+    call npm install --registry https://registry.npmmirror.com >> "%BOOTSTRAP_LOG%" 2>&1
+    if !errorlevel! neq 0 (
+        echo npmmirror failed; retrying with the official npm registry...
+        call npm install --registry https://registry.npmjs.org >> "%BOOTSTRAP_LOG%" 2>&1
+    )
+    if !errorlevel! neq 0 (
+        echo [Error] Failed to install frontend dependencies.
+        call :show_bootstrap_log
+        pause
+        exit /b 1
+    )
+    "%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" mark frontend --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%"
+) else (
+    echo Frontend dependencies are unchanged; skipping npm install.
 )
 
 echo.

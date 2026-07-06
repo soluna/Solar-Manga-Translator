@@ -109,6 +109,29 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 str(engine.model_dir),
             )
 
+    def test_engine_command_survives_upstream_parser(self) -> None:
+        vendor_package = (
+            BACKEND_DIR
+            / "manga-image-translator"
+            / "manga_translator"
+            / "args.py"
+        )
+        if not vendor_package.exists():
+            self.skipTest("manga-image-translator vendor checkout is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            config = engine._normalize_config({"use_gpu": True})
+            (root / "source").mkdir()
+            command = engine._build_command(
+                root / "source",
+                root / "output",
+                root / "detect.json",
+                config,
+                prep_manual=True,
+            )
+
             engine._ensure_vendor_import_path()
             from manga_translator.args import parser, reparse
 

@@ -80,16 +80,16 @@ set "BACKEND_DEPS_STAMP=%CD%\venv\.solar-dependencies.json"
 "%VENV_PYTHON%" dependency_state.py check backend --root "%ROOT_DIR%" --stamp "%BACKEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
     echo Backend dependencies changed or are missing; installing...
-    "%VENV_PYTHON%" pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
+    "%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
     if !errorlevel! neq 0 (
-        echo [Error] Failed to install backend requirements.
+        echo [Error] Failed to install or prepare manga-image-translator.
         call :show_bootstrap_log
         pause
         exit /b 1
     )
-    "%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
+    "%VENV_PYTHON%" pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
     if !errorlevel! neq 0 (
-        echo [Error] Failed to install or prepare manga-image-translator.
+        echo [Error] Failed to install backend requirements.
         call :show_bootstrap_log
         pause
         exit /b 1

@@ -57,6 +57,7 @@
   translated content.
 - Added dependency fingerprints, PyPI/npm mirror fallback, and a verified
   upstream source-archive fallback so unchanged launches skip pip, npm, and
-  Git network work.
+  Git network work. The application requirements are installed last so the
+  pinned upstream snapshot cannot downgrade the FastAPI runtime.
 - Added a mocked upload-to-export workflow contract test and a browser
   workspace E2E job to CI.

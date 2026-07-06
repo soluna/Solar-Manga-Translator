@@ -429,6 +429,16 @@ class RuntimeBootstrapTests(unittest.TestCase):
             self.assertIn("https://registry.npmmirror.com", script)
             self.assertIn("https://registry.npmjs.org", script)
 
+        for script in (
+            windows_script,
+            (root / "start.sh").read_text(encoding="utf-8"),
+            (root / "start.mac.sh").read_text(encoding="utf-8"),
+        ):
+            self.assertLess(
+                script.index("install_deps.py"),
+                script.index("pip_install.py"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

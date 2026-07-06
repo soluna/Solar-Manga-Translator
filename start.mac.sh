@@ -68,12 +68,12 @@ echo "[2/4] 检查并安装后端依赖..."
 BACKEND_DEPS_STAMP="$MAC_VENV_DIR/.solar-dependencies.json"
 if ! "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" check backend --root "$ROOT_DIR" --stamp "$BACKEND_DEPS_STAMP"; then
   "$MAC_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
-  "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/pip_install.py" -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
   echo "[2.5/4] 准备固定版本的 manga-image-translator 核心引擎..."
   (
     cd "$BACKEND_DIR"
     "$MAC_VENV_DIR/bin/python" install_deps.py
   )
+  "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/pip_install.py" -r "$BACKEND_DIR/requirements.txt" numpy opencv-python pillow
   "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" mark backend --root "$ROOT_DIR" --stamp "$BACKEND_DEPS_STAMP"
 else
   echo "[2.5/4] 后端依赖未变化，跳过 pip 与 Git 准备。"

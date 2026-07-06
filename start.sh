@@ -40,8 +40,8 @@ echo "检测硬件并准备对应的 PyTorch 运行时..."
 BACKEND_DEPS_STAMP="$(pwd)/venv/.solar-dependencies.json"
 if ! "$VENV_PYTHON" dependency_state.py check backend --root "$(cd .. && pwd)" --stamp "$BACKEND_DEPS_STAMP"; then
     echo "后端依赖有变化或缺失，正在安装..."
-    "$VENV_PYTHON" pip_install.py -r requirements.txt
     "$VENV_PYTHON" install_deps.py
+    "$VENV_PYTHON" pip_install.py -r requirements.txt
     "$VENV_PYTHON" dependency_state.py mark backend --root "$(cd .. && pwd)" --stamp "$BACKEND_DEPS_STAMP"
 else
     echo "后端依赖未变化，跳过 pip 与 Git 准备。"

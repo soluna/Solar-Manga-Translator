@@ -7165,17 +7165,19 @@ class TranslatorEngine:
         return "text"
 
     def _select_local_inpainting_device(self, use_gpu: bool) -> str:
+        if not use_gpu:
+            return "cpu"
+
         try:
             import torch
         except ImportError as exc:
             raise RuntimeError("本地模型擦除需要 PyTorch，请先安装完整后端依赖。") from exc
 
-        if use_gpu:
-            if torch.cuda.is_available():
-                return "cuda"
-            mps_backend = getattr(torch.backends, "mps", None)
-            if mps_backend is not None and mps_backend.is_available():
-                return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
+            return "mps"
         return "cpu"
 
     async def _run_local_lama_inpaint(

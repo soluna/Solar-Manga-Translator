@@ -319,6 +319,15 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 [0, 0, 0],
             )
 
+    def test_cpu_inpainting_device_does_not_import_pytorch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            with mock.patch.dict(sys.modules, {"torch": None}):
+                self.assertEqual(
+                    engine._select_local_inpainting_device(False),
+                    "cpu",
+                )
+
     def test_successful_detect_atomically_commits_staged_outputs_and_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

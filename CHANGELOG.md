@@ -60,4 +60,5 @@
   Git network work. The application requirements are installed last so the
   pinned upstream snapshot cannot downgrade the FastAPI runtime.
 - Added a mocked upload-to-export workflow contract test and a browser
-  workspace E2E job to CI.
+  workspace E2E job to CI, including bounded runtime and reliable service
+  process-tree cleanup on Linux runners.

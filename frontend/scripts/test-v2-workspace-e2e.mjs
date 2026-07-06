@@ -80,15 +80,18 @@ function createLogger(prefix, output = process.stdout) {
 }
 
 function spawnProcess(command, args, options = {}) {
+  const useProcessGroup = Boolean(options.processGroup && process.platform !== 'win32')
   const child = spawn(command, args, {
     cwd: options.cwd,
     env: {
       ...process.env,
       ...options.env,
     },
+    detached: useProcessGroup,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  child.solarProcessGroup = useProcessGroup
   child.stdout?.on('data', createLogger(options.label || path.basename(command)))
   child.stderr?.on('data', createLogger(options.label || path.basename(command), process.stderr))
   return child
@@ -126,12 +129,23 @@ async function waitForHttp(url, label, timeoutMs = 30000) {
 
 async function stopProcesses(processes) {
   for (const child of processes.reverse()) {
-    if (!child || child.killed) continue
-    child.kill('SIGTERM')
-    await sleep(300)
-    if (child.exitCode == null) {
-      child.kill('SIGKILL')
+    if (!child) continue
+    const signal = (name) => {
+      try {
+        if (child.solarProcessGroup && child.pid) {
+          process.kill(-child.pid, name)
+          return
+        }
+        child.kill(name)
+      } catch (error) {
+        if (error?.code !== 'ESRCH') {
+          throw error
+        }
+      }
     }
+    signal('SIGTERM')
+    await sleep(300)
+    signal('SIGKILL')
   }
 }
 
@@ -188,6 +202,7 @@ async function ensureServices() {
           APP_API_TOKEN: E2E_API_TOKEN,
         },
         label: 'backend-v2-e2e',
+        processGroup: true,
       }
     )
     started.push(backendProcess)
@@ -208,6 +223,7 @@ async function ensureServices() {
           VITE_DEV_PROXY_TARGET: BACKEND_URL,
         },
         label: 'frontend-v2-e2e',
+        processGroup: true,
       }
     )
     started.push(frontendProcess)

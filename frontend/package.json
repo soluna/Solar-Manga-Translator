@@ -13,6 +13,7 @@
     "test:canvas-preview": "node scripts/test-canvas-preview.mjs",
     "test:config-persistence": "node scripts/test-config-persistence.mjs",
     "test:task-event-state": "node scripts/test-task-event-state.mjs",
+    "test:task-connection": "node scripts/test-translation-task-connection.mjs",
     "test:workflow-state": "node scripts/test-workflow-state.mjs",
     "test:review-workspace": "npm run test:v2-workspace",
     "test:v2-workspace": "node scripts/test-v2-workspace-e2e.mjs",

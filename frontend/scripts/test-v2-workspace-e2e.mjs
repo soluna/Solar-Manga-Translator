@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
-import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { findAvailablePort } from '../../scripts/local-port.mjs'
 import { launchChromium } from './playwright-launcher.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -25,37 +25,21 @@ const E2E_APP_DATA_DIR = process.env.APP_DATA_DIR || await fs.mkdtemp(path.join(
 const E2E_API_TOKEN = process.env.CANVAS_E2E_API_TOKEN || process.env.APP_API_TOKEN || randomBytes(32).toString('base64url')
 process.env.APP_DATA_DIR = E2E_APP_DATA_DIR
 process.env.APP_API_TOKEN = E2E_API_TOKEN
-const generatedBackendPort = process.env.CANVAS_E2E_BACKEND_URL ? '' : await findFreePort(0)
+const generatedBackendPort = process.env.CANVAS_E2E_BACKEND_URL
+  ? ''
+  : await findAvailablePort({ preferredPort: 0, host: '127.0.0.1' })
 const generatedFrontendPort = process.env.CANVAS_E2E_FRONTEND_URL
   ? ''
-  : await findFreePort(0, new Set([generatedBackendPort]))
+  : await findAvailablePort({
+      preferredPort: 0,
+      host: '127.0.0.1',
+      blockedPorts: new Set([generatedBackendPort]),
+    })
 const BACKEND_URL = process.env.CANVAS_E2E_BACKEND_URL || `http://127.0.0.1:${generatedBackendPort}`
 const FRONTEND_URL = process.env.CANVAS_E2E_FRONTEND_URL || `http://127.0.0.1:${generatedFrontendPort}`
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function tryListen(port) {
-  return new Promise((resolvePort, reject) => {
-    const server = net.createServer()
-    server.unref()
-    server.once('error', reject)
-    server.listen({ host: '127.0.0.1', port }, () => {
-      const address = server.address()
-      server.close(() => resolvePort(address?.port || port))
-    })
-  })
-}
-
-async function findFreePort(preferredPort, blockedPorts = new Set()) {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const candidate = await tryListen(attempt === 0 ? preferredPort : 0)
-    if (!blockedPorts.has(candidate)) {
-      return candidate
-    }
-  }
-  throw new Error('无法获取互不冲突的空闲测试端口')
 }
 
 function apiHeaders() {

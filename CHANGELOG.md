@@ -97,3 +97,7 @@
 - Stopped silently substituting untranslated source pages into result archives;
   missing translated outputs now fail loudly, and archive generation no longer
   blocks task progress updates while compressing already-compressed images.
+- Centralized local frontend port selection into a shared startup module used
+  by the shell launcher, desktop development launcher, and browser E2E flow;
+  the launcher now checks the same loopback host that Vite binds to, avoiding
+  false-free ports during local startup.

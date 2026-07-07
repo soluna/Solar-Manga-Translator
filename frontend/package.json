@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test:canvas-preview": "node scripts/test-canvas-preview.mjs",
     "test:config-persistence": "node scripts/test-config-persistence.mjs",
+    "test:local-port": "node scripts/test-local-port.mjs",
     "test:review-workspace-state": "node scripts/test-review-workspace-state.mjs",
     "test:task-event-state": "node scripts/test-task-event-state.mjs",
     "test:task-connection": "node scripts/test-translation-task-connection.mjs",

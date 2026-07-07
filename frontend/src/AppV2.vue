@@ -2,6 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
+import {
+  getPrimaryProjectCommand,
+  getReviewPrimaryCommand,
+  getTaskFailureStatus as getWorkflowTaskFailureStatus,
+  getTaskProgressStatus,
+  getTaskStartStatus,
+  normalizeTaskAction,
+  workflowStageLabelMap
+} from './workflow-state.js'
 
 const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
   ? window.mangaDesktop
@@ -1404,13 +1413,6 @@ const targetLangLabelMap = {
   JPN: '日语',
   KOR: '韩语'
 }
-const workflowStageLabelMap = {
-  idle: '未开始',
-  detecting: '识别中',
-  detected: '待校对',
-  translating: '翻译中',
-  translated: '已翻译'
-}
 const reviewModeLabelMap = {
   classic: '经典审校',
   canvas_beta: '画布审校（Beta）'
@@ -1758,24 +1760,15 @@ const v2SelectedPageSummary = computed(() => {
   }
   return `第 ${entry.pageNumber} 页`
 })
-const v2ReviewPrimaryLabel = computed(() => {
-  if (translating.value) {
-    return '处理中…'
-  }
-  if (canContinueSegmentedTranslation.value) {
-    return '继续翻译'
-  }
-  if (canTranslateCurrentPage.value) {
-    return '翻译本页'
-  }
-  if (canRerender.value) {
-    return '保存并重渲染'
-  }
-  if (canRunInitialDetection.value) {
-    return '开始识别'
-  }
-  return workflowStage.value === 'translated' ? '重新翻译' : '开始翻译'
-})
+const v2ReviewPrimaryCommand = computed(() => getReviewPrimaryCommand({
+  translating: translating.value,
+  canContinueSegmentedTranslation: canContinueSegmentedTranslation.value,
+  canTranslateCurrentPage: canTranslateCurrentPage.value,
+  canRerender: canRerender.value,
+  canRunInitialDetection: canRunInitialDetection.value,
+  workflowStage: workflowStage.value
+}))
+const v2ReviewPrimaryLabel = computed(() => v2ReviewPrimaryCommand.value.label)
 const v2FilteredProjectHistory = computed(() => {
   const search = String(v2HistorySearch.value || '').trim().toLowerCase()
   const sorter = String(v2HistorySort.value || 'recent')
@@ -1853,41 +1846,15 @@ const previewFontFaceCss = computed(() => {
   return rules.join('\n')
 })
 
-const primaryTranslateAction = computed(() => {
-  if (workflowStage.value === 'detected' || hasPartialTranslatedResults.value) {
-    return 'resume-translate'
-  }
-  if (workflowStage.value === 'translated') {
-    return 'translate'
-  }
-  return config.value.pause_after_detection ? 'detect' : 'translate'
-})
-
-const primaryTranslateLabel = computed(() => {
-  if (translating.value) {
-    if (activeAction.value === 'detect') {
-      return '识别进行中...'
-    }
-    if (activeAction.value === 'translate-page') {
-      return '本页翻译中...'
-    }
-    if (activeAction.value === 'resume-translate') {
-      return '翻译进行中...'
-    }
-    return '翻译进行中...'
-  }
-
-  if (workflowStage.value === 'detected' || hasPartialTranslatedResults.value) {
-    return '继续翻译'
-  }
-  if (workflowStage.value === 'translated') {
-    return '重新翻译'
-  }
-  if (config.value.pause_after_detection) {
-    return '开始识别'
-  }
-  return '开始翻译'
-})
+const primaryProjectCommand = computed(() => getPrimaryProjectCommand({
+  workflowStage: workflowStage.value,
+  hasPartialTranslatedResults: hasPartialTranslatedResults.value,
+  pauseAfterDetection: config.value.pause_after_detection,
+  translating: translating.value,
+  activeAction: activeAction.value
+}))
+const primaryTranslateAction = computed(() => primaryProjectCommand.value.action)
+const primaryTranslateLabel = computed(() => primaryProjectCommand.value.label)
 
 function toApiUrl(path) {
   if (!path) {
@@ -8973,23 +8940,10 @@ function runV2ReviewPrimaryAction() {
   if (translating.value) {
     return
   }
-  if (canContinueSegmentedTranslation.value) {
-    startTranslation('resume-translate')
-    return
+  const action = v2ReviewPrimaryCommand.value.action || 'translate'
+  if (action) {
+    startTranslation(action)
   }
-  if (canTranslateCurrentPage.value) {
-    startTranslation('translate-page')
-    return
-  }
-  if (canRerender.value) {
-    startTranslation('rerender')
-    return
-  }
-  if (canRunInitialDetection.value) {
-    startTranslation('detect')
-    return
-  }
-  startTranslation('translate')
 }
 
 function runV2ProjectPrimaryAction() {
@@ -10026,19 +9980,7 @@ async function submitFile() {
 }
 
 function getTaskFailureStatus(action = activeAction.value) {
-  if (action === 'rerender') {
-    return '重嵌字失败。'
-  }
-  if (action === 'detect') {
-    return '文本框识别失败。'
-  }
-  if (action === 'translate-page') {
-    return '当前页翻译失败。'
-  }
-  if (action === 'resume-translate') {
-    return '继续翻译失败。'
-  }
-  return '翻译失败。'
+  return getWorkflowTaskFailureStatus(action)
 }
 
 async function handleTranslationTaskEvent(payload, currentSocket = socket) {
@@ -10058,8 +10000,8 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
   if (payloadSequence > 0) {
     activeTaskSequence.value = Math.max(activeTaskSequence.value, payloadSequence)
   }
-  if (payload?.action) {
-    activeAction.value = String(payload.action)
+  if (payload?.task_action || payload?.action) {
+    activeAction.value = normalizeTaskAction(payload.task_action || payload.action)
   }
   if (payload?.metadata?.target_stored_name) {
     activeTaskTargetStoredName.value = String(payload.metadata.target_stored_name)
@@ -10073,25 +10015,23 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
   }
 
   if (payload.event === 'start') {
-    progress.value = { current: 0, total: payload.total_pages }
-    status.value = activeAction.value === 'rerender'
-      ? (pageTargetStoredName
-        ? '当前页重嵌字已开始。'
-        : `重嵌字已开始，共 ${payload.total_pages} 张图片。`)
-      : activeAction.value === 'detect'
-        ? `文本框识别已开始，共 ${payload.total_pages} 张图片。`
-        : activeAction.value === 'translate-page'
-          ? '当前页翻译已开始。'
-          : activeAction.value === 'resume-translate'
-            ? `继续翻译已开始，共 ${payload.total_pages} 张图片。`
-            : `翻译已开始，共 ${payload.total_pages} 张图片。`
+    const totalPages = Number(payload.progress_total || payload.total_pages || 0)
+    progress.value = { current: 0, total: totalPages }
+    status.value = payload.message
+      || payload.default_message
+      || getTaskStartStatus(activeAction.value, {
+        totalPages,
+        targetStoredName: pageTargetStoredName
+      })
     return
   }
 
   if (payload.event === 'progress') {
+    const currentProgress = Number(payload.progress_current || payload.current || 0)
+    const totalProgress = Number(payload.progress_total || payload.total || 0)
     progress.value = {
-      current: payload.current,
-      total: payload.total
+      current: currentProgress,
+      total: totalProgress
     }
     if (payload.stored_name) {
       markPageImageUpdated(payload.stored_name)
@@ -10116,18 +10056,14 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
         payload.image_url,
       )
     }
-    status.value = activeAction.value === 'rerender'
-      ? (pageTargetStoredName
-        ? '当前页重嵌字进行中…'
-        : `重嵌字进行中：${payload.current} / ${payload.total}`)
-      : activeAction.value === 'detect'
-        ? `正在识别并准备校对：${payload.current} / ${payload.total}`
-        : activeAction.value === 'translate-page'
-          ? '当前页翻译进行中…'
-          : activeAction.value === 'resume-translate'
-            ? `继续翻译进行中：${payload.current} / ${payload.total}`
-            : `翻译进行中：${payload.current} / ${payload.total}`
-    if (Number(payload.total || 0) > 0 && Number(payload.current || 0) >= Number(payload.total || 0)) {
+    status.value = payload.message
+      || payload.default_message
+      || getTaskProgressStatus(activeAction.value, {
+        current: currentProgress,
+        total: totalProgress,
+        targetStoredName: pageTargetStoredName
+      })
+    if (totalProgress > 0 && currentProgress >= totalProgress) {
       scheduleTranslationCompletionRecovery({
         sessionId: sessionId.value,
         action: activeAction.value,
@@ -10362,17 +10298,18 @@ function startTranslation(action = 'translate') {
     return
   }
 
+  const normalizedAction = normalizeTaskAction(action)
   resetTranslationCompletionRecovery()
   resetActiveTaskConnection()
   clearTaskError()
-  activeAction.value = action
-  const pageTargetStoredName = (action === 'rerender' || action === 'translate-page')
+  activeAction.value = normalizedAction
+  const pageTargetStoredName = (normalizedAction === 'rerender' || normalizedAction === 'translate-page')
     ? (selectedEditPage.value?.stored_name || '')
     : ''
   activeTaskTargetStoredName.value = pageTargetStoredName
   manualDrawDraft.value = null
   renderNonce.value = Date.now()
-  if (action === 'translate' || action === 'detect') {
+  if (normalizedAction === 'translate' || normalizedAction === 'detect') {
     translatedImages.value = []
     downloadUrl.value = ''
     downloadPath.value = ''
@@ -10382,17 +10319,17 @@ function startTranslation(action = 'translate') {
   errorMessage.value = ''
   translating.value = true
   progress.value = { current: 0, total: 0 }
-  status.value = action === 'rerender'
+  status.value = normalizedAction === 'rerender'
     ? (pageTargetStoredName ? '正在启动当前页重嵌字任务...' : '正在启动重嵌字任务...')
-    : action === 'detect'
+    : normalizedAction === 'detect'
       ? '正在启动文本框识别任务...'
-      : action === 'translate-page'
+      : normalizedAction === 'translate-page'
         ? '正在启动当前页翻译任务...'
-        : action === 'resume-translate'
+        : normalizedAction === 'resume-translate'
           ? '正在继续翻译并嵌字...'
           : '正在启动翻译任务...'
   closeSocket()
-  connectTranslationTaskSocket({ action, pageTargetStoredName, taskId: '' })
+  connectTranslationTaskSocket({ action: normalizedAction, pageTargetStoredName, taskId: '' })
 }
 
 onMounted(() => {

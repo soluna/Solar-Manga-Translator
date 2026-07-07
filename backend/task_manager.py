@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from workflow_events import enrich_task_event
+
 
 TaskEvent = dict[str, Any]
 TaskPublisher = Callable[[TaskEvent], Awaitable[None]]
@@ -321,8 +323,14 @@ class TaskManager:
     async def _publish(self, managed: ManagedTask, event: TaskEvent) -> None:
         managed.sequence += 1
         managed.updated_at = utc_now_iso()
+        payload = enrich_task_event(
+            event,
+            action=managed.action,
+            metadata=managed.metadata,
+            task_status=managed.status,
+        )
         payload = {
-            **event,
+            **payload,
             "task_id": managed.task_id,
             "sequence": managed.sequence,
         }

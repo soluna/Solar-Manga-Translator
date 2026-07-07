@@ -75,3 +75,5 @@
   translation, and local inpainting.
 - Replaced raw task exception output with stable error codes, user-facing
   recovery actions, redacted technical details, and full server-side logging.
+- Added shared workflow descriptors for task events and frontend command
+  labels, preparing the UI for clearer staged progress and P2 workflow polish.

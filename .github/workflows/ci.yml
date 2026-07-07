@@ -33,6 +33,7 @@ jobs:
             backend/runtime_paths.py \
             backend/system_fonts.py \
             backend/task_manager.py \
+            backend/workflow_events.py \
             backend/utils/file_handler.py \
             backend/engine/translator.py \
             backend/patched_custom_openai.py \
@@ -59,6 +60,7 @@ jobs:
         run: |
           npm ci
           npm run test:config-persistence
+          npm run test:workflow-state
           npm run build
       - name: Check desktop scripts
         run: |

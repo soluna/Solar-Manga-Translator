@@ -132,10 +132,11 @@ class ApiSecurityTests(unittest.TestCase):
         async def fake_detect_session(*, session_id, session, progress_callback, **_kwargs):
             await progress_callback({"event": "status", "message": "mock detect"})
             cache_dir = main.translator_engine._prepare_rerender_cache_dir(session_id, reset=True)
-            page_cache = cache_dir / "page-1.png"
-            page_cache.mkdir(parents=True)
-            (page_cache / "regions.json").write_text("[]", encoding="utf-8")
-            Image.new("RGB", (32, 32), (255, 255, 255)).save(page_cache / "inpainted.png")
+            for source_image in session["source_images"]:
+                page_cache = cache_dir / source_image["stored_name"]
+                page_cache.mkdir(parents=True)
+                (page_cache / "regions.json").write_text("[]", encoding="utf-8")
+                Image.new("RGB", (32, 32), (255, 255, 255)).save(page_cache / "inpainted.png")
             session["rerender_cache_dir"] = str(cache_dir)
             session["workflow_stage"] = "detected"
             return {"workflow_stage": "detected"}
@@ -144,8 +145,12 @@ class ApiSecurityTests(unittest.TestCase):
             await progress_callback({"event": "status", "message": "mock translate"})
             output_dir = Path(session["translated_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
-            Image.new("RGB", (32, 32), (240, 240, 240)).save(output_dir / "page-1.png")
-            session["translated_output_map"] = {"page-1.png": "page-1.png"}
+            translated_output_map = {}
+            for source_image in session["source_images"]:
+                stored_name = source_image["stored_name"]
+                Image.new("RGB", (32, 32), (240, 240, 240)).save(output_dir / stored_name)
+                translated_output_map[stored_name] = stored_name
+            session["translated_output_map"] = translated_output_map
             session["workflow_stage"] = "translated"
             archive_path = main.translator_engine.build_session_archive(session_id, session)
             return {

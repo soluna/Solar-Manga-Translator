@@ -68,6 +68,9 @@ class TranslatorEngine:
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
     ADVANCED_ERASE_MAX_TIMEOUT_SECONDS = 300
     ADVANCED_ERASE_PROMPT_MAX_LENGTH = 4000
+    PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT = 12000
+    PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT = 15000
+    PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS = 120
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
@@ -212,6 +215,26 @@ class TranslatorEngine:
 
     def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
         return self._project_page_dir(project_id, page_id) / "page_document.json"
+
+    def _page_document_region_count(self, project_id: str, page_id: str) -> int:
+        try:
+            payload = self._read_json_file(self._project_page_document_path(project_id, page_id), {})
+        except InvalidStorageIdentifierError:
+            return 0
+        regions = payload.get("regions") if isinstance(payload, dict) else None
+        if not isinstance(regions, list):
+            return 0
+        return sum(1 for region in regions if isinstance(region, dict))
+
+    def _project_region_count(self, project_id: str, session: dict[str, Any]) -> int:
+        total = 0
+        for image in session.get("source_images") or []:
+            if not isinstance(image, dict):
+                continue
+            stored_name = str(image.get("stored_name") or "").strip()
+            if stored_name:
+                total += self._page_document_region_count(project_id, stored_name)
+        return total
 
     def _translation_request_debug_path(self, project_id: str) -> Path:
         normalized_project_id = self._validated_project_id(project_id)
@@ -412,6 +435,7 @@ class TranslatorEngine:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int = 1600,
+        timeout_seconds: int = 30,
     ) -> str:
         if not str(base_url or "").strip():
             raise ValueError(f"缺少 {provider_label} API Base URL。")
@@ -440,6 +464,7 @@ class TranslatorEngine:
             url=self._chat_completions_url(base_url),
             api_key=api_key,
             payload=payload,
+            timeout_seconds=timeout_seconds,
         )
         return self._extract_chat_completions_preview(response)
 
@@ -514,16 +539,20 @@ class TranslatorEngine:
         url: str,
         api_key: str,
         payload: dict[str, Any],
+        timeout_seconds: int = 30,
     ) -> dict[str, Any]:
         request = build_json_post_request(url, api_key=api_key, payload=payload)
+        timeout = max(5, int(timeout_seconds or 30))
         try:
-            with urllib_request.urlopen(request, timeout=30) as response:
+            with urllib_request.urlopen(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8")
         except urllib_error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(self._format_validation_http_error(provider_label, exc.code, body)) from exc
         except urllib_error.URLError as exc:
             raise RuntimeError(f"{provider_label} 请求失败：{exc}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError(f"{provider_label} 请求超时：模型响应超过 {timeout} 秒，请稍后重试或换用更快的模型。") from exc
 
         try:
             parsed = json.loads(body)
@@ -1112,6 +1141,7 @@ class TranslatorEngine:
             "created_at": str(session.get("project_created_at") or self._now_iso()),
             "updated_at": str(session.get("project_updated_at") or self._now_iso()),
             "page_count": len(session.get("source_images") or []),
+            "region_count": self._project_region_count(project_id, session),
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
             "cover_image": self._project_cover_url(project_id, session),
             "latest_snapshot_id": str((latest or {}).get("snapshot_id") or ""),
@@ -2550,6 +2580,10 @@ class TranslatorEngine:
                 "name": str(image.get("name") or image.get("stored_name") or ""),
                 "stored_name": str(image.get("stored_name") or ""),
                 "url": f"/api/pages/{project_id}/{str(image.get('stored_name') or '')}/source-image",
+                "region_count": self._page_document_region_count(
+                    project_id,
+                    str(image.get("stored_name") or ""),
+                ),
             }
             for image in (session.get("source_images") or [])
             if str(image.get("stored_name") or "")
@@ -2971,7 +3005,22 @@ class TranslatorEngine:
             "Return only valid JSON. Include short character names when they are name-like."
         )
 
+    def _limit_project_glossary_context(self, project_context: str) -> str:
+        context = str(project_context or "").strip()
+        if len(context) <= self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT:
+            return context
+
+        head_budget = max(1000, self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT * 2 // 3)
+        tail_budget = max(1000, self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT - head_budget)
+        omitted = len(context) - head_budget - tail_budget
+        return (
+            context[:head_budget].rstrip()
+            + f"\n\n[中间约 {omitted} 个字符已省略，保留开头和结尾以控制请求长度]\n\n"
+            + context[-tail_budget:].lstrip()
+        )
+
     def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str, *, retry: bool = False) -> str:
+        project_context = self._limit_project_glossary_context(project_context)
         categories = "、".join(sorted(self.PROJECT_GLOSSARY_CATEGORIES))
         retry_instruction = ""
         if retry:
@@ -3011,6 +3060,7 @@ class TranslatorEngine:
                 system_prompt=system_prompt,
                 user_prompt=prompt,
                 max_tokens=3200,
+                timeout_seconds=self.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS,
             )
 
         if selected_translator == "doubao-ark":
@@ -3026,6 +3076,7 @@ class TranslatorEngine:
                 system_prompt=system_prompt,
                 user_prompt=prompt,
                 max_tokens=3200,
+                timeout_seconds=self.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS,
             )
 
         if selected_translator == "gemini":
@@ -5201,7 +5252,9 @@ class TranslatorEngine:
 
         archive_path = ""
         if not target_stored_name or previous_stage == "translated":
-            archive_path = self.build_session_archive(
+            await progress_callback({"event": "status", "message": "页面已处理完成，正在生成下载包…"})
+            archive_path = await asyncio.to_thread(
+                self.build_session_archive,
                 session_id=session_id,
                 session=session,
                 preferred_output_format=config["rerender_output_format"],
@@ -5293,6 +5346,7 @@ class TranslatorEngine:
             )
             cache_page_dir = self._session_page_cache_dir(session, session_id, image["stored_name"])
 
+            rendered_output_path = output_path
             if self._ensure_editable_page_cache(
                 session_id=session_id,
                 session=session,
@@ -5334,10 +5388,22 @@ class TranslatorEngine:
                         debug_info=debug_info,
                         regions=prepared_regions or [],
                     )
-            elif not output_path.exists():
-                self._copy_source_to_output(source_path, output_path)
+            else:
+                current_output = self._current_translated_output(
+                    session,
+                    output_dir,
+                    image["stored_name"],
+                    config["rerender_output_format"],
+                )
+                if current_output is not None and current_output.exists():
+                    rendered_output_path = current_output
+                else:
+                    raise RuntimeError(
+                        f"当前页面缺少可编辑缓存，无法重新嵌字：{image['stored_name']}。"
+                        "请先重新识别该页，或重新执行完整翻译。"
+                    )
 
-            self._update_translated_output_map(session, image["stored_name"], output_path)
+            self._update_translated_output_map(session, image["stored_name"], rendered_output_path)
 
             await progress_callback(
                 {
@@ -5352,7 +5418,9 @@ class TranslatorEngine:
 
         archive_path = ""
         if not target_stored_name:
-            archive_path = self.build_session_archive(
+            await progress_callback({"event": "status", "message": "页面已处理完成，正在生成下载包…"})
+            archive_path = await asyncio.to_thread(
+                self.build_session_archive,
                 session_id=session_id,
                 session=session,
                 preferred_output_format=config["rerender_output_format"],
@@ -5440,6 +5508,7 @@ class TranslatorEngine:
         preferred_output_format: str,
     ) -> list[Path]:
         archive_files: list[Path] = []
+        missing_pages: list[str] = []
         for image in session.get("source_images") or []:
             stored_name = str(image.get("stored_name") or "")
             if not stored_name:
@@ -5454,15 +5523,11 @@ class TranslatorEngine:
                 archive_files.append(current_output)
                 continue
 
-            source_path = source_dir / stored_name
-            fallback_output = self._translated_output_path(
-                output_dir,
-                stored_name,
-                preferred_output_format,
-            )
-            self._copy_source_to_output(source_path, fallback_output)
-            self._update_translated_output_map(session, stored_name, fallback_output)
-            archive_files.append(fallback_output)
+            missing_pages.append(stored_name)
+        if missing_pages:
+            preview = "、".join(missing_pages[:5])
+            suffix = "…" if len(missing_pages) > 5 else ""
+            raise RuntimeError(f"缺少翻译结果，无法生成下载包：{preview}{suffix}")
         return archive_files
 
     def build_session_archive(
@@ -6231,7 +6296,7 @@ class TranslatorEngine:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_STORED) as archive:
                 for file_path in files:
                     if not file_path.exists():
                         continue
@@ -6247,7 +6312,7 @@ class TranslatorEngine:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_STORED) as archive:
                 for file_path, archive_name in files:
                     if file_path.exists():
                         archive.write(file_path, arcname=archive_name)

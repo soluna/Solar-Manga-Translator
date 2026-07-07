@@ -562,13 +562,117 @@ class TranslatorEngineStateTests(unittest.TestCase):
                     "项目_测试_result_0001.png",
                     "项目_测试_result_0002.png",
                 ])
+                self.assertTrue(all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()))
             with zipfile.ZipFile(blank_archive) as archive:
                 self.assertEqual(archive.namelist(), [
                     "项目_测试_blank_0001.png",
                     "项目_测试_blank_0002.png",
                 ])
+                self.assertTrue(all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()))
             self.assertEqual(engine.get_export_archive_filename("project-a", session, "result"), "项目_测试_result.zip")
             self.assertEqual(engine.get_export_archive_filename("project-a", session, "blank"), "项目_测试_blank.zip")
+
+    def test_project_summary_and_payload_include_persisted_region_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (20, 20), (255, 255, 255)).save(source_dir / "001.png")
+            Image.new("RGB", (20, 20), (245, 245, 245)).save(source_dir / "002.png")
+            session = {
+                "project_title": "框数项目",
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [
+                    {"name": "001.png", "stored_name": "001.png"},
+                    {"name": "002.png", "stored_name": "002.png"},
+                ],
+                "translated_output_map": {},
+                "workflow_stage": "detected",
+                "last_config": {"rerender_output_format": "png"},
+            }
+            engine._write_json_file(engine._project_page_document_path("project-a", "001.png"), {
+                "regions": [{"id": "a"}, {"id": "b"}],
+            })
+            engine._write_json_file(engine._project_page_document_path("project-a", "002.png"), {
+                "regions": [{"id": "c"}],
+            })
+
+            summary = engine._build_project_summary("project-a", session)
+            payload = engine.build_client_session_payload("project-a", session)
+
+            self.assertEqual(summary["region_count"], 3)
+            self.assertEqual(payload["project"]["region_count"], 3)
+            self.assertEqual([image["region_count"] for image in payload["images"]], [2, 1])
+
+    def test_build_session_archive_rejects_missing_translated_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (20, 20), (255, 255, 255)).save(source_dir / "001.png")
+            Image.new("RGB", (20, 20), (245, 245, 245)).save(source_dir / "002.png")
+            Image.new("RGB", (20, 20), (0, 0, 0)).save(translated_dir / "001.png")
+            session = {
+                "project_title": "缺页项目",
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [
+                    {"name": "001.png", "stored_name": "001.png"},
+                    {"name": "002.png", "stored_name": "002.png"},
+                ],
+                "translated_output_map": {"001.png": "001.png"},
+                "last_config": {"rerender_output_format": "png"},
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "缺少翻译结果"):
+                engine.build_session_archive("project-a", session)
+
+            self.assertFalse((translated_dir / "002.png").exists())
+
+    def test_project_glossary_extraction_uses_limited_context_and_longer_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {"entries": []},
+            }
+            very_long_text = "山田 小夏 " * 5000
+            engine._project_text_context_for_glossary = lambda *_args, **_kwargs: very_long_text  # type: ignore[method-assign]
+            captured: dict[str, object] = {}
+
+            def fake_completion(**kwargs) -> str:
+                captured.update(kwargs)
+                return '[{"source":"山田","translation":"山田","category":"人名"}]'
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._request_chat_completions_text_sync = fake_completion  # type: ignore[method-assign]
+
+            glossary = asyncio.run(engine.extract_project_glossary("project-a", session, {
+                "translator": "custom_openai",
+                "selected_translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "model",
+                "api_key": "key",
+                "target_lang": "CHS",
+            }, force=True))
+
+            self.assertEqual(glossary["entries"][0]["source"], "山田")
+            self.assertLessEqual(len(str(captured["user_prompt"])), engine.PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT)
+            self.assertEqual(captured["timeout_seconds"], engine.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS)
 
     def test_brush_edit_operations_paint_restore_and_erase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

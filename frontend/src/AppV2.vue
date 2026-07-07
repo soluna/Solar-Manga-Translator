@@ -1,8 +1,16 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
+import {
+  browserFallbackConfigKeys as browserConfigKeys,
+  createBrowserConfigCache,
+  mergePersistedConfigWithBrowserPreferences
+} from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
+import {
+  mergeRegionCount,
+  resolveSelectedReviewPage,
+} from './review-workspace-state.js'
 import {
   createEmptyTaskPhase,
   deriveTaskEventUpdate,
@@ -28,37 +36,6 @@ const reviewWorkspaceStorageKey = 'manga-translator.review-workspace'
 const IMAGE_THUMBNAIL_MAX_SIDE = 480
 const IMAGE_REVIEW_MAX_SIDE = 2400
 const folderUploadImageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp'])
-const browserConfigKeys = [
-  'translator',
-  'translator_model',
-  'translator_model_custom',
-  'target_lang',
-  'use_gpu',
-  'font_key',
-  'font_style_mode',
-  'style_font_gothic_key',
-  'style_font_mincho_key',
-  'style_font_rounded_key',
-  'style_font_cartoon_key',
-  'style_font_handwritten_key',
-  'style_font_sfx_key',
-  'render_alignment',
-  'render_letter_spacing',
-  'rerender_output_format',
-  'default_review_mode',
-  'workspace_width_mode',
-  'pause_after_detection',
-  'mask_cleanup_strength',
-  'export_mask_debug',
-  'advanced_text_repair',
-  'image_cleanup_mode',
-  'image_cleanup_model',
-  'advanced_erase_provider',
-  'advanced_erase_base_url',
-  'advanced_erase_model',
-  'advanced_erase_timeout_seconds',
-  'advanced_erase_selection_prompt'
-]
 const doubaoModelOptions = [
   { value: 'doubao-seed-translation-250915', label: 'doubao-seed-translation-250915 (翻译增强 / 推荐)' },
   { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215 (高质量通用文本 / OCR 漫画翻译实验)' },
@@ -534,26 +511,13 @@ function loadStoredConfig() {
   }
 }
 
-function pickConfigKeys(value, keys) {
-  return Object.fromEntries(
-    keys
-      .filter((key) => Object.prototype.hasOwnProperty.call(value || {}, key))
-      .map((key) => [key, value[key]])
-  )
-}
-
-function createBrowserConfigCache(value) {
-  const normalized = normalizeStoredConfig(value)
-  return pickConfigKeys(normalized, browserConfigKeys)
-}
-
 function saveStoredConfig(value) {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
-    const nextValue = createBrowserConfigCache(value)
+    const nextValue = createBrowserConfigCache(normalizeStoredConfig(value), browserConfigKeys)
     window.localStorage.setItem(configStorageKey, JSON.stringify(nextValue))
   } catch (error) {
     console.warn('Failed to persist UI config locally.', error)
@@ -1261,15 +1225,11 @@ const reviewWorkspaceLayoutStyle = computed(() => ({
   '--inspector-width': `${Math.round(reviewWorkspacePrefs.value.inspector_width || 420)}px`
 }))
 const selectedEditPage = computed(() => {
-  if (!mergedInspectionPages.value.length) {
-    return null
-  }
-
-  return (
-    mergedInspectionPages.value.find((page) => page.stored_name === selectedEditPageKey.value)
-    || mergedInspectionPages.value[0]
-    || null
-  )
+  return resolveSelectedReviewPage({
+    selectedPageKey: selectedEditPageKey.value,
+    inspectionPages: mergedInspectionPages.value,
+    pageEntries: v2PageEntries.value,
+  })
 })
 const selectedEditPageIndex = computed(() => {
   const selectedPageId = String(selectedEditPageKey.value || selectedEditPage.value?.stored_name || '').trim()
@@ -1675,7 +1635,11 @@ const v2PageEntries = computed(() => {
       })
     }
     const entry = mapped.get(normalizedKey)
+    const nextRegionCount = Object.prototype.hasOwnProperty.call(payload, 'regionCount')
+      ? mergeRegionCount(entry.regionCount, payload.regionCount)
+      : entry.regionCount
     Object.assign(entry, payload)
+    entry.regionCount = nextRegionCount
     return entry
   }
 
@@ -1693,7 +1657,8 @@ const v2PageEntries = computed(() => {
       blankUrl: sourceUrl,
       sourceThumbUrl,
       blankThumbUrl: sourceThumbUrl,
-      pageNumber: order.length + 1
+      pageNumber: order.length + 1,
+      regionCount: Number(image?.region_count || image?.regionCount || 0)
     })
   }
 
@@ -2850,6 +2815,7 @@ function normalizeHistoryProject(project) {
     review_mode: 'canvas_beta',
     workflow_stage: project?.workflow_stage || 'idle',
     page_count: Number(project?.page_count || 0),
+    region_count: Number(project?.region_count || 0),
     is_busy: Boolean(project?.is_busy),
     busy_action: project?.busy_action || ''
   }
@@ -4619,6 +4585,15 @@ function syncEditSelection() {
   prunePerPageUiState(mergedInspectionPages.value)
 
   if (!mergedInspectionPages.value.some((page) => page.stored_name === selectedEditPageKey.value)) {
+    const hasPendingSelectedPage = Boolean(
+      selectedEditPageKey.value
+      && v2PageEntries.value.some((page) => page.stored_name === selectedEditPageKey.value)
+    )
+    if (hasPendingSelectedPage) {
+      selectedEditRegionKey.value = ''
+      reconcileCanvasInteractionState()
+      return
+    }
     selectedEditPageKey.value = mergedInspectionPages.value[0].stored_name
   }
 
@@ -12352,6 +12327,7 @@ watch(
 
               <div class="v2-history-card-meta">
                 <span>{{ project.page_count }} 页</span>
+                <span>{{ project.region_count || 0 }} 框</span>
                 <span>{{ formatV2Timestamp(project.updated_at || project.created_at) }}</span>
               </div>
 

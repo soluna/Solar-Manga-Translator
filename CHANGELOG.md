@@ -86,3 +86,14 @@
 - Extracted frontend translation-task connection lifecycle into a tested
   module so WebSocket ownership, reconnect scheduling, task resubscription,
   and cancellation no longer live directly inside the main Vue page.
+- Fixed model/provider settings fallback persistence so non-secret OpenAI
+  Compatible model fields survive restarts even when the backend save path is
+  temporarily unavailable.
+- Fixed review workspace page selection and persisted region counts so the
+  review page no longer flashes back to the first page while loading, and
+  project/page region totals do not start at zero until each page is opened.
+- Made project glossary extraction use bounded OCR context and a longer
+  provider timeout, reducing first-run extraction failures on large projects.
+- Stopped silently substituting untranslated source pages into result archives;
+  missing translated outputs now fail loudly, and archive generation no longer
+  blocks task progress updates while compressing already-compressed images.

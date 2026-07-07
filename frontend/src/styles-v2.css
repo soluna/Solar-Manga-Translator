@@ -3500,6 +3500,12 @@ img {
   color: var(--v2-danger);
 }
 
+.v2-onboarding-copy.is-success,
+.v2-settings-inline-note.is-success {
+  color: var(--v2-success);
+  font-weight: 700;
+}
+
 .v2-inline-actions {
   display: flex;
   align-items: center;

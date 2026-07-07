@@ -796,7 +796,10 @@ async def extract_project_glossary(project_id: str, payload: dict[str, Any] | No
 
     config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
     glossary = await translator_engine.extract_project_glossary(project_id, session, config, force=True)
-    return {"glossary": glossary}
+    return {
+        "glossary": glossary,
+        "message": str(glossary.get("extract_message") or ""),
+    }
 
 
 @app.post("/api/projects/{project_id}/glossary/preview")

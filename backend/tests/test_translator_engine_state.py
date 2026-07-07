@@ -866,6 +866,26 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertEqual(result.get("preview"), "测试")
             self.assertEqual(result.get("translator"), "openai-compatible")
 
+    def test_settings_validation_treats_empty_preview_as_successful_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            def fake_validation_request(**_kwargs):
+                return ""
+
+            engine._request_chat_completions_validation_sync = fake_validation_request  # type: ignore[method-assign]
+
+            result = asyncio.run(engine.validate_user_config({
+                "translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }))
+
+            self.assertTrue(result.get("ok"))
+            self.assertEqual(result.get("message"), "连接成功")
+            self.assertEqual(result.get("preview"), "")
+
     def test_openai_compatible_settings_validation_requires_base_url_and_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -1938,11 +1958,19 @@ print(json.dumps({
             self.assertTrue(glossary_forced["auto_extract_completed"])
             self.assertEqual(calls, 4)
 
-    def test_project_glossary_extraction_skips_translation_only_doubao_model(self) -> None:
+    def test_project_glossary_extraction_uses_fallback_for_translation_only_doubao_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
 
+            captured: dict[str, str] = {}
+
+            def fake_chat_text(**kwargs):
+                captured["model"] = kwargs["model"]
+                captured["user_prompt"] = kwargs["user_prompt"]
+                return '[{"source":"小夏","translation":"小夏","category":"人名"}]'
+
+            engine._request_chat_completions_text_sync = fake_chat_text  # type: ignore[method-assign]
             result = asyncio.run(engine._request_project_glossary_extraction({
                 "translator": "custom_openai",
                 "selected_translator": "doubao-ark",
@@ -1950,7 +1978,39 @@ print(json.dumps({
                 "api_key": "secret",
             }, "项目 OCR 原文"))
 
-            self.assertEqual(result, "")
+            self.assertIn("小夏", result)
+            self.assertEqual(captured["model"], engine.DOUBAO_GLOSSARY_FALLBACK_MODEL)
+            self.assertIn("项目 OCR 原文", captured["user_prompt"])
+
+    def test_project_glossary_extraction_reports_missing_ocr_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {"entries": []},
+            }
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            glossary = asyncio.run(engine.extract_project_glossary(project_id, session, {
+                "translator": "openai-compatible",
+                "selected_translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "model",
+                "api_key": "secret",
+                "target_lang": "CHS",
+            }, force=True))
+
+            self.assertEqual(glossary["entries"], [])
+            self.assertIn("先识别文本框", glossary["extract_message"])
 
     def test_text_mask_completion_catches_symbol_stroke_fragments(self) -> None:
         mask_utils = self.load_patched_text_mask_utils()

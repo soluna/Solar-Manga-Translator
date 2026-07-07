@@ -785,6 +785,7 @@ const apiBaseUrl = ref(defaultApiBaseUrl)
 const appSettingsLoading = ref(false)
 const appSettingsSaving = ref(false)
 const appSettingsLoaded = ref(false)
+const appSettingsValidating = ref(false)
 const configuredSecrets = ref({
   api_key: false,
   image_cleanup_api_key: false,
@@ -2327,7 +2328,15 @@ function queuePersistAppSettings(value) {
 }
 
 async function validateCurrentSettings() {
+  if (appSettingsValidating.value) {
+    return
+  }
+  appSettingsValidating.value = true
   appSettingsValidation.value = { ok: null, message: '正在验证…', preview: '' }
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => {
+    controller.abort()
+  }, 45000)
   try {
     if (persistAppSettingsTimer) {
       window.clearTimeout(persistAppSettingsTimer)
@@ -2342,7 +2351,8 @@ async function validateCurrentSettings() {
     const response = await apiFetch(toApiUrl('/api/app/settings/validate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config.value)
+      body: JSON.stringify(config.value),
+      signal: controller.signal
     })
     const payload = await response.json()
     if (!response.ok) {
@@ -2350,7 +2360,7 @@ async function validateCurrentSettings() {
     }
     appSettingsValidation.value = {
       ok: Boolean(payload.ok),
-      message: String(payload.message || (payload.ok ? '连接正常。' : '验证失败')),
+      message: String(payload.message || (payload.ok ? '连接成功' : '验证失败')),
       preview: String(payload.preview || '')
     }
     if (payload.ok) {
@@ -2359,11 +2369,20 @@ async function validateCurrentSettings() {
     }
   } catch (error) {
     appSettingsSaving.value = false
+    const message = error instanceof DOMException && error.name === 'AbortError'
+      ? '连接验证超时，请检查网络、API 地址或代理设置后重试。'
+      : error instanceof Error
+      ? error.message
+      : '验证失败'
     appSettingsValidation.value = {
       ok: false,
-      message: error instanceof Error ? error.message : '验证失败',
+      message,
       preview: ''
     }
+  } finally {
+    window.clearTimeout(timeoutId)
+    appSettingsSaving.value = false
+    appSettingsValidating.value = false
   }
 }
 
@@ -3531,7 +3550,11 @@ async function extractProjectGlossary() {
     projectGlossary.value = normalizeProjectGlossary(payload.glossary || {})
     syncGlossaryDraftFromProject(projectGlossary.value)
     glossaryPreview.value = { changes: [], change_count: 0, affected_pages: [], affected_page_count: 0 }
-    status.value = `已更新专有名词库，共 ${projectGlossary.value.entries.length} 个词条。`
+    const extractMessage = String(payload.message || payload.glossary?.extract_message || '').trim()
+    status.value = extractMessage || `已更新专有名词库，共 ${projectGlossary.value.entries.length} 个词条。`
+    if (/没有可提取|无法调用|失败/.test(extractMessage)) {
+      glossaryError.value = extractMessage
+    }
   } catch (error) {
     glossaryError.value = error instanceof Error ? error.message : '提取专有名词失败'
   } finally {
@@ -12465,17 +12488,30 @@ watch(
             </label>
 
             <div class="v2-inline-actions">
-              <button type="button" class="v2-secondary-button" @click="validateCurrentSettings">
-                测试连接
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="appSettingsValidating"
+                @click="validateCurrentSettings"
+              >
+                {{ appSettingsValidating ? '正在验证…' : '测试连接' }}
               </button>
-              <button type="button" class="v2-primary-button" @click="validateCurrentSettings">
-                保存并开始
+              <button
+                type="button"
+                class="v2-primary-button"
+                :disabled="appSettingsValidating"
+                @click="validateCurrentSettings"
+              >
+                {{ appSettingsValidating ? '正在验证…' : '保存并开始' }}
               </button>
             </div>
-            <p class="v2-onboarding-copy" :class="appSettingsValidation.ok === false ? 'is-error' : ''">
+            <p
+              class="v2-onboarding-copy"
+              :class="{ 'is-error': appSettingsValidation.ok === false, 'is-success': appSettingsValidation.ok === true }"
+            >
               {{ appSettingsValidation.message || '建议先测试一次连接，确认桌面版可以正常访问你的翻译服务。' }}
             </p>
-            <p v-if="appSettingsValidation.preview" class="v2-onboarding-copy">
+            <p v-if="appSettingsValidation.preview && appSettingsValidation.ok !== true" class="v2-onboarding-copy">
               测试返回：{{ appSettingsValidation.preview }}
             </p>
           </section>
@@ -12944,8 +12980,13 @@ watch(
             </label>
 
             <div class="v2-inline-actions">
-              <button type="button" class="v2-secondary-button" @click="validateCurrentSettings">
-                测试连接
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="appSettingsValidating"
+                @click="validateCurrentSettings"
+              >
+                {{ appSettingsValidating ? '正在验证…' : '测试连接' }}
               </button>
               <button
                 v-if="showTranslatorApiKeyField"
@@ -12956,7 +12997,10 @@ watch(
                 清除密钥
               </button>
             </div>
-            <p class="v2-settings-inline-note" :class="appSettingsValidation.ok === false ? 'is-error' : ''">
+            <p
+              class="v2-settings-inline-note"
+              :class="{ 'is-error': appSettingsValidation.ok === false, 'is-success': appSettingsValidation.ok === true }"
+            >
               {{ appSettingsValidation.message || '当前会自动保存到应用配置文件。' }}
             </p>
 

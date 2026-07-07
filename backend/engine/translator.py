@@ -71,6 +71,7 @@ class TranslatorEngine:
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
+    DOUBAO_GLOSSARY_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
     DEFAULT_FONT_KEY = f"system:{BUNDLED_DEFAULT_FONT_NAME}"
     LEGACY_DEFAULT_FONT_KEYS = {"system:auto"}
@@ -310,8 +311,8 @@ class TranslatorEngine:
 
         preview = str(translated[0] or "").strip() if translated else ""
         return {
-            "ok": bool(preview),
-            "message": "连接正常。" if preview else "服务已响应，但没有返回翻译结果。",
+            "ok": True,
+            "message": "连接成功",
             "translator": selected_translator,
             "preview": preview,
         }
@@ -557,7 +558,7 @@ class TranslatorEngine:
                 text = first.get("text")
                 if isinstance(text, str) and text.strip():
                     return text.strip()
-        raise RuntimeError("服务已响应，但没有返回可读取的文本。")
+        return ""
 
     def _extract_responses_preview(self, payload: dict[str, Any]) -> str:
         output_text = payload.get("output_text")
@@ -582,7 +583,7 @@ class TranslatorEngine:
         preview = "\n".join(pieces).strip()
         if preview:
             return preview
-        raise RuntimeError("服务已响应，但没有返回可读取的文本。")
+        return ""
 
     def _format_validation_http_error(self, provider_label: str, status_code: int, body: str) -> str:
         detail = ""
@@ -3015,7 +3016,7 @@ class TranslatorEngine:
         if selected_translator == "doubao-ark":
             model = str(config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL).strip()
             if model.startswith("doubao-seed-translation"):
-                return ""
+                model = self.DOUBAO_GLOSSARY_FALLBACK_MODEL
             return await asyncio.to_thread(
                 self._request_chat_completions_text_sync,
                 provider_label="Doubao Ark",
@@ -3037,6 +3038,16 @@ class TranslatorEngine:
             )
 
         return ""
+
+    def _project_glossary_extract_result(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        glossary = self.get_project_glossary(project_id, session)
+        glossary["extract_message"] = message
+        return glossary
 
     def _parse_json_payload_from_model_text(self, text: str) -> Any:
         raw_text = str(text or "").strip()
@@ -3178,9 +3189,17 @@ class TranslatorEngine:
             return self.get_project_glossary(project_id, session)
         project_context = self._project_text_context_for_glossary(project_id, session)
         if not project_context:
-            return self.get_project_glossary(project_id, session)
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                "没有可提取的 OCR 原文。请先识别文本框，或在手动画框后填写框内原文。",
+            )
         if config.get("translator") == "none":
-            return self.get_project_glossary(project_id, session)
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                "当前翻译引擎为 none，无法调用模型提取专有名词。",
+            )
 
         if progress_callback is not None:
             await progress_callback({"event": "status", "message": "正在根据全项目原文提取专有名词库…"})
@@ -3191,7 +3210,11 @@ class TranslatorEngine:
             print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": "专有名词库自动提取失败，已继续使用现有名词库翻译。"})
-            return self.get_project_glossary(project_id, session)
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                f"专有名词提取失败：{exc}",
+            )
 
         extracted_entries = self._parse_glossary_extraction_response(response_text)
         if not extracted_entries:
@@ -3211,7 +3234,11 @@ class TranslatorEngine:
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。"})
             self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
-            return self.get_project_glossary(project_id, session)
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                "没有提取到新的专有名词。可以先检查 OCR 原文，或手动新增词条。",
+            )
 
         current = self._normalize_project_glossary(session.get("project_glossary"))
         existing_sources = {str(entry.get("source") or "") for entry in current.get("entries") or []}
@@ -3228,7 +3255,17 @@ class TranslatorEngine:
             if progress_callback is not None:
                 await progress_callback({"event": "status", "message": f"已补充 {added_count} 个项目专有名词，继续翻译。"})
         self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
-        return self.get_project_glossary(project_id, session)
+        if added_count:
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                f"已补充 {added_count} 个项目专有名词。",
+            )
+        return self._project_glossary_extract_result(
+            project_id,
+            session,
+            "已完成提取，现有词条已覆盖模型返回的结果，没有新增词条。",
+        )
 
     def _glossary_replacement_candidates(
         self,

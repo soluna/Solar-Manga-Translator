@@ -60,6 +60,7 @@ jobs:
         run: |
           npm ci
           npm run test:config-persistence
+          npm run test:local-port
           npm run test:review-workspace-state
           npm run test:task-event-state
           npm run test:task-connection

@@ -98,7 +98,7 @@ echo "等待后端启动..."
 sleep 3
 
 cd "$FRONTEND_DIR"
-FRONTEND_PORT="$(node "$FRONTEND_DIR/scripts/find-free-port.mjs" "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}")"
+FRONTEND_PORT="$(node "$FRONTEND_DIR/scripts/find-free-port.mjs" "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}" 127.0.0.1)"
 FRONTEND_URL="http://localhost:$FRONTEND_PORT"
 if [ "$MAC_OPEN_BROWSER" = "0" ]; then
   FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" VITE_API_TOKEN="$API_TOKEN" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort &

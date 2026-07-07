@@ -73,7 +73,7 @@ sleep 3
 
 echo "启动前端服务..."
 cd ../frontend
-FRONTEND_PORT="$(node scripts/find-free-port.mjs "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}")"
+FRONTEND_PORT="$(node scripts/find-free-port.mjs "${FRONTEND_PORT:-${VITE_DEV_PORT:-5173}}" 127.0.0.1)"
 FRONTEND_URL="http://localhost:$FRONTEND_PORT"
 FRONTEND_PORT="$FRONTEND_PORT" VITE_DEV_PORT="$FRONTEND_PORT" VITE_API_TOKEN="$API_TOKEN" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort --open "$FRONTEND_URL" &
 FRONTEND_PID=$!

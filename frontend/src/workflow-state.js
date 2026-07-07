@@ -146,6 +146,86 @@ export function getPrimaryProjectCommand({
   return { action: 'translate', label: '开始翻译' }
 }
 
+export function getProjectStageCommands({
+  hasProject,
+  translating,
+  activeAction,
+  workflowStage,
+  pauseAfterDetection,
+  hasPartialTranslatedResults,
+  canRunInitialDetection,
+  canContinueSegmentedTranslation,
+  canRerender,
+  canRetranslate
+}) {
+  const stage = String(workflowStage || '').trim().toLowerCase()
+  const normalizedActiveAction = normalizeTaskAction(activeAction)
+  const projectReady = Boolean(hasProject)
+  const busy = Boolean(translating)
+  const translateAction = stage === 'detected' || hasPartialTranslatedResults
+    ? 'resume-translate'
+    : 'translate'
+
+  const detectEnabled = projectReady && !busy && Boolean(canRunInitialDetection)
+  const translateEnabled = projectReady && !busy && (
+    Boolean(canContinueSegmentedTranslation)
+    || Boolean(canRetranslate)
+    || (!pauseAfterDetection && stage === 'idle')
+  )
+  const rerenderEnabled = projectReady && !busy && Boolean(canRerender)
+
+  return [
+    {
+      key: 'detect',
+      action: 'detect',
+      label: stage === 'idle' ? '识别文本框' : '重新识别',
+      enabled: detectEnabled,
+      active: busy && normalizedActiveAction === 'detect',
+      disabledReason: detectEnabled
+        ? ''
+        : busy
+          ? '当前任务完成或停止后可重新识别'
+          : projectReady
+            ? '已有识别结果时请谨慎重新识别'
+            : '请先上传漫画素材',
+    },
+    {
+      key: 'translate',
+      action: translateAction,
+      label: stage === 'detected' || hasPartialTranslatedResults
+        ? '继续翻译'
+        : stage === 'translated'
+          ? '重新翻译'
+          : '翻译整本',
+      enabled: translateEnabled,
+      active: busy && ['translate', 'resume-translate'].includes(normalizedActiveAction),
+      disabledReason: translateEnabled
+        ? ''
+        : busy
+          ? '当前任务完成或停止后可继续翻译'
+          : pauseAfterDetection && stage === 'idle'
+            ? '请先识别文本框并确认结果'
+            : projectReady
+              ? '当前项目暂时没有可翻译内容'
+              : '请先上传漫画素材',
+    },
+    {
+      key: 'rerender',
+      action: 'rerender',
+      label: '重新嵌字',
+      enabled: rerenderEnabled,
+      active: busy && normalizedActiveAction === 'rerender',
+      disabledReason: rerenderEnabled
+        ? ''
+        : busy
+          ? '当前任务完成或停止后可重新嵌字'
+          : projectReady
+            ? '需要先生成翻译结果'
+            : '请先上传漫画素材',
+    }
+  ]
+}
+
 export function getReviewPrimaryCommand({
   translating,
   canContinueSegmentedTranslation,
@@ -198,6 +278,42 @@ export function getTaskProgressStatus(action, {
 
 export function getTaskFailureStatus(action) {
   return getTaskActionDescriptor(action).failureMessage
+}
+
+export function shouldConfirmBatchTranslation(action, { targetStoredName = '' } = {}) {
+  const normalized = normalizeTaskAction(action)
+  if (String(targetStoredName || '').trim()) {
+    return false
+  }
+  return normalized === 'translate' || normalized === 'resume-translate'
+}
+
+export function buildBatchTranslationConfirmation({
+  action = 'translate',
+  pageCount = 0,
+  regionCount = 0,
+  providerLabel = '当前翻译服务',
+  targetLanguageLabel = '目标语言',
+} = {}) {
+  const descriptor = getTaskActionDescriptor(action)
+  const safePageCount = Math.max(0, Number(pageCount || 0))
+  const safeRegionCount = Math.max(0, Number(regionCount || 0))
+  const safeProviderLabel = String(providerLabel || '当前翻译服务').trim()
+  const safeTargetLanguageLabel = String(targetLanguageLabel || '目标语言').trim()
+
+  return {
+    title: '开始批量翻译前确认',
+    action: descriptor.action,
+    actionLabel: descriptor.actionLabel,
+    confirmLabel: '确认开始翻译',
+    cancelLabel: '再检查一下',
+    summary: `${descriptor.actionLabel}将通过 ${safeProviderLabel} 处理 ${safePageCount} 页、约 ${safeRegionCount} 个文本框，目标语言为 ${safeTargetLanguageLabel}。`,
+    items: [
+      `翻译服务：${safeProviderLabel}`,
+      '费用和限额由你的翻译服务商实际收取，本地无法精确估算。',
+      '任务开始后可随时停止；已成功生成的旧结果会被保留到新任务完成后再替换。',
+    ],
+  }
 }
 
 function renderTemplate(template, values) {

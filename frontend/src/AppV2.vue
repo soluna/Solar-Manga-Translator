@@ -3,12 +3,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import {
+  buildBatchTranslationConfirmation,
+  getProjectStageCommands,
   getPrimaryProjectCommand,
   getReviewPrimaryCommand,
   getTaskFailureStatus as getWorkflowTaskFailureStatus,
   getTaskProgressStatus,
   getTaskStartStatus,
   normalizeTaskAction,
+  shouldConfirmBatchTranslation,
   workflowStageLabelMap
 } from './workflow-state.js'
 
@@ -339,7 +342,7 @@ function createDefaultConfig() {
     rerender_output_format: 'png',
     default_review_mode: 'canvas_beta',
     workspace_width_mode: 'fixed',
-    pause_after_detection: false,
+    pause_after_detection: true,
     mask_cleanup_strength: 'standard',
     export_mask_debug: false,
     advanced_text_repair: 'auto',
@@ -813,6 +816,16 @@ const topbarTaskProgress = ref({
 const activeTaskId = ref('')
 const activeTaskSequence = ref(0)
 const activeTaskTargetStoredName = ref('')
+const activeTaskPhase = ref({
+  label: '',
+  index: 0,
+  total: 0,
+  scopeLabel: '',
+  current: 0,
+  progressTotal: 0
+})
+const batchTranslationConfirmationOpen = ref(false)
+const pendingBatchTranslationAction = ref('')
 
 const config = ref(loadStoredConfig())
 const reviewWorkspacePrefs = ref(loadStoredReviewWorkspacePrefs())
@@ -1570,12 +1583,39 @@ const v2TopbarProgressPercent = computed(() => (
     ? progressPercent.value
     : topbarTaskProgressPercent.value
 ))
-const canRunProjectPrimaryAction = computed(
-  () => Boolean(sessionId.value) && !translating.value
-)
 const canCancelTask = computed(
   () => Boolean(translating.value && activeTaskId.value)
 )
+const projectStageCommands = computed(() => getProjectStageCommands({
+  hasProject: Boolean(sessionId.value),
+  translating: translating.value,
+  activeAction: activeAction.value,
+  workflowStage: workflowStage.value,
+  pauseAfterDetection: config.value.pause_after_detection,
+  hasPartialTranslatedResults: hasPartialTranslatedResults.value,
+  canRunInitialDetection: canRunInitialDetection.value,
+  canContinueSegmentedTranslation: canContinueSegmentedTranslation.value,
+  canRerender: canRerender.value,
+  canRetranslate: canRetranslate.value
+}))
+const activeTaskPhaseVisible = computed(() => Boolean(
+  translating.value
+  && (activeTaskPhase.value.label || activeTaskPhase.value.index || activeTaskPhase.value.current)
+))
+const activeTaskPhaseLabel = computed(() => {
+  const phase = activeTaskPhase.value
+  const indexPart = phase.index && phase.total ? `阶段 ${phase.index}/${phase.total}` : '当前阶段'
+  const labelPart = phase.label || '任务处理中'
+  const scopePart = phase.scopeLabel ? ` · ${phase.scopeLabel}` : ''
+  return `${indexPart} · ${labelPart}${scopePart}`
+})
+const activeTaskPhaseProgressLabel = computed(() => {
+  const phase = activeTaskPhase.value
+  if (phase.current && phase.progressTotal) {
+    return `${phase.current} / ${phase.progressTotal} 页`
+  }
+  return canCancelTask.value ? '可随时停止' : ''
+})
 const v2SettingsOpen = computed({
   get() {
     return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
@@ -1854,7 +1894,29 @@ const primaryProjectCommand = computed(() => getPrimaryProjectCommand({
   activeAction: activeAction.value
 }))
 const primaryTranslateAction = computed(() => primaryProjectCommand.value.action)
-const primaryTranslateLabel = computed(() => primaryProjectCommand.value.label)
+const activeTranslatorServiceLabel = computed(() => {
+  const translator = translatorLabelMap[config.value.translator] || config.value.translator || '翻译服务'
+  if (config.value.translator === 'doubao-ark') {
+    return `${translator} / ${getResolvedTranslatorModel(config.value)}`
+  }
+  if (config.value.translator === 'openai-compatible') {
+    return config.value.openai_model ? `${translator} / ${config.value.openai_model}` : translator
+  }
+  return translator
+})
+const projectTranslationRegionCount = computed(() => (
+  v2PageEntries.value.reduce((total, page) => total + Number(page.regionCount || 0), 0)
+))
+const v2OpenReviewLabel = computed(() => (
+  projectTranslationRegionCount.value > 0 ? '进入审校' : '手动标框'
+))
+const batchTranslationConfirmation = computed(() => buildBatchTranslationConfirmation({
+  action: pendingBatchTranslationAction.value || primaryTranslateAction.value,
+  pageCount: v2PageEntries.value.length,
+  regionCount: projectTranslationRegionCount.value,
+  providerLabel: activeTranslatorServiceLabel.value,
+  targetLanguageLabel: targetLangLabelMap[config.value.target_lang] || config.value.target_lang || '目标语言'
+}))
 
 function toApiUrl(path) {
   if (!path) {
@@ -2496,6 +2558,14 @@ function resetActiveTaskConnection() {
   activeTaskId.value = ''
   activeTaskSequence.value = 0
   activeTaskTargetStoredName.value = ''
+  activeTaskPhase.value = {
+    label: '',
+    index: 0,
+    total: 0,
+    scopeLabel: '',
+    current: 0,
+    progressTotal: 0
+  }
 }
 
 function clearTaskError() {
@@ -8942,29 +9012,29 @@ function runV2ReviewPrimaryAction() {
   }
   const action = v2ReviewPrimaryCommand.value.action || 'translate'
   if (action) {
-    startTranslation(action)
+    requestStartTranslation(action)
   }
 }
 
-function runV2ProjectPrimaryAction() {
-  if (!canRunProjectPrimaryAction.value) {
+function runV2ProjectStageCommand(command) {
+  if (!command?.enabled || translating.value) {
     return
   }
-  startTranslation(primaryTranslateAction.value)
+  requestStartTranslation(command.action)
 }
 
 function runV2RerenderAction() {
   if (!canRerender.value || translating.value) {
     return
   }
-  startTranslation('rerender')
+  requestStartTranslation('rerender')
 }
 
 function runV2RetranslateAction() {
   if (!canRetranslate.value || translating.value) {
     return
   }
-  startTranslation(hasPartialTranslatedResults.value || workflowStage.value === 'detected' ? 'resume-translate' : 'translate')
+  requestStartTranslation(hasPartialTranslatedResults.value || workflowStage.value === 'detected' ? 'resume-translate' : 'translate')
 }
 
 function getAdvancedEraseConfigError() {
@@ -9983,6 +10053,29 @@ function getTaskFailureStatus(action = activeAction.value) {
   return getWorkflowTaskFailureStatus(action)
 }
 
+function updateActiveTaskPhase(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return
+  }
+  const phaseLabel = String(payload.phase_label || payload.workflow_phase || '').trim()
+  const phaseIndex = Number(payload.phase_index || 0)
+  const phaseTotal = Number(payload.phase_total || 0)
+  const scopeLabel = String(payload.scope_label || '').trim()
+  const progressCurrent = Number(payload.progress_current || payload.current || 0)
+  const progressTotal = Number(payload.progress_total || payload.total || 0)
+  if (!phaseLabel && !phaseIndex && !progressCurrent) {
+    return
+  }
+  activeTaskPhase.value = {
+    label: phaseLabel,
+    index: phaseIndex,
+    total: phaseTotal,
+    scopeLabel,
+    current: progressCurrent,
+    progressTotal
+  }
+}
+
 async function handleTranslationTaskEvent(payload, currentSocket = socket) {
   const payloadTaskId = String(payload?.task_id || '').trim()
   const payloadSequence = Number(payload?.sequence || 0)
@@ -10006,6 +10099,7 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
   if (payload?.metadata?.target_stored_name) {
     activeTaskTargetStoredName.value = String(payload.metadata.target_stored_name)
   }
+  updateActiveTaskPhase(payload)
 
   const pageTargetStoredName = activeTaskTargetStoredName.value
   if (payload.event === 'task') {
@@ -10291,6 +10385,29 @@ async function cancelActiveTask() {
     errorMessage.value = error instanceof Error ? error.message : '停止任务失败'
     status.value = '停止任务失败，后台任务可能仍在运行。'
   }
+}
+
+function requestStartTranslation(action = 'translate', options = {}) {
+  const normalizedAction = normalizeTaskAction(action)
+  const targetStoredName = String(options.targetStoredName || '').trim()
+  if (!options.skipConfirmation && shouldConfirmBatchTranslation(normalizedAction, { targetStoredName })) {
+    pendingBatchTranslationAction.value = normalizedAction
+    batchTranslationConfirmationOpen.value = true
+    return
+  }
+  startTranslation(normalizedAction)
+}
+
+function closeBatchTranslationConfirmation() {
+  batchTranslationConfirmationOpen.value = false
+  pendingBatchTranslationAction.value = ''
+}
+
+function confirmBatchTranslation() {
+  const action = pendingBatchTranslationAction.value || primaryTranslateAction.value || 'translate'
+  batchTranslationConfirmationOpen.value = false
+  pendingBatchTranslationAction.value = ''
+  startTranslation(action)
 }
 
 function startTranslation(action = 'translate') {
@@ -10715,6 +10832,10 @@ watch(
                 <div class="v2-topbar-status-fill" :style="{ width: `${v2TopbarProgressPercent}%` }"></div>
               </div>
               <span>{{ v2TopbarProgressCurrent }} / {{ v2TopbarProgressTotal }}</span>
+              <span v-if="activeTaskPhaseVisible" class="v2-topbar-phase">
+                {{ activeTaskPhaseLabel }}
+                <template v-if="activeTaskPhaseProgressLabel"> · {{ activeTaskPhaseProgressLabel }}</template>
+              </span>
             </div>
           </div>
           <button
@@ -10805,6 +10926,10 @@ watch(
                 <div class="v2-topbar-status-fill" :style="{ width: `${v2TopbarProgressPercent}%` }"></div>
               </div>
               <span>{{ v2TopbarProgressCurrent }} / {{ v2TopbarProgressTotal }}</span>
+              <span v-if="activeTaskPhaseVisible" class="v2-topbar-phase">
+                {{ activeTaskPhaseLabel }}
+                <template v-if="activeTaskPhaseProgressLabel"> · {{ activeTaskPhaseProgressLabel }}</template>
+              </span>
             </div>
           </div>
 
@@ -10907,14 +11032,6 @@ watch(
 
           <div class="v2-section-actions">
             <button
-              type="button"
-              class="v2-primary-button"
-              :disabled="!canRunProjectPrimaryAction"
-              @click="runV2ProjectPrimaryAction"
-            >
-              {{ primaryTranslateLabel }}
-            </button>
-            <button
               v-if="canCancelTask"
               type="button"
               class="v2-icon-button v2-cancel-task-button"
@@ -10930,9 +11047,27 @@ watch(
               :disabled="!v2PageEntries.length"
               @click="openV2ReviewPage(v2SelectedPageEntry?.stored_name || '')"
             >
-              进入审校
+              {{ v2OpenReviewLabel }}
             </button>
           </div>
+        </div>
+
+        <div class="v2-workflow-strip" data-testid="v2-workflow-strip">
+          <button
+            v-for="command in projectStageCommands"
+            :key="command.key"
+            type="button"
+            :class="['v2-workflow-step-button', command.active ? 'is-active' : '', command.enabled ? '' : 'is-disabled']"
+            :disabled="!command.enabled"
+            :title="command.enabled ? command.label : command.disabledReason"
+            @click="runV2ProjectStageCommand(command)"
+          >
+            <span class="v2-workflow-step-index">{{ command.key === 'detect' ? '1' : command.key === 'translate' ? '2' : '3' }}</span>
+            <span>{{ command.label }}</span>
+          </button>
+          <p class="v2-workflow-strip-note">
+            {{ config.pause_after_detection ? '推荐流程：先识别文本框并检查，再开始批量翻译。' : '当前流程：可直接翻译，也可以先识别后审校。' }}
+          </p>
         </div>
 
         <div class="v2-picker-toolbar">
@@ -12168,6 +12303,32 @@ watch(
           <p>{{ taskErrorDetails.action }}</p>
           <pre v-if="taskErrorDetails.technical_message">{{ taskErrorDetails.technical_message }}</pre>
         </div>
+      </section>
+    </div>
+
+    <div v-if="batchTranslationConfirmationOpen" class="v2-overlay" @click.self="closeBatchTranslationConfirmation">
+      <section class="v2-modal v2-batch-confirm-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">批量任务</p>
+            <h2>{{ batchTranslationConfirmation.title }}</h2>
+          </div>
+          <button type="button" class="v2-icon-button" aria-label="关闭确认" @click="closeBatchTranslationConfirmation">✕</button>
+        </header>
+        <div class="v2-batch-confirm-body">
+          <p>{{ batchTranslationConfirmation.summary }}</p>
+          <ul>
+            <li v-for="item in batchTranslationConfirmation.items" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <footer class="v2-selection-erase-actions">
+          <button type="button" class="v2-secondary-button" @click="closeBatchTranslationConfirmation">
+            {{ batchTranslationConfirmation.cancelLabel }}
+          </button>
+          <button type="button" class="v2-primary-button" @click="confirmBatchTranslation">
+            {{ batchTranslationConfirmation.confirmLabel }}
+          </button>
+        </footer>
       </section>
     </div>
 

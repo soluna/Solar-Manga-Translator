@@ -204,6 +204,14 @@ img {
   white-space: nowrap;
 }
 
+.v2-topbar-phase {
+  max-width: 280px;
+  color: var(--v2-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .v2-status-detail-button {
   width: 24px;
   height: 24px;
@@ -800,6 +808,64 @@ img {
 
 .v2-section-actions {
   gap: 14px;
+}
+
+.v2-workflow-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 18px 0 14px;
+}
+
+.v2-workflow-step-button {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 14px;
+  border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius-md);
+  background: white;
+  color: var(--v2-text);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.v2-workflow-step-button:hover:not(:disabled) {
+  border-color: rgba(37, 99, 235, 0.28);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+}
+
+.v2-workflow-step-button.is-active {
+  border-color: rgba(37, 99, 235, 0.42);
+  color: var(--v2-accent);
+}
+
+.v2-workflow-step-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.v2-workflow-step-index {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--v2-accent);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.v2-workflow-strip-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--v2-text-muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
 
 .v2-section-head,
@@ -3368,6 +3434,31 @@ img {
   width: min(560px, 100%);
 }
 
+.v2-batch-confirm-modal {
+  width: min(560px, 100%);
+}
+
+.v2-batch-confirm-body {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.v2-batch-confirm-body p {
+  margin: 0;
+  color: var(--v2-text);
+  line-height: 1.58;
+}
+
+.v2-batch-confirm-body ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--v2-text-soft);
+  line-height: 1.55;
+}
+
 .v2-task-error-content {
   display: grid;
   gap: 14px;
@@ -3473,6 +3564,10 @@ img {
     width: 100%;
     justify-content: space-between;
   }
+
+  .v2-workflow-strip {
+    grid-template-columns: repeat(2, minmax(150px, 1fr));
+  }
 }
 
 @media (max-width: 1080px) {
@@ -3497,6 +3592,10 @@ img {
 
   .v2-page-grid,
   .v2-history-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-workflow-strip {
     grid-template-columns: 1fr;
   }
 

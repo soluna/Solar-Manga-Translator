@@ -77,3 +77,6 @@
   recovery actions, redacted technical details, and full server-side logging.
 - Added shared workflow descriptors for task events and frontend command
   labels, preparing the UI for clearer staged progress and P2 workflow polish.
+- Made new projects default to a staged recognize-then-translate workflow,
+  added stable project-stage buttons, task phase labels, clearer zero-region
+  review entry text, and a batch-translation confirmation dialog.

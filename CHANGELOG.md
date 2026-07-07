@@ -80,3 +80,6 @@
 - Made new projects default to a staged recognize-then-translate workflow,
   added stable project-stage buttons, task phase labels, clearer zero-region
   review entry text, and a batch-translation confirmation dialog.
+- Extracted frontend task-event state derivation into a tested pure module so
+  duplicate event filtering, task phase display, progress, and task status
+  messages no longer live directly inside the main Vue page.

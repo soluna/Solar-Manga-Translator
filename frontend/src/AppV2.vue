@@ -3,13 +3,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import {
+  createEmptyTaskPhase,
+  deriveTaskEventUpdate,
+} from './task-event-state.js'
+import {
   buildBatchTranslationConfirmation,
   getProjectStageCommands,
   getPrimaryProjectCommand,
   getReviewPrimaryCommand,
-  getTaskFailureStatus as getWorkflowTaskFailureStatus,
-  getTaskProgressStatus,
-  getTaskStartStatus,
   normalizeTaskAction,
   shouldConfirmBatchTranslation,
   workflowStageLabelMap
@@ -817,14 +818,7 @@ const topbarTaskProgress = ref({
 const activeTaskId = ref('')
 const activeTaskSequence = ref(0)
 const activeTaskTargetStoredName = ref('')
-const activeTaskPhase = ref({
-  label: '',
-  index: 0,
-  total: 0,
-  scopeLabel: '',
-  current: 0,
-  progressTotal: 0
-})
+const activeTaskPhase = ref(createEmptyTaskPhase())
 const batchTranslationConfirmationOpen = ref(false)
 const pendingBatchTranslationAction = ref('')
 
@@ -2577,14 +2571,7 @@ function resetActiveTaskConnection() {
   activeTaskId.value = ''
   activeTaskSequence.value = 0
   activeTaskTargetStoredName.value = ''
-  activeTaskPhase.value = {
-    label: '',
-    index: 0,
-    total: 0,
-    scopeLabel: '',
-    current: 0,
-    progressTotal: 0
-  }
+  activeTaskPhase.value = createEmptyTaskPhase()
 }
 
 function clearTaskError() {
@@ -10072,114 +10059,66 @@ async function submitFile() {
   }
 }
 
-function getTaskFailureStatus(action = activeAction.value) {
-  return getWorkflowTaskFailureStatus(action)
-}
-
-function updateActiveTaskPhase(payload) {
-  if (!payload || typeof payload !== 'object') {
-    return
-  }
-  const phaseLabel = String(payload.phase_label || payload.workflow_phase || '').trim()
-  const phaseIndex = Number(payload.phase_index || 0)
-  const phaseTotal = Number(payload.phase_total || 0)
-  const scopeLabel = String(payload.scope_label || '').trim()
-  const progressCurrent = Number(payload.progress_current || payload.current || 0)
-  const progressTotal = Number(payload.progress_total || payload.total || 0)
-  if (!phaseLabel && !phaseIndex && !progressCurrent) {
-    return
-  }
-  activeTaskPhase.value = {
-    label: phaseLabel,
-    index: phaseIndex,
-    total: phaseTotal,
-    scopeLabel,
-    current: progressCurrent,
-    progressTotal
-  }
-}
-
 async function handleTranslationTaskEvent(payload, currentSocket = socket) {
-  const payloadTaskId = String(payload?.task_id || '').trim()
-  const payloadSequence = Number(payload?.sequence || 0)
-  if (
-    payloadTaskId
-    && payloadTaskId === activeTaskId.value
-    && payloadSequence > 0
-    && payloadSequence <= activeTaskSequence.value
-  ) {
+  const eventPayload = payload && typeof payload === 'object' ? payload : {}
+  const eventUpdate = deriveTaskEventUpdate(payload, {
+    activeTaskId: activeTaskId.value,
+    activeTaskSequence: activeTaskSequence.value,
+    activeAction: activeAction.value,
+    activeTaskTargetStoredName: activeTaskTargetStoredName.value,
+  })
+  if (eventUpdate.ignore) {
     return
   }
-  if (payloadTaskId) {
-    activeTaskId.value = payloadTaskId
+  activeTaskId.value = eventUpdate.activeTaskId
+  activeTaskSequence.value = eventUpdate.activeTaskSequence
+  activeAction.value = eventUpdate.activeAction
+  activeTaskTargetStoredName.value = eventUpdate.activeTaskTargetStoredName
+  if (eventUpdate.phase) {
+    activeTaskPhase.value = eventUpdate.phase
   }
-  if (payloadSequence > 0) {
-    activeTaskSequence.value = Math.max(activeTaskSequence.value, payloadSequence)
-  }
-  if (payload?.task_action || payload?.action) {
-    activeAction.value = normalizeTaskAction(payload.task_action || payload.action)
-  }
-  if (payload?.metadata?.target_stored_name) {
-    activeTaskTargetStoredName.value = String(payload.metadata.target_stored_name)
-  }
-  updateActiveTaskPhase(payload)
 
-  const pageTargetStoredName = activeTaskTargetStoredName.value
-  if (payload.event === 'task') {
+  const pageTargetStoredName = eventUpdate.activeTaskTargetStoredName
+  if (eventPayload.event === 'task') {
     taskReconnectAttempts = 0
     clearTaskReconnectTimer()
     return
   }
 
-  if (payload.event === 'start') {
-    const totalPages = Number(payload.progress_total || payload.total_pages || 0)
-    progress.value = { current: 0, total: totalPages }
-    status.value = payload.message
-      || payload.default_message
-      || getTaskStartStatus(activeAction.value, {
-        totalPages,
-        targetStoredName: pageTargetStoredName
-      })
+  if (eventPayload.event === 'start') {
+    progress.value = eventUpdate.progress || { current: 0, total: 0 }
+    status.value = eventUpdate.statusMessage
     return
   }
 
-  if (payload.event === 'progress') {
-    const currentProgress = Number(payload.progress_current || payload.current || 0)
-    const totalProgress = Number(payload.progress_total || payload.total || 0)
-    progress.value = {
-      current: currentProgress,
-      total: totalProgress
+  if (eventPayload.event === 'progress') {
+    const currentProgress = Number(eventUpdate.progress?.current || 0)
+    const totalProgress = Number(eventUpdate.progress?.total || 0)
+    progress.value = eventUpdate.progress || { current: currentProgress, total: totalProgress }
+    if (eventPayload.stored_name) {
+      markPageImageUpdated(eventPayload.stored_name)
     }
-    if (payload.stored_name) {
-      markPageImageUpdated(payload.stored_name)
-    }
-    const nextImageUrl = getVersionedPageImageUrl(payload.image_url, payload.stored_name)
-    preloadImageUrl(getReviewPageImageUrl(nextImageUrl, payload.stored_name))
+    const nextImageUrl = getVersionedPageImageUrl(eventPayload.image_url, eventPayload.stored_name)
+    preloadImageUrl(getReviewPageImageUrl(nextImageUrl, eventPayload.stored_name))
     translatedImages.value = upsertTranslatedImage(
       translatedImages.value,
-      payload,
+      eventPayload,
       nextImageUrl,
       sessionId.value,
     )
-    if (payload.stored_name) {
+    if (eventPayload.stored_name) {
       reviewInspectionPages.value = updatePagePreviewUrl(
         reviewInspectionPages.value,
-        payload.stored_name,
-        payload.image_url,
+        eventPayload.stored_name,
+        eventPayload.image_url,
       )
       styleInspectionPages.value = updatePagePreviewUrl(
         styleInspectionPages.value,
-        payload.stored_name,
-        payload.image_url,
+        eventPayload.stored_name,
+        eventPayload.image_url,
       )
     }
-    status.value = payload.message
-      || payload.default_message
-      || getTaskProgressStatus(activeAction.value, {
-        current: currentProgress,
-        total: totalProgress,
-        targetStoredName: pageTargetStoredName
-      })
+    status.value = eventUpdate.statusMessage
     if (totalProgress > 0 && currentProgress >= totalProgress) {
       scheduleTranslationCompletionRecovery({
         sessionId: sessionId.value,
@@ -10192,13 +10131,13 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
     return
   }
 
-  if (payload.event === 'status') {
-    status.value = payload.message || '正在进行复杂页增强修复...'
+  if (eventPayload.event === 'status') {
+    status.value = eventUpdate.statusMessage
     return
   }
 
-  if (payload.event === 'completed') {
-    await finalizeCompletedTranslation(payload, {
+  if (eventPayload.event === 'completed') {
+    await finalizeCompletedTranslation(eventPayload, {
       action: activeAction.value,
       pageTargetStoredName,
       socket: currentSocket,
@@ -10206,24 +10145,24 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
     return
   }
 
-  if (payload.event === 'cancelled') {
+  if (eventPayload.event === 'cancelled') {
     resetTranslationCompletionRecovery()
     closeSocket(currentSocket)
     translating.value = false
     errorMessage.value = ''
     clearTaskError()
-    status.value = '任务已停止。'
+    status.value = eventUpdate.statusMessage
     resetActiveTaskConnection()
     void loadProjectHistory({ silent: true })
     return
   }
 
-  if (payload.event === 'error') {
+  if (eventPayload.event === 'error') {
     resetTranslationCompletionRecovery()
     closeSocket(currentSocket)
     translating.value = false
-    applyTaskError(payload, '翻译失败')
-    status.value = getTaskFailureStatus()
+    applyTaskError(eventPayload, '翻译失败')
+    status.value = eventUpdate.statusMessage
     resetActiveTaskConnection()
   }
 }

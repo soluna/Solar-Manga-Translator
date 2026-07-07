@@ -83,3 +83,6 @@
 - Extracted frontend task-event state derivation into a tested pure module so
   duplicate event filtering, task phase display, progress, and task status
   messages no longer live directly inside the main Vue page.
+- Extracted frontend translation-task connection lifecycle into a tested
+  module so WebSocket ownership, reconnect scheduling, task resubscription,
+  and cancellation no longer live directly inside the main Vue page.

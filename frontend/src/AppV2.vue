@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { mergePersistedConfigWithBrowserPreferences } from './config-persistence.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
+import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
   createEmptyTaskPhase,
   deriveTaskEventUpdate,
@@ -861,8 +862,6 @@ const v2UploadInputRef = ref(null)
 const v2FolderUploadInputRef = ref(null)
 const v2SupplementInputRef = ref(null)
 
-let socket = null
-const expectedClosingSockets = new WeakSet()
 let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
 let suppressCanvasRegionClickUntil = 0
@@ -883,10 +882,31 @@ const TRANSLATION_COMPLETION_RECOVERY_MAX_ATTEMPTS = 20
 let translationCompletionRecoveryTimer = null
 let translationCompletionRecoveryToken = 0
 let translationFinalizationPromise = null
-let taskReconnectTimer = null
-let taskReconnectAttempts = 0
 let miniToastTimer = null
 const TASK_RECONNECT_MAX_ATTEMPTS = 20
+
+const translationTaskConnection = useTranslationTaskConnection({
+  refs: {
+    sessionId,
+    translating,
+    status,
+    errorMessage,
+    activeTaskId,
+    activeTaskSequence,
+    activeAction,
+    activeTaskTargetStoredName,
+    activeTaskPhase,
+    progress,
+  },
+  createApiWebSocket,
+  buildRuntimeConfig,
+  apiFetch,
+  toApiUrl,
+  handleTaskEvent: handleTranslationTaskEvent,
+  clearTaskError,
+  getBackendLogHint,
+  maxReconnectAttempts: TASK_RECONNECT_MAX_ATTEMPTS,
+})
 
 const acceptValue = '.zip,.cbz,.jpg,.jpeg,.png,.webp'
 const {
@@ -2559,19 +2579,11 @@ async function exportCurrentProjectTranslationRequestDebug() {
 }
 
 function clearTaskReconnectTimer() {
-  if (taskReconnectTimer != null) {
-    window.clearTimeout(taskReconnectTimer)
-    taskReconnectTimer = null
-  }
+  translationTaskConnection.clearReconnectTimer()
 }
 
 function resetActiveTaskConnection() {
-  clearTaskReconnectTimer()
-  taskReconnectAttempts = 0
-  activeTaskId.value = ''
-  activeTaskSequence.value = 0
-  activeTaskTargetStoredName.value = ''
-  activeTaskPhase.value = createEmptyTaskPhase()
+  translationTaskConnection.resetActiveTaskConnection()
 }
 
 function clearTaskError() {
@@ -2588,15 +2600,8 @@ function applyTaskError(payload, fallbackMessage = '任务执行失败。') {
   errorMessage.value = String(details?.message || payload?.message || fallbackMessage)
 }
 
-function closeSocket(targetSocket = socket) {
-  if (targetSocket) {
-    const socketToClose = targetSocket
-    if (socket === socketToClose) {
-      socket = null
-    }
-    expectedClosingSockets.add(socketToClose)
-    socketToClose.close()
-  }
+function closeSocket(targetSocket) {
+  translationTaskConnection.closeSocket(targetSocket)
 }
 
 function clearTranslationCompletionRecoveryTimer() {
@@ -2670,7 +2675,7 @@ async function finalizeCompletedTranslation(payload, context = {}) {
 
   const completedAction = String(context.action || activeAction.value || 'translate')
   const pageTargetStoredName = String(context.pageTargetStoredName || '').trim()
-  const activeSocket = context.socket || socket
+  const activeSocket = context.socket || translationTaskConnection.getSocket()
   const finalization = (async () => {
     resetTranslationCompletionRecovery()
     closeSocket(activeSocket)
@@ -10059,7 +10064,7 @@ async function submitFile() {
   }
 }
 
-async function handleTranslationTaskEvent(payload, currentSocket = socket) {
+async function handleTranslationTaskEvent(payload, currentSocket = translationTaskConnection.getSocket()) {
   const eventPayload = payload && typeof payload === 'object' ? payload : {}
   const eventUpdate = deriveTaskEventUpdate(payload, {
     activeTaskId: activeTaskId.value,
@@ -10080,7 +10085,6 @@ async function handleTranslationTaskEvent(payload, currentSocket = socket) {
 
   const pageTargetStoredName = eventUpdate.activeTaskTargetStoredName
   if (eventPayload.event === 'task') {
-    taskReconnectAttempts = 0
     clearTaskReconnectTimer()
     return
   }
@@ -10172,181 +10176,26 @@ function connectTranslationTaskSocket({
   pageTargetStoredName = activeTaskTargetStoredName.value,
   taskId = activeTaskId.value,
 } = {}) {
-  if (!sessionId.value || !translating.value) {
-    return
-  }
-
-  clearTaskReconnectTimer()
-  const currentSocket = createApiWebSocket(`/ws/translate/${sessionId.value}`)
-  socket = currentSocket
-
-  currentSocket.onopen = () => {
-    if (taskId) {
-      currentSocket.send(JSON.stringify({
-        task_id: taskId,
-        after_sequence: activeTaskSequence.value
-      }))
-      status.value = '已重新连接，正在同步任务进度…'
-      return
-    }
-    currentSocket.send(JSON.stringify({
-      action,
-      config: buildRuntimeConfig(),
-      target_stored_name: pageTargetStoredName || undefined
-    }))
-  }
-
-  currentSocket.onmessage = (event) => {
-    if (currentSocket !== socket) {
-      return
-    }
-    try {
-      const payload = JSON.parse(event.data)
-      taskReconnectAttempts = 0
-      void handleTranslationTaskEvent(payload, currentSocket)
-    } catch (error) {
-      console.warn('[TranslationTask] invalid task event', error)
-    }
-  }
-
-  currentSocket.onerror = () => {
-    if (currentSocket !== socket || expectedClosingSockets.has(currentSocket)) {
-      return
-    }
-    status.value = '任务仍在后台运行，连接中断后正在恢复…'
-  }
-
-  currentSocket.onclose = () => {
-    if (expectedClosingSockets.has(currentSocket)) {
-      expectedClosingSockets.delete(currentSocket)
-      return
-    }
-    if (currentSocket !== socket) {
-      return
-    }
-    socket = null
-    if (translating.value) {
-      scheduleTaskReconnect()
-    }
-  }
+  return translationTaskConnection.connect({ action, pageTargetStoredName, taskId })
 }
 
 function scheduleTaskReconnect() {
-  if (!translating.value || !sessionId.value) {
-    return
-  }
-  clearTaskReconnectTimer()
-  taskReconnectAttempts += 1
-  if (taskReconnectAttempts > TASK_RECONNECT_MAX_ATTEMPTS) {
-    translating.value = false
-    errorMessage.value = `无法重新连接后台任务。${getBackendLogHint()}`
-    status.value = '任务连接恢复失败。'
-    resetActiveTaskConnection()
-    return
-  }
-
-  status.value = `任务仍在后台运行，正在重新连接（${taskReconnectAttempts}/${TASK_RECONNECT_MAX_ATTEMPTS}）…`
-  const delayMs = Math.min(5000, 750 + taskReconnectAttempts * 250)
-  taskReconnectTimer = window.setTimeout(() => {
-    taskReconnectTimer = null
-    void reconnectTranslationTask()
-  }, delayMs)
+  return translationTaskConnection.scheduleReconnect()
 }
 
 async function reconnectTranslationTask() {
-  if (!translating.value || !sessionId.value) {
-    return
-  }
-  try {
-    if (!activeTaskId.value) {
-      const response = await apiFetch(
-        toApiUrl(`/api/projects/${encodeURIComponent(sessionId.value)}/task`)
-      )
-      const payload = await response.json()
-      if (!response.ok) {
-        throw new Error(payload.detail || '查询后台任务失败')
-      }
-      const task = payload?.task
-      if (!task?.task_id) {
-        throw new Error('后台没有找到可恢复的任务')
-      }
-      activeTaskId.value = String(task.task_id)
-      activeAction.value = String(task.action || activeAction.value)
-      activeTaskTargetStoredName.value = String(task.metadata?.target_stored_name || '')
-      const events = Array.isArray(task.events) ? task.events : []
-      for (const event of events) {
-        await handleTranslationTaskEvent(event, null)
-      }
-      if (!translating.value || ['completed', 'failed', 'cancelled'].includes(String(task.status))) {
-        return
-      }
-    }
-    connectTranslationTaskSocket()
-  } catch (error) {
-    console.warn('[TranslationTask] reconnect failed', error)
-    scheduleTaskReconnect()
-  }
+  return await translationTaskConnection.reconnect()
 }
 
 async function resumeProjectTaskSubscription(projectId) {
-  const normalizedProjectId = String(projectId || '').trim()
-  if (!normalizedProjectId) {
-    return false
-  }
-  try {
-    const response = await apiFetch(
-      toApiUrl(`/api/projects/${encodeURIComponent(normalizedProjectId)}/task`)
-    )
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '查询项目任务失败')
-    }
-    const task = payload?.task
-    if (!task?.task_id || ['completed', 'failed', 'cancelled'].includes(String(task.status))) {
-      return false
-    }
-
-    resetActiveTaskConnection()
-    clearTaskError()
-    translating.value = true
-    activeTaskId.value = String(task.task_id)
-    activeAction.value = String(task.action || 'translate')
-    activeTaskTargetStoredName.value = String(task.metadata?.target_stored_name || '')
-    progress.value = { current: 0, total: 0 }
-    for (const event of Array.isArray(task.events) ? task.events : []) {
-      await handleTranslationTaskEvent(event, null)
-    }
-    if (translating.value) {
-      connectTranslationTaskSocket()
-    }
-    return true
-  } catch (error) {
-    console.warn('[TranslationTask] failed to resume project task', error)
-    return false
-  }
+  return await translationTaskConnection.resumeProjectTaskSubscription(projectId)
 }
 
 async function cancelActiveTask() {
   if (!canCancelTask.value) {
     return
   }
-  status.value = '正在停止当前任务…'
-  try {
-    const response = await apiFetch(
-      toApiUrl(`/api/tasks/${encodeURIComponent(activeTaskId.value)}/cancel`),
-      { method: 'POST' }
-    )
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '停止任务失败')
-    }
-    if (!socket) {
-      scheduleTaskReconnect()
-    }
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '停止任务失败'
-    status.value = '停止任务失败，后台任务可能仍在运行。'
-  }
+  await translationTaskConnection.cancelActiveTask()
 }
 
 function requestStartTranslation(action = 'translate', options = {}) {

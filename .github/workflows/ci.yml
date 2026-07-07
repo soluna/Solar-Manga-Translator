@@ -61,6 +61,7 @@ jobs:
           npm ci
           npm run test:config-persistence
           npm run test:task-event-state
+          npm run test:task-connection
           npm run test:workflow-state
           npm run build
       - name: Check desktop scripts

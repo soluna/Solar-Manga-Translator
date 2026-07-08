@@ -101,3 +101,6 @@
   by the shell launcher, desktop development launcher, and browser E2E flow;
   the launcher now checks the same loopback host that Vite binds to, avoiding
   false-free ports during local startup.
+- Added fine-grained workflow progress steps for task events and the topbar,
+  so model checks, glossary extraction, translation, inpainting, rendering,
+  complex-page repair, and archive packaging are surfaced separately.

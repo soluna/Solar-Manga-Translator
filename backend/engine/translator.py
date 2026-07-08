@@ -3142,14 +3142,22 @@ class TranslatorEngine:
             )
 
         if progress_callback is not None:
-            await progress_callback({"event": "status", "message": "正在根据全项目原文提取专有名词库…"})
+            await progress_callback({
+                "event": "status",
+                "progress_step": "glossary",
+                "message": "正在根据全项目原文提取专有名词库…",
+            })
         prompt = self._build_glossary_extraction_prompt(project_context, str(config.get("target_lang") or ""))
         try:
             response_text = await self._request_project_glossary_extraction(config, prompt)
         except Exception as exc:
             print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
             if progress_callback is not None:
-                await progress_callback({"event": "status", "message": "专有名词库自动提取失败，已继续使用现有名词库翻译。"})
+                await progress_callback({
+                    "event": "status",
+                    "progress_step": "glossary",
+                    "message": "专有名词库自动提取失败，已继续使用现有名词库翻译。",
+                })
             return self._project_glossary_extract_result(
                 project_id,
                 session,
@@ -3159,7 +3167,11 @@ class TranslatorEngine:
         extracted_entries = self._parse_glossary_extraction_response(response_text)
         if not extracted_entries:
             if progress_callback is not None:
-                await progress_callback({"event": "status", "message": "第一次未解析到专有名词，正在用更严格规则重试…"})
+                await progress_callback({
+                    "event": "status",
+                    "progress_step": "glossary",
+                    "message": "第一次未解析到专有名词，正在用更严格规则重试…",
+                })
             retry_prompt = self._build_glossary_extraction_prompt(
                 project_context,
                 str(config.get("target_lang") or ""),
@@ -3172,7 +3184,11 @@ class TranslatorEngine:
                 print(f"[WARN] Project glossary extraction retry failed for {project_id}: {exc}")
         if not extracted_entries:
             if progress_callback is not None:
-                await progress_callback({"event": "status", "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。"})
+                await progress_callback({
+                    "event": "status",
+                    "progress_step": "glossary",
+                    "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。",
+                })
             self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
             return self._project_glossary_extract_result(
                 project_id,
@@ -3193,7 +3209,11 @@ class TranslatorEngine:
         if added_count:
             self.save_project_glossary(project_id, session, merged_entries, persist=True)
             if progress_callback is not None:
-                await progress_callback({"event": "status", "message": f"已补充 {added_count} 个项目专有名词，继续翻译。"})
+                await progress_callback({
+                    "event": "status",
+                    "progress_step": "glossary",
+                    "message": f"已补充 {added_count} 个项目专有名词，继续翻译。",
+                })
         self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
         if added_count:
             return self._project_glossary_extract_result(
@@ -4909,6 +4929,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "detect",
                 "message": (
                     "正在先识别全项目文本框，为专有名词库和翻译建立上下文。"
                     if auto_continue
@@ -5018,11 +5039,13 @@ class TranslatorEngine:
         if skipped_completed:
             await progress_callback({
                 "event": "status",
+                "progress_step": "prepare",
                 "message": f"已跳过 {skipped_completed} 张已有翻译结果的页面，继续处理剩余页面。",
             })
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "translate",
                 "message": (
                     f"正在翻译当前页并回填到工作台：{self._page_display_name(session, target_stored_name)}…"
                     if target_stored_name
@@ -5072,6 +5095,7 @@ class TranslatorEngine:
                 await progress_callback(
                     {
                         "event": "status",
+                        "progress_step": "inpaint",
                         "message": (
                             f"正在为 {image['name']} 生成无字底图；"
                             "首次使用会下载并校验 LaMa 模型。"
@@ -5103,6 +5127,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "progress",
+                    "progress_step": "render",
                     "current": index,
                     "total": total,
                     "image_url": f"/api/pages/{session_id}/{stored_name}/translated-image",
@@ -5127,6 +5152,7 @@ class TranslatorEngine:
                     await progress_callback(
                         {
                             "event": "status",
+                            "progress_step": "repair",
                             "message": "已启用 AI 去字，但没有可用 API Key，已保留稳定版输出。",
                         }
                     )
@@ -5141,7 +5167,11 @@ class TranslatorEngine:
 
         archive_path = ""
         if not target_stored_name or previous_stage == "translated":
-            await progress_callback({"event": "status", "message": "页面已处理完成，正在生成下载包…"})
+            await progress_callback({
+                "event": "status",
+                "progress_step": "package",
+                "message": "页面已处理完成，正在生成下载包…",
+            })
             archive_path = await asyncio.to_thread(
                 self.build_session_archive,
                 session_id=session_id,
@@ -5211,6 +5241,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "render",
                 "message": (
                     f"正在复用缓存重新嵌字，当前页可重排。"
                     if target_stored_name
@@ -5297,6 +5328,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "progress",
+                    "progress_step": "render",
                     "current": index,
                     "total": total,
                     "image_url": f"/api/pages/{session_id}/{image['stored_name']}/translated-image",
@@ -5307,7 +5339,11 @@ class TranslatorEngine:
 
         archive_path = ""
         if not target_stored_name:
-            await progress_callback({"event": "status", "message": "页面已处理完成，正在生成下载包…"})
+            await progress_callback({
+                "event": "status",
+                "progress_step": "package",
+                "message": "页面已处理完成，正在生成下载包…",
+            })
             archive_path = await asyncio.to_thread(
                 self.build_session_archive,
                 session_id=session_id,
@@ -5528,11 +5564,19 @@ class TranslatorEngine:
                         download_notice = self._model_download_notice(log_path)
                         if download_notice and download_notice != last_download_notice:
                             last_download_notice = download_notice
-                            await progress_callback({"event": "status", "message": download_notice})
+                            await progress_callback({
+                                "event": "status",
+                                "progress_step": "model",
+                                "message": download_notice,
+                            })
                         runtime_notice = self._runtime_contract_notice(log_path)
                         if runtime_notice and runtime_notice != last_runtime_notice:
                             last_runtime_notice = runtime_notice
-                            await progress_callback({"event": "status", "message": runtime_notice})
+                            await progress_callback({
+                                "event": "status",
+                                "progress_step": "model",
+                                "message": runtime_notice,
+                            })
                     await asyncio.sleep(1)
 
                 await wait_task
@@ -5630,6 +5674,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "progress",
+                    "progress_step": "workspace",
                     "current": len(reported),
                     "total": total,
                     "image_url": f"/api/pages/{session_id}/{source_meta['stored_name']}/translated-image",
@@ -6446,6 +6491,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "render",
                 "message": "正在根据文本框的字体样式切换中文字体并重新嵌字…",
             }
         )
@@ -6526,6 +6572,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "render",
                 "message": "字体风格映射已应用完成。",
             }
         )
@@ -6733,6 +6780,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "repair",
                 "message": f"检测到 {len(complex_images)} 张复杂嵌字页，正在进行增强修复…",
             }
         )
@@ -6774,6 +6822,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
+                    "progress_step": "repair",
                     "message": "复杂页增强修复失败，已保留稳定版输出。",
                 }
             )
@@ -6786,6 +6835,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
+                    "progress_step": "repair",
                     "message": "复杂页增强修复失败，已保留稳定版输出。",
                 }
             )
@@ -6805,6 +6855,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "repair",
                 "message": f"复杂页增强修复完成，共 {enhanced_count} 张。",
             }
         )
@@ -6823,6 +6874,7 @@ class TranslatorEngine:
         await progress_callback(
             {
                 "event": "status",
+                "progress_step": "repair",
                 "message": f"检测到 {len(complex_images)} 张复杂嵌字页，正在使用 {config['image_cleanup_model']} 做 AI 去字…",
             }
         )
@@ -6839,6 +6891,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
+                    "progress_step": "repair",
                     "message": (
                         f"AI 去字第 {index}/{len(complex_images)} 张："
                         f"{image['name']}，正在等待 {config['image_cleanup_model']} 返回结果…"
@@ -6851,6 +6904,7 @@ class TranslatorEngine:
                 await progress_callback(
                     {
                         "event": "status",
+                        "progress_step": "repair",
                         "message": f"AI 去字跳过 {image['name']}：缺少可复用缓存，已保留稳定版输出。",
                     }
                 )
@@ -6882,6 +6936,7 @@ class TranslatorEngine:
                 await progress_callback(
                     {
                         "event": "status",
+                        "progress_step": "repair",
                         "message": f"AI 去字已完成 {image['name']}，正在继续后续页面…",
                     }
                 )
@@ -6893,6 +6948,7 @@ class TranslatorEngine:
                 await progress_callback(
                     {
                         "event": "status",
+                        "progress_step": "repair",
                         "message": (
                             f"AI 去字在 {image['name']} 上等待超时，"
                             "已自动回退到稳定版输出。"
@@ -6904,6 +6960,7 @@ class TranslatorEngine:
                 await progress_callback(
                     {
                         "event": "status",
+                        "progress_step": "repair",
                         "message": f"AI 去字在 {image['name']} 上失败，已回退到稳定版输出。",
                     }
                 )
@@ -6912,6 +6969,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
+                    "progress_step": "repair",
                     "message": f"AI 去字完成，共优化 {enhanced_count} 张复杂页。",
                 }
             )
@@ -6919,6 +6977,7 @@ class TranslatorEngine:
             await progress_callback(
                 {
                     "event": "status",
+                    "progress_step": "repair",
                     "message": "AI 去字没有成功产出可替换结果，已保留稳定版输出。",
                 }
             )

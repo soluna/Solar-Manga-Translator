@@ -1575,10 +1575,22 @@ const projectStageCommands = computed(() => getProjectStageCommands({
 }))
 const activeTaskPhaseVisible = computed(() => Boolean(
   translating.value
-  && (activeTaskPhase.value.label || activeTaskPhase.value.index || activeTaskPhase.value.current)
+  && (
+    activeTaskPhase.value.stepLabel
+    || activeTaskPhase.value.stepIndex
+    || activeTaskPhase.value.label
+    || activeTaskPhase.value.index
+    || activeTaskPhase.value.current
+  )
 ))
 const activeTaskPhaseLabel = computed(() => {
   const phase = activeTaskPhase.value
+  if (phase.stepLabel || phase.stepIndex) {
+    const stepIndexPart = phase.stepIndex && phase.stepTotal ? `步骤 ${phase.stepIndex}/${phase.stepTotal}` : '当前步骤'
+    const stepLabelPart = phase.stepLabel || '任务处理中'
+    const scopePart = phase.scopeLabel ? ` · ${phase.scopeLabel}` : ''
+    return `${stepIndexPart} · ${stepLabelPart}${scopePart}`
+  }
   const indexPart = phase.index && phase.total ? `阶段 ${phase.index}/${phase.total}` : '当前阶段'
   const labelPart = phase.label || '任务处理中'
   const scopePart = phase.scopeLabel ? ` · ${phase.scopeLabel}` : ''

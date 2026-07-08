@@ -13,6 +13,10 @@ assert.deepEqual(createEmptyTaskPhase(), {
   scopeLabel: '',
   current: 0,
   progressTotal: 0,
+  step: '',
+  stepLabel: '',
+  stepIndex: 0,
+  stepTotal: 0,
 })
 
 assert.equal(
@@ -34,6 +38,10 @@ const startUpdate = deriveTaskEventUpdate(
     phase_index: 2,
     phase_total: 6,
     scope_label: '整组页面',
+    workflow_step: 'detect',
+    step_label: '检测文本框',
+    step_index: 3,
+    step_total: 5,
   },
   {
     activeTaskId: '',
@@ -55,6 +63,10 @@ assert.deepEqual(startUpdate.phase, {
   scopeLabel: '整组页面',
   current: 0,
   progressTotal: 0,
+  step: 'detect',
+  stepLabel: '检测文本框',
+  stepIndex: 3,
+  stepTotal: 5,
 })
 
 const progressUpdate = deriveTaskEventUpdate(

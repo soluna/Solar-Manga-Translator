@@ -13,6 +13,10 @@ export function createEmptyTaskPhase() {
     scopeLabel: '',
     current: 0,
     progressTotal: 0,
+    step: '',
+    stepLabel: '',
+    stepIndex: 0,
+    stepTotal: 0,
   }
 }
 
@@ -69,8 +73,12 @@ export function deriveTaskPhase(payload) {
   const scopeLabel = cleanString(eventPayload.scope_label)
   const progressCurrent = safeNumber(eventPayload.progress_current || eventPayload.current)
   const progressTotal = safeNumber(eventPayload.progress_total || eventPayload.total)
+  const step = cleanString(eventPayload.workflow_step || eventPayload.progress_step || eventPayload.step)
+  const stepLabel = cleanString(eventPayload.step_label)
+  const stepIndex = safeNumber(eventPayload.step_index)
+  const stepTotal = safeNumber(eventPayload.step_total)
 
-  if (!phaseLabel && !phaseIndex && !progressCurrent) {
+  if (!phaseLabel && !phaseIndex && !progressCurrent && !stepLabel && !stepIndex) {
     return null
   }
 
@@ -81,6 +89,10 @@ export function deriveTaskPhase(payload) {
     scopeLabel,
     current: progressCurrent,
     progressTotal,
+    step,
+    stepLabel,
+    stepIndex,
+    stepTotal,
   }
 }
 

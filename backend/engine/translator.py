@@ -47,14 +47,11 @@ from .image_cleanup import (
     SEEDREAM_IMAGE_API_URL,
     create_image_cleanup_client,
 )
+from .project_workspace import InvalidStorageIdentifierError, ProjectWorkspace
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 logger = logging.getLogger("manga_translator.engine")
-
-
-class InvalidStorageIdentifierError(ValueError):
-    pass
 
 
 class TranslatorEngine:
@@ -119,18 +116,17 @@ class TranslatorEngine:
         "doubao-seed-2-0-lite-260215",
         "doubao-seed-2-0-mini-260215",
     }
-    PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-
     def __init__(self, base_dir: Path, app_paths: AppPaths | None = None):
         self.base_dir = Path(base_dir)
         self.paths = app_paths or resolve_app_paths(self.base_dir)
+        self.project_workspace = ProjectWorkspace(self.paths)
         self.temp_dir = self.paths.cache_dir
         self.model_dir = self.paths.models_dir
         self.rerender_cache_root = self.temp_dir / "rerender_cache"
-        self.projects_root = self.paths.projects_dir
-        self.project_index_path = self.paths.project_index_path
-        self.output_root = self.paths.output_dir
-        self.logs_dir = self.paths.logs_dir
+        self.projects_root = self.project_workspace.projects_root
+        self.project_index_path = self.project_workspace.project_index_path
+        self.output_root = self.project_workspace.output_root
+        self.logs_dir = self.project_workspace.logs_dir
         self.config_dir = self.paths.config_dir
         self.font_root_dir = ensure_project_font_directories(self.base_dir)
         self.bundled_font_dirs = list(bundled_font_directories(self.base_dir))
@@ -148,121 +144,58 @@ class TranslatorEngine:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def _validated_project_id(self, project_id: str) -> str:
-        normalized = str(project_id or "")
-        if normalized in {".", ".."} or not self.PROJECT_ID_PATTERN.fullmatch(normalized):
-            raise InvalidStorageIdentifierError("项目标识无效，请刷新后重试。")
-        return normalized
+        return self.project_workspace.validated_project_id(project_id)
 
     def _validated_page_id(self, page_id: str) -> str:
-        normalized = str(page_id or "")
-        if (
-            not normalized
-            or len(normalized) > 255
-            or normalized in {".", ".."}
-            or "\x00" in normalized
-            or "/" in normalized
-            or "\\" in normalized
-            or Path(normalized).name != normalized
-        ):
-            raise InvalidStorageIdentifierError("页面标识无效，请刷新后重试。")
-        return normalized
+        return self.project_workspace.validated_page_id(page_id)
 
     def _safe_storage_child(self, root: Path, name: str, *, label: str) -> Path:
-        resolved_root = root.resolve()
-        candidate = (resolved_root / name).resolve()
-        if candidate == resolved_root or resolved_root not in candidate.parents:
-            raise InvalidStorageIdentifierError(f"{label}无效，请刷新后重试。")
-        return candidate
+        return self.project_workspace.safe_storage_child(root, name, label=label)
 
     def _project_dir(self, project_id: str) -> Path:
-        return self._safe_storage_child(
-            self.projects_root,
-            self._validated_project_id(project_id),
-            label="项目标识",
-        )
+        return self.project_workspace.project_dir(project_id)
 
     def _project_manifest_path(self, project_id: str) -> Path:
-        return self._project_dir(project_id) / "project.json"
+        return self.project_workspace.project_manifest_path(project_id)
 
     def _project_session_state_path(self, project_id: str) -> Path:
-        return self._project_dir(project_id) / "session.json"
+        return self.project_workspace.project_session_state_path(project_id)
 
     def _project_output_dir(self, project_id: str) -> Path:
-        return self._safe_storage_child(
-            self.output_root,
-            self._validated_project_id(project_id),
-            label="项目标识",
-        )
+        return self.project_workspace.project_output_dir(project_id)
 
     def _project_source_dir(self, project_id: str) -> Path:
-        return self._project_output_dir(project_id) / "source"
+        return self.project_workspace.project_source_dir(project_id)
 
     def _project_translated_dir(self, project_id: str) -> Path:
-        return self._project_output_dir(project_id) / "translated"
+        return self.project_workspace.project_translated_dir(project_id)
 
     def _project_snapshots_dir(self, project_id: str) -> Path:
-        return self._project_dir(project_id) / "snapshots"
+        return self.project_workspace.project_snapshots_dir(project_id)
 
     def _project_pages_dir(self, project_id: str) -> Path:
-        return self._project_dir(project_id) / "pages"
+        return self.project_workspace.project_pages_dir(project_id)
 
     def _project_page_dir(self, project_id: str, page_id: str) -> Path:
-        return self._safe_storage_child(
-            self._project_pages_dir(project_id),
-            self._validated_page_id(page_id),
-            label="页面标识",
-        )
+        return self.project_workspace.project_page_dir(project_id, page_id)
 
     def _project_page_document_path(self, project_id: str, page_id: str) -> Path:
-        return self._project_page_dir(project_id, page_id) / "page_document.json"
+        return self.project_workspace.project_page_document_path(project_id, page_id)
 
     def _page_document_region_count(self, project_id: str, page_id: str) -> int:
-        try:
-            payload = self._read_json_file(self._project_page_document_path(project_id, page_id), {})
-        except InvalidStorageIdentifierError:
-            return 0
-        regions = payload.get("regions") if isinstance(payload, dict) else None
-        if not isinstance(regions, list):
-            return 0
-        return sum(1 for region in regions if isinstance(region, dict))
+        return self.project_workspace.page_document_region_count(project_id, page_id)
 
     def _project_region_count(self, project_id: str, session: dict[str, Any]) -> int:
-        total = 0
-        for image in session.get("source_images") or []:
-            if not isinstance(image, dict):
-                continue
-            stored_name = str(image.get("stored_name") or "").strip()
-            if stored_name:
-                total += self._page_document_region_count(project_id, stored_name)
-        return total
+        return self.project_workspace.project_region_count(project_id, session)
 
     def _translation_request_debug_path(self, project_id: str) -> Path:
-        normalized_project_id = self._validated_project_id(project_id)
-        return self._safe_storage_child(
-            self.temp_dir,
-            f"{normalized_project_id}_translation-request-debug.jsonl",
-            label="项目标识",
-        )
+        return self.project_workspace.translation_request_debug_path(project_id)
 
     def _project_temp_path(self, project_id: str, suffix: str) -> Path:
-        normalized_project_id = self._validated_project_id(project_id)
-        normalized_suffix = self._validated_page_id(suffix)
-        return self._safe_storage_child(
-            self.temp_dir,
-            f"{normalized_project_id}_{normalized_suffix}",
-            label="项目临时路径",
-        )
+        return self.project_workspace.project_temp_path(project_id, suffix)
 
     def _project_log_path(self, project_id: str, suffix: str) -> Path:
-        normalized_project_id = self._validated_project_id(project_id)
-        normalized_suffix = self._validated_page_id(suffix)
-        task_log_dir = self._safe_storage_child(
-            self.logs_dir / "tasks",
-            normalized_project_id,
-            label="项目日志目录",
-        )
-        task_log_dir.mkdir(parents=True, exist_ok=True)
-        return self._safe_storage_child(task_log_dir, normalized_suffix, label="项目日志文件")
+        return self.project_workspace.project_log_path(project_id, suffix)
 
     def load_persisted_settings(self) -> dict[str, Any]:
         normalized = self._normalize_config(
@@ -651,41 +584,13 @@ class TranslatorEngine:
         }
 
     def _read_json_file(self, path: Path, default: Any) -> Any:
-        if not path.exists():
-            return default
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return default
+        return self.project_workspace.read_json_file(path, default)
 
     def _read_jsonl_file(self, path: Path) -> list[Any]:
-        if not path.exists():
-            return []
-        rows: list[Any] = []
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for raw_line in handle:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rows.append(json.loads(line))
-                    except Exception:
-                        rows.append({"type": "unparsed_line", "raw": line})
-        except Exception:
-            return []
-        return rows
+        return self.project_workspace.read_jsonl_file(path)
 
     def _write_json_file(self, path: Path, payload: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(prefix=f"{path.stem}_", suffix=".tmp", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-            os.replace(temp_path, path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(temp_path)
+        self.project_workspace.write_json_file(path, payload)
 
     def _sanitize_config_for_storage(self, config: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(config, dict):
@@ -762,19 +667,7 @@ class TranslatorEngine:
         }
 
     def _read_snapshot_manifests(self, project_id: str) -> list[dict[str, Any]]:
-        snapshots_dir = self._project_snapshots_dir(project_id)
-        manifests: list[dict[str, Any]] = []
-        if not snapshots_dir.exists():
-            return manifests
-
-        for path in sorted(snapshots_dir.glob("*.json")):
-            payload = self._read_json_file(path, {})
-            if isinstance(payload, dict):
-                payload["_path"] = str(path)
-                manifests.append(payload)
-
-        manifests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        return manifests
+        return self.project_workspace.read_snapshot_manifests(project_id)
 
     def _collect_referenced_output_names(self, project_id: str, session: dict[str, Any]) -> set[str]:
         referenced: set[str] = set()
@@ -1155,14 +1048,10 @@ class TranslatorEngine:
         }
 
     def _write_project_index(self, summaries: list[dict[str, Any]]) -> None:
-        summaries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        self._write_json_file(self.project_index_path, summaries)
+        self.project_workspace.write_project_index(summaries)
 
     def _refresh_project_index_entry(self, project_summary: dict[str, Any]) -> None:
-        existing = self._read_json_file(self.project_index_path, [])
-        next_items = [item for item in existing if isinstance(item, dict) and str(item.get("project_id") or "") != project_summary["project_id"]]
-        next_items.append(project_summary)
-        self._write_project_index(next_items)
+        self.project_workspace.refresh_project_index_entry(project_summary)
 
     def initialize_project(
         self,

@@ -9,6 +9,7 @@ import { usePageCommandState } from './composables/usePageCommandState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
   mergeRegionCount,
+  normalizeSessionSourceImages,
   resolveSelectedReviewPage,
 } from './review-workspace-state.js'
 import {
@@ -3054,12 +3055,11 @@ function applySessionPayload(payload, options = {}) {
   downloadPath.value = payload?.download_path || ''
   translatedDirPath.value = payload?.translated_dir || ''
   maskDebugDirPath.value = payload?.mask_debug_dir || ''
-  originalImages.value = (payload?.images || []).map((image, index) => ({
-    id: `${sessionId.value || 'session'}-source-${index}`,
-    name: image.name,
-    url: toApiUrl(image.url),
-    stored_name: image.stored_name
-  }))
+  originalImages.value = normalizeSessionSourceImages({
+    images: payload?.images || [],
+    sessionId: sessionId.value || 'session',
+    toApiUrl,
+  })
   markTranslatedPayloadImagesUpdated(payload?.translated_images || [], {
     onlyPageId: options.refreshTranslatedPageId || '',
     refreshAll: Boolean(options.refreshAllTranslatedImages),

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 
 import {
   mergeRegionCount,
+  normalizeSessionSourceImages,
   resolveSelectedReviewPage,
 } from '../src/review-workspace-state.js'
 
@@ -37,5 +38,19 @@ assert.deepEqual(loadedPage.regions, [{ id: 'a' }])
 assert.equal(mergeRegionCount(0, 5), 5)
 assert.equal(mergeRegionCount(4, 0), 4)
 assert.equal(mergeRegionCount(4, 6), 6)
+
+const sourceImages = normalizeSessionSourceImages({
+  images: [
+    { name: '第一页', stored_name: '001.png', url: '/source/001.png', region_count: 3 },
+    { name: '第二页', stored_name: '002.png', url: '/source/002.png', regionCount: 4 },
+  ],
+  sessionId: 'project-a',
+  toApiUrl: (url) => `/api${url}`,
+})
+
+assert.equal(sourceImages[0].region_count, 3)
+assert.equal(sourceImages[0].regionCount, 3)
+assert.equal(sourceImages[1].region_count, 4)
+assert.equal(sourceImages[1].regionCount, 4)
 
 console.log('Review workspace state tests passed.')

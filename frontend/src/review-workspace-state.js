@@ -4,6 +4,28 @@ export function mergeRegionCount(previousCount, nextCount) {
   return Math.max(previous, next)
 }
 
+export function normalizeSessionSourceImages({
+  images = [],
+  sessionId = '',
+  toApiUrl = (url) => url,
+} = {}) {
+  const sourceImages = Array.isArray(images) ? images : []
+  const safeSessionId = String(sessionId || 'session')
+  const resolveUrl = typeof toApiUrl === 'function' ? toApiUrl : (url) => url
+
+  return sourceImages.map((image, index) => {
+    const regionCount = getImageRegionCount(image)
+    return {
+      id: `${safeSessionId}-source-${index}`,
+      name: image?.name,
+      url: resolveUrl(image?.url || ''),
+      stored_name: image?.stored_name,
+      region_count: regionCount,
+      regionCount,
+    }
+  })
+}
+
 export function resolveSelectedReviewPage({
   selectedPageKey,
   inspectionPages = [],
@@ -45,4 +67,11 @@ function createPendingReviewPage(entry) {
 function normalizeCount(value) {
   const numeric = Number(value || 0)
   return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0
+}
+
+function getImageRegionCount(image) {
+  if (!image || typeof image !== 'object') {
+    return 0
+  }
+  return mergeRegionCount(image.region_count, image.regionCount)
 }

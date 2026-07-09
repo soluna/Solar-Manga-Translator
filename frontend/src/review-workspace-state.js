@@ -26,6 +26,11 @@ export function normalizeSessionSourceImages({
   })
 }
 
+export function shouldRefreshBaseImageForTaskAction(action) {
+  const normalizedAction = String(action || '').trim().toLowerCase()
+  return ['translate', 'resume-translate', 'translate-page'].includes(normalizedAction)
+}
+
 export function resolveSelectedReviewPage({
   selectedPageKey,
   inspectionPages = [],

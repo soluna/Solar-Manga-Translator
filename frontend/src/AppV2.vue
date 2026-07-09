@@ -11,6 +11,7 @@ import {
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolveSelectedReviewPage,
+  shouldRefreshBaseImageForTaskAction,
 } from './review-workspace-state.js'
 import {
   createEmptyTaskPhase,
@@ -2667,6 +2668,19 @@ async function finalizeCompletedTranslation(payload, context = {}) {
       refreshAllTranslatedImages: completedAction === 'translate' || completedAction === 'resume-translate' || (completedAction === 'rerender' && !pageTargetStoredName),
       preserveExistingTranslatedImageNonce: true,
     })
+    if (shouldRefreshBaseImageForTaskAction(completedAction)) {
+      const refreshedBasePageIds = new Set(
+        (payload?.translated_images || [])
+          .map((image) => String(image?.stored_name || '').trim())
+          .filter(Boolean)
+      )
+      if (pageTargetStoredName) {
+        refreshedBasePageIds.add(pageTargetStoredName)
+      }
+      for (const pageId of refreshedBasePageIds) {
+        markPageImageUpdated(pageId, Date.now(), { base: true, translated: false })
+      }
+    }
     markCompletedTranslationAction(completedAction, pageTargetStoredName)
 
     const inspectionPageId = String(
@@ -10087,7 +10101,9 @@ async function handleTranslationTaskEvent(payload, currentSocket = translationTa
     const totalProgress = Number(eventUpdate.progress?.total || 0)
     progress.value = eventUpdate.progress || { current: currentProgress, total: totalProgress }
     if (eventPayload.stored_name) {
-      markPageImageUpdated(eventPayload.stored_name)
+      markPageImageUpdated(eventPayload.stored_name, Date.now(), {
+        base: shouldRefreshBaseImageForTaskAction(activeAction.value)
+      })
     }
     const nextImageUrl = getVersionedPageImageUrl(eventPayload.image_url, eventPayload.stored_name)
     preloadImageUrl(getReviewPageImageUrl(nextImageUrl, eventPayload.stored_name))

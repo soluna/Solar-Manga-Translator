@@ -319,7 +319,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 [0, 0, 0],
             )
 
-    def test_translation_base_cleans_white_caption_residue_after_local_lama(self) -> None:
+    def test_translation_base_does_not_clean_connected_white_art_outside_text_mask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
@@ -327,11 +327,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
             page_cache = root / "cache" / "page-1.png"
             page_cache.mkdir(parents=True)
 
-            source = np.full((240, 240, 3), 128, dtype=np.uint8)
-            cv2.rectangle(source, (86, 50), (142, 152), (255, 255, 255), -1)
-            cv2.rectangle(source, (86, 50), (142, 152), (0, 0, 0), 2)
-            cv2.line(source, (114, 78), (114, 138), (0, 0, 0), 2)
-            cv2.line(source, (128, 106), (128, 132), (64, 64, 64), 2)
+            source = np.full((600, 600, 3), 128, dtype=np.uint8)
+            cv2.rectangle(source, (90, 90), (290, 340), (255, 255, 255), -1)
+            cv2.line(source, (122, 132), (122, 210), (0, 0, 0), 2)
+            cv2.line(source, (230, 150), (260, 250), (0, 0, 0), 3)
             Image.fromarray(source).save(source_path)
             Image.fromarray(source).save(page_cache / "inpainted.png")
             (page_cache / "meta.json").write_text(
@@ -340,8 +339,8 @@ class TranslatorEngineStateTests(unittest.TestCase):
             )
 
             region = SimpleNamespace(
-                lines=[[[108, 74], [120, 74], [120, 142], [108, 142]]],
-                xyxy=[108, 74, 120, 142],
+                lines=[[[116, 128], [128, 128], [128, 214], [116, 214]]],
+                xyxy=[116, 128, 128, 214],
                 font_size=14,
                 disabled_region=False,
             )
@@ -349,7 +348,6 @@ class TranslatorEngineStateTests(unittest.TestCase):
             async def fake_inpaint(base_rgb, selection_mask, *, device):
                 edited = base_rgb.copy()
                 edited[selection_mask > 0] = [248, 248, 248]
-                edited[106:133, 126:131] = [64, 64, 64]
                 return edited
 
             engine._load_cached_regions = lambda _path: [region]  # type: ignore[method-assign]
@@ -365,10 +363,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
             )
 
             output = np.asarray(Image.open(page_cache / "inpainted.png").convert("RGB"))
-            self.assertGreater(int(output[116, 128, 0]), 240)
-            self.assertLess(int(output[50, 114, 0]), 32)
+            self.assertGreater(int(output[170, 122, 0]), 240)
+            self.assertLess(int(output[200, 245, 0]), 32)
 
-    def test_translation_base_upgrades_existing_white_caption_residue_cache(self) -> None:
+    def test_translation_base_regenerates_bad_white_container_cleanup_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
@@ -376,35 +374,32 @@ class TranslatorEngineStateTests(unittest.TestCase):
             page_cache = root / "cache" / "page-1.png"
             page_cache.mkdir(parents=True)
 
-            source = np.full((240, 240, 3), 128, dtype=np.uint8)
-            cv2.rectangle(source, (86, 50), (142, 152), (255, 255, 255), -1)
-            cv2.rectangle(source, (86, 50), (142, 152), (0, 0, 0), 2)
-            cv2.line(source, (114, 78), (114, 138), (0, 0, 0), 2)
-            cv2.line(source, (128, 106), (128, 132), (64, 64, 64), 2)
+            source = np.full((80, 80, 3), 255, dtype=np.uint8)
+            source[20:44, 20:32] = [0, 0, 0]
             Image.fromarray(source).save(source_path)
-
-            stale_base = source.copy()
-            stale_base[108:140, 108:121] = [248, 248, 248]
-            stale_base[106:133, 126:131] = [64, 64, 64]
-            Image.fromarray(stale_base).save(page_cache / "inpainted.png")
+            Image.fromarray(np.zeros_like(source)).save(page_cache / "inpainted.png")
             (page_cache / "meta.json").write_text(
-                json.dumps({"base_kind": "inpainted"}),
+                json.dumps({"base_kind": "inpainted", "white_container_cleanup_version": 1}),
                 encoding="utf-8",
             )
 
             region = SimpleNamespace(
-                lines=[[[108, 74], [120, 74], [120, 142], [108, 142]]],
-                xyxy=[108, 74, 120, 142],
-                font_size=14,
+                lines=[[[20, 20], [32, 20], [32, 44], [20, 44]]],
+                xyxy=[20, 20, 32, 44],
+                font_size=12,
                 disabled_region=False,
             )
+            observed = {"called": False}
+
+            async def fake_inpaint(base_rgb, selection_mask, *, device):
+                observed["called"] = True
+                edited = base_rgb.copy()
+                edited[selection_mask > 0] = [248, 248, 248]
+                return edited
 
             engine._load_cached_regions = lambda _path: [region]  # type: ignore[method-assign]
-
-            async def fail_inpaint(*_args, **_kwargs):
-                raise AssertionError("existing inpainted caches should not rerun LaMa")
-
-            engine._run_local_lama_inpaint = fail_inpaint  # type: ignore[method-assign]
+            engine._run_local_lama_inpaint = fake_inpaint  # type: ignore[method-assign]
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"  # type: ignore[method-assign]
 
             asyncio.run(
                 engine._ensure_translation_base_image(
@@ -416,9 +411,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             output = np.asarray(Image.open(page_cache / "inpainted.png").convert("RGB"))
             meta = json.loads((page_cache / "meta.json").read_text(encoding="utf-8"))
-            self.assertGreater(int(output[116, 128, 0]), 240)
-            self.assertLess(int(output[50, 114, 0]), 32)
-            self.assertEqual(meta["white_container_cleanup_version"], 1)
+            self.assertTrue(observed["called"])
+            self.assertGreater(int(output[30, 26, 0]), 240)
+            self.assertEqual(meta["base_kind"], "inpainted")
+            self.assertNotIn("white_container_cleanup_version", meta)
 
     def test_cpu_inpainting_device_does_not_import_pytorch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

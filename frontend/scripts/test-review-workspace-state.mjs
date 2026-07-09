@@ -4,6 +4,7 @@ import {
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolveSelectedReviewPage,
+  shouldRefreshBaseImageForTaskAction,
 } from '../src/review-workspace-state.js'
 
 const pendingPage = resolveSelectedReviewPage({
@@ -52,5 +53,11 @@ assert.equal(sourceImages[0].region_count, 3)
 assert.equal(sourceImages[0].regionCount, 3)
 assert.equal(sourceImages[1].region_count, 4)
 assert.equal(sourceImages[1].regionCount, 4)
+
+assert.equal(shouldRefreshBaseImageForTaskAction('translate'), true)
+assert.equal(shouldRefreshBaseImageForTaskAction('resume-translate'), true)
+assert.equal(shouldRefreshBaseImageForTaskAction('translate-page'), true)
+assert.equal(shouldRefreshBaseImageForTaskAction('detect'), false)
+assert.equal(shouldRefreshBaseImageForTaskAction('rerender'), false)
 
 console.log('Review workspace state tests passed.')

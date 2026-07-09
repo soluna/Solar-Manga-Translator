@@ -69,7 +69,6 @@ class TranslatorEngine:
     PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT = 15000
     PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS = 120
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
-    TRANSLATION_BASE_WHITE_CONTAINER_CLEANUP_VERSION = 1
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
     DOUBAO_GLOSSARY_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
@@ -7274,18 +7273,11 @@ class TranslatorEngine:
         meta = self._read_json_file(meta_path, {})
         base_kind = str(meta.get("base_kind") or "").strip().lower()
         if base_kind != "source":
-            if (
-                base_kind == "inpainted"
-                and int(meta.get("white_container_cleanup_version") or 0)
-                < self.TRANSLATION_BASE_WHITE_CONTAINER_CLEANUP_VERSION
-            ):
-                self._upgrade_translation_base_white_container_cleanup(
-                    source_path=source_path,
-                    page_cache_dir=page_cache_dir,
-                    meta_path=meta_path,
-                    meta=meta,
-                )
-            return
+            if base_kind == "inpainted" and int(meta.get("white_container_cleanup_version") or 0) > 0:
+                meta["base_kind"] = "source"
+                meta.pop("white_container_cleanup_version", None)
+            else:
+                return
 
         source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if source_bgr is None:
@@ -7293,90 +7285,26 @@ class TranslatorEngine:
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
         regions = self._load_cached_regions(page_cache_dir)
         mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        white_container_cleanup_mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        dilation_scale, dilation_min, dilation_max = self._translation_base_mask_dilation(config)
         for region in regions:
             if bool(getattr(region, "disabled_region", False)):
                 continue
             region_mask = self._build_region_mask(
                 region,
                 source_rgb.shape,
-                dilation_scale=dilation_scale,
-                dilation_min=dilation_min,
-                dilation_max=dilation_max,
+                dilation_scale=0.24,
+                dilation_min=4,
+                dilation_max=24,
             )
             mask = cv2.bitwise_or(mask, region_mask)
-            container_mask = self._build_advanced_erase_region_container_mask(source_rgb, region)
-            white_container_cleanup_mask = cv2.bitwise_or(white_container_cleanup_mask, container_mask)
 
         if np.any(mask):
             device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
             inpainted_rgb = await self._run_local_lama_inpaint(source_rgb, mask, device=device)
-            if np.any(white_container_cleanup_mask):
-                inpainted_rgb = self._clean_advanced_erase_white_container_residue(
-                    source_rgb,
-                    inpainted_rgb,
-                    white_container_cleanup_mask,
-                )
             self._save_rgb_image_atomic(page_cache_dir / "inpainted.png", inpainted_rgb)
 
         meta["base_kind"] = "inpainted" if np.any(mask) else "source_no_text"
         meta["inpainting_region_count"] = len(regions)
-        if np.any(mask):
-            meta["white_container_cleanup_version"] = self.TRANSLATION_BASE_WHITE_CONTAINER_CLEANUP_VERSION
         self._write_json_file(meta_path, meta)
-
-    def _upgrade_translation_base_white_container_cleanup(
-        self,
-        *,
-        source_path: Path,
-        page_cache_dir: Path,
-        meta_path: Path,
-        meta: dict[str, Any],
-    ) -> None:
-        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-        inpainted_bgr = cv2.imread(str(page_cache_dir / "inpainted.png"), cv2.IMREAD_COLOR)
-        if source_bgr is None or inpainted_bgr is None:
-            return
-        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-        inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
-        if source_rgb.shape[:2] != inpainted_rgb.shape[:2]:
-            return
-
-        cleanup_mask = self._translation_base_white_container_cleanup_mask(
-            source_rgb,
-            self._load_cached_regions(page_cache_dir),
-        )
-        if not np.any(cleanup_mask):
-            meta["white_container_cleanup_version"] = self.TRANSLATION_BASE_WHITE_CONTAINER_CLEANUP_VERSION
-            self._write_json_file(meta_path, meta)
-            return
-
-        cleaned_rgb = self._clean_advanced_erase_white_container_residue(source_rgb, inpainted_rgb, cleanup_mask)
-        self._save_rgb_image_atomic(page_cache_dir / "inpainted.png", cleaned_rgb)
-        meta["white_container_cleanup_version"] = self.TRANSLATION_BASE_WHITE_CONTAINER_CLEANUP_VERSION
-        self._write_json_file(meta_path, meta)
-
-    def _translation_base_white_container_cleanup_mask(
-        self,
-        source_rgb: np.ndarray,
-        regions: list[Any],
-    ) -> np.ndarray:
-        cleanup_mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        for region in regions:
-            if bool(getattr(region, "disabled_region", False)):
-                continue
-            container_mask = self._build_advanced_erase_region_container_mask(source_rgb, region)
-            cleanup_mask = cv2.bitwise_or(cleanup_mask, container_mask)
-        return cleanup_mask
-
-    def _translation_base_mask_dilation(self, config: dict[str, Any]) -> tuple[float, int, int]:
-        strength = str(config.get("mask_cleanup_strength") or "standard").strip().lower()
-        if strength == "aggressive":
-            return 0.34, 7, 34
-        if strength == "clean":
-            return 0.29, 5, 28
-        return 0.24, 4, 24
 
     def _composite_local_model_erase_result(
         self,

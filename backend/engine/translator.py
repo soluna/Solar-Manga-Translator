@@ -5029,6 +5029,7 @@ class TranslatorEngine:
         skipped_completed = 0
         if skip_completed and target_stored_name is None:
             source_images, skipped_completed = self._filter_completed_translation_images(
+                session_id,
                 session,
                 output_dir,
                 source_images,
@@ -5404,8 +5405,47 @@ class TranslatorEngine:
             raise RuntimeError("找不到当前选中的页面，无法只翻译这一页。请刷新逐框校对后再试。")
         return matched_images
 
+    def _page_has_completed_translation_document(
+        self,
+        project_id: str,
+        stored_name: str,
+    ) -> bool:
+        document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+        if not isinstance(document, dict):
+            return False
+
+        regions = document.get("regions")
+        if not isinstance(regions, list) or not regions:
+            return False
+
+        saw_source_region = False
+        for region in regions:
+            if not isinstance(region, dict):
+                continue
+            source_text = str(region.get("source_text") or "").strip()
+            if not source_text:
+                continue
+            saw_source_region = True
+
+            flags = region.get("flags") if isinstance(region.get("flags"), dict) else {}
+            if bool(flags.get("keep_original")) or bool(flags.get("disabled")):
+                continue
+
+            translation = region.get("translation") if isinstance(region.get("translation"), dict) else {}
+            machine_translation = str(translation.get("machine") or "").strip()
+            edited_translation = str(translation.get("edited") or "").strip()
+            resolved_translation = str(translation.get("resolved") or "").strip()
+            if machine_translation or edited_translation:
+                continue
+            if resolved_translation and resolved_translation != source_text:
+                continue
+            return False
+
+        return saw_source_region
+
     def _filter_completed_translation_images(
         self,
+        project_id: str,
         session: dict[str, Any],
         output_dir: Path,
         source_images: list[dict[str, Any]],
@@ -5418,7 +5458,11 @@ class TranslatorEngine:
             if not stored_name:
                 continue
             current_output = self._current_translated_output(session, output_dir, stored_name, preferred_format)
-            if current_output is not None and current_output.exists():
+            if (
+                current_output is not None
+                and current_output.exists()
+                and self._page_has_completed_translation_document(project_id, stored_name)
+            ):
                 self._update_translated_output_map(session, stored_name, current_output)
                 skipped_count += 1
                 continue

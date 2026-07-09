@@ -10752,17 +10752,7 @@ watch(
             class="v2-topbar-button"
             @click="openV2HistoryModal"
           >
-            历史项目
-          </button>
-
-          <button
-            v-if="v2View === 'picker'"
-            type="button"
-            class="v2-topbar-button"
-            :disabled="!canStartNewProject"
-            @click="startV2NewProject"
-          >
-            新建项目
+            项目管理
           </button>
 
           <div v-if="v2HasProject" class="v2-erase-menu v2-export-menu">
@@ -10854,6 +10844,14 @@ watch(
               @click="cancelActiveTask"
             >
               ■
+            </button>
+            <button
+              type="button"
+              class="v2-secondary-button"
+              :disabled="!canUseProjectGlossary"
+              @click="openProjectGlossaryDrawer"
+            >
+              专有名词库
             </button>
             <button
               type="button"
@@ -12314,11 +12312,21 @@ watch(
       <section class="v2-modal v2-history-modal" data-testid="v2-history-modal">
         <header class="v2-modal-head">
           <div>
-            <p class="v2-section-kicker">历史项目</p>
-            <h2 class="v2-section-title">恢复之前的工作区</h2>
+            <p class="v2-section-kicker">项目管理</p>
+            <h2 class="v2-section-title">项目列表</h2>
           </div>
 
-          <button type="button" class="v2-icon-button" aria-label="关闭历史项目" @click="closeV2HistoryModal">✕</button>
+          <div class="v2-modal-head-actions">
+            <button
+              type="button"
+              class="v2-secondary-button"
+              :disabled="!canStartNewProject"
+              @click="startV2NewProject"
+            >
+              新建项目
+            </button>
+            <button type="button" class="v2-icon-button" aria-label="关闭项目管理" @click="closeV2HistoryModal">✕</button>
+          </div>
         </header>
 
         <div class="v2-modal-toolbar">

@@ -2276,6 +2276,19 @@ print(json.dumps({
                 "translation_region_layout_overrides": {},
                 "style_region_overrides": {},
             }
+            page_doc_path = engine._project_page_document_path(project_id, "page-1.png")
+            page_doc_path.parent.mkdir(parents=True, exist_ok=True)
+            page_doc_path.write_text(json.dumps({
+                "page_id": "page-1.png",
+                "regions": [
+                    {
+                        "region_id": "region-1",
+                        "source_text": "山田",
+                        "translation": {"machine": "Yamada", "resolved": "Yamada"},
+                        "flags": {},
+                    }
+                ],
+            }), encoding="utf-8")
             rendered_pages: list[str] = []
             persisted_pages: list[list[str] | None] = []
             events: list[dict[str, object]] = []
@@ -2322,6 +2335,93 @@ print(json.dumps({
             self.assertIn(["page-2.png"], persisted_pages)
             self.assertEqual(session["workflow_stage"], "translated")
             self.assertTrue(result["download_path"].endswith("translated.zip"))
+            start_events = [event for event in events if event.get("event") == "start"]
+            self.assertEqual(start_events[0]["total_pages"], 1)
+
+    def test_resume_translation_does_not_skip_detect_only_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-resume-detected"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(source_dir / "page-1.png")
+            Image.new("RGB", (8, 8), (240, 240, 240)).save(output_dir / "page-1.png")
+            page_doc_path = engine._project_page_document_path(project_id, "page-1.png")
+            page_doc_path.parent.mkdir(parents=True, exist_ok=True)
+            page_doc_path.write_text(json.dumps({
+                "page_id": "page-1.png",
+                "regions": [
+                    {
+                        "region_id": "region-1",
+                        "source_text": "山田",
+                        "translation": {"machine": "", "resolved": ""},
+                        "flags": {},
+                    }
+                ],
+            }), encoding="utf-8")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [
+                    {"name": "page-1.png", "stored_name": "page-1.png"},
+                ],
+                "translated_output_map": {"page-1.png": "page-1.png"},
+                "download_path": "",
+                "workflow_stage": "detected",
+                "last_config": {"rerender_output_format": "png"},
+                "project_glossary": {"entries": []},
+                "translation_region_overrides": {},
+                "translation_region_skip_overrides": {},
+                "translation_region_disabled_overrides": {},
+                "translation_region_layout_overrides": {},
+                "style_region_overrides": {},
+            }
+            rendered_pages: list[str] = []
+            events: list[dict[str, object]] = []
+
+            async def fake_translate_regions(*_args, **_kwargs) -> None:
+                return None
+
+            async def fake_render_cached_page(*_args, **kwargs) -> None:
+                output_path = kwargs.get("output_path") if "output_path" in kwargs else _args[1]
+                rendered_pages.append(Path(output_path).name)
+                Image.new("RGB", (8, 8), (90, 90, 90)).save(output_path)
+
+            async def collect_event(event: dict[str, object]) -> None:
+                events.append(event)
+
+            async def fake_glossary_request(*_args, **_kwargs) -> str:
+                return '[{"source":"山田","translation":"山田","category":"人名"}]'
+
+            def fake_archive(*_args, **_kwargs) -> str:
+                archive_path = root / "translated.zip"
+                archive_path.write_bytes(b"zip")
+                return str(archive_path)
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._ensure_editable_page_cache = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+            engine._prepare_cached_regions_for_edit = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+            engine._translate_cached_regions = fake_translate_regions  # type: ignore[method-assign]
+            engine._persist_translated_regions = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+            engine._render_cached_page = fake_render_cached_page  # type: ignore[method-assign]
+            engine.persist_project_state = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+            engine.build_session_archive = fake_archive  # type: ignore[method-assign]
+            engine._request_project_glossary_extraction = fake_glossary_request  # type: ignore[method-assign]
+
+            asyncio.run(engine.resume_translation_session(
+                session_id=project_id,
+                session=session,
+                raw_config={"rerender_output_format": "png"},
+                progress_callback=collect_event,
+                skip_completed=True,
+            ))
+
+            self.assertEqual(rendered_pages, ["page-1.png"])
+            self.assertEqual(session["project_glossary"]["entries"][0]["source"], "山田")
+            self.assertTrue(session["project_glossary"]["auto_extract_completed"])
             start_events = [event for event in events if event.get("event") == "start"]
             self.assertEqual(start_events[0]["total_pages"], 1)
 

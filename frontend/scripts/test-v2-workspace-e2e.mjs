@@ -335,8 +335,9 @@ async function main() {
     }
     await page.getByTestId('v2-settings-panel').getByRole('button', { name: '关闭设置' }).click()
 
-    await page.getByRole('banner').getByRole('button', { name: '历史项目' }).click()
+    await page.getByRole('banner').getByRole('button', { name: '项目管理' }).click()
     await page.getByTestId('v2-history-modal').waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByTestId('v2-history-modal').getByRole('button', { name: '新建项目' }).waitFor({ state: 'visible', timeout: 20000 })
     const historyShot = await saveScreenshot(page, 'v2-history-modal.png')
 
     const fixtureCard = page.locator('.v2-history-card', { hasText: FIXTURE_PROJECT_TITLE }).first()
@@ -345,7 +346,8 @@ async function main() {
 
     await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
     await assertText(page.locator('.v2-section-title').first(), FIXTURE_PROJECT_TITLE, '选页页项目标题不正确')
-    await page.getByRole('banner').getByRole('button', { name: '新建项目' }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByRole('banner').getByRole('button', { name: '项目管理' }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByRole('button', { name: '专有名词库' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.getByTestId('v2-workflow-strip').waitFor({ state: 'visible', timeout: 20000 })
     await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /识别文本框|重新识别/ }).waitFor({ state: 'visible', timeout: 20000 })
     await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /继续翻译|翻译整本|重新翻译/ }).waitFor({ state: 'visible', timeout: 20000 })

@@ -276,6 +276,13 @@ def create_fixture(project_id: str) -> dict[str, Any]:
             json.dumps(page_document, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        page_cache_dir = rerender_cache_dir / stored_name
+        page_cache_dir.mkdir(parents=True, exist_ok=True)
+        Image.open(image_path).save(page_cache_dir / "inpainted.png")
+        (page_cache_dir / "meta.json").write_text(
+            json.dumps({"base_kind": "inpainted"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     session = {
         "source_dir": str(source_dir),

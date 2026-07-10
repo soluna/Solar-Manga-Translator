@@ -24,6 +24,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import engine.translator as translator_module
+from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
 from engine.image_cleanup import SeedreamImageCleanupClient
 from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from runtime_paths import AppPaths
@@ -516,6 +517,14 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 np.asarray(Image.open(live_cache / "page-1.png" / "inpainted.png"))[0, 0].tolist(),
                 [240, 240, 240],
             )
+            page_artifact = engine.build_client_session_payload(
+                project_id,
+                session,
+            )["page_artifacts"]["page-1.png"]
+            self.assertTrue(page_artifact["capabilities"]["recognition_ready"])
+            self.assertTrue(page_artifact["capabilities"]["blank_ready"])
+            self.assertFalse(page_artifact["capabilities"]["translation_ready"])
+            self.assertFalse(page_artifact["capabilities"]["final_ready"])
 
     def test_project_storage_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1806,6 +1815,15 @@ print(json.dumps({
                         "category": "人名",
                     }]
                 },
+                "artifact_state": ProjectArtifactState.create(
+                    ["page-1.png"]
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.TRANSLATED,
+                ).model_dump(mode="json"),
             }
             engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
                 "page_id": "page-1.png",
@@ -1844,6 +1862,9 @@ print(json.dumps({
             self.assertEqual(result["change_count"], 1)
             self.assertEqual(result["glossary"]["entries"][0]["translation"], "山田先生")
             self.assertEqual(len(rerender_calls), 1)
+            page_artifact = result["page_artifacts"]["page-1.png"]
+            self.assertEqual(page_artifact["artifacts"]["translation"]["revision"], 2)
+            self.assertTrue(page_artifact["capabilities"]["final_stale"])
 
     def test_project_glossary_save_preserves_previous_translation_for_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1881,6 +1902,21 @@ print(json.dumps({
                         "category": "人名",
                     }]
                 },
+                "artifact_state": ProjectArtifactState.create(
+                    ["page-1.png", "page-2.png"]
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.TRANSLATED,
+                ).apply(
+                    "page-2.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-2.png",
+                    PageArtifactEvent.TRANSLATED,
+                ).model_dump(mode="json"),
             }
             engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
                 "page_id": "page-1.png",
@@ -2290,6 +2326,15 @@ print(json.dumps({
                 "translation_region_disabled_overrides": {},
                 "translation_region_layout_overrides": {},
                 "style_region_overrides": {},
+                "artifact_state": ProjectArtifactState.create(
+                    ["page-1.png", "page-2.png"]
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-2.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).model_dump(mode="json"),
             }
             page_doc_path = engine._project_page_document_path(project_id, "page-1.png")
             page_doc_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2352,6 +2397,13 @@ print(json.dumps({
             self.assertTrue(result["download_path"].endswith("translated.zip"))
             start_events = [event for event in events if event.get("event") == "start"]
             self.assertEqual(start_events[0]["total_pages"], 1)
+            page_artifact = engine.build_client_session_payload(
+                project_id,
+                session,
+            )["page_artifacts"]["page-2.png"]
+            self.assertTrue(page_artifact["capabilities"]["translation_ready"])
+            self.assertTrue(page_artifact["capabilities"]["final_ready"])
+            self.assertTrue(page_artifact["capabilities"]["can_export"])
 
     def test_resume_translation_does_not_skip_detect_only_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2393,6 +2445,12 @@ print(json.dumps({
                 "translation_region_disabled_overrides": {},
                 "translation_region_layout_overrides": {},
                 "style_region_overrides": {},
+                "artifact_state": ProjectArtifactState.create(
+                    ["page-1.png"]
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).model_dump(mode="json"),
             }
             rendered_pages: list[str] = []
             events: list[dict[str, object]] = []
@@ -2464,6 +2522,21 @@ print(json.dumps({
                 "download_path": str(existing_archive),
                 "workflow_stage": "translated",
                 "last_config": {"rerender_output_format": "png"},
+                "artifact_state": ProjectArtifactState.create(
+                    ["page-1.png", "page-2.png"]
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-1.png",
+                    PageArtifactEvent.TRANSLATED,
+                ).apply(
+                    "page-2.png",
+                    PageArtifactEvent.RECOGNIZED,
+                ).apply(
+                    "page-2.png",
+                    PageArtifactEvent.TRANSLATED,
+                ).model_dump(mode="json"),
             }
             events: list[dict[str, object]] = []
             persisted: dict[str, object] = {}
@@ -2503,6 +2576,12 @@ print(json.dumps({
             self.assertEqual(events[-1]["event"], "progress")
             self.assertEqual(events[-1]["current"], 1)
             self.assertEqual(events[-1]["total"], 1)
+            page_artifact = engine.build_client_session_payload(
+                "project-a",
+                session,
+            )["page_artifacts"]["page-1.png"]
+            self.assertEqual(page_artifact["artifacts"]["final"]["revision"], 2)
+            self.assertTrue(page_artifact["capabilities"]["final_ready"])
 
     def test_advanced_erase_composite_preserves_pixels_outside_change_mask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

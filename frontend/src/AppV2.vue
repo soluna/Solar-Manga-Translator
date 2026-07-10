@@ -8,6 +8,11 @@ import {
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
+  mergePageArtifact,
+  normalizePageArtifacts,
+  projectArtifactsAllowExport,
+} from './project-artifact-state.js'
+import {
   getBaseImageRefreshPageIds,
   mergeRegionCount,
   normalizeSessionSourceImages,
@@ -700,6 +705,8 @@ const taskErrorDetails = ref(null)
 const taskErrorDetailsOpen = ref(false)
 const downloadUrl = ref('')
 const downloadPath = ref('')
+const artifactSchemaVersion = ref(0)
+const pageArtifacts = ref({})
 const translatedDirPath = ref('')
 const maskDebugDirPath = ref('')
 const progress = ref({ current: 0, total: 0 })
@@ -986,7 +993,10 @@ const canApplyProjectGlossary = computed(() => canUseProjectGlossary.value && !g
 const canRefreshProjectGlossaryOccurrences = computed(() => canUseProjectGlossary.value && !glossaryBusy.value)
 const v2ExportArchiveUrl = computed(() => {
   const activeSessionId = String(sessionId.value || '').trim()
-  if (!activeSessionId) {
+  if (
+    !activeSessionId
+    || !projectArtifactsAllowExport(artifactSchemaVersion.value, pageArtifacts.value)
+  ) {
     return ''
   }
   const currentDownloadUrl = String(downloadUrl.value || '').trim()
@@ -3056,6 +3066,8 @@ function applySessionPayload(payload, options = {}) {
   workflowStage.value = payload?.workflow_stage || 'idle'
   downloadUrl.value = payload?.download_url ? withCacheBust(toApiUrl(payload.download_url)) : ''
   downloadPath.value = payload?.download_path || ''
+  artifactSchemaVersion.value = Number(payload?.artifact_schema_version) || 0
+  pageArtifacts.value = normalizePageArtifacts(payload?.page_artifacts)
   translatedDirPath.value = payload?.translated_dir || ''
   maskDebugDirPath.value = payload?.mask_debug_dir || ''
   originalImages.value = normalizeSessionSourceImages({
@@ -3327,6 +3339,8 @@ async function deleteProject(project) {
       translatedImages.value = []
       downloadUrl.value = ''
       downloadPath.value = ''
+      artifactSchemaVersion.value = 0
+      pageArtifacts.value = {}
       translatedDirPath.value = ''
       maskDebugDirPath.value = ''
       workflowStage.value = 'idle'
@@ -4446,6 +4460,12 @@ function applyInspectionOverrides(overrides, options = {}) {
 }
 
 function applyPageCommandPayload(payload) {
+  if (Number(payload?.artifact_schema_version) > 0) {
+    artifactSchemaVersion.value = Number(payload.artifact_schema_version)
+  }
+  if (payload?.page_artifact) {
+    pageArtifacts.value = mergePageArtifact(pageArtifacts.value, payload.page_artifact)
+  }
   if (payload?.translation_page) {
     reviewInspectionPages.value = replaceInspectionPage(reviewInspectionPages.value, payload.translation_page)
   }

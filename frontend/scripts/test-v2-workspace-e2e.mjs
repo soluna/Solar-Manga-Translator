@@ -443,6 +443,10 @@ async function main() {
     if (await page.locator('.v2-region-commit-icon.is-failed.is-visible').count()) {
       throw new Error('译文编辑提交后出现失败状态')
     }
+    const exportResultButton = page.getByRole('button', { name: '导出结果', exact: true }).first()
+    if (!(await exportResultButton.isDisabled())) {
+      throw new Error('译文编辑后旧嵌字结果仍然可以直接导出')
+    }
     const previewCentering = await readPreviewTextCentering(activeBox)
     if (!previewCentering) {
       throw new Error('译文编辑后没有出现框内预览文本，无法验证居中效果')

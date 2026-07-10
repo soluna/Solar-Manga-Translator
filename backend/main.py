@@ -1294,12 +1294,15 @@ async def upload_comic(
 async def download_translated_archive(session_id: str):
     session = get_or_restore_session(session_id)
 
-    download_path = Path(
-        translator_engine.build_session_archive(
-            session_id=session_id,
-            session=session,
+    try:
+        download_path = Path(
+            translator_engine.build_session_archive(
+                session_id=session_id,
+                session=session,
+            )
         )
-    )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not download_path.exists():
         raise HTTPException(status_code=404, detail="Translated archive not found")
 

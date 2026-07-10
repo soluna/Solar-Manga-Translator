@@ -74,8 +74,8 @@
 
 | 文件 | 行数 | 观察 |
 | --- | ---: | --- |
-| [`backend/engine/translator.py`](../backend/engine/translator.py#L53) | 10,907 | 1 个类、379 个方法、56 个 public 方法 |
-| [`frontend/src/AppV2.vue`](../frontend/src/AppV2.vue#L1) | 12,999 | 157 个 `ref`、136 个 `computed`、14 个 `watch`、41 次 `apiFetch` |
+| [`backend/engine/translator.py`](../backend/engine/translator.py#L53) | 11,160 | 1 个类、仍承担绝大多数业务与副作用 |
+| [`frontend/src/AppV2.vue`](../frontend/src/AppV2.vue#L1) | 13,019 | 页面级远端状态开始迁移，但大部分状态和副作用仍集中于此 |
 | [`frontend/src/styles-v2.css`](../frontend/src/styles-v2.css#L1) | 3,631 | 与单一大视图同步增长 |
 | [`backend/main.py`](../backend/main.py#L1) | 1,545 | 75 个顶层函数、49 个路由，全局实例在 import 时创建 |
 | [`backend/engine/project_workspace.py`](../backend/engine/project_workspace.py#L18) | 210 | 主要是路径、JSON 和索引辅助函数 |
@@ -83,13 +83,13 @@
 
 `TranslatorEngine` 直接访问 28 个 session 字段，共约 294 次，其中 25 个字段会被它原地修改。最大的单测文件
 [`test_translator_engine_state.py`](../backend/tests/test_translator_engine_state.py#L1)
-有 3,206 行，对 `engine._*` 私有实现有 189 次引用、54 次直接替换。
+有 3,285 行，仍大量引用和直接替换 `engine._*` 私有实现。
 
 ### 3.2 本地自动化结果
 
-- 后端：163 个测试通过。
+- 后端：170 个测试通过。
 - 前端：配置持久化、审校状态、任务事件、任务连接、工作流状态测试通过。
-- 前端生产构建通过。
+- 前端生产构建、桌面运行路径检查和 V2 工作台 Playwright E2E 通过。
 
 这些结果证明当前补丁有回归保护，但不能证明架构 Interface 稳定；大量测试正是绑定在私有 Implementation 上。
 
@@ -532,6 +532,29 @@ class ProjectApplication:
 ## 8. 实施顺序
 
 每个 Work Package 都必须能独立合并；在新 Interface 稳定前保留兼容 facade，完成调用迁移后立即删除旧路径。
+
+### 8.1 当前实施进度（2026-07-10）
+
+W0 + W1 的第一个纵向切片已经落地，但不能据此把 W0 或 W1 整包标记为完成：
+
+- 新增 [`PageArtifactState`](../backend/domain/project_artifacts.py)，以 Schema v2 表达
+  source、recognition、blank、translation、final 和 layout revision，并从依赖 revision
+  派生 capability 与 stale 状态。
+- `session.json` 已持久化 `artifact_state`；无该字段的旧项目会依据页面文档、缓存和当前输出迁移一次，
+  未知版本或损坏的 v2 状态会显式失败，不再被当作空状态继续运行。
+- 识别、翻译和重新嵌字现在通过同一个 Artifact State Module 提交产物事件；原有
+  `workflow_stage` 与旧 payload 保留为兼容 Interface。
+- 新 payload 增加 `artifact_schema_version`、`page_artifacts` 和每页 `artifact_state`，旧字段未删除。
+- 改译文、保留原文、禁用文本框、版式/字体编辑、名词库批量替换、上传无字图、画笔编辑以及
+  高级擦除会使已有 final 失效；重新嵌字后 final 才恢复 current/can_export。
+- 已增加 Domain 行为测试、迁移/非法 Schema 测试，以及识别、翻译、重嵌、译文编辑和空白页编辑的
+  Engine Interface 回归测试；CI 也会单独编译新 Domain Module。
+- 前端已通过独立的 `project-artifact-state` Module 读取 capability；任一页 final 过期时不再自行拼接
+  下载地址，服务端也会拒绝导出并返回 409。工作台 E2E 覆盖了“改译文后导出结果立即禁用”。
+
+这个切片仍有明确边界：完整 `ProjectState` 尚未类型化，`content_hash` 尚未写入，项目索引仍是第二份投影，
+旧的手动框路由仍有绕过统一 command/event Interface 的入口，前端也尚未把 `page_artifacts` 设为唯一状态 owner。
+因此下一步仍按 W0/W1 收尾，而不是直接宣布进入文件拆分。
 
 ### W0：冻结语义与建立架构回归基线
 

@@ -27,6 +27,7 @@ atexit.register(shutil.rmtree, TEST_APP_DATA_DIR, True)
 os.environ["APP_DATA_DIR"] = str(TEST_APP_DATA_DIR)
 
 import main
+from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
 
 
 class DummyUpload:
@@ -139,6 +140,15 @@ class ApiSecurityTests(unittest.TestCase):
                 Image.new("RGB", (32, 32), (255, 255, 255)).save(page_cache / "inpainted.png")
             session["rerender_cache_dir"] = str(cache_dir)
             session["workflow_stage"] = "detected"
+            artifact_state = ProjectArtifactState.model_validate(
+                session["artifact_state"]
+            )
+            for source_image in session["source_images"]:
+                artifact_state = artifact_state.apply(
+                    source_image["stored_name"],
+                    PageArtifactEvent.RECOGNIZED,
+                )
+            session["artifact_state"] = artifact_state.model_dump(mode="json")
             return {"workflow_stage": "detected"}
 
         async def fake_resume_session(*, session_id, session, progress_callback, **_kwargs):
@@ -152,6 +162,15 @@ class ApiSecurityTests(unittest.TestCase):
                 translated_output_map[stored_name] = stored_name
             session["translated_output_map"] = translated_output_map
             session["workflow_stage"] = "translated"
+            artifact_state = ProjectArtifactState.model_validate(
+                session["artifact_state"]
+            )
+            for source_image in session["source_images"]:
+                artifact_state = artifact_state.apply(
+                    source_image["stored_name"],
+                    PageArtifactEvent.TRANSLATED,
+                )
+            session["artifact_state"] = artifact_state.model_dump(mode="json")
             archive_path = main.translator_engine.build_session_archive(session_id, session)
             return {
                 "workflow_stage": "translated",
@@ -183,6 +202,22 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(download.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
             self.assertEqual(len(archive.namelist()), 1)
+
+    def test_download_rejects_a_project_without_current_final_artifacts(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (16, 16), (255, 255, 255)).save(
+            image_bytes,
+            format="PNG",
+        )
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+            )
+            response = self.client.get(f"/api/download/{upload.json()['session_id']}")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("翻译结果", response.json()["detail"])
 
     def test_translation_task_survives_websocket_disconnect_and_resumes(self) -> None:
         image_bytes = io.BytesIO()

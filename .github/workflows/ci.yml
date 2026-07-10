@@ -34,6 +34,7 @@ jobs:
             backend/system_fonts.py \
             backend/task_manager.py \
             backend/workflow_events.py \
+            backend/domain/project_artifacts.py \
             backend/utils/file_handler.py \
             backend/engine/translator.py \
             backend/patched_custom_openai.py \
@@ -61,6 +62,7 @@ jobs:
           npm ci
           npm run test:config-persistence
           npm run test:local-port
+          npm run test:project-artifact-state
           npm run test:review-workspace-state
           npm run test:task-event-state
           npm run test:task-connection

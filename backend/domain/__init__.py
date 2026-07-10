@@ -1,0 +1,1 @@
+"""Typed project domain models."""

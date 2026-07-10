@@ -27,6 +27,12 @@ from urllib import request as urllib_request
 import cv2
 import numpy as np
 
+from domain.project_artifacts import (
+    PROJECT_ARTIFACT_SCHEMA_VERSION,
+    LegacyPageArtifactEvidence,
+    PageArtifactEvent,
+    ProjectArtifactState,
+)
 from http_requests import build_json_post_request
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
@@ -631,12 +637,119 @@ class TranslatorEngine:
             return f"/output/{project_id}/translated/{current_output.name}"
         return f"/output/{project_id}/source/{stored_name}"
 
+    def _legacy_page_artifact_evidence(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+    ) -> list[LegacyPageArtifactEvidence]:
+        stage = self._session_workflow_stage(session)
+        output_dir = Path(session.get("translated_dir") or "")
+        preferred_format = self._normalize_rerender_output_format(
+            (session.get("last_config") or {}).get("rerender_output_format")
+        )
+        evidence: list[LegacyPageArtifactEvidence] = []
+        for image in session.get("source_images") or []:
+            if not isinstance(image, dict):
+                continue
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not stored_name:
+                continue
+            document = self._read_json_file(
+                self._project_page_document_path(project_id, stored_name),
+                {},
+            )
+            metadata = document.get("metadata") if isinstance(document, dict) else {}
+            document_revision = int(
+                (metadata or {}).get("revision") or 0
+            )
+            page_cache_dir = self._session_page_cache_dir(
+                session,
+                project_id,
+                stored_name,
+            )
+            regions_path = page_cache_dir / "regions.json"
+            inpainted_path = page_cache_dir / "inpainted.png"
+            cache_meta = self._read_json_file(page_cache_dir / "meta.json", {})
+            base_kind = str((cache_meta or {}).get("base_kind") or "").strip().lower()
+            has_recognition = regions_path.exists() or (
+                stage in {"detected", "translating", "translated"}
+                and isinstance(document, dict)
+                and bool(document)
+            )
+            has_blank = inpainted_path.exists() and base_kind != "source"
+            current_output = self._current_translated_output(
+                session,
+                output_dir,
+                stored_name,
+                preferred_format,
+            )
+            has_final = bool(current_output is not None and current_output.exists())
+            # A legacy final is evidence that recognition and a blank base existed
+            # when it was rendered, even if its editable cache has since been lost.
+            has_recognition = has_recognition or has_final
+            has_blank = has_blank or has_final
+            has_translation = has_final or self._page_has_completed_translation_document(
+                project_id,
+                stored_name,
+            )
+            evidence.append(
+                LegacyPageArtifactEvidence(
+                    page_id=stored_name,
+                    document_revision=document_revision,
+                    recognition_ready=has_recognition,
+                    blank_ready=has_blank,
+                    translation_ready=has_translation,
+                    final_ready=has_final,
+                )
+            )
+        return evidence
+
+    def _project_artifact_state(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+    ) -> ProjectArtifactState:
+        raw_state = session.get("artifact_state")
+        if raw_state is None:
+            page_evidence = self._legacy_page_artifact_evidence(project_id, session)
+        else:
+            page_evidence = [
+                LegacyPageArtifactEvidence(page_id=stored_name)
+                for stored_name in (
+                    str(image.get("stored_name") or "").strip()
+                    for image in (session.get("source_images") or [])
+                    if isinstance(image, dict)
+                )
+                if stored_name
+            ]
+        state = ProjectArtifactState.load(
+            raw_state,
+            legacy_pages=page_evidence,
+        )
+        session["artifact_state"] = state.model_dump(mode="json")
+        return state
+
+    def _apply_page_artifact_event(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_ids: list[str],
+        event: PageArtifactEvent,
+    ) -> ProjectArtifactState:
+        state = self._project_artifact_state(project_id, session)
+        for page_id in dict.fromkeys(str(item or "").strip() for item in page_ids):
+            if page_id:
+                state = state.apply(page_id, event)
+        session["artifact_state"] = state.model_dump(mode="json")
+        return state
+
     def _serialize_session_state(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
         created_at = str(session.get("project_created_at") or self._now_iso())
         updated_at = self._now_iso()
         session["project_id"] = project_id
         session["project_created_at"] = created_at
         session["project_updated_at"] = updated_at
+        artifact_state = self._project_artifact_state(project_id, session)
 
         return {
             "project_id": project_id,
@@ -664,6 +777,7 @@ class TranslatorEngine:
             "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
             "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
             "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+            "artifact_state": artifact_state.model_dump(mode="json"),
         }
 
     def _read_snapshot_manifests(self, project_id: str) -> list[dict[str, Any]]:
@@ -1137,6 +1251,12 @@ class TranslatorEngine:
             raise ValueError("没有找到可匹配的页面文件名。请确保无字图与原图文件名一致。")
 
         unique_page_ids = list(dict.fromkeys(matched_page_ids))
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            unique_page_ids,
+            PageArtifactEvent.BLANK_REPLACED,
+        )
         self.persist_project_state(
             project_id,
             session,
@@ -1359,6 +1479,12 @@ class TranslatorEngine:
                 "changed_ratio": changed_ratio,
             },
         )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
+        )
         self.persist_project_state(
             project_id,
             session,
@@ -1429,6 +1555,12 @@ class TranslatorEngine:
                 "operation_count": len(normalized_operations),
                 "changed_ratio": changed_ratio,
             },
+        )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
         )
         self.persist_project_state(
             project_id,
@@ -1715,6 +1847,12 @@ class TranslatorEngine:
                 "selection_count": len(rects),
             },
         )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
+        )
         self.persist_project_state(
             project_id,
             session,
@@ -1873,6 +2011,12 @@ class TranslatorEngine:
                 "selection_count": len(rects),
             },
         )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
+        )
         self.persist_project_state(
             project_id,
             session,
@@ -1920,6 +2064,12 @@ class TranslatorEngine:
                 "mode": "traditional",
                 "updated_at": self._now_iso(),
             },
+        )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
         )
         self.persist_project_state(
             project_id,
@@ -2164,6 +2314,7 @@ class TranslatorEngine:
                 raise FileNotFoundError("项目状态不存在，请重新上传。")
             state = self._serialize_session_state(project_id, recovered_session)
             restored_from_manifest = True
+        artifact_state_needs_migration = state.get("artifact_state") is None
 
         session = {
             "source_dir": str(state.get("source_dir") or ""),
@@ -2185,6 +2336,7 @@ class TranslatorEngine:
             "translation_region_disabled_overrides": dict(state.get("translation_region_disabled_overrides") or {}),
             "translation_region_layout_overrides": dict(state.get("translation_region_layout_overrides") or {}),
             "style_region_overrides": dict(state.get("style_region_overrides") or {}),
+            "artifact_state": state.get("artifact_state"),
             "project_id": project_id,
             "project_title": str(state.get("project_title") or project_id),
             "project_note": str(state.get("project_note") or ""),
@@ -2255,7 +2407,8 @@ class TranslatorEngine:
         if session.get("workflow_stage") != inferred_workflow_stage:
             session["workflow_stage"] = inferred_workflow_stage
             restored_from_manifest = True
-        if restored_from_manifest:
+        self._project_artifact_state(project_id, session)
+        if restored_from_manifest or artifact_state_needs_migration:
             self.persist_project_state(project_id, session, persist_page_documents=False)
         return session
 
@@ -2461,6 +2614,15 @@ class TranslatorEngine:
         return self._build_project_summary(project_id, session)
 
     def build_client_session_payload(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        artifact_state = self._project_artifact_state(project_id, session)
+        page_artifacts = {
+            page_id: artifact_state.page_view(page_id).model_dump(mode="json")
+            for page_id in artifact_state.pages
+        }
+        project_can_export = bool(page_artifacts) and all(
+            bool(page["capabilities"]["can_export"])
+            for page in page_artifacts.values()
+        )
         preferred_output_format = self._normalize_rerender_output_format(
             (session.get("last_config") or {}).get("rerender_output_format")
         )
@@ -2472,6 +2634,10 @@ class TranslatorEngine:
                 "region_count": self._page_document_region_count(
                     project_id,
                     str(image.get("stored_name") or ""),
+                ),
+                "artifact_state": page_artifacts.get(
+                    str(image.get("stored_name") or ""),
+                    {},
                 ),
             }
             for image in (session.get("source_images") or [])
@@ -2500,7 +2666,13 @@ class TranslatorEngine:
             "images": source_images,
             "translated_images": translated_images,
             "workflow_stage": str(session.get("workflow_stage") or "idle"),
-            "download_url": f"/api/download/{project_id}" if translated_images else "",
+            "artifact_schema_version": PROJECT_ARTIFACT_SCHEMA_VERSION,
+            "page_artifacts": page_artifacts,
+            "download_url": (
+                f"/api/download/{project_id}"
+                if translated_images and project_can_export
+                else ""
+            ),
             "download_path": str(session.get("download_path") or ""),
             "translated_dir": str(Path(session.get("translated_dir") or "").resolve()) if session.get("translated_dir") else "",
             "mask_debug_dir": str(Path(session.get("mask_debug_dir") or "").resolve()) if session.get("mask_debug_dir") else "",
@@ -3357,6 +3529,12 @@ class TranslatorEngine:
                 for page_id in (preview.get("affected_pages") or [])
                 if str(page_id or "")
             ]
+            self._apply_page_artifact_event(
+                project_id,
+                session,
+                affected_pages,
+                PageArtifactEvent.TRANSLATION_EDITED,
+            )
             raw_config = {
                 **dict(session.get("last_config") or {}),
                 "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
@@ -4733,6 +4911,40 @@ class TranslatorEngine:
 
             raise ValueError(f"暂不支持的页面命令：{command_type}")
 
+        translation_hints = {
+            "translation_updated",
+            "keep_original_updated",
+            "region_disabled",
+            "region_restored",
+        }
+        layout_hints = {
+            "layout_adjusted",
+            "font_size_updated",
+            "text_direction_updated",
+            "font_family_updated",
+            "advanced_style_updated",
+            "font_style_updated",
+            "manual_region_added",
+            "manual_region_duplicated",
+            "regions_merged",
+            "manual_region_deleted",
+            "manual_region_restored",
+        }
+        if any(hint in translation_hints for hint in snapshot_hints):
+            self._apply_page_artifact_event(
+                project_id,
+                session,
+                [page_id],
+                PageArtifactEvent.TRANSLATION_EDITED,
+            )
+        if any(hint in layout_hints for hint in snapshot_hints):
+            self._apply_page_artifact_event(
+                project_id,
+                session,
+                [page_id],
+                PageArtifactEvent.LAYOUT_EDITED,
+            )
+
         self.persist_project_state(
             project_id,
             session,
@@ -4741,8 +4953,14 @@ class TranslatorEngine:
         )
         document = self.get_page_document(project_id, session, page_id)
         page_name = self._page_display_name(session, page_id)
+        page_artifact = self._project_artifact_state(
+            project_id,
+            session,
+        ).page_view(page_id)
         return {
             "page_id": page_id,
+            "artifact_schema_version": PROJECT_ARTIFACT_SCHEMA_VERSION,
+            "page_artifact": page_artifact.model_dump(mode="json"),
             "document": document,
             "revision": int((document.get("metadata") or {}).get("revision") or 0),
             "updated_region_ids": sorted({region_id for region_id in updated_region_ids if region_id}),
@@ -4994,6 +5212,16 @@ class TranslatorEngine:
         # They are not translated artifacts and must not survive as client-visible final images.
         self._clear_directory(output_dir)
         session["translated_output_map"] = {}
+        self._apply_page_artifact_event(
+            session_id,
+            session,
+            [
+                str(image.get("stored_name") or "")
+                for image in session.get("source_images") or []
+                if isinstance(image, dict)
+            ],
+            PageArtifactEvent.RECOGNIZED,
+        )
 
         session["workflow_stage"] = "detected"
         self.persist_project_state(
@@ -5140,6 +5368,12 @@ class TranslatorEngine:
                 session=session,
             )
             self._update_translated_output_map(session, stored_name, output_path)
+            self._apply_page_artifact_event(
+                session_id,
+                session,
+                [stored_name],
+                PageArtifactEvent.TRANSLATED,
+            )
             self.persist_project_state(
                 session_id,
                 session,
@@ -5347,6 +5581,12 @@ class TranslatorEngine:
                     )
 
             self._update_translated_output_map(session, image["stored_name"], rendered_output_path)
+            self._apply_page_artifact_event(
+                session_id,
+                session,
+                [str(image.get("stored_name") or "")],
+                PageArtifactEvent.RENDERED,
+            )
 
             await progress_callback(
                 {
@@ -5540,6 +5780,19 @@ class TranslatorEngine:
             output_dir=output_dir,
             preferred_output_format=resolved_output_format,
         )
+        artifact_state = self._project_artifact_state(session_id, session)
+        non_exportable_pages = [
+            page_id
+            for page_id in artifact_state.pages
+            if not artifact_state.page_view(page_id).capabilities.can_export
+        ]
+        if non_exportable_pages:
+            preview = "、".join(non_exportable_pages[:5])
+            suffix = "…" if len(non_exportable_pages) > 5 else ""
+            raise RuntimeError(
+                "存在尚未生成或已经过期的嵌字结果，请先重新嵌字："
+                f"{preview}{suffix}"
+            )
         project_name = self._safe_export_name(session.get("project_title"), session_id)
         named_files = [
             (file_path, f"{project_name}_result_{index:04d}{file_path.suffix.lower()}")

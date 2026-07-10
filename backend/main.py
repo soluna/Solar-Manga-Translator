@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from domain.project_state import ProjectStateError
 from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
@@ -331,6 +332,8 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
         session = translator_engine.restore_project_session(project_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     SESSIONS[project_id] = session
     return session
@@ -719,6 +722,8 @@ async def restore_project(project_id: str):
         session = translator_engine.restore_project_session(project_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     SESSIONS[project_id] = session
     return translator_engine.build_client_session_payload(project_id, session)
 
@@ -842,6 +847,8 @@ async def restore_project_snapshot(project_id: str, snapshot_id: str):
         restored_project_id, session = translator_engine.restore_snapshot_as_project(project_id, snapshot_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     SESSIONS[restored_project_id] = session
     return translator_engine.build_client_session_payload(restored_project_id, session)
@@ -858,6 +865,8 @@ async def pin_project_snapshot(project_id: str, snapshot_id: str, payload: dict[
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"snapshots": snapshots}
@@ -911,60 +920,54 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             region_id = str(payload.get("region_id") or "").strip()
             if not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要删除的补漏框 ID。")
-            removed = translator_engine.delete_manual_region(session, region_id)
-            if not removed:
-                raise HTTPException(status_code=404, detail="没有找到对应的补漏框。")
-            translator_engine.persist_project_state(
-                session_id,
-                session,
-                snapshot_kind="manual_region_deleted",
-                snapshot_summary="删除手动补漏框",
-                persist_page_documents=True,
+            result = await translator_engine.apply_page_commands(
+                project_id=session_id,
+                session=session,
+                page_id=str(payload.get("stored_name") or "").strip(),
+                raw_config=payload.get("config", {}),
+                commands=[{"type": "delete_manual_region", "region_id": region_id}],
             )
-            return {"ok": True, "action": "delete", "region_id": region_id}
+            return {
+                "ok": True,
+                "action": "delete",
+                "region_id": result["deleted_region_id"],
+                "page_artifact": result["page_artifact"],
+            }
 
         if action == "merge":
-            translator_engine.capture_session_config(session, payload.get("config", {}))
             stored_name = str(payload.get("stored_name") or "").strip()
             region_ids = payload.get("region_ids") or []
             if not stored_name:
                 raise HTTPException(status_code=400, detail="缺少目标页面信息。")
             if not isinstance(region_ids, list) or len(region_ids) < 2:
                 raise HTTPException(status_code=400, detail="至少需要选择两个文本框才能合并。")
-            region = await translator_engine.merge_regions(
-                session_id=session_id,
+            result = await translator_engine.apply_page_commands(
+                project_id=session_id,
                 session=session,
+                page_id=stored_name,
                 raw_config=payload.get("config", {}),
-                stored_name=stored_name,
-                region_ids=region_ids,
+                commands=[{"type": "merge_regions", "region_ids": region_ids}],
             )
-            translator_engine.persist_project_state(
-                session_id,
-                session,
-                snapshot_kind="regions_merged",
-                snapshot_summary=f"{stored_name} 合并文本框",
-                persist_page_documents=True,
-            )
-            return {"ok": True, "action": "merge", "region": region}
+            return {
+                "ok": True,
+                "action": "merge",
+                "region": result["created_region_payload"],
+                "page_artifact": result["page_artifact"],
+            }
 
         if action == "recognize":
             stored_name = str(payload.get("stored_name") or "").strip()
             region_id = str(payload.get("region_id") or "").strip()
             if not stored_name or not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要识别的页面或手动框信息。")
-            region = await translator_engine.recognize_manual_region(
-                session_id=session_id,
+            result = await translator_engine.apply_page_commands(
+                project_id=session_id,
                 session=session,
+                page_id=stored_name,
                 raw_config=payload.get("config", {}),
-                stored_name=stored_name,
-                region_id=region_id,
+                commands=[{"type": "recognize_manual_region", "region_id": region_id}],
             )
-            translator_engine.persist_project_state(
-                session_id,
-                session,
-                persist_page_documents=True,
-                page_ids=[stored_name],
-            )
+            region = result["recognized_region_payload"]
             recognition_ok = str(region.get("recognition_status") or "") == "ready"
             return {
                 "ok": recognition_ok,
@@ -975,31 +978,33 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                     if recognition_ok
                     else f"手动框已保留，但识别失败：{region.get('recognition_error') or '未知错误'}"
                 ),
+                "page_artifact": result["page_artifact"],
             }
 
-        translator_engine.capture_session_config(session, payload.get("config", {}))
         stored_name = str(payload.get("stored_name") or "").strip()
         if not stored_name:
             raise HTTPException(status_code=400, detail="缺少目标页面信息。")
 
-        region = await translator_engine.create_manual_region(
-            session_id=session_id,
+        result = await translator_engine.apply_page_commands(
+            project_id=session_id,
             session=session,
+            page_id=stored_name,
             raw_config=payload.get("config", {}),
-            stored_name=stored_name,
-            bbox=payload.get("bbox"),
+            commands=[{"type": "create_region", "bbox": payload.get("bbox")}],
         )
-        translator_engine.persist_project_state(
-            session_id,
-            session,
-            snapshot_kind="manual_region_added",
-            snapshot_summary=f"{stored_name} 新增手动补漏框",
-            persist_page_documents=True,
-        )
-        return {"ok": True, "action": "create", "region": region}
+        return {
+            "ok": True,
+            "action": "create",
+            "region": result["created_region_payload"],
+            "page_artifact": result["page_artifact"],
+        }
     except HTTPException:
         raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

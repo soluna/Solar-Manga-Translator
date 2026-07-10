@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import io
+import json
 import os
 import shutil
 import sys
@@ -218,6 +219,126 @@ class ApiSecurityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("翻译结果", response.json()["detail"])
+
+    def test_restore_reports_corrupt_project_state_instead_of_silently_recovering(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (16, 16), (255, 255, 255)).save(
+            image_bytes,
+            format="PNG",
+        )
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+            )
+            project_id = upload.json()["session_id"]
+            main.SESSIONS.pop(project_id, None)
+            state_path = main.translator_engine.project_workspace.project_session_state_path(
+                project_id
+            )
+            state_path.write_text("{not valid json", encoding="utf-8")
+
+            response = self.client.post(f"/api/projects/{project_id}/restore")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("项目状态文件已损坏", response.json()["detail"])
+
+    def test_restore_rejects_an_unknown_project_state_schema(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (16, 16), (255, 255, 255)).save(
+            image_bytes,
+            format="PNG",
+        )
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+            )
+            project_id = upload.json()["session_id"]
+            main.SESSIONS.pop(project_id, None)
+            state_path = main.translator_engine.project_workspace.project_session_state_path(
+                project_id
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 99
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            response = self.client.post(f"/api/projects/{project_id}/restore")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("不支持的项目状态版本", response.json()["detail"])
+
+    def test_legacy_manual_region_mutations_invalidate_the_current_final_artifact(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(
+            image_bytes,
+            format="PNG",
+        )
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+            )
+            payload = upload.json()
+            project_id = payload["session_id"]
+            page_id = payload["images"][0]["stored_name"]
+            session = main.SESSIONS[project_id]
+            output_dir = Path(session["translated_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (32, 32), (240, 240, 240)).save(
+                output_dir / page_id
+            )
+            session["translated_output_map"] = {page_id: page_id}
+            session["workflow_stage"] = "translated"
+            session["artifact_state"] = ProjectArtifactState.create(
+                [page_id]
+            ).apply(
+                page_id,
+                PageArtifactEvent.RECOGNIZED,
+            ).apply(
+                page_id,
+                PageArtifactEvent.TRANSLATED,
+            ).model_dump(mode="json")
+            main.translator_engine.persist_project_state(project_id, session)
+
+            created = self.client.post(
+                f"/api/manual-regions/{project_id}",
+                json={
+                    "action": "create",
+                    "stored_name": page_id,
+                    "bbox": [4, 4, 20, 20],
+                    "config": {},
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertTrue(
+                created.json()["page_artifact"]["capabilities"]["final_stale"]
+            )
+
+            region_id = created.json()["region"]["id"]
+            session["artifact_state"] = ProjectArtifactState.model_validate(
+                session["artifact_state"]
+            ).apply(
+                page_id,
+                PageArtifactEvent.RENDERED,
+            ).model_dump(mode="json")
+            main.translator_engine.persist_project_state(project_id, session)
+            deleted = self.client.post(
+                f"/api/manual-regions/{project_id}",
+                json={
+                    "action": "delete",
+                    "region_id": region_id,
+                },
+            )
+            restored = self.client.post(f"/api/projects/{project_id}/restore")
+
+        self.assertEqual(deleted.status_code, 200)
+        page_artifact = restored.json()["page_artifacts"][page_id]
+        self.assertTrue(page_artifact["capabilities"]["final_stale"])
+        self.assertFalse(page_artifact["capabilities"]["can_export"])
 
     def test_translation_task_survives_websocket_disconnect_and_resumes(self) -> None:
         image_bytes = io.BytesIO()

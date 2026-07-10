@@ -31,7 +31,13 @@ from domain.project_artifacts import (
     PROJECT_ARTIFACT_SCHEMA_VERSION,
     LegacyPageArtifactEvidence,
     PageArtifactEvent,
+    ProjectArtifactSchemaError,
     ProjectArtifactState,
+)
+from domain.project_state import (
+    PROJECT_STATE_SCHEMA_VERSION,
+    InvalidProjectStateError,
+    ProjectState,
 )
 from http_requests import build_json_post_request
 from patch_pydensecrf import patch_mask_refinement
@@ -750,35 +756,21 @@ class TranslatorEngine:
         session["project_created_at"] = created_at
         session["project_updated_at"] = updated_at
         artifact_state = self._project_artifact_state(project_id, session)
-
-        return {
-            "project_id": project_id,
-            "project_title": str(session.get("project_title") or ""),
-            "project_note": str(session.get("project_note") or ""),
+        storage_session = {
+            **session,
             "review_mode": self._session_review_mode(session),
-            "project_created_at": created_at,
-            "project_updated_at": updated_at,
-            "source_dir": str(session.get("source_dir") or ""),
-            "translated_dir": str(session.get("translated_dir") or ""),
-            "source_images": list(session.get("source_images") or []),
-            "download_path": str(session.get("download_path") or ""),
-            "translated_output_map": dict(session.get("translated_output_map") or {}),
-            "rerender_generation": int(session.get("rerender_generation") or 0),
-            "manual_regions": dict(session.get("manual_regions") or {}),
-            "advanced_erase_pages": dict(session.get("advanced_erase_pages") or {}),
-            "project_glossary": self._normalize_project_glossary(session.get("project_glossary")),
-            "workflow_stage": str(session.get("workflow_stage") or "idle"),
-            "mask_debug_dir": str(session.get("mask_debug_dir") or ""),
-            "rerender_cache_dir": str(session.get("rerender_cache_dir") or ""),
-            "last_config": self._sanitize_config_for_storage(session.get("last_config") or {}),
-            "deferred_output_names": sorted(str(item) for item in (session.get("deferred_output_names") or [])),
-            "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
-            "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
-            "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
-            "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
-            "style_region_overrides": dict(session.get("style_region_overrides") or {}),
-            "artifact_state": artifact_state.model_dump(mode="json"),
+            "project_glossary": self._normalize_project_glossary(
+                session.get("project_glossary")
+            ),
+            "last_config": self._sanitize_config_for_storage(
+                session.get("last_config") or {}
+            ),
         }
+        return ProjectState.capture(
+            project_id=project_id,
+            session=storage_session,
+            artifact_state=artifact_state,
+        ).model_dump(mode="json")
 
     def _read_snapshot_manifests(self, project_id: str) -> list[dict[str, Any]]:
         return self.project_workspace.read_snapshot_manifests(project_id)
@@ -2200,28 +2192,11 @@ class TranslatorEngine:
             self._refresh_project_index_entry(refreshed_summary)
 
     def list_projects(self) -> list[dict[str, Any]]:
-        index_items = self._read_json_file(self.project_index_path, [])
-        if isinstance(index_items, list) and index_items:
-            valid_items = [item for item in index_items if isinstance(item, dict)]
-            for item in valid_items:
-                project_id = str(item.get("project_id") or "")
-                item["is_busy"] = self.is_session_busy(project_id)
-                item["busy_action"] = self.get_session_busy_action(project_id)
-            valid_items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-            return valid_items
-
-        items: list[dict[str, Any]] = []
-        for project_dir in sorted(self.projects_root.iterdir()) if self.projects_root.exists() else []:
-            manifest_path = project_dir / "project.json"
-            payload = self._read_json_file(manifest_path, {})
-            if isinstance(payload, dict) and payload:
-                project_id = str(payload.get("project_id") or "")
-                payload["is_busy"] = self.is_session_busy(project_id)
-                payload["busy_action"] = self.get_session_busy_action(project_id)
-                items.append(payload)
-        items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        if items:
-            self._write_project_index(items)
+        items = self.project_workspace.rebuild_project_index()
+        for item in items:
+            project_id = str(item.get("project_id") or "")
+            item["is_busy"] = self.is_session_busy(project_id)
+            item["busy_action"] = self.get_session_busy_action(project_id)
         return items
 
     def try_mark_session_busy(self, project_id: str, action: str) -> bool:
@@ -2305,45 +2280,45 @@ class TranslatorEngine:
         return self.list_project_snapshots(project_id)
 
     def restore_project_session(self, project_id: str) -> dict[str, Any]:
-        state = self._read_json_file(self._project_session_state_path(project_id), {})
+        state_document = self.project_workspace.read_project_session_document(project_id)
         manifest = self._read_json_file(self._project_manifest_path(project_id), {})
         restored_from_manifest = False
-        if not isinstance(state, dict) or not state:
+        if state_document is None:
             recovered_session = self._recover_session_from_manifest(project_id, manifest)
             if not recovered_session:
                 raise FileNotFoundError("项目状态不存在，请重新上传。")
-            state = self._serialize_session_state(project_id, recovered_session)
+            state_document = self._serialize_session_state(project_id, recovered_session)
             restored_from_manifest = True
-        artifact_state_needs_migration = state.get("artifact_state") is None
-
-        session = {
-            "source_dir": str(state.get("source_dir") or ""),
-            "translated_dir": str(state.get("translated_dir") or ""),
-            "source_images": list(state.get("source_images") or []),
-            "download_path": str(state.get("download_path") or ""),
-            "translated_output_map": dict(state.get("translated_output_map") or {}),
-            "rerender_generation": int(state.get("rerender_generation") or 0),
-            "manual_regions": dict(state.get("manual_regions") or {}),
-            "advanced_erase_pages": dict(state.get("advanced_erase_pages") or {}),
-            "project_glossary": self._normalize_project_glossary(state.get("project_glossary")),
-            "workflow_stage": str(state.get("workflow_stage") or "idle"),
-            "mask_debug_dir": str(state.get("mask_debug_dir") or ""),
-            "rerender_cache_dir": str(state.get("rerender_cache_dir") or ""),
-            "last_config": dict(state.get("last_config") or {}),
-            "deferred_output_names": set(state.get("deferred_output_names") or []),
-            "translation_region_overrides": dict(state.get("translation_region_overrides") or {}),
-            "translation_region_skip_overrides": dict(state.get("translation_region_skip_overrides") or {}),
-            "translation_region_disabled_overrides": dict(state.get("translation_region_disabled_overrides") or {}),
-            "translation_region_layout_overrides": dict(state.get("translation_region_layout_overrides") or {}),
-            "style_region_overrides": dict(state.get("style_region_overrides") or {}),
-            "artifact_state": state.get("artifact_state"),
-            "project_id": project_id,
-            "project_title": str(state.get("project_title") or project_id),
-            "project_note": str(state.get("project_note") or ""),
-            "review_mode": self._normalize_review_mode(state.get("review_mode")),
-            "project_created_at": str(state.get("project_created_at") or self._now_iso()),
-            "project_updated_at": str(state.get("project_updated_at") or self._now_iso()),
-        }
+        project_state_needs_migration = (
+            state_document.get("schema_version") != PROJECT_STATE_SCHEMA_VERSION
+        )
+        legacy_artifact_state: ProjectArtifactState | None = None
+        if project_state_needs_migration:
+            migration_session = dict(state_document)
+            try:
+                legacy_artifact_state = self._project_artifact_state(
+                    project_id,
+                    migration_session,
+                )
+            except ProjectArtifactSchemaError as exc:
+                raise InvalidProjectStateError(
+                    "旧项目的页面产物状态损坏，无法安全迁移。"
+                ) from exc
+        project_state = ProjectState.load(
+            state_document,
+            expected_project_id=project_id,
+            legacy_artifact_state=legacy_artifact_state,
+        )
+        project_state_repaired = (
+            project_state.model_dump(mode="json") != state_document
+        )
+        session = project_state.to_runtime_session()
+        session["project_glossary"] = self._normalize_project_glossary(
+            session.get("project_glossary")
+        )
+        session["review_mode"] = self._normalize_review_mode(
+            session.get("review_mode")
+        )
         manifest_dict = manifest if isinstance(manifest, dict) else {}
         if not session["source_dir"]:
             session["source_dir"] = str(manifest_dict.get("source_dir") or "")
@@ -2408,7 +2383,11 @@ class TranslatorEngine:
             session["workflow_stage"] = inferred_workflow_stage
             restored_from_manifest = True
         self._project_artifact_state(project_id, session)
-        if restored_from_manifest or artifact_state_needs_migration:
+        if (
+            restored_from_manifest
+            or project_state_needs_migration
+            or project_state_repaired
+        ):
             self.persist_project_state(project_id, session, persist_page_documents=False)
         return session
 
@@ -4732,15 +4711,26 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         commands: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
-            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
         if not isinstance(commands, list) or not commands:
             raise ValueError("至少需要一条页面命令。")
+
+        page_id = str(page_id or "").strip()
+        if not page_id and len(commands) == 1:
+            command = commands[0]
+            if isinstance(command, dict) and str(command.get("type") or "").strip().lower() == "delete_manual_region":
+                page_id = self._manual_region_page_id(
+                    session,
+                    str(command.get("region_id") or "").strip(),
+                )
+        if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
+            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
 
         config = self.capture_page_command_config(session, raw_config)
         updated_region_ids: list[str] = []
         snapshot_hints: list[str] = []
         created_region_id = ""
+        created_region_payload: dict[str, Any] | None = None
+        recognized_region_payload: dict[str, Any] | None = None
         deleted_region_id = ""
         deleted_region_payload: dict[str, Any] | None = None
         page_region_ids: set[str] | None = None
@@ -4850,6 +4840,7 @@ class TranslatorEngine:
                     bbox=bbox,
                 )
                 created_region_id = str(region.get("id") or "")
+                created_region_payload = region
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_added")
                 continue
@@ -4864,6 +4855,7 @@ class TranslatorEngine:
                     raw_config=config,
                 )
                 created_region_id = str(region.get("id") or "")
+                created_region_payload = region
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_duplicated")
                 page_region_ids = None
@@ -4880,6 +4872,7 @@ class TranslatorEngine:
                 )
                 merged_from = [str(item) for item in (region.get("merged_from") or []) if str(item)]
                 created_region_id = str(region.get("id") or "")
+                created_region_payload = region
                 for source_region_id in merged_from:
                     self._set_region_disabled(session, source_region_id, True)
                 updated_region_ids.extend(merged_from)
@@ -4889,6 +4882,8 @@ class TranslatorEngine:
 
             if command_type == "delete_manual_region":
                 region_id = str(command.get("region_id") or "").strip()
+                if self._manual_region_page_id(session, region_id) != page_id:
+                    raise FileNotFoundError("当前页面没有找到对应的手动补框。")
                 removed_payload = self.pop_manual_region(session, region_id)
                 if not removed_payload:
                     raise FileNotFoundError("没有找到对应的手动补框。")
@@ -4899,12 +4894,28 @@ class TranslatorEngine:
                 snapshot_hints.append("manual_region_deleted")
                 continue
 
+            if command_type == "recognize_manual_region":
+                region_id = str(command.get("region_id") or "").strip()
+                if not region_id:
+                    raise ValueError("缺少需要识别的手动框标识。")
+                recognized_region_payload = await self.recognize_manual_region(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    stored_name=page_id,
+                    region_id=region_id,
+                )
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("manual_region_recognized")
+                continue
+
             if command_type == "restore_manual_region":
                 raw_payload = command.get("payload")
                 if not isinstance(raw_payload, dict):
                     raise ValueError("缺少可恢复的手动补框数据。")
                 restored_payload = self.restore_manual_region(session, raw_payload)
                 created_region_id = str(restored_payload.get("id") or "")
+                created_region_payload = restored_payload
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_restored")
                 continue
@@ -4928,6 +4939,7 @@ class TranslatorEngine:
             "manual_region_duplicated",
             "regions_merged",
             "manual_region_deleted",
+            "manual_region_recognized",
             "manual_region_restored",
         }
         if any(hint in translation_hints for hint in snapshot_hints):
@@ -4945,9 +4957,29 @@ class TranslatorEngine:
                 PageArtifactEvent.LAYOUT_EDITED,
             )
 
+        snapshot_metadata = {
+            "manual_region_added": (
+                "manual_region_added",
+                f"{page_id} 新增手动补漏框",
+            ),
+            "manual_region_duplicated": (
+                "manual_region_duplicated",
+                f"{page_id} 复制文本框",
+            ),
+            "regions_merged": (
+                "regions_merged",
+                f"{page_id} 合并文本框",
+            ),
+            "manual_region_deleted": (
+                "manual_region_deleted",
+                f"{page_id} 删除手动补漏框",
+            ),
+        }.get(snapshot_hints[-1] if snapshot_hints else "")
         self.persist_project_state(
             project_id,
             session,
+            snapshot_kind=snapshot_metadata[0] if snapshot_metadata else None,
+            snapshot_summary=snapshot_metadata[1] if snapshot_metadata else "",
             persist_page_documents=True,
             page_ids=[page_id],
         )
@@ -4965,6 +4997,8 @@ class TranslatorEngine:
             "revision": int((document.get("metadata") or {}).get("revision") or 0),
             "updated_region_ids": sorted({region_id for region_id in updated_region_ids if region_id}),
             "created_region_id": created_region_id,
+            "created_region_payload": created_region_payload or {},
+            "recognized_region_payload": recognized_region_payload or {},
             "deleted_region_id": deleted_region_id,
             "deleted_region_payload": deleted_region_payload or {},
             "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
@@ -9074,6 +9108,21 @@ class TranslatorEngine:
         if not isinstance(page_regions, list):
             return []
         return [payload for payload in page_regions if isinstance(payload, dict)]
+
+    def _manual_region_page_id(self, session: dict[str, Any], region_id: str) -> str:
+        if not region_id:
+            raise ValueError("缺少手动框标识。")
+        manual_regions = self._ensure_manual_regions_store(session)
+        for stored_name, page_regions in manual_regions.items():
+            if not isinstance(page_regions, list):
+                continue
+            if any(
+                isinstance(payload, dict)
+                and str(payload.get("id") or "") == region_id
+                for payload in page_regions
+            ):
+                return str(stored_name)
+        raise FileNotFoundError("没有找到对应的手动框。")
 
     def _normalize_manual_bbox(self, bbox: Any, image_width: int, image_height: int) -> list[int]:
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:

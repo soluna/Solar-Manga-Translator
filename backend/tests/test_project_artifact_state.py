@@ -21,6 +21,7 @@ from domain.project_artifacts import (
     ProjectArtifactState,
     UnsupportedProjectArtifactSchemaError,
 )
+from domain.project_state import PROJECT_STATE_SCHEMA_VERSION
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
 
@@ -187,6 +188,10 @@ class ProjectArtifactStateTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            self.assertEqual(
+                persisted["schema_version"],
+                PROJECT_STATE_SCHEMA_VERSION,
+            )
             self.assertEqual(persisted["artifact_state"]["schema_version"], 2)
 
             restored = engine.restore_project_session(project_id)
@@ -203,6 +208,7 @@ class ProjectArtifactStateTests(unittest.TestCase):
                 project_id
             )
             legacy_persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            legacy_persisted.pop("schema_version", None)
             legacy_persisted.pop("artifact_state", None)
             legacy_persisted["workflow_stage"] = "detected"
             engine._write_json_file(state_path, legacy_persisted)

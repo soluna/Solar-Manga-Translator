@@ -113,6 +113,44 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 ["older-project", "newer-project"],
             )
 
+    def test_project_index_is_rebuilt_from_manifests_instead_of_trusting_stale_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            workspace.write_project_index(
+                [{"project_id": "ghost", "updated_at": "2099-01-01"}]
+            )
+            workspace.write_json_file(
+                workspace.project_manifest_path("project-a"),
+                {
+                    "project_id": "project-a",
+                    "title": "Project A",
+                    "updated_at": "2026-01-01",
+                    "source_dir": "/private/project-a/source",
+                    "translated_dir": "/private/project-a/translated",
+                },
+            )
+            workspace.write_json_file(
+                workspace.project_manifest_path("project-b"),
+                {
+                    "project_id": "project-b",
+                    "title": "Project B",
+                    "updated_at": "2026-01-02",
+                },
+            )
+
+            rebuilt = workspace.rebuild_project_index()
+
+            self.assertEqual(
+                [item["project_id"] for item in rebuilt],
+                ["project-b", "project-a"],
+            )
+            self.assertEqual(
+                workspace.read_json_file(workspace.project_index_path, []),
+                rebuilt,
+            )
+            self.assertNotIn("source_dir", rebuilt[1])
+            self.assertNotIn("translated_dir", rebuilt[1])
+
 
 if __name__ == "__main__":
     unittest.main()

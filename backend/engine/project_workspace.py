@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from domain.project_state import CorruptProjectStateError
 from runtime_paths import AppPaths
 
 
@@ -16,6 +17,27 @@ class InvalidStorageIdentifierError(ValueError):
 
 
 class ProjectWorkspace:
+    PROJECT_INDEX_FIELDS = (
+        "project_id",
+        "title",
+        "note",
+        "review_mode",
+        "created_at",
+        "updated_at",
+        "page_count",
+        "region_count",
+        "workflow_stage",
+        "cover_image",
+        "latest_snapshot_id",
+        "latest_snapshot_kind",
+        "latest_snapshot_summary",
+        "snapshot_count",
+        "glossary_count",
+        "archived",
+        "is_busy",
+        "busy_action",
+    )
+
     PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
     def __init__(self, paths: AppPaths):
@@ -131,6 +153,22 @@ class ProjectWorkspace:
         except Exception:
             return default
 
+    def read_project_session_document(self, project_id: str) -> dict[str, Any] | None:
+        path = self.project_session_state_path(project_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CorruptProjectStateError(
+                "项目状态文件已损坏，无法安全恢复。请保留项目数据并导出诊断包。"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise CorruptProjectStateError(
+                "项目状态文件已损坏：顶层内容必须是 JSON 对象。"
+            )
+        return payload
+
     def read_jsonl_file(self, path: Path) -> list[Any]:
         if not path.exists():
             return []
@@ -208,3 +246,31 @@ class ProjectWorkspace:
         ]
         next_items.append(project_summary)
         self.write_project_index(next_items)
+
+    def rebuild_project_index(self) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        project_dirs = (
+            sorted(path for path in self.projects_root.iterdir() if path.is_dir())
+            if self.projects_root.exists()
+            else []
+        )
+        for project_dir in project_dirs:
+            try:
+                project_id = self.validated_project_id(project_dir.name)
+            except InvalidStorageIdentifierError:
+                continue
+            payload = self.read_json_file(project_dir / "project.json", {})
+            if not isinstance(payload, dict) or not payload:
+                continue
+            manifest_project_id = str(payload.get("project_id") or "").strip()
+            if manifest_project_id != project_id:
+                continue
+            summaries.append(
+                {
+                    field: payload[field]
+                    for field in self.PROJECT_INDEX_FIELDS
+                    if field in payload
+                }
+            )
+        self.write_project_index(summaries)
+        return summaries

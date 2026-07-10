@@ -8,8 +8,11 @@ import {
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
+  getBaseImageRefreshPageIds,
   mergeRegionCount,
   normalizeSessionSourceImages,
+  resolvePageEntryCoverUrl,
+  resolveReviewRegionTranslation,
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
 } from './review-workspace-state.js'
@@ -1679,9 +1682,8 @@ const v2PageEntries = computed(() => {
   for (const page of mergedInspectionPages.value) {
     const sourceImagePath = page?.source_image_url || page?.image_url || page?.base_image_url || ''
     const blankImagePath = page?.base_image_url || page?.source_image_url || page?.image_url || ''
-    const translatedImagePath = page?.translated_image_url || page?.image_url || ''
-    const finalUrl = getSavedTranslatedImageUrl(page) || getReviewPageImageUrl(translatedImagePath, page?.stored_name)
-    const previewUrl = getCanvasPreviewImageUrl(page) || getSavedTranslatedImageUrl(page) || getReviewPageImageUrl(translatedImagePath, page?.stored_name)
+    const finalUrl = getSavedTranslatedImageUrl(page)
+    const previewUrl = getCanvasPreviewImageUrl(page) || finalUrl || getReviewPageImageUrl(page?.image_url || '', page?.stored_name)
     ensureEntry(page?.stored_name, {
       name: page?.name || page?.stored_name || '未命名页面',
       sourceUrl: getReviewPageImageUrl(sourceImagePath, page?.stored_name),
@@ -1690,8 +1692,8 @@ const v2PageEntries = computed(() => {
       previewUrl,
       sourceThumbUrl: getThumbnailPageImageUrl(sourceImagePath, page?.stored_name),
       blankThumbUrl: getThumbnailPageImageUrl(blankImagePath, page?.stored_name),
-      finalThumbUrl: getSavedTranslatedImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getThumbnailPageImageUrl(translatedImagePath, page?.stored_name),
-      previewThumbUrl: getCanvasPreviewImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getSavedTranslatedImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getThumbnailPageImageUrl(translatedImagePath, page?.stored_name),
+      finalThumbUrl: getSavedTranslatedImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE),
+      previewThumbUrl: getCanvasPreviewImageUrl(page, IMAGE_THUMBNAIL_MAX_SIDE) || getThumbnailPageImageUrl(page?.image_url || '', page?.stored_name),
       regionCount: Number(page?.regions?.length || 0),
       reviewReady: true
     })
@@ -1718,17 +1720,7 @@ const v2PageEntries = computed(() => {
 
   return order.map((key) => {
     const entry = mapped.get(key)
-    const fallback = (
-      entry?.sourceThumbUrl
-      || entry?.blankThumbUrl
-      || entry?.finalThumbUrl
-      || entry?.previewThumbUrl
-      || entry?.sourceUrl
-      || entry?.blankUrl
-      || entry?.finalUrl
-      || entry?.previewUrl
-      || ''
-    )
+    const fallback = resolvePageEntryCoverUrl(entry, workflowStage.value)
     const status = entry?.finalUrl
       ? '已完成'
       : entry?.reviewReady
@@ -2597,7 +2589,7 @@ function resetTranslationCompletionRecovery() {
 
 function getCompletedTranslationStatus(completedAction, pageTargetStoredName = '') {
   if (completedAction === 'detect') {
-    return '文本框识别完成。现在可以先逐框确认、手动加框或保留原文，确认后再继续翻译。'
+    return '识别与擦字完成，无字底图已载入工作台。现在可以确认文本框，再继续翻译。'
   }
   if (completedAction === 'translate-page') {
     return '当前页翻译完成，结果已回填到工作台。'
@@ -2669,14 +2661,11 @@ async function finalizeCompletedTranslation(payload, context = {}) {
       preserveExistingTranslatedImageNonce: true,
     })
     if (shouldRefreshBaseImageForTaskAction(completedAction)) {
-      const refreshedBasePageIds = new Set(
-        (payload?.translated_images || [])
-          .map((image) => String(image?.stored_name || '').trim())
-          .filter(Boolean)
-      )
-      if (pageTargetStoredName) {
-        refreshedBasePageIds.add(pageTargetStoredName)
-      }
+      const refreshedBasePageIds = getBaseImageRefreshPageIds({
+        action: completedAction,
+        payload,
+        targetStoredName: pageTargetStoredName,
+      })
       for (const pageId of refreshedBasePageIds) {
         markPageImageUpdated(pageId, Date.now(), { base: true, translated: false })
       }
@@ -3668,10 +3657,11 @@ function getRegionOverrideValue(region) {
 }
 
 function getEditRegionText(region) {
-  if (Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)) {
-    return translationInputDrafts.value[region.id]
-  }
-  return translationRegionOverrides.value[region.id] || region.current_translation || region.machine_translation || ''
+  return resolveReviewRegionTranslation({
+    region,
+    drafts: translationInputDrafts.value,
+    overrides: translationRegionOverrides.value,
+  })
 }
 
 function isRegionSkipEnabled(region) {
@@ -5293,12 +5283,8 @@ function getReviewComparePaneImageUrl(mode) {
   if (mode === 'final') {
     return (
       getSavedTranslatedImageUrl(page, IMAGE_REVIEW_MAX_SIDE)
-      || getReviewPageImageUrl(page?.translated_image_url || page?.image_url || '', page?.stored_name)
+      || getReviewPageImageUrl(page?.translated_image_url || '', page?.stored_name)
       || entry?.finalUrl
-      || getCanvasPreviewImageUrl(page, IMAGE_REVIEW_MAX_SIDE)
-      || entry?.previewUrl
-      || entry?.blankUrl
-      || entry?.sourceUrl
       || ''
     )
   }
@@ -5712,10 +5698,7 @@ function getCanvasPreviewText(region) {
   if (isRegionSkipEnabled(region) || isRegionDisabled(region)) {
     return ''
   }
-  const draft = Object.prototype.hasOwnProperty.call(translationInputDrafts.value, region.id)
-    ? String(translationInputDrafts.value[region.id] || '')
-    : ''
-  return draft || getEditRegionText(region) || region.preview_text || ''
+  return getEditRegionText(region)
 }
 
 function shouldShowSourceCropPreview(region, page) {
@@ -10878,7 +10861,7 @@ watch(
             <span>{{ command.label }}</span>
           </button>
           <p class="v2-workflow-strip-note">
-            {{ config.pause_after_detection ? '推荐流程：先识别文本框并检查，再开始批量翻译。' : '当前流程：可直接翻译，也可以先识别后审校。' }}
+            第 1 步生成可编辑空页；第 2 步把译文回填到审校工作台并生成初稿；第 3 步应用审校调整重新嵌字。
           </p>
         </div>
 

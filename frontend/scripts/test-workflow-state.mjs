@@ -16,7 +16,7 @@ import {
 
 assert.equal(normalizeTaskAction('resume_translate'), 'resume-translate')
 assert.equal(normalizeTaskAction('translate_page'), 'translate-page')
-assert.equal(getWorkflowStageLabel('detected'), '待校对')
+assert.equal(getWorkflowStageLabel('detected'), '空页待审校')
 
 assert.deepEqual(
   getPrimaryProjectCommand({
@@ -75,7 +75,7 @@ assert.equal(
   '当前页重嵌字已开始。',
 )
 assert.equal(getTaskProgressStatus('resume-translate', { current: 2, total: 5 }), '继续翻译进行中：2 / 5')
-assert.equal(getTaskFailureStatus('detect'), '文本框识别失败。')
+assert.equal(getTaskFailureStatus('detect'), '识别或空页生成失败。')
 
 const idleStageCommands = getProjectStageCommands({
   hasProject: true,
@@ -94,7 +94,7 @@ assert.deepEqual(
   idleStageCommands.map((command) => command.key),
   ['detect', 'translate', 'rerender'],
 )
-assert.equal(idleStageCommands[0].label, '识别文本框')
+assert.equal(idleStageCommands[0].label, '识别并生成空页')
 assert.equal(idleStageCommands[0].enabled, true)
 assert.equal(idleStageCommands[1].enabled, false)
 assert.match(idleStageCommands[1].disabledReason, /识别/)
@@ -112,7 +112,7 @@ const detectedStageCommands = getProjectStageCommands({
   canRetranslate: false,
 })
 assert.equal(detectedStageCommands[1].action, 'resume-translate')
-assert.equal(detectedStageCommands[1].label, '继续翻译')
+assert.equal(detectedStageCommands[1].label, '翻译并生成初稿')
 assert.equal(detectedStageCommands[1].enabled, true)
 
 assert.equal(shouldConfirmBatchTranslation('detect'), false)

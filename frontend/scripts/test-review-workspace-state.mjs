@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 
 import {
+  getBaseImageRefreshPageIds,
   mergeRegionCount,
   normalizeSessionSourceImages,
+  resolvePageEntryCoverUrl,
+  resolveReviewRegionTranslation,
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
 } from '../src/review-workspace-state.js'
@@ -57,7 +60,73 @@ assert.equal(sourceImages[1].regionCount, 4)
 assert.equal(shouldRefreshBaseImageForTaskAction('translate'), true)
 assert.equal(shouldRefreshBaseImageForTaskAction('resume-translate'), true)
 assert.equal(shouldRefreshBaseImageForTaskAction('translate-page'), true)
-assert.equal(shouldRefreshBaseImageForTaskAction('detect'), false)
+assert.equal(shouldRefreshBaseImageForTaskAction('detect'), true)
 assert.equal(shouldRefreshBaseImageForTaskAction('rerender'), false)
+
+assert.deepEqual(
+  getBaseImageRefreshPageIds({
+    action: 'detect',
+    payload: {
+      images: [
+        { stored_name: '001.png' },
+        { stored_name: '002.png' },
+      ],
+      translated_images: [],
+    },
+  }),
+  ['001.png', '002.png'],
+)
+assert.deepEqual(
+  getBaseImageRefreshPageIds({
+    action: 'translate-page',
+    payload: { translated_images: [] },
+    targetStoredName: '002.png',
+  }),
+  ['002.png'],
+)
+
+const detectedRegion = {
+  id: 'region-1',
+  source_text: '原文',
+  preview_text: '原文',
+  current_translation: '',
+  machine_translation: '',
+}
+assert.equal(resolveReviewRegionTranslation({ region: detectedRegion }), '')
+assert.equal(
+  resolveReviewRegionTranslation({
+    region: {
+      ...detectedRegion,
+      preview_text: '译文',
+      current_translation: '译文',
+      machine_translation: '译文',
+    },
+  }),
+  '译文',
+)
+assert.equal(
+  resolveReviewRegionTranslation({
+    region: detectedRegion,
+    drafts: { 'region-1': '人工译文' },
+  }),
+  '人工译文',
+)
+
+assert.equal(
+  resolvePageEntryCoverUrl({
+    sourceThumbUrl: '/source-thumb.png',
+    blankThumbUrl: '/blank-thumb.png',
+    previewThumbUrl: '/source-preview.png',
+  }, 'detected'),
+  '/blank-thumb.png',
+)
+assert.equal(
+  resolvePageEntryCoverUrl({
+    sourceThumbUrl: '/source-thumb.png',
+    blankThumbUrl: '/blank-thumb.png',
+    finalThumbUrl: '/translated-thumb.png',
+  }, 'translated'),
+  '/translated-thumb.png',
+)
 
 console.log('Review workspace state tests passed.')

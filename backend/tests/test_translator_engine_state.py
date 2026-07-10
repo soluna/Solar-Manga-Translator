@@ -474,11 +474,24 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 Image.new("RGB", (16, 16), (0, 200, 0)).save(staged_output / "page-1.png")
                 Image.new("RGB", (16, 16), (0, 200, 0)).save(staged_cache_page / "inpainted.png")
                 (staged_cache_page / "regions.json").write_text("[]", encoding="utf-8")
+                (staged_cache_page / "meta.json").write_text(
+                    json.dumps({"base_kind": "source"}),
+                    encoding="utf-8",
+                )
                 staged_session["translated_output_map"] = {"page-1.png": "page-1.png"}
                 return 0
 
             engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
             engine._run_translation_command = fake_command  # type: ignore[method-assign]
+            ensured_base_images: list[str] = []
+
+            async def fake_ensure_base_image(*, source_path, page_cache_dir, config):
+                ensured_base_images.append(Path(source_path).name)
+                Image.new("RGB", (16, 16), (240, 240, 240)).save(Path(page_cache_dir) / "inpainted.png")
+                meta_path = Path(page_cache_dir) / "meta.json"
+                meta_path.write_text(json.dumps({"base_kind": "inpainted"}), encoding="utf-8")
+
+            engine._ensure_translation_base_image = fake_ensure_base_image  # type: ignore[method-assign]
 
             async def progress(_event):
                 return None
@@ -495,13 +508,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertEqual(result["translated_dir"], str(output_dir.resolve()))
             self.assertEqual(session["translated_dir"], str(output_dir))
             self.assertEqual(session["rerender_cache_dir"], str(live_cache))
-            self.assertEqual(
-                np.asarray(Image.open(output_dir / "page-1.png"))[0, 0].tolist(),
-                [0, 200, 0],
-            )
+            self.assertEqual(ensured_base_images, ["page-1.png"])
+            self.assertEqual(session["workflow_stage"], "detected")
+            self.assertEqual(session["translated_output_map"], {})
+            self.assertFalse((output_dir / "page-1.png").exists())
             self.assertEqual(
                 np.asarray(Image.open(live_cache / "page-1.png" / "inpainted.png"))[0, 0].tolist(),
-                [0, 200, 0],
+                [240, 240, 240],
             )
 
     def test_project_storage_rejects_path_traversal(self) -> None:
@@ -1689,6 +1702,8 @@ print(json.dumps({
 
             self.assertEqual([page["stored_name"] for page in review_payload["pages"]], ["page-2.png"])
             self.assertEqual([page["stored_name"] for page in style_payload["pages"]], ["page-2.png"])
+            self.assertEqual(review_payload["pages"][0]["translated_image_url"], "")
+            self.assertEqual(style_payload["pages"][0]["translated_image_url"], "")
 
     def test_project_glossary_preview_uses_previous_translation_as_replacement_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

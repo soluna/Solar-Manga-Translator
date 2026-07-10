@@ -349,8 +349,8 @@ async function main() {
     await page.getByRole('banner').getByRole('button', { name: '项目管理' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.getByRole('button', { name: '专有名词库' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.getByTestId('v2-workflow-strip').waitFor({ state: 'visible', timeout: 20000 })
-    await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /识别文本框|重新识别/ }).waitFor({ state: 'visible', timeout: 20000 })
-    await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /继续翻译|翻译整本|重新翻译/ }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /识别并生成空页|重新识别并生成空页/ }).waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByTestId('v2-workflow-strip').getByRole('button', { name: /翻译并生成初稿|重新翻译并生成初稿/ }).waitFor({ state: 'visible', timeout: 20000 })
     const pickerShot = await saveScreenshot(page, 'v2-picker.png')
 
     const pageCards = page.locator('.v2-page-card')

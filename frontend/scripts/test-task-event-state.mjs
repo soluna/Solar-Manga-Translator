@@ -55,7 +55,7 @@ assert.equal(startUpdate.activeTaskId, 'task-a')
 assert.equal(startUpdate.activeTaskSequence, 1)
 assert.equal(startUpdate.activeAction, 'detect')
 assert.deepEqual(startUpdate.progress, { current: 0, total: 6 })
-assert.equal(startUpdate.statusMessage, '文本框识别已开始，共 6 张图片。')
+assert.equal(startUpdate.statusMessage, '识别与空页生成已开始，共 6 张图片。')
 assert.deepEqual(startUpdate.phase, {
   label: '检测与 OCR',
   index: 2,

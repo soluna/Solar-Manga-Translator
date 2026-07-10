@@ -4326,7 +4326,7 @@ class TranslatorEngine:
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
-            "translated_image_url": str(page_document.get("translated_image") or page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("translated_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
             "regions": region_payloads,
@@ -4381,7 +4381,7 @@ class TranslatorEngine:
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
-            "translated_image_url": str(page_document.get("translated_image") or page_document.get("preview_image") or page_document.get("source_image") or ""),
+            "translated_image_url": str(page_document.get("translated_image") or ""),
             "image_width": int(dimensions.get("width") or 0),
             "image_height": int(dimensions.get("height") or 0),
             "regions": region_payloads,
@@ -4972,6 +4972,28 @@ class TranslatorEngine:
                 f"[WARN] Detection cache only generated for {rerenderable_pages}/{len(expected_outputs)} "
                 f"page(s) in session {session_id}."
             )
+
+        await progress_callback(
+            {
+                "event": "status",
+                "progress_step": "inpaint",
+                "message": "文本识别已完成，正在擦除原文并生成可编辑空页。",
+            }
+        )
+        for image in session["source_images"]:
+            stored_name = str(image.get("stored_name") or "").strip()
+            if not stored_name:
+                continue
+            await self._ensure_translation_base_image(
+                source_path=source_dir / stored_name,
+                page_cache_dir=self._session_page_cache_dir(session, session_id, stored_name),
+                config=config,
+            )
+
+        # The upstream detect-only command writes source-like files so progress can be reported.
+        # They are not translated artifacts and must not survive as client-visible final images.
+        self._clear_directory(output_dir)
+        session["translated_output_map"] = {}
 
         session["workflow_stage"] = "detected"
         self.persist_project_state(

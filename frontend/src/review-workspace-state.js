@@ -28,7 +28,77 @@ export function normalizeSessionSourceImages({
 
 export function shouldRefreshBaseImageForTaskAction(action) {
   const normalizedAction = String(action || '').trim().toLowerCase()
-  return ['translate', 'resume-translate', 'translate-page'].includes(normalizedAction)
+  return ['detect', 'translate', 'resume-translate', 'translate-page'].includes(normalizedAction)
+}
+
+export function getBaseImageRefreshPageIds({
+  action,
+  payload = {},
+  targetStoredName = '',
+} = {}) {
+  if (!shouldRefreshBaseImageForTaskAction(action)) {
+    return []
+  }
+
+  const normalizedAction = String(action || '').trim().toLowerCase()
+  const payloadImages = normalizedAction === 'detect'
+    ? payload?.images
+    : payload?.translated_images
+  const pageIds = new Set(
+    (Array.isArray(payloadImages) ? payloadImages : [])
+      .map((image) => String(image?.stored_name || '').trim())
+      .filter(Boolean)
+  )
+  const normalizedTarget = String(targetStoredName || '').trim()
+  if (normalizedTarget) {
+    pageIds.add(normalizedTarget)
+  }
+  return Array.from(pageIds)
+}
+
+export function resolveReviewRegionTranslation({
+  region = {},
+  drafts = {},
+  overrides = {},
+} = {}) {
+  const regionId = String(region?.id || '').trim()
+  if (regionId && Object.prototype.hasOwnProperty.call(drafts, regionId)) {
+    return String(drafts[regionId] ?? '')
+  }
+  return String(
+    (regionId ? overrides[regionId] : '')
+    || region?.current_translation
+    || region?.machine_translation
+    || ''
+  )
+}
+
+export function resolvePageEntryCoverUrl(entry = {}, workflowStage = '') {
+  const finalUrl = String(entry?.finalThumbUrl || entry?.finalUrl || '').trim()
+  if (finalUrl) {
+    return finalUrl
+  }
+
+  const normalizedStage = String(workflowStage || '').trim().toLowerCase()
+  if (normalizedStage === 'detected') {
+    return String(
+      entry?.blankThumbUrl
+      || entry?.blankUrl
+      || entry?.sourceThumbUrl
+      || entry?.sourceUrl
+      || ''
+    )
+  }
+
+  return String(
+    entry?.previewThumbUrl
+    || entry?.sourceThumbUrl
+    || entry?.blankThumbUrl
+    || entry?.previewUrl
+    || entry?.sourceUrl
+    || entry?.blankUrl
+    || ''
+  )
 }
 
 export function resolveSelectedReviewPage({
@@ -61,7 +131,7 @@ function createPendingReviewPage(entry) {
     name: String(entry?.name || entry?.stored_name || '未命名页面'),
     source_image_url: String(entry?.sourceUrl || ''),
     base_image_url: String(entry?.blankUrl || entry?.sourceUrl || ''),
-    translated_image_url: String(entry?.finalUrl || entry?.previewUrl || ''),
+    translated_image_url: String(entry?.finalUrl || ''),
     image_url: String(entry?.previewUrl || entry?.finalUrl || entry?.sourceUrl || ''),
     image_width: Number(entry?.image_width || 0),
     image_height: Number(entry?.image_height || 0),

@@ -1,9 +1,9 @@
 export const workflowStageLabelMap = Object.freeze({
   idle: '未开始',
   detecting: '识别中',
-  detected: '待校对',
+  detected: '空页待审校',
   translating: '翻译中',
-  translated: '已翻译'
+  translated: '译文已回填'
 })
 
 const PHASE_TOTAL = 6
@@ -11,14 +11,14 @@ const PHASE_TOTAL = 6
 const taskActionDescriptors = Object.freeze({
   detect: {
     action: 'detect',
-    actionLabel: '文本框识别',
+    actionLabel: '识别并生成空页',
     workflowPhase: 'recognize',
-    phaseLabel: '检测与 OCR',
+    phaseLabel: '检测、OCR 与擦字',
     phaseIndex: 2,
     phaseTotal: PHASE_TOTAL,
-    startMessage: '文本框识别已开始，共 {total} 张图片。',
-    progressMessage: '正在识别并准备校对：{current} / {total}',
-    failureMessage: '文本框识别失败。',
+    startMessage: '识别与空页生成已开始，共 {total} 张图片。',
+    progressMessage: '正在识别并生成空页：{current} / {total}',
+    failureMessage: '识别或空页生成失败。',
     busyLabel: '识别进行中...',
     scope: 'project',
     scopeLabel: '整组页面'
@@ -178,7 +178,7 @@ export function getProjectStageCommands({
     {
       key: 'detect',
       action: 'detect',
-      label: stage === 'idle' ? '识别文本框' : '重新识别',
+      label: stage === 'idle' ? '识别并生成空页' : '重新识别并生成空页',
       enabled: detectEnabled,
       active: busy && normalizedActiveAction === 'detect',
       disabledReason: detectEnabled
@@ -193,10 +193,10 @@ export function getProjectStageCommands({
       key: 'translate',
       action: translateAction,
       label: stage === 'detected' || hasPartialTranslatedResults
-        ? '继续翻译'
+        ? '翻译并生成初稿'
         : stage === 'translated'
-          ? '重新翻译'
-          : '翻译整本',
+          ? '重新翻译并生成初稿'
+          : '翻译并生成初稿',
       enabled: translateEnabled,
       active: busy && ['translate', 'resume-translate'].includes(normalizedActiveAction),
       disabledReason: translateEnabled
@@ -212,7 +212,7 @@ export function getProjectStageCommands({
     {
       key: 'rerender',
       action: 'rerender',
-      label: '重新嵌字',
+      label: '调整后重新嵌字',
       enabled: rerenderEnabled,
       active: busy && normalizedActiveAction === 'rerender',
       disabledReason: rerenderEnabled

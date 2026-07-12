@@ -56,7 +56,7 @@ echo [1/3] Installing Backend Dependencies...
 cd /d "%ROOT_DIR%"
 cd backend
 if not exist venv (
-    echo Creating Python venv...
+    echo [1/3 - 1/4] Creating Python virtual environment...
     python -m venv venv >> "%BOOTSTRAP_LOG%" 2>&1
     if !errorlevel! neq 0 (
         echo [Error] Failed to create the Python virtual environment.
@@ -67,8 +67,9 @@ if not exist venv (
 )
 call venv\Scripts\activate.bat
 set "VENV_PYTHON=%CD%\venv\Scripts\python.exe"
+set "BOOTSTRAP_RUNNER=%ROOT_DIR%\backend\bootstrap_command.py"
 
-echo Detecting GPU and preparing the matching PyTorch runtime...
+echo [1/3 - 2/4] Detecting GPU and preparing the matching PyTorch runtime...
 "%VENV_PYTHON%" runtime_bootstrap.py --install
 if %errorlevel% neq 0 (
     echo [Error] PyTorch runtime setup failed. See the log excerpt below, then rerun start.bat.
@@ -79,15 +80,16 @@ if %errorlevel% neq 0 (
 set "BACKEND_DEPS_STAMP=%CD%\venv\.solar-dependencies.json"
 "%VENV_PYTHON%" dependency_state.py check backend --root "%ROOT_DIR%" --stamp "%BACKEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Backend dependencies changed or are missing; installing...
-    "%VENV_PYTHON%" install_deps.py >> "%BOOTSTRAP_LOG%" 2>&1
+    echo [1/3 - 3/4] Installing core engine dependencies. This can take 5-20 minutes on first run.
+    "%VENV_PYTHON%" "%BOOTSTRAP_RUNNER%" --label "[1/3 - 3/4] Core engine dependencies" --log "%BOOTSTRAP_LOG%" --heartbeat-seconds 15 -- "%VENV_PYTHON%" install_deps.py
     if !errorlevel! neq 0 (
         echo [Error] Failed to install or prepare manga-image-translator.
         call :show_bootstrap_log
         pause
         exit /b 1
     )
-    "%VENV_PYTHON%" pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%" 2>&1
+    echo [1/3 - 4/4] Installing backend application dependencies.
+    "%VENV_PYTHON%" "%BOOTSTRAP_RUNNER%" --label "[1/3 - 4/4] Backend application dependencies" --log "%BOOTSTRAP_LOG%" --heartbeat-seconds 15 -- "%VENV_PYTHON%" pip_install.py -r requirements.txt
     if !errorlevel! neq 0 (
         echo [Error] Failed to install backend requirements.
         call :show_bootstrap_log
@@ -111,11 +113,11 @@ cd frontend
 set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
 "%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" check frontend --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Frontend dependencies changed or are missing; installing...
-    call npm install --registry https://registry.npmmirror.com >> "%BOOTSTRAP_LOG%" 2>&1
+    echo [2/3 - 1/1] Installing frontend dependencies. This can take several minutes on first run.
+    "%VENV_PYTHON%" "%BOOTSTRAP_RUNNER%" --label "[2/3 - 1/1] Frontend dependencies via npmmirror" --log "%BOOTSTRAP_LOG%" --heartbeat-seconds 15 -- cmd.exe /d /c npm install --registry https://registry.npmmirror.com
     if !errorlevel! neq 0 (
         echo npmmirror failed; retrying with the official npm registry...
-        call npm install --registry https://registry.npmjs.org >> "%BOOTSTRAP_LOG%" 2>&1
+        "%VENV_PYTHON%" "%BOOTSTRAP_RUNNER%" --label "[2/3 - 1/1] Frontend dependencies via npm" --log "%BOOTSTRAP_LOG%" --heartbeat-seconds 15 -- cmd.exe /d /c npm install --registry https://registry.npmjs.org
     )
     if !errorlevel! neq 0 (
         echo [Error] Failed to install frontend dependencies.

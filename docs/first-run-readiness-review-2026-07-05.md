@@ -44,19 +44,21 @@
 构建，后续诊断只调用 `torch.cuda.is_available()`，于是把“检测到 NVIDIA
 显卡但 PyTorch 不支持 CUDA”显示成“未检测到 GPU”。
 
-RTX 50 属于 Blackwell 架构，需要 CUDA 12.8 或更高版本。当前安全基线使用
-PyTorch 2.12.1，并从 PyTorch 官方 CUDA 13.0 wheel 源安装。CUDA 13.x
-要求 NVIDIA R580 或更高驱动。
+RTX 50 属于 Blackwell 架构，需要 CUDA 12.8 或更高版本。最初的安全基线只使用
+PyTorch 2.12.1 + CUDA 13.0，导致仍可运行 CUDA 12.8 的 R570–R579 驱动被错误
+判定为必须升级。2026-07-12 起改为按显卡架构和现有驱动选择完整版本组合。
 
 **修复**
 
 - 新增 `backend/runtime_bootstrap.py`。
 - 启动时通过 `nvidia-smi` 读取显卡名称、驱动版本和计算能力。
-- Windows/Linux 检测到现代 NVIDIA GPU 时，明确使用官方 `cu130` wheel。
+- RTX 50 / Blackwell + R580 及以上使用 PyTorch 2.12.1 + `cu130`。
+- RTX 50 / Blackwell + R570–R579 使用 PyTorch 2.11.0 + `cu128`，不再要求
+  为了本项目刻意升级到最新驱动。
 - 旧架构 NVIDIA GPU 使用兼容的 `cu126` wheel。
 - 没有 NVIDIA GPU 时明确使用 CPU wheel；macOS 继续使用 MPS。
 - 已安装正确运行时后不会重复下载 PyTorch。
-- RTX 50 驱动低于 R580 时，在下载前停止并给出更新驱动的明确原因。
+- 只有驱动确实低于所选运行时和显卡架构的最低要求时才提示升级。
 - 打包 Windows runtime 前也执行相同检查。
 - 运行时只安装项目实际使用的 `torch` 和 `torchvision`，不再要求未使用且
   没有对应 CUDA 13 wheel 的 `torchaudio 2.12.1`。
@@ -66,6 +68,8 @@ PyTorch 2.12.1，并从 PyTorch 官方 CUDA 13.0 wheel 源安装。CUDA 13.x
   区分网络问题与不受支持的平台。
 - Windows 会分别读取官方源与阿里云镜像的 256 KiB 样本并按实测速率排序。
 - pip 下载进度直接显示在终端，同时通过 pip 原生日志写入 `bootstrap.log`。
+- PyTorch、核心引擎、普通 Python 依赖和 npm 安装在静默解包阶段每 15 秒显示
+  心跳和累计用时，避免用户把正常安装误判为死机。
 - 连接连续 30 秒无数据时重试或切换；只要仍在接收数据就不设总下载时限，
   避免约 2 GB 的 CUDA wheel 在慢速网络下被误判超时。
 - 官方源和镜像使用同一组 PyTorch 官方 SHA-256，镜像文件校验不一致时拒绝安装。
@@ -209,7 +213,7 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 期望结果：
 
 - `torch` 带 CUDA 构建；
-- `torch.version.cuda` 为 13.0；
+- R570–R579 驱动下 `torch.version.cuda` 为 12.8，R580 及以上为 13.0；
 - `torch.cuda.is_available()` 为 `True`；
 - 设置页显示真实显卡名称；
 - 完成一张合成测试图的检测、OCR、擦除和嵌字。
@@ -218,7 +222,7 @@ backend\venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch
 
 本轮自动验证：
 
-- 后端 unittest：110 项通过；
+- 后端 unittest：187 项通过；
 - OpenAI Compatible 保存/重载回归测试通过；
 - RTX 50 CUDA 安装计划与 CPU wheel 诊断测试通过；
 - 手动画框 OCR 失败保留测试通过；

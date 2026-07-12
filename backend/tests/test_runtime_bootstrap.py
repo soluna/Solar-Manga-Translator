@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import re
 import subprocess
 import sys
 import unittest
@@ -43,6 +44,39 @@ class RuntimeBootstrapTests(unittest.TestCase):
             ("torch==2.12.1", "torchvision==0.27.1"),
         )
 
+    def test_windows_blackwell_gpu_uses_cuda_12_8_when_driver_cannot_run_cuda_13(self) -> None:
+        plan = choose_pytorch_runtime(
+            platform_name="win32",
+            nvidia_gpus=[
+                NvidiaGpu(
+                    name="NVIDIA GeForce RTX 5060 Ti",
+                    driver_version="577.00",
+                    compute_capability="12.0",
+                )
+            ],
+        )
+
+        self.assertEqual(plan.accelerator, "cuda")
+        self.assertEqual(plan.index_url, "https://download.pytorch.org/whl/cu128")
+        self.assertEqual(
+            plan.packages,
+            ("torch==2.11.0", "torchvision==0.26.0"),
+        )
+        self.assertIn("当前驱动", plan.reason)
+
+    def test_upstream_requirements_do_not_override_the_selected_pytorch_runtime(self) -> None:
+        requirements = (BACKEND_DIR / "requirements-upstream.txt").read_text(
+            encoding="utf-8"
+        )
+        package_names = {
+            re.split(r"[<>=!~;\s]", line, maxsplit=1)[0].lower()
+            for raw_line in requirements.splitlines()
+            if (line := raw_line.strip()) and not line.startswith("#")
+        }
+
+        self.assertNotIn("torch", package_names)
+        self.assertNotIn("torchvision", package_names)
+
     def test_windows_without_nvidia_gpu_uses_cpu_runtime(self) -> None:
         plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[])
 
@@ -66,7 +100,10 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
                 mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=False),
                 mock.patch("runtime_bootstrap._probe_wheel_source", return_value=0.1),
-                mock.patch("runtime_bootstrap.subprocess.run") as run,
+                mock.patch(
+                    "runtime_bootstrap.run_bootstrap_command",
+                    return_value=0,
+                ) as run,
             ):
                 install_pytorch_runtime(
                     plan,
@@ -91,6 +128,45 @@ class RuntimeBootstrapTests(unittest.TestCase):
                     2,
                 )
                 self.assertNotIn("--index-url", command)
+
+    def test_windows_blackwell_compatible_install_uses_cuda_12_8_wheels(self) -> None:
+        gpu = NvidiaGpu(
+            name="NVIDIA GeForce RTX 5060 Ti",
+            driver_version="577.00",
+            compute_capability="12.0",
+        )
+        plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[gpu])
+
+        with (
+            mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
+            mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=False),
+            mock.patch("runtime_bootstrap._probe_wheel_source", return_value=0.1),
+            mock.patch(
+                "runtime_bootstrap.run_bootstrap_command",
+                return_value=0,
+            ) as run,
+        ):
+            install_pytorch_runtime(
+                plan,
+                platform_name="win32",
+                python_tag="cp311",
+                machine="AMD64",
+            )
+
+        command = run.call_args.args[0]
+        self.assertTrue(
+            any(
+                "torch-2.11.0%2Bcu128-cp311-cp311-win_amd64.whl" in item
+                for item in command
+            )
+        )
+        self.assertTrue(
+            any(
+                "torchvision-0.26.0%2Bcu128-cp311-cp311-win_amd64.whl" in item
+                for item in command
+            )
+        )
+        self.assertEqual(sum("#sha256=" in item for item in command), 2)
 
     def test_windows_cuda_install_falls_back_to_next_download_source(self) -> None:
         gpu = NvidiaGpu(
@@ -117,11 +193,8 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 create=True,
             ),
             mock.patch(
-                "runtime_bootstrap.subprocess.run",
-                side_effect=[
-                    subprocess.CalledProcessError(1, ["pip"]),
-                    None,
-                ],
+                "runtime_bootstrap.run_bootstrap_command",
+                side_effect=[1, 0],
             ) as run,
         ):
             install_pytorch_runtime(
@@ -157,7 +230,10 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "runtime_bootstrap._ranked_windows_cuda_wheel_sources",
                 return_value=[source],
             ),
-            mock.patch("runtime_bootstrap.subprocess.run") as run,
+            mock.patch(
+                "runtime_bootstrap.run_bootstrap_command",
+                return_value=0,
+            ) as run,
         ):
             install_pytorch_runtime(
                 plan,
@@ -167,6 +243,42 @@ class RuntimeBootstrapTests(unittest.TestCase):
             )
 
         self.assertNotIn("timeout", run.call_args.kwargs)
+
+    def test_pytorch_install_reports_heartbeats_while_pip_is_silent(self) -> None:
+        gpu = NvidiaGpu(
+            name="NVIDIA GeForce RTX 5060 Ti",
+            driver_version="580.88",
+            compute_capability="12.0",
+        )
+        plan = choose_pytorch_runtime(platform_name="win32", nvidia_gpus=[gpu])
+        source = (
+            "PyTorch 官方",
+            ("https://download-r2.pytorch.org/torch.whl",),
+        )
+
+        with (
+            mock.patch("runtime_bootstrap.detect_nvidia_gpus", return_value=[gpu]),
+            mock.patch("runtime_bootstrap._installed_runtime_matches", return_value=False),
+            mock.patch(
+                "runtime_bootstrap._ranked_windows_cuda_wheel_sources",
+                return_value=[source],
+            ),
+            mock.patch(
+                "runtime_bootstrap.run_bootstrap_command",
+                return_value=0,
+                create=True,
+            ) as command_runner,
+            mock.patch("runtime_bootstrap.subprocess.run"),
+        ):
+            install_pytorch_runtime(
+                plan,
+                platform_name="win32",
+                python_tag="cp311",
+                machine="AMD64",
+            )
+
+        command_runner.assert_called_once()
+        self.assertIn("PyTorch", command_runner.call_args.kwargs["label"])
 
     def test_matching_runtime_removes_obsolete_torchaudio(self) -> None:
         gpu = NvidiaGpu(
@@ -414,6 +526,33 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
         self.assertNotIn("%date%", start_script.lower())
         self.assertIn("Get-Date -Format 'yyyy-MM-dd HH:mm:ss'", start_script)
+
+    def test_windows_start_script_streams_long_install_steps_with_heartbeats(self) -> None:
+        start_script = (BACKEND_DIR.parent / "start.bat").read_text(encoding="utf-8")
+
+        self.assertIn("bootstrap_command.py", start_script)
+        self.assertIn("--heartbeat-seconds", start_script)
+        self.assertIn("--log", start_script)
+        self.assertNotIn('install_deps.py >> "%BOOTSTRAP_LOG%"', start_script)
+        self.assertNotIn('pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%"', start_script)
+
+    def test_desktop_runtime_package_includes_bootstrap_command_runner(self) -> None:
+        staging_script = (
+            BACKEND_DIR.parent / "desktop" / "scripts" / "stage-runtime.mjs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("'bootstrap_command.py'", staging_script)
+
+    def test_mac_start_script_prepares_the_runtime_before_generic_dependencies(self) -> None:
+        start_script = (BACKEND_DIR.parent / "start.mac.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertRegex(start_script, r'runtime_bootstrap\.py"?\s+--install')
+        self.assertLess(
+            start_script.index("runtime_bootstrap.py"),
+            start_script.index("install_deps.py"),
+        )
 
     def test_start_scripts_skip_unchanged_dependencies_and_have_mirror_fallbacks(self) -> None:
         root = BACKEND_DIR.parent

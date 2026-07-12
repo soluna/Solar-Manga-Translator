@@ -65,6 +65,8 @@ fi
 
 echo "[2/4] 检查并安装后端依赖..."
 "$MAC_VENV_DIR/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+echo "[2.1/4] 检测硬件并准备匹配的 PyTorch 运行时..."
+"$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/runtime_bootstrap.py" --install
 BACKEND_DEPS_STAMP="$MAC_VENV_DIR/.solar-dependencies.json"
 if ! "$MAC_VENV_DIR/bin/python" "$BACKEND_DIR/dependency_state.py" check backend --root "$ROOT_DIR" --stamp "$BACKEND_DEPS_STAMP"; then
   "$MAC_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true

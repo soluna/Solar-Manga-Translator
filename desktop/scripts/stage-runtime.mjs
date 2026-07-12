@@ -31,6 +31,7 @@ const ignoredNames = new Set([
 const ignoredExtensions = new Set(['.pyc', '.pyo'])
 
 const backendFiles = [
+  'bootstrap_command.py',
   'desktop_server.py',
   'diagnostics_bundle.py',
   'http_requests.py',

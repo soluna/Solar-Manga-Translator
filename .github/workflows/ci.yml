@@ -24,12 +24,14 @@ jobs:
       - name: Compile backend
         run: |
           python -m py_compile \
+            backend/bootstrap_command.py \
             backend/main.py \
             backend/http_requests.py \
             backend/dependency_state.py \
             backend/diagnostics_bundle.py \
             backend/model_manager.py \
             backend/pip_install.py \
+            backend/runtime_bootstrap.py \
             backend/runtime_paths.py \
             backend/system_fonts.py \
             backend/task_manager.py \

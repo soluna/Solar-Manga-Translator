@@ -2,10 +2,10 @@
 # 8e256098da2a85f6b99ec1f4cec3c28118c00bfd.
 # pydensecrf is intentionally omitted because backend/patch_pydensecrf.py
 # patches the upstream runtime to avoid that optional native build dependency.
+# torch and torchvision are installed by runtime_bootstrap.py so GPU/driver
+# compatibility cannot be overridden by this generic dependency snapshot.
 networkx
-torch>=2.12.1
 groq
-torchvision>=0.27.1
 torch-summary
 einops
 scikit-image

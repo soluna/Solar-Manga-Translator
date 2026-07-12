@@ -13,13 +13,21 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
+from bootstrap_command import run_bootstrap_command
+
 
 PYTORCH_VERSION = "2.12.1"
 TORCHVISION_VERSION = "0.27.1"
+PYTORCH_CUDA_12_8_VERSION = "2.11.0"
+TORCHVISION_CUDA_12_8_VERSION = "0.26.0"
 DOWNLOAD_PROBE_BYTES = 256 * 1024
 DOWNLOAD_PROBE_TIMEOUT_SECONDS = 8
 PIP_SOCKET_TIMEOUT_SECONDS = 30
 WINDOWS_WHEEL_SHA256 = {
+    ("cu128", "cp310", "torch"): "7c792fe95ad5edaf622cf9e4f5573f5aecf2bc0654c7e866eda6134088f95d72",
+    ("cu128", "cp310", "torchvision"): "ed0770e00b96d8aa675718e20db69c740c927f027c9c8b1330251f8a973221b6",
+    ("cu128", "cp311", "torch"): "90ef0c2454e5296a9fb021ddd42252e4ce1abe2c0a4988a173ef90a6cded0bf5",
+    ("cu128", "cp311", "torchvision"): "d26091b15cd6e3c74c148d9b68c9a901ad6fb9b0f66fa3ea3ab09f04132a07d3",
     ("cu126", "cp310", "torch"): "75b223d98517a4f14d1cf4f53767ddbc953f2e6f7d811f3fd045b7cbbb129b05",
     ("cu126", "cp310", "torchvision"): "cc1dbe9fa2507a27ebdcb1d415fff4f40f28349743dd0fd28eec8e86a24179d3",
     ("cu126", "cp311", "torch"): "b7d68e60097b75d7dd507d1268144c7770de3b019f2a4cb3fe36550c9b4f3320",
@@ -123,6 +131,24 @@ def choose_pytorch_runtime(
     if platform_name.startswith(("win", "linux")) and gpus:
         capability = _compute_capability(gpus)
         driver_major = _driver_major(gpus)
+        if (
+            capability is not None
+            and capability >= 10
+            and driver_major is not None
+            and driver_major < 580
+        ):
+            return PytorchRuntimePlan(
+                accelerator="cuda",
+                index_url="https://download.pytorch.org/whl/cu128",
+                packages=(
+                    f"torch=={PYTORCH_CUDA_12_8_VERSION}",
+                    f"torchvision=={TORCHVISION_CUDA_12_8_VERSION}",
+                ),
+                reason=(
+                    "当前驱动无法运行 CUDA 13，自动使用支持 RTX 50 / Blackwell "
+                    "的 CUDA 12.8 兼容运行时。"
+                ),
+            )
         if (
             capability is not None
             and capability < 7.5
@@ -322,9 +348,15 @@ def _installed_runtime_matches(plan: PytorchRuntimePlan) -> bool:
     except importlib.metadata.PackageNotFoundError:
         return False
 
-    if not torch_version.startswith(PYTORCH_VERSION):
+    expected_versions = {
+        package_name: package.split("==", 1)[1]
+        for package in plan.packages
+        if "==" in package
+        for package_name in [package.split("==", 1)[0]]
+    }
+    if not torch_version.startswith(expected_versions.get("torch", "")):
         return False
-    if not torchvision_version.startswith(TORCHVISION_VERSION):
+    if not torchvision_version.startswith(expected_versions.get("torchvision", "")):
         return False
     if plan.accelerator == "cuda":
         runtime = plan.index_url.rstrip("/").rsplit("/", 1)[-1]
@@ -365,7 +397,7 @@ def _windows_cuda_wheel_urls(
         not platform_name.startswith("win")
         or plan.accelerator != "cuda"
         or architecture not in {"amd64", "x86_64"}
-        or runtime not in {"cu126", "cu130"}
+        or runtime not in {"cu126", "cu128", "cu130"}
         or python_tag not in {"cp310", "cp311"}
     ):
         return ()
@@ -373,12 +405,20 @@ def _windows_cuda_wheel_urls(
     resolved_base_url = (
         base_url or f"https://download-r2.pytorch.org/whl/{runtime}"
     ).rstrip("/")
+    versions = {
+        package_name: package.split("==", 1)[1]
+        for package in plan.packages
+        if "==" in package
+        for package_name in [package.split("==", 1)[0]]
+    }
+    torch_version = versions["torch"]
+    torchvision_version = versions["torchvision"]
     torch_sha256 = WINDOWS_WHEEL_SHA256[(runtime, python_tag, "torch")]
     torchvision_sha256 = WINDOWS_WHEEL_SHA256[(runtime, python_tag, "torchvision")]
     return (
-        f"{resolved_base_url}/torch-{PYTORCH_VERSION}%2B{runtime}"
+        f"{resolved_base_url}/torch-{torch_version}%2B{runtime}"
         f"-{python_tag}-{python_tag}-win_amd64.whl#sha256={torch_sha256}",
-        f"{resolved_base_url}/torchvision-{TORCHVISION_VERSION}%2B{runtime}"
+        f"{resolved_base_url}/torchvision-{torchvision_version}%2B{runtime}"
         f"-{python_tag}-{python_tag}-win_amd64.whl#sha256={torchvision_sha256}",
     )
 
@@ -529,23 +569,24 @@ def install_pytorch_runtime(
                 f"若连续 {PIP_SOCKET_TIMEOUT_SECONDS} 秒无数据会自动重试或切换。"
             )
             command = _pip_install_command(wheel_urls)
-            try:
-                subprocess.run(
-                    command,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                failures.append(f"{source_name}：pip 退出码 {exc.returncode}")
+            return_code = run_bootstrap_command(
+                command,
+                label=f"PyTorch 运行时（{source_name}）",
+            )
+            if return_code != 0:
+                failures.append(f"{source_name}：pip 退出码 {return_code}")
                 print(f"[PyTorch] {source_name}安装失败，正在切换下载源...")
                 continue
             return
         raise RuntimeError("所有 PyTorch 下载源均失败：" + "；".join(failures))
 
     print(f"[PyTorch] 安装源：{plan.index_url or 'PyPI'}")
-    subprocess.run(
+    return_code = run_bootstrap_command(
         _pip_install_command(plan.packages, index_url=plan.index_url),
-        check=True,
+        label="PyTorch 运行时",
     )
+    if return_code != 0:
+        raise RuntimeError(f"PyTorch 安装失败：pip 退出码 {return_code}")
 
 
 def verify_runtime(plan: PytorchRuntimePlan) -> dict[str, Any]:

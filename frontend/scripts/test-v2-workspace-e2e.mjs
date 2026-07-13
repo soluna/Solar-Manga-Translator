@@ -173,48 +173,52 @@ async function seedPersistedSettings() {
 
 async function ensureServices() {
   const started = []
+  try {
+    if (!(await httpOk(`${BACKEND_URL}/api/status`))) {
+      const python = pickBackendPython()
+      const backendProcess = spawnProcess(
+        python,
+        ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', new URL(BACKEND_URL).port || '8000'],
+        {
+          cwd: backendDir,
+          env: {
+            APP_DATA_DIR: E2E_APP_DATA_DIR,
+            APP_API_TOKEN: E2E_API_TOKEN,
+          },
+          label: 'backend-v2-e2e',
+          processGroup: true,
+        }
+      )
+      started.push(backendProcess)
+      await waitForHttp(`${BACKEND_URL}/api/status`, '后端服务')
+    }
 
-  if (!(await httpOk(`${BACKEND_URL}/api/status`))) {
-    const python = pickBackendPython()
-    const backendProcess = spawnProcess(
-      python,
-      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', new URL(BACKEND_URL).port || '8000'],
-      {
-        cwd: backendDir,
-        env: {
-          APP_DATA_DIR: E2E_APP_DATA_DIR,
-          APP_API_TOKEN: E2E_API_TOKEN,
-        },
-        label: 'backend-v2-e2e',
-        processGroup: true,
-      }
-    )
-    started.push(backendProcess)
-    await waitForHttp(`${BACKEND_URL}/api/status`, '后端服务')
+    if (!(await httpOk(FRONTEND_URL))) {
+      const frontendProcess = spawnProcess(
+        'npm',
+        ['run', 'dev', '--', '--host', '127.0.0.1', '--port', new URL(FRONTEND_URL).port || '5173', '--strictPort'],
+        {
+          cwd: frontendDir,
+          env: {
+            FRONTEND_PORT: new URL(FRONTEND_URL).port || '5173',
+            VITE_API_BASE_URL: BACKEND_URL,
+            VITE_API_TOKEN: E2E_API_TOKEN,
+            VITE_DEV_PORT: new URL(FRONTEND_URL).port || '5173',
+            VITE_DEV_PROXY_TARGET: BACKEND_URL,
+          },
+          label: 'frontend-v2-e2e',
+          processGroup: true,
+        }
+      )
+      started.push(frontendProcess)
+      await waitForHttp(FRONTEND_URL, '前端服务')
+    }
+
+    return started
+  } catch (error) {
+    await stopProcesses(started)
+    throw error
   }
-
-  if (!(await httpOk(FRONTEND_URL))) {
-    const frontendProcess = spawnProcess(
-      'npm',
-      ['run', 'dev', '--', '--host', '127.0.0.1', '--port', new URL(FRONTEND_URL).port || '5173'],
-      {
-        cwd: frontendDir,
-        env: {
-          FRONTEND_PORT: new URL(FRONTEND_URL).port || '5173',
-          VITE_API_BASE_URL: BACKEND_URL,
-          VITE_API_TOKEN: E2E_API_TOKEN,
-          VITE_DEV_PORT: new URL(FRONTEND_URL).port || '5173',
-          VITE_DEV_PROXY_TARGET: BACKEND_URL,
-        },
-        label: 'frontend-v2-e2e',
-        processGroup: true,
-      }
-    )
-    started.push(frontendProcess)
-    await waitForHttp(FRONTEND_URL, '前端服务')
-  }
-
-  return started
 }
 
 async function saveScreenshot(page, name) {
@@ -241,6 +245,33 @@ async function assertText(locator, expected, message) {
   if (!text.includes(expected)) {
     throw new Error(`${message}：期望包含 "${expected}"，实际为 "${text}"`)
   }
+}
+
+function isPageCommandResponse(response, commandType) {
+  if (!response.url().includes(`/api/pages/${FIXTURE_PROJECT_ID}/`) || !response.url().includes('/commands')) {
+    return false
+  }
+  if (response.request().method() !== 'POST') {
+    return false
+  }
+  try {
+    const payload = response.request().postDataJSON()
+    return (payload?.commands || []).some((command) => command?.type === commandType)
+  } catch {
+    return false
+  }
+}
+
+async function waitForLocatorCount(locator, expected, message, timeoutMs = 20000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const actual = await locator.count()
+    if (actual === expected) {
+      return
+    }
+    await sleep(100)
+  }
+  throw new Error(`${message}：期望 ${expected}，实际 ${await locator.count()}`)
 }
 
 async function readBoxMetrics(locator) {
@@ -449,7 +480,11 @@ async function main() {
       throw new Error(`保存状态图标仍然导致译文字段高度跳变：before=${fieldHeightBeforeEdit} after=${fieldHeightWithDirtyIcon}`)
     }
     await translationInput.blur()
-    await editSave
+    const editSaveResponse = await editSave
+    const editSavePayload = editSaveResponse.request().postDataJSON()
+    if (!Number.isInteger(editSavePayload?.expected_revision) || editSavePayload.expected_revision < 0) {
+      throw new Error(`页面命令没有携带服务端文档版本：${JSON.stringify(editSavePayload)}`)
+    }
     await page.waitForTimeout(150)
     if (await page.locator('.v2-region-commit-icon.is-failed.is-visible').count()) {
       throw new Error('译文编辑提交后出现失败状态')
@@ -497,6 +532,69 @@ async function main() {
     if (translationAfterLayoutEdit !== editedTranslation) {
       throw new Error(`框体编辑后译文发生回滚：${translationAfterLayoutEdit}`)
     }
+
+    const regionCards = page.locator('.v2-region-card')
+    const regionCountBeforeManualDraw = await regionCards.count()
+    await page.getByRole('button', { name: '手动添加框' }).click()
+    const canvasStage = page.locator('.v2-pane-card-frame .v2-canvas-stage').first()
+    const canvasStageBounds = await canvasStage.boundingBox()
+    if (!canvasStageBounds) {
+      throw new Error('无法读取框页画布位置，无法验证手动添加框')
+    }
+    const createRegionResponse = page.waitForResponse(
+      (response) => isPageCommandResponse(response, 'create_region') && response.ok(),
+      { timeout: 30000 },
+    )
+    const recognizeRegionResponse = page.waitForResponse(
+      (response) => isPageCommandResponse(response, 'recognize_manual_region') && response.ok(),
+      { timeout: 60000 },
+    )
+    await page.mouse.move(
+      canvasStageBounds.x + canvasStageBounds.width * 0.70,
+      canvasStageBounds.y + canvasStageBounds.height * 0.72,
+    )
+    await page.mouse.down()
+    await page.mouse.move(
+      canvasStageBounds.x + canvasStageBounds.width * 0.84,
+      canvasStageBounds.y + canvasStageBounds.height * 0.82,
+      { steps: 8 },
+    )
+    await page.mouse.up()
+    await createRegionResponse
+    await recognizeRegionResponse
+    await waitForLocatorCount(regionCards, regionCountBeforeManualDraw + 1, '手动添加框后文本框数量不正确')
+    const manualRegionCard = page.locator('.v2-region-card.active').first()
+    await assertText(manualRegionCard, '用户添加', '新建文本框没有标记为用户手动框')
+    const manualFontSize = Number(await manualRegionCard.getByLabel('字号').inputValue())
+    if (!Number.isFinite(manualFontSize) || manualFontSize < 8 || manualFontSize > 200) {
+      throw new Error(`手动框识别后的字号异常：${manualFontSize}`)
+    }
+
+    const deleteRegionResponse = page.waitForResponse(
+      (response) => isPageCommandResponse(response, 'delete_manual_region') && response.ok(),
+      { timeout: 30000 },
+    )
+    await manualRegionCard.getByRole('button', { name: '删除手动框' }).click()
+    await deleteRegionResponse
+    await waitForLocatorCount(regionCards, regionCountBeforeManualDraw, '删除手动框后文本框数量不正确')
+
+    const restoreRegionResponse = page.waitForResponse(
+      (response) => isPageCommandResponse(response, 'restore_manual_region') && response.ok(),
+      { timeout: 30000 },
+    )
+    await page.getByRole('button', { name: '撤销' }).click()
+    await restoreRegionResponse
+    await waitForLocatorCount(regionCards, regionCountBeforeManualDraw + 1, '撤销删除后手动框没有恢复')
+
+    const redoDeleteResponse = page.waitForResponse(
+      (response) => isPageCommandResponse(response, 'delete_manual_region') && response.ok(),
+      { timeout: 30000 },
+    )
+    await page.getByRole('button', { name: '重做' }).click()
+    await redoDeleteResponse
+    await waitForLocatorCount(regionCards, regionCountBeforeManualDraw, '重做删除后手动框仍然存在')
+    await regionCards.first().click()
+
     const reviewShot = await saveScreenshot(page, 'v2-review.png')
 
     await page.getByRole('button', { name: '下一个对白框' }).click()

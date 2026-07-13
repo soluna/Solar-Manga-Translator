@@ -14,6 +14,7 @@ import {
 } from './project-artifact-state.js'
 import {
   getBaseImageRefreshPageIds,
+  mergePageDocumentRevisions,
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolvePageEntryCoverUrl,
@@ -252,7 +253,7 @@ function isValidRerenderOutputFormat(value) {
 }
 
 function isValidReviewMode(value) {
-  return ['classic', 'canvas_beta'].includes(value)
+  return value === 'canvas_beta'
 }
 
 function isValidWorkspaceWidthMode(value) {
@@ -732,6 +733,7 @@ const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
 const pageEditHistory = ref({})
 const pageCommandRevisions = ref({})
+const pageDocumentRevisions = ref({})
 const canvasPreviewDirtyPages = ref({})
 const pageImageNonces = ref({})
 const pageBaseImageNonces = ref({})
@@ -1028,8 +1030,7 @@ const canInspectEditor = computed(() => Boolean(sessionId.value))
 const canCreateManualRegion = computed(() => Boolean(sessionId.value) && !translating.value && !creatingManualRegion.value)
 const canActivateManualDraw = computed(() => Boolean(selectedEditPage.value) && canCreateManualRegion.value)
 const activeReviewMode = computed(() => {
-  const mode = currentProject.value?.review_mode || config.value.default_review_mode || 'canvas_beta'
-  return mode === 'classic' ? 'canvas_beta' : mode
+  return 'canvas_beta'
 })
 const isCanvasReviewMode = computed(() => activeReviewMode.value === 'canvas_beta')
 const hasTranslationOverrides = computed(
@@ -1420,8 +1421,7 @@ const targetLangLabelMap = {
   KOR: '韩语'
 }
 const reviewModeLabelMap = {
-  classic: '经典审校',
-  canvas_beta: '画布审校（Beta）'
+  canvas_beta: '画布审校'
 }
 const compactConfigSummary = computed(() => {
   const translator = translatorLabelMap[config.value.translator] || config.value.translator
@@ -2827,6 +2827,8 @@ function resetEditInspectorSelection() {
   fontSizeInputDrafts.value = {}
   fontSizeDraftOriginOverrides.value = {}
   pageEditHistory.value = {}
+  pageCommandRevisions.value = {}
+  pageDocumentRevisions.value = {}
   perPageUiState.value = {}
   autoFitCanvasPageIds = new Set()
   regionListSearch.value = ''
@@ -3113,6 +3115,8 @@ function applySessionPayload(payload, options = {}) {
     fontSizeInputDrafts.value = {}
     fontSizeDraftOriginOverrides.value = {}
     pageEditHistory.value = {}
+    pageCommandRevisions.value = {}
+    pageDocumentRevisions.value = {}
     pageCommandPendingCounts.value = {}
     regionCommitStates.value = {}
     canvasPreviewDirtyPages.value = {}
@@ -4356,6 +4360,28 @@ function bumpPageCommandRevision(pageId) {
   return nextRevision
 }
 
+function getPageDocumentRevision(pageId) {
+  const normalizedPageId = String(pageId || '').trim()
+  if (!normalizedPageId || !Object.prototype.hasOwnProperty.call(pageDocumentRevisions.value, normalizedPageId)) {
+    return null
+  }
+  const revision = Number(pageDocumentRevisions.value[normalizedPageId])
+  return Number.isFinite(revision) && revision >= 0 ? revision : null
+}
+
+function mergeDocumentRevisions(pages) {
+  pageDocumentRevisions.value = mergePageDocumentRevisions(pageDocumentRevisions.value, pages)
+}
+
+function recordPageCommandRevision(payload) {
+  const pageId = String(payload?.page_id || payload?.translation_page?.stored_name || '').trim()
+  const revision = Number(payload?.revision)
+  if (!pageId || !Number.isFinite(revision) || revision < 0) {
+    return
+  }
+  mergeDocumentRevisions([{ stored_name: pageId, revision }])
+}
+
 function getProtectedRegionIds(forceRegionIds = []) {
   const forceSet = new Set((forceRegionIds || []).map((regionId) => String(regionId || '').trim()))
   const protectedIds = new Set()
@@ -4458,6 +4484,7 @@ function applyInspectionOverrides(overrides, options = {}) {
 }
 
 function applyPageCommandPayload(payload) {
+  recordPageCommandRevision(payload)
   if (Number(payload?.artifact_schema_version) > 0) {
     artifactSchemaVersion.value = Number(payload.artifact_schema_version)
   }
@@ -6055,34 +6082,10 @@ async function submitManualDraw(page, bbox) {
   try {
     setTopbarTaskProgress('正在保存新的手动框…', 1, 3)
     await flushUiFrame()
-    if (isCanvasReviewMode.value) {
-      await runCanvasStructuredAction(page, {
-        kind: 'create_region',
-        bbox
-      })
-    } else {
-      const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          action: 'create',
-          stored_name: page.stored_name,
-          bbox,
-          config: buildRuntimeConfig()
-        })
-      })
-      const payload = await response.json()
-      if (!response.ok) {
-        throw new Error(payload.detail || '新增手动框失败')
-      }
-      await loadEditInspection({ silent: true })
-      selectedEditPageKey.value = page.stored_name
-      selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
-      status.value = '手动框已保存，正在尝试识别框内文字。'
-      await recognizeManualRegion(page, payload.region?.id)
-    }
+    await runCanvasStructuredAction(page, {
+      kind: 'create_region',
+      bbox
+    })
 
     setTopbarTaskProgress('手动框已可编辑。', 3, 3)
     await flushUiFrame()
@@ -6103,39 +6106,27 @@ async function recognizeManualRegion(page, regionId) {
 
   setTopbarTaskProgress('框已保存，正在识别框内文字…', 2, 3)
   try {
-    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        action: 'recognize',
-        stored_name: page.stored_name,
-        region_id: normalizedRegionId,
-        config: buildRuntimeConfig()
-      })
-    })
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '识别手动框失败')
-    }
-
-    await loadEditInspection({ silent: true })
+    const result = await applyPageCommands(page.stored_name, [{
+      type: 'recognize_manual_region',
+      region_id: normalizedRegionId,
+    }])
+    const region = result?.payload?.recognized_region_payload || {}
     selectedEditPageKey.value = page.stored_name
     selectedEditRegionKey.value = normalizedRegionId
     markCanvasPreviewDirty(page.stored_name)
-    if (!payload.ok) {
-      status.value = payload.message || '手动框已保留，但文字识别失败；可以稍后重新识别或直接填写译文。'
+    if (region.recognition_status !== 'ready') {
+      status.value = region.recognition_error
+        ? `手动框已保留，但文字识别失败：${region.recognition_error}`
+        : '手动框已保留，但文字识别失败；可以稍后重新识别或直接填写译文。'
       errorMessage.value = status.value
       return false
     }
-    status.value = payload.region?.translation_status === 'failed'
+    status.value = region.translation_status === 'failed'
       ? '文字识别完成，翻译失败；手动框已保留，可直接填写译文或重试。'
       : '手动框识别完成。'
     errorMessage.value = ''
     return true
   } catch (error) {
-    await loadEditInspection({ silent: true })
     selectedEditPageKey.value = page.stored_name
     selectedEditRegionKey.value = normalizedRegionId
     status.value = '手动框已保存，但识别服务连接失败；可以稍后重新识别或直接填写译文。'
@@ -6349,55 +6340,16 @@ async function deleteManualRegion(region) {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
-    if (isCanvasReviewMode.value && selectedEditPage.value) {
-      await runCanvasStructuredAction(selectedEditPage.value, {
-        kind: 'delete_manual_region',
-        regionIds: [region.id]
-      })
-      return
+    const page = selectedEditPage.value || mergedInspectionPages.value.find(
+      (item) => (item.regions || []).some((candidate) => candidate.id === region.id)
+    )
+    if (!page) {
+      throw new Error('没有找到这个文本框所属的页面，请刷新后重试。')
     }
-
-    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        action: 'delete',
-        region_id: region.id
-      })
+    await runCanvasStructuredAction(page, {
+      kind: 'delete_manual_region',
+      regionIds: [region.id]
     })
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '删除手动框失败')
-    }
-
-    const nextTranslationOverrides = { ...translationRegionOverrides.value }
-    delete nextTranslationOverrides[region.id]
-    translationRegionOverrides.value = nextTranslationOverrides
-
-    const nextSkipOverrides = { ...translationRegionSkipOverrides.value }
-    delete nextSkipOverrides[region.id]
-    translationRegionSkipOverrides.value = nextSkipOverrides
-
-    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
-    delete nextDisabledOverrides[region.id]
-    translationRegionDisabledOverrides.value = nextDisabledOverrides
-
-    const nextLayoutOverrides = { ...translationRegionLayoutOverrides.value }
-    delete nextLayoutOverrides[region.id]
-    translationRegionLayoutOverrides.value = nextLayoutOverrides
-
-    const nextStyleOverrides = { ...styleRegionOverrides.value }
-    delete nextStyleOverrides[region.id]
-    styleRegionOverrides.value = nextStyleOverrides
-
-    const nextMergeSelection = { ...mergeRegionSelection.value }
-    delete nextMergeSelection[region.id]
-    mergeRegionSelection.value = nextMergeSelection
-
-    await loadEditInspection({ silent: true })
-    status.value = '已删除这个手动框。'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '删除手动框失败'
   } finally {
@@ -6409,6 +6361,7 @@ function applyReviewInspectionPayload(payload, options = {}) {
   reviewInspectionPages.value = options.mergePages
     ? mergeInspectionPages(reviewInspectionPages.value, payload.pages)
     : (payload.pages || [])
+  mergeDocumentRevisions(payload.pages || [])
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
@@ -6432,17 +6385,18 @@ function applyReviewInspectionPayload(payload, options = {}) {
     translation_region_skip_overrides: nextSkipOverrides,
     translation_region_disabled_overrides: nextDisabledOverrides,
     translation_region_layout_overrides: nextLayoutOverrides,
-  })
+  }, { forceRegionIds: options.forceRegionIds || [] })
 }
 
 function applyStyleInspectionPayload(payload, options = {}) {
   styleInspectionPages.value = options.mergePages
     ? mergeInspectionPages(styleInspectionPages.value, payload.pages)
     : (payload.pages || [])
+  mergeDocumentRevisions(payload.pages || [])
   if (payload.workflow_stage) {
     workflowStage.value = payload.workflow_stage
   }
-  applyInspectionOverrides(payload?.overrides)
+  applyInspectionOverrides(payload?.overrides, { forceRegionIds: options.forceRegionIds || [] })
 }
 
 function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
@@ -6527,7 +6481,10 @@ async function loadReviewInspection(options = {}) {
     if (requestToken !== reviewInspectionRequestToken) {
       return
     }
-    applyReviewInspectionPayload(payload, { mergePages: Boolean(pageId) })
+    applyReviewInspectionPayload(payload, {
+      mergePages: Boolean(pageId),
+      forceRegionIds: options.forceRegionIds || [],
+    })
     syncEditSelection()
   } catch (error) {
     if (requestToken !== reviewInspectionRequestToken) {
@@ -6575,7 +6532,10 @@ async function loadStyleInspection(options = {}) {
     if (requestToken !== styleInspectionRequestToken) {
       return
     }
-    applyStyleInspectionPayload(payload, { mergePages: Boolean(pageId) })
+    applyStyleInspectionPayload(payload, {
+      mergePages: Boolean(pageId),
+      forceRegionIds: options.forceRegionIds || [],
+    })
     syncEditSelection()
   } catch (error) {
     if (requestToken !== styleInspectionRequestToken) {
@@ -6606,9 +6566,10 @@ async function loadEditInspection(options = {}) {
       || v2PageEntries.value[0]?.stored_name
       || ''
     ).trim()
-  const tasks = [loadReviewInspection({ silent, pageId })]
+  const forceRegionIds = options.forceRegionIds || []
+  const tasks = [loadReviewInspection({ silent, pageId, forceRegionIds })]
   if (config.value.font_style_mode === 'auto-map') {
-    tasks.push(loadStyleInspection({ silent, pageId }))
+    tasks.push(loadStyleInspection({ silent, pageId, forceRegionIds }))
   } else {
     resetStyleInspector()
   }
@@ -6882,6 +6843,7 @@ async function requestPageCommands(pageId, commands, runtimeConfig) {
   if (!sessionId.value || !pageId || !Array.isArray(commands) || !commands.length) {
     return null
   }
+  const expectedRevision = getPageDocumentRevision(pageId)
   const response = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/commands`), {
     method: 'POST',
     headers: {
@@ -6889,12 +6851,23 @@ async function requestPageCommands(pageId, commands, runtimeConfig) {
     },
     body: JSON.stringify({
       config: runtimeConfig || buildRuntimeConfig(),
-      commands
+      commands,
+      ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
     })
   })
   const payload = await response.json()
   if (!response.ok) {
-    throw new Error(payload.detail || '更新页面编辑状态失败')
+    const detail = payload?.detail
+    const error = new Error(
+      typeof detail === 'object'
+        ? (detail.message || '页面内容已被其他操作更新，请刷新后重试。')
+        : (detail || '更新页面编辑状态失败')
+    )
+    if (response.status === 409 && detail?.code === 'page_revision_conflict') {
+      error.code = detail.code
+      error.actualRevision = Number(detail.actual_revision)
+    }
+    throw error
   }
   return payload
 }
@@ -6910,6 +6883,7 @@ async function applyPageCommands(pageId, commands, options = {}) {
   return queuePageCommandExecution(normalizedPageId, async () => {
     try {
       const payload = await requestPageCommands(normalizedPageId, commands, buildRuntimeConfig())
+      recordPageCommandRevision(payload)
       const isLatest = revision === getPageCommandRevision(normalizedPageId)
       if (options.syncPayload !== false && isLatest) {
         applyPageCommandPayload(payload)
@@ -6919,6 +6893,28 @@ async function applyPageCommands(pageId, commands, options = {}) {
         isLatest,
         revision,
       }
+    } catch (error) {
+      if (error?.code === 'page_revision_conflict') {
+        const forceRegionIds = getCommandRegionIds(commands)
+        if (Number.isFinite(error.actualRevision) && error.actualRevision >= 0) {
+          mergeDocumentRevisions([{ stored_name: normalizedPageId, revision: error.actualRevision }])
+        }
+        const conflictMessage = '页面内容已在别处更新，已为你刷新到最新版；请重试刚才的操作。'
+        error.message = conflictMessage
+        window.setTimeout(() => {
+          clearRegionCommitState(forceRegionIds)
+          translationInputDrafts.value = omitRegionDrafts(translationInputDrafts.value, forceRegionIds)
+          fontSizeInputDrafts.value = omitRegionDrafts(fontSizeInputDrafts.value, forceRegionIds)
+          fontSizeDraftOriginOverrides.value = omitRegionDrafts(fontSizeDraftOriginOverrides.value, forceRegionIds)
+          void loadEditInspection({
+            silent: true,
+            pageId: normalizedPageId,
+            forceRegionIds,
+          })
+          errorMessage.value = conflictMessage
+        }, 0)
+      }
+      throw error
     } finally {
       setPageCommandPending(normalizedPageId, -1)
     }
@@ -8160,44 +8156,12 @@ async function mergeSelectedRegions() {
   creatingManualRegion.value = true
   errorMessage.value = ''
   try {
-    if (isCanvasReviewMode.value) {
-      await runCanvasStructuredAction(page, {
-        kind: 'merge_regions',
-        regionIds
-      })
-      mergeRegionSelection.value = {}
-      mergeMode.value = false
-      return
-    }
-
-    const response = await apiFetch(toApiUrl(`/api/manual-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        action: 'merge',
-        stored_name: page.stored_name,
-        region_ids: regionIds,
-        config: buildRuntimeConfig()
-      })
+    await runCanvasStructuredAction(page, {
+      kind: 'merge_regions',
+      regionIds
     })
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '合并文本框失败')
-    }
-
-    const nextDisabledOverrides = { ...translationRegionDisabledOverrides.value }
-    for (const regionId of regionIds) {
-      nextDisabledOverrides[regionId] = true
-    }
-    translationRegionDisabledOverrides.value = nextDisabledOverrides
     mergeRegionSelection.value = {}
     mergeMode.value = false
-    await loadEditInspection({ silent: true })
-    selectedEditPageKey.value = page.stored_name
-    selectedEditRegionKey.value = payload.region?.id || selectedEditRegionKey.value
-    status.value = '已合并选中的文本框。原框会先隐藏，新的合并框可继续编辑。'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '合并文本框失败'
   } finally {
@@ -12731,14 +12695,6 @@ watch(
                 <option value="ENG">英语</option>
                 <option value="JPN">日语</option>
                 <option value="KOR">韩语</option>
-              </select>
-            </label>
-
-            <label class="v2-field">
-              <span>默认审校模式</span>
-              <select v-model="config.default_review_mode">
-                <option value="canvas_beta">画布审校（Beta）</option>
-                <option value="classic">经典审校</option>
               </select>
             </label>
 

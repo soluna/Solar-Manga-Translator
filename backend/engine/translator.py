@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 
 from domain.page_regions import PageRegionCollection, is_user_authored_region, region_origin
+from domain.region_typography import RegionTypography
 from domain.project_artifacts import (
     PROJECT_ARTIFACT_SCHEMA_VERSION,
     LegacyPageArtifactEvidence,
@@ -65,6 +66,22 @@ from .project_workspace import InvalidStorageIdentifierError, ProjectWorkspace
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 logger = logging.getLogger("manga_translator.engine")
+
+
+class PageDocumentRevisionConflict(RuntimeError):
+    def __init__(
+        self,
+        *,
+        expected_revision: int,
+        actual_revision: int,
+        document: dict[str, Any],
+    ) -> None:
+        super().__init__(
+            f"页面版本已变化：请求基于版本 {expected_revision}，当前版本为 {actual_revision}。"
+        )
+        self.expected_revision = expected_revision
+        self.actual_revision = actual_revision
+        self.document = document
 
 
 class TranslatorEngine:
@@ -150,6 +167,10 @@ class TranslatorEngine:
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
         self.active_sessions_lock = threading.Lock()
+        # Page commands mutate project-level override maps and persistence
+        # manifests, so commands for different pages in the same project must
+        # still be serialized with one another.
+        self.project_command_locks: dict[str, asyncio.Lock] = {}
         self.validated_page_base_images: set[tuple[str, int, int]] = set()
         self.validated_page_base_images_lock = threading.Lock()
 
@@ -782,6 +803,9 @@ class TranslatorEngine:
         referenced.update(str(name) for name in translated_output_map.values() if str(name))
 
         for snapshot in self._read_snapshot_manifests(project_id):
+            artifact_bundle = snapshot.get("artifact_bundle")
+            if isinstance(artifact_bundle, dict) and artifact_bundle.get("schema_version") == 1:
+                continue
             output_map = snapshot.get("translated_output_map") or {}
             if isinstance(output_map, dict):
                 referenced.update(str(name) for name in output_map.values() if str(name))
@@ -1096,7 +1120,45 @@ class TranslatorEngine:
                 with contextlib.suppress(OSError):
                     victim_path.unlink()
 
+        self.project_workspace.garbage_collect_snapshot_blobs(
+            project_id,
+            self._read_snapshot_manifests(project_id),
+        )
         self._garbage_collect_project_outputs(project_id, session)
+
+    def _snapshot_artifact_files(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+    ) -> dict[str, Path]:
+        files: dict[str, Path] = {}
+
+        def collect_tree(prefix: str, root: Path) -> None:
+            root = Path(root)
+            if not root.is_dir():
+                return
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and not path.is_symlink():
+                    files[f"{prefix}/{path.relative_to(root).as_posix()}"] = path
+
+        source_dir_value = str(session.get("source_dir") or "").strip()
+        if source_dir_value:
+            collect_tree("source", Path(source_dir_value))
+        translated_dir_value = str(session.get("translated_dir") or "").strip()
+        translated_dir = Path(translated_dir_value) if translated_dir_value else None
+        for output_name in sorted({
+            str(name).strip()
+            for name in (session.get("translated_output_map") or {}).values()
+            if str(name).strip()
+        }):
+            if Path(output_name).name != output_name:
+                continue
+            output_path = translated_dir / output_name if translated_dir is not None else None
+            if output_path is not None and output_path.is_file() and not output_path.is_symlink():
+                files[f"translated/{output_name}"] = output_path
+        collect_tree("cache", self._session_rerender_cache_dir(session, project_id))
+        collect_tree("pages", self._project_pages_dir(project_id))
+        return files
 
     def _create_project_snapshot(
         self,
@@ -1127,6 +1189,13 @@ class TranslatorEngine:
             "cover_image": self._project_cover_url(project_id, session),
             "pinned": False,
         }
+        previous_snapshot = next(iter(self._read_snapshot_manifests(project_id)), None)
+        previous_bundle = previous_snapshot.get("artifact_bundle") if isinstance(previous_snapshot, dict) else None
+        snapshot["artifact_bundle"] = self.project_workspace.capture_snapshot_artifacts(
+            project_id,
+            self._snapshot_artifact_files(project_id, session),
+            previous_bundle=previous_bundle,
+        )
         self._write_json_file(self._project_snapshots_dir(project_id) / f"{snapshot_id}.json", snapshot)
         return snapshot
 
@@ -2167,6 +2236,9 @@ class TranslatorEngine:
         project_dir.mkdir(parents=True, exist_ok=True)
         self._project_snapshots_dir(project_id).mkdir(parents=True, exist_ok=True)
 
+        if persist_page_documents:
+            self._persist_page_documents(project_id, session, page_ids=page_ids)
+
         latest_snapshot = None
         if snapshot_kind:
             latest_snapshot = self._create_project_snapshot(project_id, session, snapshot_kind, snapshot_summary)
@@ -2182,9 +2254,6 @@ class TranslatorEngine:
         }
         self._write_json_file(self._project_manifest_path(project_id), project_manifest)
         self._refresh_project_index_entry(project_summary)
-
-        if persist_page_documents:
-            self._persist_page_documents(project_id, session, page_ids=page_ids)
 
         if snapshot_kind:
             self._enforce_snapshot_retention(project_id, session)
@@ -2468,6 +2537,9 @@ class TranslatorEngine:
         if not snapshot:
             raise FileNotFoundError("目标快照不存在，请刷新后重试。")
 
+        def snapshot_field(name: str, fallback: Any) -> Any:
+            return snapshot[name] if name in snapshot else fallback
+
         source_output_dir = Path(source_session.get("translated_dir") or "")
         source_source_dir = Path(source_session.get("source_dir") or "")
         source_cache_dir = self._rerender_cache_dir(project_id)
@@ -2479,27 +2551,54 @@ class TranslatorEngine:
         new_output_root.mkdir(parents=True, exist_ok=True)
         new_source_dir.mkdir(parents=True, exist_ok=True)
         new_translated_dir.mkdir(parents=True, exist_ok=True)
-
-        if source_source_dir.exists():
-            for source_file in source_source_dir.iterdir():
-                if source_file.is_file():
-                    shutil.copy2(source_file, new_source_dir / source_file.name)
+        new_cache_dir = self._rerender_cache_dir(new_project_id)
+        new_pages_dir = self._project_pages_dir(new_project_id)
+        artifact_bundle = snapshot.get("artifact_bundle")
+        has_versioned_artifacts = (
+            isinstance(artifact_bundle, dict)
+            and artifact_bundle.get("schema_version") == 1
+        )
+        try:
+            if has_versioned_artifacts:
+                self.project_workspace.restore_snapshot_artifacts(
+                    project_id,
+                    artifact_bundle,
+                    {
+                        "source": new_source_dir,
+                        "translated": new_translated_dir,
+                        "cache": new_cache_dir,
+                        "pages": new_pages_dir,
+                    },
+                )
+            else:
+                if source_source_dir.exists():
+                    for source_file in source_source_dir.iterdir():
+                        if source_file.is_file() and not source_file.is_symlink():
+                            shutil.copy2(source_file, new_source_dir / source_file.name)
+                if source_cache_dir.exists():
+                    if new_cache_dir.exists():
+                        shutil.rmtree(new_cache_dir)
+                    shutil.copytree(source_cache_dir, new_cache_dir)
+        except BaseException:
+            shutil.rmtree(new_output_root, ignore_errors=True)
+            shutil.rmtree(self._project_dir(new_project_id), ignore_errors=True)
+            shutil.rmtree(new_cache_dir, ignore_errors=True)
+            raise
 
         translated_output_map = dict(snapshot.get("translated_output_map") or {})
         copied_output_map: dict[str, str] = {}
         for stored_name, output_name in translated_output_map.items():
-            source_file = source_output_dir / str(output_name)
-            if not source_file.exists():
+            normalized_output_name = str(output_name or "").strip()
+            if not normalized_output_name or Path(normalized_output_name).name != normalized_output_name:
                 continue
-            target_file = new_translated_dir / source_file.name
-            shutil.copy2(source_file, target_file)
-            copied_output_map[str(stored_name)] = target_file.name
-
-        new_cache_dir = self._rerender_cache_dir(new_project_id)
-        if source_cache_dir.exists():
-            if new_cache_dir.exists():
-                shutil.rmtree(new_cache_dir)
-            shutil.copytree(source_cache_dir, new_cache_dir)
+            target_file = new_translated_dir / normalized_output_name
+            if not has_versioned_artifacts:
+                source_file = source_output_dir / normalized_output_name
+                if not source_file.is_file() or source_file.is_symlink():
+                    continue
+                shutil.copy2(source_file, target_file)
+            if target_file.is_file():
+                copied_output_map[str(stored_name)] = target_file.name
 
         source_title = str(source_session.get("project_title") or project_id).strip() or project_id
         new_session = {
@@ -2508,13 +2607,15 @@ class TranslatorEngine:
             "translated_dir": str(new_translated_dir),
             "download_path": "",
             "translated_output_map": copied_output_map,
-            "manual_regions": dict(snapshot.get("manual_regions") or source_session.get("manual_regions") or {}),
-            "advanced_erase_pages": dict(snapshot.get("advanced_erase_pages") or source_session.get("advanced_erase_pages") or {}),
-            "project_glossary": self._normalize_project_glossary(snapshot.get("project_glossary") or source_session.get("project_glossary")),
-            "workflow_stage": str(snapshot.get("workflow_stage") or source_session.get("workflow_stage") or "idle"),
+            "manual_regions": dict(snapshot_field("manual_regions", source_session.get("manual_regions")) or {}),
+            "advanced_erase_pages": dict(snapshot_field("advanced_erase_pages", source_session.get("advanced_erase_pages")) or {}),
+            "project_glossary": self._normalize_project_glossary(
+                snapshot_field("project_glossary", source_session.get("project_glossary"))
+            ),
+            "workflow_stage": str(snapshot_field("workflow_stage", source_session.get("workflow_stage")) or "idle"),
             "mask_debug_dir": "",
             "rerender_cache_dir": str(new_cache_dir),
-            "last_config": dict(snapshot.get("last_config") or source_session.get("last_config") or {}),
+            "last_config": dict(snapshot_field("last_config", source_session.get("last_config")) or {}),
             "deferred_output_names": set(),
             "translation_region_overrides": dict(snapshot.get("translation_region_overrides") or {}),
             "translation_region_skip_overrides": dict(snapshot.get("translation_region_skip_overrides") or {}),
@@ -2524,17 +2625,25 @@ class TranslatorEngine:
             "project_id": new_project_id,
             "project_title": f"{source_title}（快照恢复）",
             "project_note": str(source_session.get("project_note") or ""),
-            "review_mode": self._normalize_review_mode(snapshot.get("review_mode") or source_session.get("review_mode")),
+            "review_mode": self._normalize_review_mode(
+                snapshot_field("review_mode", source_session.get("review_mode"))
+            ),
             "project_created_at": self._now_iso(),
             "project_updated_at": self._now_iso(),
         }
-        self.persist_project_state(
-            new_project_id,
-            new_session,
-            snapshot_kind="snapshot_restored",
-            snapshot_summary=f"从快照 {snapshot_id} 恢复继续编辑",
-            persist_page_documents=True,
-        )
+        try:
+            self.persist_project_state(
+                new_project_id,
+                new_session,
+                snapshot_kind="snapshot_restored",
+                snapshot_summary=f"从快照 {snapshot_id} 恢复继续编辑",
+                persist_page_documents=True,
+            )
+        except BaseException:
+            shutil.rmtree(new_output_root, ignore_errors=True)
+            shutil.rmtree(self._project_dir(new_project_id), ignore_errors=True)
+            shutil.rmtree(new_cache_dir, ignore_errors=True)
+            raise
         return new_project_id, new_session
 
     def delete_project(self, project_id: str) -> None:
@@ -4474,9 +4583,11 @@ class TranslatorEngine:
             )
 
         dimensions = page_document.get("dimensions") or {}
+        metadata = page_document.get("metadata") or {}
         return {
             "stored_name": str(page_document.get("page_id") or ""),
             "name": page_name,
+            "revision": int(metadata.get("revision") or 0),
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
@@ -4530,9 +4641,11 @@ class TranslatorEngine:
             )
 
         dimensions = page_document.get("dimensions") or {}
+        metadata = page_document.get("metadata") or {}
         return {
             "stored_name": str(page_document.get("page_id") or ""),
             "name": page_name,
+            "revision": int(metadata.get("revision") or 0),
             "image_url": str(page_document.get("preview_image") or page_document.get("source_image") or ""),
             "source_image_url": str(page_document.get("source_image") or ""),
             "base_image_url": str(page_document.get("base_image") or page_document.get("source_image") or ""),
@@ -4708,6 +4821,94 @@ class TranslatorEngine:
         page_id: str,
         raw_config: dict[str, Any] | None,
         commands: list[dict[str, Any]],
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        page_id = str(page_id or "").strip()
+        if not page_id and len(commands) == 1:
+            command = commands[0]
+            if isinstance(command, dict) and str(command.get("type") or "").strip().lower() == "delete_manual_region":
+                page_id = self._manual_region_page_id(
+                    session,
+                    str(command.get("region_id") or "").strip(),
+                )
+        project_lock = self.project_command_locks.setdefault(project_id, asyncio.Lock())
+        async with project_lock:
+            previous_session = copy.deepcopy(session)
+            rollback_files = {
+                path: path.read_bytes() if path.is_file() else None
+                for path in (
+                    self._project_page_document_path(project_id, page_id),
+                    self._project_manifest_path(project_id),
+                )
+            }
+            snapshots_dir = self._project_snapshots_dir(project_id)
+            previous_snapshot_paths = set(snapshots_dir.glob("*.json"))
+            try:
+                return await self._apply_page_commands_once(
+                    project_id=project_id,
+                    session=session,
+                    page_id=page_id,
+                    raw_config=raw_config,
+                    commands=commands,
+                    expected_revision=expected_revision,
+                )
+            except BaseException:
+                session.clear()
+                session.update(previous_session)
+                for path, previous_contents in rollback_files.items():
+                    try:
+                        if previous_contents is None:
+                            path.unlink(missing_ok=True)
+                            continue
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        fd, temporary_path = tempfile.mkstemp(
+                            prefix=f".{path.name}.",
+                            suffix=".rollback",
+                            dir=str(path.parent),
+                        )
+                        try:
+                            with os.fdopen(fd, "wb") as handle:
+                                handle.write(previous_contents)
+                                handle.flush()
+                                os.fsync(handle.fileno())
+                            os.replace(temporary_path, path)
+                        finally:
+                            with contextlib.suppress(FileNotFoundError):
+                                os.remove(temporary_path)
+                    except OSError:
+                        logger.exception(
+                            "Failed to restore page-command persistence file. project=%s page=%s path=%s",
+                            project_id,
+                            page_id,
+                            path,
+                        )
+                for snapshot_path in snapshots_dir.glob("*.json"):
+                    if snapshot_path not in previous_snapshot_paths:
+                        with contextlib.suppress(OSError):
+                            snapshot_path.unlink()
+                try:
+                    remaining_snapshots = self._read_snapshot_manifests(project_id)
+                    self.project_workspace.garbage_collect_snapshot_blobs(
+                        project_id,
+                        remaining_snapshots,
+                    )
+                    self.project_workspace.rebuild_project_index()
+                except Exception:
+                    logger.exception(
+                        "Failed to rebuild project persistence after page-command rollback. project=%s page=%s",
+                        project_id,
+                        page_id,
+                    )
+                raise
+
+    async def _apply_page_commands_once(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        raw_config: dict[str, Any] | None,
+        commands: list[dict[str, Any]],
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         if not isinstance(commands, list) or not commands:
             raise ValueError("至少需要一条页面命令。")
@@ -4722,6 +4923,47 @@ class TranslatorEngine:
                 )
         if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
             raise FileNotFoundError("目标页面不存在，请刷新后重试。")
+
+        if expected_revision is not None:
+            try:
+                normalized_expected_revision = int(expected_revision)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("页面版本无效，请刷新后重试。") from exc
+            current_document = self.get_page_document(project_id, session, page_id)
+            actual_revision = int((current_document.get("metadata") or {}).get("revision") or 0)
+            if normalized_expected_revision != actual_revision:
+                raise PageDocumentRevisionConflict(
+                    expected_revision=normalized_expected_revision,
+                    actual_revision=actual_revision,
+                    document=current_document,
+                )
+
+        supported_command_types = {
+            "update_translation",
+            "set_keep_original",
+            "disable_region",
+            "restore_region",
+            "update_region_bbox",
+            "update_font_size",
+            "update_text_direction",
+            "update_region_font",
+            "update_region_style",
+            "update_font_style",
+            "create_region",
+            "duplicate_region",
+            "merge_regions",
+            "delete_manual_region",
+            "recognize_manual_region",
+            "restore_manual_region",
+        }
+        for command in commands:
+            if not isinstance(command, dict):
+                raise ValueError("页面命令格式无效。")
+            command_type = str(command.get("type") or "").strip().lower()
+            if not command_type:
+                raise ValueError("页面命令缺少类型。")
+            if command_type not in supported_command_types:
+                raise ValueError(f"暂不支持的页面命令：{command_type}")
 
         config = self.capture_page_command_config(session, raw_config)
         structural_command_types = {
@@ -9220,7 +9462,7 @@ class TranslatorEngine:
         resolved_font_size = int(round(
             font_size
             if font_size is not None
-            else PageRegionCollection.recommend_font_size(
+            else RegionTypography.recommend_font_size(
                 bbox=bbox,
                 regions=[],
                 direction=resolved_direction,
@@ -9237,6 +9479,7 @@ class TranslatorEngine:
             "direction": resolved_direction,
             "alignment": "auto",
             "font_size": max(resolved_font_size, 8),
+            "recommended_font_size": max(resolved_font_size, 8),
             "angle": 0.0,
             "letter_spacing": 1.0,
             "line_spacing": 1.0,
@@ -9593,7 +9836,7 @@ class TranslatorEngine:
             current_regions = current_document.get("regions") or []
         except FileNotFoundError:
             current_regions = []
-        recommended_font_size = PageRegionCollection.recommend_font_size(
+        recommended_font_size = RegionTypography.recommend_font_size(
             bbox=normalized_bbox,
             regions=current_regions,
             direction=self._direction_from_bbox(normalized_bbox),
@@ -9677,15 +9920,14 @@ class TranslatorEngine:
             payload["translation_status"] = "skipped"
             return payload
 
-        ocr_font_size = ocr_result.get("font_size")
-        try:
-            resolved_font_size = (
-                max(8, int(round(float(ocr_font_size))))
-                if ocr_font_size is not None
-                else int(payload.get("font_size") or 14)
-            )
-        except (TypeError, ValueError):
-            resolved_font_size = int(payload.get("font_size") or 14)
+        recommended_font_size = payload.get("recommended_font_size") or payload.get("font_size") or 14
+        payload["recommended_font_size"] = recommended_font_size
+        resolved_font_size = RegionTypography.resolve_ocr_font_size(
+            bbox=bbox,
+            recommended_font_size=recommended_font_size,
+            current_font_size=payload.get("font_size"),
+            ocr_font_size=ocr_result.get("font_size"),
+        )
 
         payload.update({
             "bbox": bbox,

@@ -4,6 +4,19 @@ export function mergeRegionCount(previousCount, nextCount) {
   return Math.max(previous, next)
 }
 
+export function mergePageDocumentRevisions(previousRevisions = {}, pages = []) {
+  const nextRevisions = { ...(previousRevisions || {}) }
+  for (const page of pages || []) {
+    const pageId = String(page?.stored_name || page?.page_id || '').trim()
+    const revision = Number(page?.revision || 0)
+    if (!pageId || !Number.isFinite(revision) || revision < 0) {
+      continue
+    }
+    nextRevisions[pageId] = Math.max(Number(nextRevisions[pageId] || 0), revision)
+  }
+  return nextRevisions
+}
+
 export function normalizeSessionSourceImages({
   images = [],
   sessionId = '',

@@ -271,6 +271,38 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("不支持的项目状态版本", response.json()["detail"])
 
+    def test_page_command_revision_conflict_is_a_structured_http_409(self) -> None:
+        project_id = "revision-conflict-api"
+        page_id = "0001.png"
+        main.SESSIONS[project_id] = {"source_images": [{"stored_name": page_id}]}
+        conflict = main.PageDocumentRevisionConflict(
+            expected_revision=3,
+            actual_revision=4,
+            document={"page_id": page_id, "metadata": {"revision": 4}},
+        )
+        try:
+            with (
+                mock.patch.object(main, "API_TOKEN", ""),
+                mock.patch.object(
+                    main.translator_engine,
+                    "apply_page_commands",
+                    new=mock.AsyncMock(side_effect=conflict),
+                ),
+            ):
+                response = self.client.post(
+                    f"/api/pages/{project_id}/{page_id}/commands",
+                    json={
+                        "expected_revision": 3,
+                        "commands": [{"type": "update_translation", "region_id": "region-1", "text": "译文"}],
+                    },
+                )
+        finally:
+            main.SESSIONS.pop(project_id, None)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "page_revision_conflict")
+        self.assertEqual(response.json()["detail"]["actual_revision"], 4)
+
     def test_legacy_manual_region_mutations_invalidate_the_current_final_artifact(self) -> None:
         image_bytes = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 255, 255)).save(

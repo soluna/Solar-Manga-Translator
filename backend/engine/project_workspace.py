@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from domain.project_state import CorruptProjectStateError
+from domain.project_state import CorruptProjectStateError, ProjectStateError
 from runtime_paths import AppPaths
 
 
 class InvalidStorageIdentifierError(ValueError):
+    pass
+
+
+class CorruptSnapshotArtifactError(ProjectStateError):
     pass
 
 
@@ -103,6 +109,9 @@ class ProjectWorkspace:
 
     def project_snapshots_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "snapshots"
+
+    def project_snapshot_blobs_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "snapshot_blobs"
 
     def project_pages_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "pages"
@@ -232,6 +241,173 @@ class ProjectWorkspace:
 
         manifests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return manifests
+
+    @staticmethod
+    def _validated_snapshot_logical_path(logical_path: str) -> tuple[str, ...]:
+        normalized = str(logical_path or "").strip().replace("\\", "/")
+        parsed = PurePosixPath(normalized)
+        if (
+            not normalized
+            or parsed.is_absolute()
+            or not parsed.parts
+            or any(part in {"", ".", ".."} for part in parsed.parts)
+        ):
+            raise CorruptSnapshotArtifactError("快照产物路径无效，无法安全恢复。")
+        return parsed.parts
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def capture_snapshot_artifacts(
+        self,
+        project_id: str,
+        files: dict[str, Path],
+        previous_bundle: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        staging_dir = blobs_dir / ".staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        captured: dict[str, dict[str, Any]] = {}
+        previous_files = (
+            previous_bundle.get("files")
+            if isinstance(previous_bundle, dict) and previous_bundle.get("schema_version") == 1
+            else {}
+        )
+        if not isinstance(previous_files, dict):
+            previous_files = {}
+
+        for logical_path, source_path in sorted(files.items()):
+            self._validated_snapshot_logical_path(logical_path)
+            source = Path(source_path)
+            if not source.is_file() or source.is_symlink():
+                continue
+
+            source_stat = source.stat()
+            previous = previous_files.get(logical_path)
+            previous_blob_id = str(previous.get("blob") or "").strip().lower() if isinstance(previous, dict) else ""
+            previous_blob_path = blobs_dir / previous_blob_id[:2] / previous_blob_id
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", previous_blob_id)
+                and previous_blob_path.is_file()
+                and int(previous.get("size") or -1) == source_stat.st_size
+                and int(previous.get("mtime_ns") or -1) == source_stat.st_mtime_ns
+                and int(previous.get("ctime_ns") or -1) == source_stat.st_ctime_ns
+            ):
+                captured[logical_path] = {
+                    "blob": previous_blob_id,
+                    "size": source_stat.st_size,
+                    "mtime_ns": source_stat.st_mtime_ns,
+                    "ctime_ns": source_stat.st_ctime_ns,
+                }
+                continue
+
+            blob_id = self._sha256_file(source)
+            size = source_stat.st_size
+            blob_path = blobs_dir / blob_id[:2] / blob_id
+            if not blob_path.exists():
+                blob_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, temp_name = tempfile.mkstemp(prefix="blob_", suffix=".tmp", dir=str(staging_dir))
+                os.close(fd)
+                try:
+                    shutil.copy2(source, temp_name)
+                    if self._sha256_file(Path(temp_name)) != blob_id:
+                        raise CorruptSnapshotArtifactError("快照产物在保存过程中发生变化，请重试。")
+                    os.replace(temp_name, blob_path)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(temp_name)
+            captured[logical_path] = {
+                "blob": blob_id,
+                "size": size,
+                "mtime_ns": source_stat.st_mtime_ns,
+                "ctime_ns": source_stat.st_ctime_ns,
+            }
+
+        with contextlib.suppress(OSError):
+            staging_dir.rmdir()
+        return {
+            "schema_version": 1,
+            "files": captured,
+        }
+
+    def restore_snapshot_artifacts(
+        self,
+        project_id: str,
+        bundle: dict[str, Any],
+        destinations: dict[str, Path],
+    ) -> set[str]:
+        if not isinstance(bundle, dict) or bundle.get("schema_version") != 1:
+            raise CorruptSnapshotArtifactError("快照产物版本不受支持，无法安全恢复。")
+        raw_files = bundle.get("files")
+        if not isinstance(raw_files, dict):
+            raise CorruptSnapshotArtifactError("快照产物清单已损坏，无法安全恢复。")
+
+        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        verified_blobs: set[str] = set()
+        restored_roots: set[str] = set()
+        for logical_path, metadata in sorted(raw_files.items()):
+            parts = self._validated_snapshot_logical_path(logical_path)
+            if not isinstance(metadata, dict):
+                raise CorruptSnapshotArtifactError("快照产物记录已损坏，无法安全恢复。")
+            blob_id = str(metadata.get("blob") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", blob_id):
+                raise CorruptSnapshotArtifactError("快照产物摘要无效，无法安全恢复。")
+            destination_root = destinations.get(parts[0])
+            if destination_root is None:
+                continue
+            destination_root = Path(destination_root)
+            destination = destination_root.joinpath(*parts[1:])
+            resolved_root = destination_root.resolve()
+            resolved_destination = destination.resolve()
+            if resolved_destination == resolved_root or resolved_root not in resolved_destination.parents:
+                raise CorruptSnapshotArtifactError("快照恢复路径越界，已停止恢复。")
+
+            blob_path = blobs_dir / blob_id[:2] / blob_id
+            if not blob_path.is_file():
+                raise CorruptSnapshotArtifactError("快照产物缺失，无法完整恢复该历史版本。")
+            if blob_id not in verified_blobs:
+                if self._sha256_file(blob_path) != blob_id:
+                    raise CorruptSnapshotArtifactError("快照产物校验失败，无法安全恢复。")
+                verified_blobs.add(blob_id)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(blob_path, destination)
+            restored_roots.add(parts[0])
+        return restored_roots
+
+    def garbage_collect_snapshot_blobs(
+        self,
+        project_id: str,
+        manifests: list[dict[str, Any]],
+    ) -> None:
+        referenced: set[str] = set()
+        for manifest in manifests:
+            bundle = manifest.get("artifact_bundle") if isinstance(manifest, dict) else None
+            files = bundle.get("files") if isinstance(bundle, dict) else None
+            if not isinstance(files, dict):
+                continue
+            for metadata in files.values():
+                blob_id = str(metadata.get("blob") or "").strip().lower() if isinstance(metadata, dict) else ""
+                if re.fullmatch(r"[0-9a-f]{64}", blob_id):
+                    referenced.add(blob_id)
+
+        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        if not blobs_dir.exists():
+            return
+        for blob_path in blobs_dir.glob("[0-9a-f][0-9a-f]/*"):
+            if blob_path.is_file() and blob_path.name not in referenced:
+                with contextlib.suppress(OSError):
+                    blob_path.unlink()
+        for directory in sorted(blobs_dir.iterdir(), reverse=True):
+            if directory.is_dir():
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+        with contextlib.suppress(OSError):
+            blobs_dir.rmdir()
 
     def write_project_index(self, summaries: list[dict[str, Any]]) -> None:
         summaries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)

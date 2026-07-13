@@ -18,7 +18,11 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from domain.project_state import ProjectStateError
-from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
+from engine.translator import (
+    InvalidStorageIdentifierError,
+    PageDocumentRevisionConflict,
+    TranslatorEngine,
+)
 from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
 from runtime_paths import resolve_app_paths
@@ -1142,7 +1146,19 @@ async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, 
             page_id=page_id,
             raw_config=payload.get("config", {}),
             commands=payload.get("commands") or [],
+            expected_revision=payload.get("expected_revision"),
         )
+    except PageDocumentRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "page_revision_conflict",
+                "message": str(exc),
+                "expected_revision": exc.expected_revision,
+                "actual_revision": exc.actual_revision,
+                "document": exc.document,
+            },
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

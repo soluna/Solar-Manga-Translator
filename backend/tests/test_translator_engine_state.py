@@ -861,6 +861,116 @@ class TranslatorEngineStateTests(unittest.TestCase):
             remaining = engine._read_json_file(engine.project_index_path, [])
             self.assertEqual([item["project_id"] for item in remaining], ["keep-project"])
 
+    def test_snapshot_restore_keeps_an_explicitly_empty_user_region_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "snapshot-empty-regions"
+            page_id = "0001.png"
+            source_dir = engine._project_source_dir(project_id)
+            translated_dir = engine._project_translated_dir(project_id)
+            source_dir.mkdir(parents=True)
+            translated_dir.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (255, 255, 255)).save(source_dir / page_id)
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "Page 1", "stored_name": page_id}],
+                "translated_output_map": {},
+                "workflow_stage": "idle",
+                "manual_regions": {},
+            }
+            engine.initialize_project(project_id, session, title="Snapshot empty regions")
+            engine.persist_project_state(
+                project_id,
+                session,
+                snapshot_kind="before_user_regions",
+                snapshot_summary="No user regions",
+            )
+            snapshot_id = engine.list_project_snapshots(project_id)[0]["snapshot_id"]
+
+            session["manual_regions"] = {
+                page_id: [
+                    {
+                        "id": f"manual::{page_id}::later",
+                        "stored_name": page_id,
+                        "bbox": [4, 4, 20, 20],
+                        "source_text": "later",
+                        "translation": "后来新增",
+                    }
+                ]
+            }
+            engine.persist_project_state(project_id, session)
+
+            _restored_project_id, restored_session = engine.restore_snapshot_as_project(
+                project_id,
+                snapshot_id,
+            )
+
+            self.assertEqual(restored_session["manual_regions"], {})
+
+    def test_snapshot_restore_uses_snapshot_time_artifacts_instead_of_current_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "snapshot-artifact-history"
+            page_id = "0001.png"
+            source_dir = engine._project_source_dir(project_id)
+            translated_dir = engine._project_translated_dir(project_id)
+            cache_dir = engine._rerender_cache_dir(project_id)
+            page_dir = engine._project_page_dir(project_id, page_id)
+            source_dir.mkdir(parents=True)
+            translated_dir.mkdir(parents=True)
+            (cache_dir / page_id).mkdir(parents=True)
+            page_dir.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (10, 20, 30)).save(source_dir / page_id)
+            Image.new("RGB", (32, 32), (40, 50, 60)).save(translated_dir / page_id)
+            (cache_dir / page_id / "snapshot-marker.txt").write_text("old-cache", encoding="utf-8")
+            (page_dir / "snapshot-marker.txt").write_text("old-page", encoding="utf-8")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "rerender_cache_dir": str(cache_dir),
+                "source_images": [{"name": "Page 1", "stored_name": page_id}],
+                "translated_output_map": {page_id: page_id},
+                "workflow_stage": "translated",
+                "manual_regions": {},
+            }
+            engine.initialize_project(project_id, session, title="Snapshot artifacts")
+            engine.persist_project_state(
+                project_id,
+                session,
+                snapshot_kind="historical_artifacts",
+                snapshot_summary="Capture old files",
+                persist_page_documents=True,
+            )
+            snapshot_id = engine.list_project_snapshots(project_id)[0]["snapshot_id"]
+
+            Image.new("RGB", (32, 32), (110, 120, 130)).save(source_dir / page_id)
+            Image.new("RGB", (32, 32), (140, 150, 160)).save(translated_dir / page_id)
+            (cache_dir / page_id / "snapshot-marker.txt").write_text("new-cache", encoding="utf-8")
+            (page_dir / "snapshot-marker.txt").write_text("new-page", encoding="utf-8")
+
+            restored_project_id, restored_session = engine.restore_snapshot_as_project(
+                project_id,
+                snapshot_id,
+            )
+
+            restored_source = np.asarray(Image.open(Path(restored_session["source_dir"]) / page_id))
+            restored_output = np.asarray(Image.open(Path(restored_session["translated_dir"]) / page_id))
+            restored_cache_dir = engine._rerender_cache_dir(restored_project_id)
+            restored_page_dir = engine._project_page_dir(restored_project_id, page_id)
+            self.assertEqual(restored_source[0, 0].tolist(), [10, 20, 30])
+            self.assertEqual(restored_output[0, 0].tolist(), [40, 50, 60])
+            self.assertEqual(
+                (restored_cache_dir / page_id / "snapshot-marker.txt").read_text(encoding="utf-8"),
+                "old-cache",
+            )
+            self.assertEqual(
+                (restored_page_dir / "snapshot-marker.txt").read_text(encoding="utf-8"),
+                "old-page",
+            )
+
     def test_page_commands_reject_unknown_region_without_dirty_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -1561,6 +1671,57 @@ print(json.dumps({
                 session["manual_regions"]["page-1.png"][0]["id"],
                 region["id"],
             )
+
+    def test_manual_region_ocr_outlier_font_size_is_bounded_and_retry_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            Image.new("RGB", (240, 320), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "workflow_stage": "detected",
+                "manual_regions": {},
+            }
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            region = asyncio.run(engine.create_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                bbox=[20, 30, 140, 190],
+            ))
+            recommended_font_size = int(region["font_size"])
+
+            async def outlier_ocr(*_args, **_kwargs):
+                return {
+                    "source_text": "测试",
+                    "direction": "v",
+                    "font_size": 9999,
+                    "fg_color": (0, 0, 0),
+                    "bg_color": (255, 255, 255),
+                }
+
+            engine._ocr_manual_region = outlier_ocr  # type: ignore[method-assign]
+            first = asyncio.run(engine.recognize_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                region_id=region["id"],
+            ))
+            second = asyncio.run(engine.recognize_manual_region(
+                session_id="manual-project",
+                session=session,
+                raw_config={"translator": "none", "target_lang": "CHS", "use_gpu": False},
+                stored_name="page-1.png",
+                region_id=region["id"],
+            ))
+
+            self.assertLessEqual(first["font_size"], recommended_font_size * 2)
+            self.assertEqual(second["font_size"], first["font_size"])
 
     def test_rerender_result_image_preserves_source_alpha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

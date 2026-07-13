@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -197,6 +198,158 @@ class PageRegionCommandTests(unittest.TestCase):
             self.assertEqual(authored["style"]["font_size_override"], 22)
             self.assertEqual(automatic["bbox"], [6, 6, 32, 38])
             self.assertEqual(authored["bbox"], [64, 79, 111, 126])
+
+    def test_page_command_batch_rolls_back_when_a_later_command_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+
+            with self.assertRaisesRegex(ValueError, "暂不支持"):
+                asyncio.run(
+                    engine.apply_page_commands(
+                        project_id=project_id,
+                        session=session,
+                        page_id=page_id,
+                        raw_config={"target_lang": "CHS", "translator": "none"},
+                        commands=[
+                            {
+                                "type": "update_translation",
+                                "region_id": "auto-1",
+                                "text": "不应保留",
+                            },
+                            {"type": "future_unsupported_command"},
+                        ],
+                    )
+                )
+
+            self.assertEqual(session["translation_region_overrides"], {})
+            document = engine.get_page_document(project_id, session, page_id)
+            auto_region = next(
+                region for region in document["regions"] if region["region_id"] == "auto-1"
+            )
+            self.assertEqual(auto_region["translation"]["resolved"], "")
+
+    def test_page_command_rolls_back_persisted_files_when_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            page_document_path = engine._project_page_document_path(project_id, page_id)
+            project_manifest_path = engine._project_manifest_path(project_id)
+            snapshots_dir = engine._project_snapshots_dir(project_id)
+            previous_document = page_document_path.read_bytes()
+            previous_manifest = project_manifest_path.read_bytes()
+            previous_snapshots = {path.name for path in snapshots_dir.glob("*.json")}
+
+            with patch.object(
+                engine,
+                "_refresh_project_index_entry",
+                side_effect=OSError("simulated index failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated index failure"):
+                    asyncio.run(
+                        engine.apply_page_commands(
+                            project_id=project_id,
+                            session=session,
+                            page_id=page_id,
+                            raw_config={"target_lang": "CHS", "translator": "none"},
+                            commands=[{"type": "create_region", "bbox": [65, 80, 110, 125]}],
+                        )
+                    )
+
+            self.assertEqual(session["manual_regions"], {})
+            self.assertEqual(page_document_path.read_bytes(), previous_document)
+            self.assertEqual(project_manifest_path.read_bytes(), previous_manifest)
+            self.assertEqual(
+                {path.name for path in snapshots_dir.glob("*.json")},
+                previous_snapshots,
+            )
+            self.assertEqual(
+                [region["region_id"] for region in engine.get_page_document(project_id, session, page_id)["regions"]],
+                ["auto-1", "auto-2", "auto-3"],
+            )
+
+    def test_page_commands_reject_a_stale_document_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            document = engine.get_page_document(project_id, session, page_id)
+            current_revision = int(document["metadata"]["revision"])
+
+            with self.assertRaisesRegex(RuntimeError, "版本"):
+                asyncio.run(
+                    engine.apply_page_commands(
+                        project_id=project_id,
+                        session=session,
+                        page_id=page_id,
+                        raw_config={"target_lang": "CHS", "translator": "none"},
+                        commands=[
+                            {
+                                "type": "update_translation",
+                                "region_id": "auto-1",
+                                "text": "过期请求",
+                            }
+                        ],
+                        expected_revision=current_revision - 1,
+                    )
+                )
+
+            self.assertEqual(session["translation_region_overrides"], {})
+            accepted = asyncio.run(
+                engine.apply_page_commands(
+                    project_id=project_id,
+                    session=session,
+                    page_id=page_id,
+                    raw_config={"target_lang": "CHS", "translator": "none"},
+                    commands=[
+                        {
+                            "type": "update_translation",
+                            "region_id": "auto-1",
+                            "text": "当前请求",
+                        }
+                    ],
+                    expected_revision=current_revision,
+                )
+            )
+            self.assertGreater(accepted["revision"], current_revision)
+
+    def test_concurrent_page_commands_with_the_same_revision_cannot_overwrite_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            current_revision = int(
+                engine.get_page_document(project_id, session, page_id)["metadata"]["revision"]
+            )
+
+            async def submit(text: str):
+                return await engine.apply_page_commands(
+                    project_id=project_id,
+                    session=session,
+                    page_id=page_id,
+                    raw_config={"target_lang": "CHS", "translator": "none"},
+                    commands=[
+                        {
+                            "type": "update_translation",
+                            "region_id": "auto-1",
+                            "text": text,
+                        }
+                    ],
+                    expected_revision=current_revision,
+                )
+
+            async def run_concurrently():
+                return await asyncio.gather(
+                    submit("并发请求 A"),
+                    submit("并发请求 B"),
+                    return_exceptions=True,
+                )
+
+            results = asyncio.run(run_concurrently())
+
+            successes = [result for result in results if isinstance(result, dict)]
+            conflicts = [result for result in results if isinstance(result, RuntimeError)]
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(conflicts), 1)
+            self.assertIn("版本", str(conflicts[0]))
+            self.assertIn(
+                session["translation_region_overrides"]["auto-1"],
+                {"并发请求 A", "并发请求 B"},
+            )
 
 
 if __name__ == "__main__":

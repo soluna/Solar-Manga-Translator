@@ -560,9 +560,21 @@ W0 的第一个纵向切片与 W1 已经落地；W0 尚未整包完成：
 - 旧 `/api/manual-regions` Adapter 的新增、合并、识别和删除已统一进入 `apply_page_commands`
   Interface；产物失效、持久化和结构性编辑快照由同一 Module 负责。
 
-当前边界是：`content_hash` 尚未写入，PageDocument 与 TaskRecord 尚未进入同一版本化协议，前端也尚未把
-`page_artifacts` 设为唯一状态 owner。下一步应先收完 W0 的 contract 基线，再进入 W2 的 revision/原子提交，
-而不是直接拆分大文件。
+### 8.2 增量进度（2026-07-13）
+
+- PageDocument 已有单调 `revision`；页面命令支持 `expected_revision`，同一项目的命令由服务端串行执行。版本冲突
+  返回结构化 HTTP 409，前端刷新最新页面后要求用户重试，不再静默覆盖其他窗口或后台写入。
+- 一批页面命令会在后续命令或持久化失败时回滚 session、页面文档和项目 manifest，删除失败批次新建的快照并回收孤立 blob；命令类型在执行副作用前统一校验。
+- 手动新增、单框识别、删除和合并的生产前端已全部改走 PageDocument command seam；经典审校入口已从产品
+  界面移除，旧 `/api/manual-regions` 只作为旧客户端兼容 Adapter 保留。
+- 新增区域字号由独立 `RegionTypography` Domain Module 负责：邻近框给出稳定基线，OCR 估计只能在基线和框
+  尺寸允许的范围内调整，重复识别结果幂等。
+- 新快照会把 source、translated、PageDocument 和可编辑 cache 写入 SHA-256 内容寻址产物包；相同内容跨快照
+  去重，恢复前校验哈希，快照淘汰后回收无引用 blob。旧快照继续兼容读取。
+- V2 浏览器回归已覆盖真实画框、单框识别、删除、撤销恢复、重做删除、字号范围和页面命令版本字段。
+
+当前边界是：W2 的一致快照已完成，但任务 staging 仍会复制整目录，尚未变成“只提交受影响页面 revision”的
+manifest 指针事务；TaskRecord 也尚未进入同一版本化协议。`page_artifacts` 还不是前端唯一状态 owner。
 
 ### W0：冻结语义与建立架构回归基线
 
@@ -593,8 +605,9 @@ W0 的第一个纵向切片与 W1 已经落地；W0 尚未整包完成：
 
 - [ ] 实现按页面写入的 artifact revision。
 - [ ] manifest 指针原子提交，替代整目录 copytree。
-- [ ] 完整快照引用 manifest revision。
-- [ ] 中断 staging 清理、垃圾回收、快照恢复契约测试。
+- [x] 快照用内容寻址产物包固定 source、translated、PageDocument 和可编辑 cache 的历史内容。
+- [x] 增加 blob 校验、去重、垃圾回收、路径越界和一致恢复契约测试。
+- [ ] 增加任务中断 staging 清理与启动恢复。
 
 完成定义：单页任务不复制全项目；快照可一致恢复可编辑状态。
 
@@ -627,7 +640,7 @@ W0 的第一个纵向切片与 W1 已经落地；W0 尚未整包完成：
 
 - [ ] 前端只消费 `ProjectView` / `PageView`，停止同步 original/translated/inspection 多套真相数组。
 - [ ] 任务完成统一刷新 ProjectView。
-- [ ] PageDocument command 带 expected revision。
+- [x] PageDocument command 带 expected revision，并在 409 冲突后刷新最新页面。
 - [ ] 把画布几何与审校文档状态分开。
 - [ ] `AppV2.vue` 逐段变为组合壳；迁一段删一段，不复制逻辑。
 

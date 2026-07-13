@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 
 import {
   getBaseImageRefreshPageIds,
+  mergePageDocumentRevisions,
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolvePageEntryCoverUrl,
@@ -9,6 +10,18 @@ import {
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
 } from '../src/review-workspace-state.js'
+
+assert.deepEqual(
+  mergePageDocumentRevisions(
+    { '001.png': 4, 'keep.png': 2 },
+    [
+      { stored_name: '001.png', revision: 3 },
+      { stored_name: '002.png', revision: 7 },
+      { stored_name: 'new.png', revision: 0 },
+    ],
+  ),
+  { '001.png': 4, '002.png': 7, 'keep.png': 2, 'new.png': 0 },
+)
 
 const pendingPage = resolveSelectedReviewPage({
   selectedPageKey: '002.png',

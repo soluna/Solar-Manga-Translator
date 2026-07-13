@@ -19,3 +19,11 @@ _Avoid_: Review payload, manual-region list
 **Page Artifact**:
 A revisioned output of the page workflow, such as recognition, blank page, translation, or final typeset page.
 _Avoid_: Step status when referring to the actual output
+
+**Page Revision**:
+The monotonic version of a Page Document. A Page Command may declare the revision it was based on so a stale editor cannot overwrite newer text-region state.
+_Avoid_: UI request counter
+
+**Snapshot Artifact Bundle**:
+An immutable, content-addressed set of source images, translated images, Page Documents, and editable caches captured by a project snapshot.
+_Avoid_: Snapshot when only a mutable output filename was recorded

@@ -4,13 +4,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from engine.project_workspace import InvalidStorageIdentifierError, ProjectWorkspace
+from engine.project_workspace import (
+    CorruptSnapshotArtifactError,
+    InvalidStorageIdentifierError,
+    ProjectWorkspace,
+)
 from runtime_paths import AppPaths
 
 
@@ -112,6 +117,76 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 [item["project_id"] for item in workspace.read_json_file(workspace.project_index_path, [])],
                 ["older-project", "newer-project"],
             )
+
+    def test_snapshot_artifacts_are_content_addressed_restorable_and_collectable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            source = root / "artifact.txt"
+            source.write_text("same historical bytes", encoding="utf-8")
+
+            bundle = workspace.capture_snapshot_artifacts(
+                "project-a",
+                {
+                    "source/page.txt": source,
+                    "cache/page/marker.txt": source,
+                },
+            )
+
+            blob_ids = {metadata["blob"] for metadata in bundle["files"].values()}
+            self.assertEqual(len(blob_ids), 1)
+            blob_files = list(workspace.project_snapshot_blobs_dir("project-a").glob("[0-9a-f][0-9a-f]/*"))
+            self.assertEqual(len(blob_files), 1)
+
+            with mock.patch.object(workspace, "_sha256_file", wraps=workspace._sha256_file) as hash_file:
+                reused_bundle = workspace.capture_snapshot_artifacts(
+                    "project-a",
+                    {
+                        "source/page.txt": source,
+                        "cache/page/marker.txt": source,
+                    },
+                    previous_bundle=bundle,
+                )
+            self.assertEqual(hash_file.call_count, 0)
+            self.assertEqual(
+                {metadata["blob"] for metadata in reused_bundle["files"].values()},
+                blob_ids,
+            )
+
+            restored_source = root / "restored-source"
+            restored_cache = root / "restored-cache"
+            restored_roots = workspace.restore_snapshot_artifacts(
+                "project-a",
+                bundle,
+                {"source": restored_source, "cache": restored_cache},
+            )
+            self.assertEqual(restored_roots, {"source", "cache"})
+            self.assertEqual((restored_source / "page.txt").read_text(encoding="utf-8"), "same historical bytes")
+            self.assertEqual((restored_cache / "page" / "marker.txt").read_text(encoding="utf-8"), "same historical bytes")
+
+            workspace.garbage_collect_snapshot_blobs("project-a", [{"artifact_bundle": bundle}])
+            self.assertTrue(blob_files[0].exists())
+            workspace.garbage_collect_snapshot_blobs("project-a", [])
+            self.assertFalse(blob_files[0].exists())
+
+    def test_snapshot_artifacts_reject_traversal_and_bad_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            source = root / "artifact.txt"
+            source.write_text("safe", encoding="utf-8")
+
+            with self.assertRaises(CorruptSnapshotArtifactError):
+                workspace.capture_snapshot_artifacts("project-a", {"../outside.txt": source})
+            with self.assertRaises(CorruptSnapshotArtifactError):
+                workspace.restore_snapshot_artifacts(
+                    "project-a",
+                    {
+                        "schema_version": 1,
+                        "files": {"source/page.txt": {"blob": "not-a-hash"}},
+                    },
+                    {"source": root / "restored"},
+                )
 
     def test_project_index_is_rebuilt_from_manifests_instead_of_trusting_stale_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

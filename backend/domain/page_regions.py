@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import math
-import statistics
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -71,62 +69,3 @@ class PageRegionCollection:
             reconciled.append(normalized)
             seen_region_ids.add(region_id)
         return reconciled
-
-    @classmethod
-    def recommend_font_size(
-        cls,
-        *,
-        bbox: Iterable[int | float],
-        regions: Iterable[Mapping[str, Any]] | None,
-        direction: str = "auto",
-    ) -> int:
-        coordinates = [int(round(float(value))) for value in bbox]
-        if len(coordinates) != 4:
-            raise ValueError("A text region bbox must contain four coordinates")
-        x1, y1, x2, y2 = coordinates
-        short_side = max(8, min(abs(x2 - x1), abs(y2 - y1)))
-        center_x = (x1 + x2) / 2.0
-        center_y = (y1 + y2) / 2.0
-        normalized_direction = cls._normalized_direction(direction, coordinates)
-
-        candidates: list[tuple[bool, float, float]] = []
-        for region in regions or []:
-            if not isinstance(region, Mapping):
-                continue
-            if bool((region.get("flags") or {}).get("disabled")):
-                continue
-            region_bbox = region.get("bbox")
-            if not isinstance(region_bbox, (list, tuple)) or len(region_bbox) != 4:
-                continue
-            try:
-                rx1, ry1, rx2, ry2 = [float(value) for value in region_bbox]
-                font_size = float((region.get("style") or {}).get("font_size"))
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(font_size) or font_size < 8:
-                continue
-            region_direction = cls._normalized_direction(
-                str(region.get("direction") or "auto"),
-                [rx1, ry1, rx2, ry2],
-            )
-            distance = math.hypot(((rx1 + rx2) / 2.0) - center_x, ((ry1 + ry2) / 2.0) - center_y)
-            candidates.append((region_direction == normalized_direction, distance, font_size))
-
-        same_direction = sorted((item for item in candidates if item[0]), key=lambda item: item[1])
-        nearest = same_direction[:3] or sorted(candidates, key=lambda item: item[1])[:5]
-        if nearest:
-            recommended = int(round(statistics.median(item[2] for item in nearest)))
-        else:
-            recommended = int(round(short_side * 0.22))
-            recommended = max(14, min(48, recommended))
-        return max(8, min(short_side, recommended))
-
-    @staticmethod
-    def _normalized_direction(direction: str, bbox: list[int | float]) -> str:
-        normalized = str(direction or "").strip().lower()
-        if normalized.startswith("v"):
-            return "vertical"
-        if normalized.startswith("h"):
-            return "horizontal"
-        x1, y1, x2, y2 = bbox
-        return "vertical" if abs(y2 - y1) > abs(x2 - x1) * 1.15 else "horizontal"

@@ -372,6 +372,78 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertTrue(page_artifact["capabilities"]["final_stale"])
         self.assertFalse(page_artifact["capabilities"]["can_export"])
 
+    def test_glossary_extract_button_supplements_a_name_after_an_earlier_empty_result(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")
+
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("page-1.png", image_bytes.getvalue(), "image/png")},
+            )
+        self.assertEqual(upload.status_code, 200)
+        project_id = upload.json()["session_id"]
+        page_id = upload.json()["images"][0]["stored_name"]
+        session = main.SESSIONS[project_id]
+        session["project_glossary"] = {
+            "entries": [],
+            "auto_extract_completed": True,
+            "auto_extracted_at": "2026-07-07T12:56:55+00:00",
+        }
+        main.translator_engine._write_json_file(
+            main.translator_engine._project_page_document_path(project_id, page_id),
+            {
+                "page_id": page_id,
+                "regions": [
+                    {
+                        "region_id": "r1",
+                        "source_text": "私の名前は片桐 奈々美",
+                        "translation": {},
+                    },
+                    {
+                        "region_id": "r2",
+                        "source_text": "ど…どうしたの？奈々美ちゃん",
+                        "translation": {},
+                    },
+                ],
+            },
+        )
+
+        async def fake_glossary_request(_config, prompt):
+            if "可能遗漏的 OCR 证据" in prompt and "片桐 奈々美" in prompt:
+                return '[{"source":"片桐 奈々美","translation":"片桐奈奈美","category":"人名"}]'
+            return "[]"
+
+        with (
+            mock.patch.object(main.translator_engine, "_ensure_runtime_patches", return_value=None),
+            mock.patch.object(
+                main.translator_engine,
+                "_request_project_glossary_extraction",
+                side_effect=fake_glossary_request,
+            ),
+            mock.patch.object(main, "API_TOKEN", ""),
+        ):
+            response = self.client.post(
+                f"/api/projects/{project_id}/glossary/extract",
+                json={
+                    "config": {
+                        "translator": "custom_openai",
+                        "selected_translator": "openai-compatible",
+                        "target_lang": "CHS",
+                        "openai_base_url": "https://api.example.com/v1",
+                        "openai_model": "example-model",
+                        "api_key": "secret",
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [entry["source"] for entry in response.json()["glossary"]["entries"]],
+            ["片桐 奈々美"],
+        )
+        self.assertIn("已补充 1 个", response.json()["message"])
+
     def test_translation_task_survives_websocket_disconnect_and_resumes(self) -> None:
         image_bytes = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")

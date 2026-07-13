@@ -755,7 +755,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             self.assertFalse((translated_dir / "002.png").exists())
 
-    def test_project_glossary_extraction_uses_limited_context_and_longer_timeout(self) -> None:
+    def test_project_glossary_extraction_uses_large_context_and_longer_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
@@ -790,8 +790,50 @@ class TranslatorEngineStateTests(unittest.TestCase):
             }, force=True))
 
             self.assertEqual(glossary["entries"][0]["source"], "山田")
+            self.assertGreater(len(str(captured["user_prompt"])), 24000)
             self.assertLessEqual(len(str(captured["user_prompt"])), engine.PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT)
             self.assertEqual(captured["timeout_seconds"], engine.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS)
+
+    def test_project_glossary_extraction_only_shrinks_context_after_provider_limit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {"entries": []},
+            }
+            engine._project_text_context_for_glossary = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: "普通上下文 " * 10000
+            )
+            prompts: list[str] = []
+
+            async def fake_completion(_config, prompt):
+                prompts.append(prompt)
+                if len(prompts) == 1:
+                    raise RuntimeError("maximum context length exceeded")
+                return '[{"source":"山田","translation":"山田","category":"人名"}]'
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._request_project_glossary_extraction = fake_completion  # type: ignore[method-assign]
+            glossary = asyncio.run(engine.extract_project_glossary("project-a", session, {
+                "translator": "custom_openai",
+                "selected_translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "small-context-model",
+                "api_key": "key",
+                "target_lang": "CHS",
+            }, force=True))
+
+            self.assertEqual(glossary["entries"][0]["source"], "山田")
+            self.assertEqual(len(prompts), 2)
+            self.assertGreater(len(prompts[0]), len(prompts[1]))
+            self.assertLessEqual(len(prompts[1]), engine.PROJECT_GLOSSARY_FALLBACK_PROMPT_CHAR_LIMIT)
 
     def test_brush_edit_operations_paint_restore_and_erase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2241,6 +2283,55 @@ print(json.dumps({
             self.assertEqual(glossary["entries"][0]["source"], "山田")
             self.assertEqual(glossary["entries"][0]["category"], "人名")
 
+    def test_project_glossary_extraction_accepts_structured_chat_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {"entries": []},
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "regions": [{
+                    "region_id": "r1",
+                    "bbox": [0, 0, 8, 8],
+                    "source_text": "私の名前は片桐 奈々美",
+                    "translation": {},
+                }],
+            })
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._post_validation_json = lambda **_kwargs: {  # type: ignore[method-assign]
+                "choices": [{
+                    "message": {
+                        "content": [{
+                            "type": "text",
+                            "text": '[{"source":"片桐 奈々美","translation":"片桐奈奈美","category":"人名"}]',
+                        }],
+                    },
+                }],
+            }
+            glossary = asyncio.run(engine.extract_project_glossary(project_id, session, {
+                "translator": "openai-compatible",
+                "selected_translator": "openai-compatible",
+                "target_lang": "CHS",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }, force=True))
+
+            self.assertEqual(glossary["entries"][0]["source"], "片桐 奈々美")
+            self.assertEqual(glossary["entries"][0]["translation"], "片桐奈奈美")
+
     def test_project_glossary_parser_accepts_chinese_keys_and_wrappers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -2268,6 +2359,21 @@ print(json.dumps({
             )
             self.assertEqual(single_entry[0]["source"], "蓮")
             self.assertEqual(single_entry[0]["translation"], "莲")
+
+    def test_project_glossary_parser_accepts_labeled_non_json_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            entries = engine._parse_glossary_extraction_response(
+                "提取结果：\n"
+                "- 原文：片桐 奈々美；译文：片桐奈奈美；类别：人名；说明：女主角\n"
+                "- source: 星見町; translation: 星见町; category: 地点"
+            )
+
+            self.assertEqual([entry["source"] for entry in entries], ["片桐 奈々美", "星見町"])
+            self.assertEqual(entries[0]["translation"], "片桐奈奈美")
+            self.assertEqual(entries[0]["category"], "人名")
+            self.assertEqual(entries[1]["category"], "地点")
 
     def test_project_glossary_extraction_retries_when_model_returns_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2319,7 +2425,89 @@ print(json.dumps({
             self.assertEqual(glossary["entries"][0]["source"], "小夏")
             self.assertEqual(glossary["entries"][0]["category"], "人名")
 
-    def test_project_glossary_auto_extraction_marks_empty_result_complete(self) -> None:
+    def test_project_glossary_retry_keeps_full_context_and_lets_the_model_choose_name_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {
+                    "entries": [{
+                        "id": "term-rubber-suit",
+                        "source": "ラバースーツ",
+                        "translation": "橡胶衣",
+                        "category": "道具",
+                    }],
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "dimensions": {"width": 16, "height": 16},
+                "regions": [
+                    {
+                        "region_id": "r1",
+                        "bbox": [0, 0, 8, 8],
+                        "source_text": "ハァハァななみちゃーん！",
+                        "translation": {},
+                    },
+                    {
+                        "region_id": "r2",
+                        "bbox": [0, 8, 16, 16],
+                        "source_text": "私の名前は片桐 奈々美",
+                        "translation": {},
+                    },
+                    {
+                        "region_id": "r3",
+                        "bbox": [8, 0, 16, 8],
+                        "source_text": "ど…どうしたの？奈々美ちゃん",
+                        "translation": {},
+                    },
+                    {
+                        "region_id": "r4",
+                        "bbox": [8, 8, 16, 16],
+                        "source_text": "無関但需要保留的全局上下文",
+                        "translation": {},
+                    },
+                ],
+            })
+            prompts: list[str] = []
+
+            async def fake_completion(_config, prompt):
+                prompts.append(prompt)
+                if len(prompts) == 2 and "可能遗漏的 OCR 证据" in prompt:
+                    return '[{"source":"片桐 奈々美","translation":"片桐奈奈美","category":"人名"}]'
+                return "[]"
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._request_project_glossary_extraction = fake_completion  # type: ignore[method-assign]
+            glossary = asyncio.run(engine.extract_project_glossary(project_id, session, {
+                "translator": "openai-compatible",
+                "selected_translator": "openai-compatible",
+                "target_lang": "CHS",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }, force=True))
+
+            self.assertEqual(len(prompts), 2)
+            self.assertIn("可能遗漏的 OCR 证据", prompts[-1])
+            self.assertIn("不是预先切好的词条", prompts[-1])
+            self.assertIn("無関但需要保留的全局上下文", prompts[-1])
+            self.assertEqual(
+                {entry["source"] for entry in glossary["entries"]},
+                {"ラバースーツ", "片桐 奈々美"},
+            )
+            self.assertTrue(glossary["auto_extract_completed"])
+
+    def test_project_glossary_empty_result_remains_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
@@ -2366,10 +2554,56 @@ print(json.dumps({
             glossary_again = asyncio.run(engine.extract_project_glossary(project_id, session, config))
             glossary_forced = asyncio.run(engine.extract_project_glossary(project_id, session, config, force=True))
 
+            self.assertFalse(glossary["auto_extract_completed"])
+            self.assertFalse(glossary_again["auto_extract_completed"])
+            self.assertFalse(glossary_forced["auto_extract_completed"])
+            self.assertEqual(calls, 6)
+
+    def test_project_glossary_retries_a_legacy_completed_empty_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-glossary"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "project_glossary": {
+                    "entries": [],
+                    "auto_extract_completed": True,
+                    "auto_extracted_at": "2026-07-07T12:56:55+00:00",
+                },
+            }
+            engine._write_json_file(engine._project_page_document_path(project_id, "page-1.png"), {
+                "page_id": "page-1.png",
+                "regions": [{
+                    "region_id": "r1",
+                    "source_text": "私の名前は片桐 奈々美",
+                    "translation": {},
+                }],
+            })
+
+            async def fake_completion(_config, _prompt):
+                return '[{"source":"片桐 奈々美","translation":"片桐奈奈美","category":"人名"}]'
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._request_project_glossary_extraction = fake_completion  # type: ignore[method-assign]
+            glossary = asyncio.run(engine.extract_project_glossary(project_id, session, {
+                "translator": "openai-compatible",
+                "selected_translator": "openai-compatible",
+                "target_lang": "CHS",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "example-model",
+                "api_key": "secret",
+            }))
+
+            self.assertEqual(glossary["entries"][0]["source"], "片桐 奈々美")
             self.assertTrue(glossary["auto_extract_completed"])
-            self.assertTrue(glossary_again["auto_extract_completed"])
-            self.assertTrue(glossary_forced["auto_extract_completed"])
-            self.assertEqual(calls, 4)
 
     def test_project_glossary_extraction_uses_fallback_for_translation_only_doubao_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2394,6 +2628,30 @@ print(json.dumps({
             self.assertIn("小夏", result)
             self.assertEqual(captured["model"], engine.DOUBAO_GLOSSARY_FALLBACK_MODEL)
             self.assertIn("项目 OCR 原文", captured["user_prompt"])
+
+    def test_project_glossary_openai_adapter_accepts_reasoning_content_when_final_content_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            engine._post_validation_json = lambda **_kwargs: {  # type: ignore[method-assign]
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "reasoning_content": (
+                            '[{"source":"片桐 奈々美","translation":"片桐奈奈美","category":"人名"}]'
+                        ),
+                    },
+                }],
+            }
+
+            response = asyncio.run(engine._request_project_glossary_extraction({
+                "translator": "openai-compatible",
+                "selected_translator": "openai-compatible",
+                "openai_base_url": "https://api.example.com/v1",
+                "openai_model": "reasoning-model",
+                "api_key": "secret",
+            }, "项目 OCR 原文"))
+
+            self.assertIn("片桐 奈々美", response)
 
     def test_project_glossary_extraction_reports_missing_ocr_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

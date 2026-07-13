@@ -27,8 +27,8 @@ from urllib import request as urllib_request
 import cv2
 import numpy as np
 
+from domain.glossary_candidates import GlossaryCandidate, GlossaryCandidateDiscovery
 from domain.page_regions import PageRegionCollection, is_user_authored_region, region_origin
-from domain.region_typography import RegionTypography
 from domain.project_artifacts import (
     PROJECT_ARTIFACT_SCHEMA_VERSION,
     LegacyPageArtifactEvidence,
@@ -41,6 +41,7 @@ from domain.project_state import (
     InvalidProjectStateError,
     ProjectState,
 )
+from domain.region_typography import RegionTypography
 from http_requests import build_json_post_request
 from patch_pydensecrf import patch_mask_refinement
 from runtime_paths import AppPaths, resolve_app_paths
@@ -95,8 +96,11 @@ class TranslatorEngine:
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
     ADVANCED_ERASE_MAX_TIMEOUT_SECONDS = 300
     ADVANCED_ERASE_PROMPT_MAX_LENGTH = 4000
-    PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT = 12000
-    PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT = 15000
+    PROJECT_GLOSSARY_SOURCE_CHAR_LIMIT = 240000
+    PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT = 48000
+    PROJECT_GLOSSARY_PROMPT_CHAR_LIMIT = 60000
+    PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT = 8000
+    PROJECT_GLOSSARY_FALLBACK_PROMPT_CHAR_LIMIT = 16000
     PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS = 120
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
     DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -542,18 +546,45 @@ class TranslatorEngine:
         return f"{normalized}/responses"
 
     def _extract_chat_completions_preview(self, payload: dict[str, Any]) -> str:
+        def content_text(value: Any) -> str:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if not isinstance(value, list):
+                return ""
+            pieces: list[str] = []
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    pieces.append(item.strip())
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if isinstance(text, dict):
+                    text = text.get("value")
+                if isinstance(text, str) and text.strip():
+                    pieces.append(text.strip())
+            return "\n".join(pieces).strip()
+
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, dict):
                 message = first.get("message")
                 if isinstance(message, dict):
-                    content = message.get("content")
-                    if isinstance(content, str) and content.strip():
-                        return content.strip()
+                    preview = content_text(message.get("content"))
+                    if preview:
+                        return preview
                 text = first.get("text")
                 if isinstance(text, str) and text.strip():
                     return text.strip()
+                if isinstance(message, dict):
+                    for field_name in ("reasoning_content", "reasoning"):
+                        preview = content_text(message.get(field_name))
+                        if preview:
+                            return preview
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
         return ""
 
     def _extract_responses_preview(self, payload: dict[str, Any]) -> str:
@@ -2947,12 +2978,21 @@ class TranslatorEngine:
             seen_ids.add(entry["id"])
             entries.append(entry)
 
+        auto_extract_completed = bool(
+            isinstance(raw_value, dict)
+            and raw_value.get("auto_extract_completed")
+            and entries
+        )
         return {
             "version": self.PROJECT_GLOSSARY_VERSION,
             "entries": entries,
             "updated_at": str((raw_value or {}).get("updated_at") or self._now_iso()) if isinstance(raw_value, dict) else self._now_iso(),
-            "auto_extract_completed": bool((raw_value or {}).get("auto_extract_completed")) if isinstance(raw_value, dict) else False,
-            "auto_extracted_at": str((raw_value or {}).get("auto_extracted_at") or "") if isinstance(raw_value, dict) else "",
+            "auto_extract_completed": auto_extract_completed,
+            "auto_extracted_at": (
+                str((raw_value or {}).get("auto_extracted_at") or "")
+                if auto_extract_completed
+                else ""
+            ),
         }
 
     def _project_glossary_auto_extract_completed(self, session: dict[str, Any]) -> bool:
@@ -2971,6 +3011,21 @@ class TranslatorEngine:
         glossary["auto_extract_completed"] = True
         glossary["auto_extracted_at"] = self._now_iso()
         glossary["updated_at"] = glossary["auto_extracted_at"]
+        session["project_glossary"] = glossary
+        if persist:
+            self.persist_project_state(project_id, session, persist_page_documents=False)
+
+    def _mark_project_glossary_auto_extract_retryable(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        *,
+        persist: bool,
+    ) -> None:
+        glossary = self._normalize_project_glossary(session.get("project_glossary"))
+        glossary["auto_extract_completed"] = False
+        glossary["auto_extracted_at"] = ""
+        glossary["updated_at"] = self._now_iso()
         session["project_glossary"] = glossary
         if persist:
             self.persist_project_state(project_id, session, persist_page_documents=False)
@@ -3110,7 +3165,13 @@ class TranslatorEngine:
                     "translation": translation,
                 }
 
-    def _project_text_context_for_glossary(self, project_id: str, session: dict[str, Any], max_chars: int = 24000) -> str:
+    def _project_text_context_for_glossary(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        max_chars: int | None = None,
+    ) -> str:
+        max_chars = max_chars or self.PROJECT_GLOSSARY_SOURCE_CHAR_LIMIT
         lines: list[str] = []
         char_count = 0
         for index, segment in enumerate(self._iter_project_text_segments(project_id, session), start=1):
@@ -3155,13 +3216,18 @@ class TranslatorEngine:
             "Return only valid JSON. Include short character names when they are name-like."
         )
 
-    def _limit_project_glossary_context(self, project_context: str) -> str:
+    def _limit_project_glossary_context(
+        self,
+        project_context: str,
+        max_chars: int | None = None,
+    ) -> str:
         context = str(project_context or "").strip()
-        if len(context) <= self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT:
+        max_chars = max_chars or self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT
+        if len(context) <= max_chars:
             return context
 
-        head_budget = max(1000, self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT * 2 // 3)
-        tail_budget = max(1000, self.PROJECT_GLOSSARY_CONTEXT_CHAR_LIMIT - head_budget)
+        head_budget = max(1000, max_chars * 2 // 3)
+        tail_budget = max(1000, max_chars - head_budget)
         omitted = len(context) - head_budget - tail_budget
         return (
             context[:head_budget].rstrip()
@@ -3169,14 +3235,33 @@ class TranslatorEngine:
             + context[-tail_budget:].lstrip()
         )
 
-    def _build_glossary_extraction_prompt(self, project_context: str, target_lang: str, *, retry: bool = False) -> str:
-        project_context = self._limit_project_glossary_context(project_context)
+    def _build_glossary_extraction_prompt(
+        self,
+        project_context: str,
+        target_lang: str,
+        *,
+        retry: bool = False,
+        candidates: list[GlossaryCandidate] | None = None,
+        context_char_limit: int | None = None,
+    ) -> str:
+        project_context = self._limit_project_glossary_context(
+            project_context,
+            max_chars=context_char_limit,
+        )
         categories = "、".join(sorted(self.PROJECT_GLOSSARY_CATEGORIES))
         retry_instruction = ""
         if retry:
             retry_instruction = (
                 "上一次没有得到可用词条。请重新检查，不要因为词条只有 2 到 4 个字就跳过；"
                 "只要像角色名、昵称、称号、地点、组织、技能、道具、作品名或重复出现的关键行业词，就必须收录。"
+            )
+        candidate_instruction = ""
+        if candidates:
+            candidate_instruction = (
+                "\n\n以下是系统标记的可能遗漏的 OCR 证据，不是预先切好的词条。"
+                "请把它们作为复查线索，结合下方尽可能完整的项目原文，由你自己判断词边界和是否应收录。"
+                "不要因为全书其他内容敏感、冗长或无关而忽略这些证据。\n"
+                f"可能遗漏的 OCR 证据：\n{GlossaryCandidateDiscovery.format_evidence(candidates)}"
             )
         return (
             "你是漫画翻译项目的专有名词编辑。请阅读全项目 OCR 原文，提取会影响翻译一致性的专有名词。"
@@ -3187,7 +3272,7 @@ class TranslatorEngine:
             "{\"source\":\"原文\",\"translation\":\"建议译文\",\"category\":\"分类\",\"note\":\"可选备注\"}。"
             f"分类只能从这些值选择：{categories}。"
             "不要收录普通助词、语气词、整句台词或没有专名意义的普通短词。"
-            f"{retry_instruction}\n\n"
+            f"{retry_instruction}{candidate_instruction}\n\n"
             f"项目 OCR 原文：\n{project_context}"
         )
 
@@ -3239,6 +3324,60 @@ class TranslatorEngine:
             )
 
         return ""
+
+    @staticmethod
+    def _is_glossary_context_length_error(exc: Exception) -> bool:
+        message = str(exc or "").casefold()
+        return any(marker in message for marker in (
+            "context length",
+            "context_length_exceeded",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "prompt is too long",
+            "上下文长度",
+            "请求内容过长",
+        ))
+
+    async def _request_project_glossary_with_context_fallback(
+        self,
+        config: dict[str, Any],
+        project_context: str,
+        target_lang: str,
+        *,
+        retry: bool,
+        candidates: list[GlossaryCandidate] | None,
+    ) -> str:
+        prompt = self._build_glossary_extraction_prompt(
+            project_context,
+            target_lang,
+            retry=retry,
+            candidates=candidates,
+        )
+        try:
+            return await self._request_project_glossary_extraction(config, prompt)
+        except Exception as exc:
+            if (
+                not self._is_glossary_context_length_error(exc)
+                or len(project_context) <= self.PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT
+            ):
+                raise
+            fallback_prompt = self._build_glossary_extraction_prompt(
+                project_context,
+                target_lang,
+                retry=retry,
+                candidates=candidates,
+                context_char_limit=self.PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT,
+            )
+            if len(fallback_prompt) > self.PROJECT_GLOSSARY_FALLBACK_PROMPT_CHAR_LIMIT:
+                fallback_prompt = self._build_glossary_extraction_prompt(
+                    project_context,
+                    target_lang,
+                    retry=retry,
+                    candidates=None,
+                    context_char_limit=self.PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT,
+                )
+            return await self._request_project_glossary_extraction(config, fallback_prompt)
 
     def _project_glossary_extract_result(
         self,
@@ -3366,7 +3505,7 @@ class TranslatorEngine:
         payload = self._parse_json_payload_from_model_text(text)
         items = self._glossary_items_from_payload(payload)
         if not items:
-            return []
+            items = self._glossary_items_from_labeled_text(text)
         entries: list[dict[str, Any]] = []
         for item in items:
             entry = self._normalize_project_glossary_entry({
@@ -3376,6 +3515,70 @@ class TranslatorEngine:
             if entry:
                 entries.append(entry)
         return entries
+
+    def _glossary_items_from_labeled_text(self, text: str) -> list[dict[str, str]]:
+        label_pattern = re.compile(
+            r"(?P<label>"
+            r"original_text|source_text|suggested_translation|target_text|translation|translated|"
+            r"category|type|note|description|source|original|term|target|"
+            r"建议译文|目标译文|翻译|译文|译名|中文|原文|源文|词条|术语|名词|名称|日文|原名|"
+            r"类别|分类|类型|说明|备注"
+            r")\s*[:：]",
+            flags=re.IGNORECASE,
+        )
+        field_names = {
+            "source": "source",
+            "original": "source",
+            "original_text": "source",
+            "source_text": "source",
+            "term": "source",
+            "原文": "source",
+            "源文": "source",
+            "词条": "source",
+            "术语": "source",
+            "名词": "source",
+            "名称": "source",
+            "日文": "source",
+            "原名": "source",
+            "translation": "translation",
+            "translated": "translation",
+            "target": "translation",
+            "target_text": "translation",
+            "suggested_translation": "translation",
+            "译文": "translation",
+            "翻译": "translation",
+            "建议译文": "translation",
+            "目标译文": "translation",
+            "译名": "translation",
+            "中文": "translation",
+            "category": "category",
+            "type": "category",
+            "类别": "category",
+            "分类": "category",
+            "类型": "category",
+            "note": "note",
+            "description": "note",
+            "说明": "note",
+            "备注": "note",
+        }
+        items: list[dict[str, str]] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            matches = list(label_pattern.finditer(line))
+            if len(matches) < 2:
+                continue
+            item: dict[str, str] = {}
+            for index, match in enumerate(matches):
+                value_start = match.end()
+                value_end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+                value = line[value_start:value_end].strip(" \t|-*，,；;")
+                normalized_label = str(match.group("label") or "").strip().lower()
+                field_name = field_names.get(normalized_label)
+                if field_name and value:
+                    item[field_name] = value
+            if item.get("source") and item.get("translation"):
+                items.append(item)
+        return items
 
     async def extract_project_glossary(
         self,
@@ -3408,9 +3611,16 @@ class TranslatorEngine:
                 "progress_step": "glossary",
                 "message": "正在根据全项目原文提取专有名词库…",
             })
-        prompt = self._build_glossary_extraction_prompt(project_context, str(config.get("target_lang") or ""))
+        candidates = GlossaryCandidateDiscovery.discover(project_context)
+        target_lang = str(config.get("target_lang") or "")
         try:
-            response_text = await self._request_project_glossary_extraction(config, prompt)
+            response_text = await self._request_project_glossary_with_context_fallback(
+                config,
+                project_context,
+                target_lang,
+                retry=False,
+                candidates=candidates or None,
+            )
         except Exception as exc:
             print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
             if progress_callback is not None:
@@ -3425,22 +3635,41 @@ class TranslatorEngine:
                 f"专有名词提取失败：{exc}",
             )
 
+        current = self._normalize_project_glossary(session.get("project_glossary"))
+        current_entries = list(current.get("entries") or [])
         extracted_entries = self._parse_glossary_extraction_response(response_text)
-        if not extracted_entries:
+        missing_candidates = GlossaryCandidateDiscovery.missing_candidates(
+            candidates,
+            [*current_entries, *extracted_entries],
+        )
+        candidate_review_returned_entries = False
+        if not extracted_entries or missing_candidates:
             if progress_callback is not None:
                 await progress_callback({
                     "event": "status",
                     "progress_step": "glossary",
-                    "message": "第一次未解析到专有名词，正在用更严格规则重试…",
+                    "message": (
+                        "正在保留完整上下文并突出自我介绍和称呼证据，补查可能漏掉的人名…"
+                        if missing_candidates
+                        else "第一次未解析到专有名词，正在用更严格规则重试…"
+                    ),
                 })
-            retry_prompt = self._build_glossary_extraction_prompt(
-                project_context,
-                str(config.get("target_lang") or ""),
-                retry=True,
-            )
             try:
-                retry_response_text = await self._request_project_glossary_extraction(config, retry_prompt)
-                extracted_entries = self._parse_glossary_extraction_response(retry_response_text)
+                retry_response_text = await self._request_project_glossary_with_context_fallback(
+                    config,
+                    project_context,
+                    target_lang,
+                    retry=True,
+                    candidates=missing_candidates or None,
+                )
+                retry_entries = self._parse_glossary_extraction_response(retry_response_text)
+                candidate_review_returned_entries = bool(missing_candidates and retry_entries)
+                extracted_sources = {str(entry.get("source") or "") for entry in extracted_entries}
+                extracted_entries.extend(
+                    entry
+                    for entry in retry_entries
+                    if str(entry.get("source") or "") not in extracted_sources
+                )
             except Exception as exc:
                 print(f"[WARN] Project glossary extraction retry failed for {project_id}: {exc}")
         if not extracted_entries:
@@ -3450,16 +3679,25 @@ class TranslatorEngine:
                     "progress_step": "glossary",
                     "message": "没有提取到可用专有名词，已继续使用现有名词库翻译。",
                 })
-            self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
+            self._mark_project_glossary_auto_extract_retryable(project_id, session, persist=True)
             return self._project_glossary_extract_result(
                 project_id,
                 session,
-                "没有提取到新的专有名词。可以先检查 OCR 原文，或手动新增词条。",
+                "没有提取到新的专有名词，本次结果不会标记为完成；可以检查 OCR 原文后再次提取。",
             )
 
-        current = self._normalize_project_glossary(session.get("project_glossary"))
-        existing_sources = {str(entry.get("source") or "") for entry in current.get("entries") or []}
-        merged_entries = list(current.get("entries") or [])
+        unresolved_candidates = GlossaryCandidateDiscovery.missing_candidates(
+            candidates,
+            [*current_entries, *extracted_entries],
+        )
+        if candidate_review_returned_entries:
+            # The detector identifies evidence, not canonical word boundaries. Once
+            # the LLM has reviewed that evidence and returned usable terms, its
+            # selection is authoritative even when kana or a shorter alias does not
+            # string-match the selected full name.
+            unresolved_candidates = []
+        existing_sources = {str(entry.get("source") or "") for entry in current_entries}
+        merged_entries = list(current_entries)
         added_count = 0
         for entry in extracted_entries:
             if entry["source"] in existing_sources:
@@ -3475,12 +3713,26 @@ class TranslatorEngine:
                     "progress_step": "glossary",
                     "message": f"已补充 {added_count} 个项目专有名词，继续翻译。",
                 })
-        self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
+        if unresolved_candidates:
+            self._mark_project_glossary_auto_extract_retryable(project_id, session, persist=True)
+        else:
+            self._mark_project_glossary_auto_extract_completed(project_id, session, persist=True)
         if added_count:
             return self._project_glossary_extract_result(
                 project_id,
                 session,
-                f"已补充 {added_count} 个项目专有名词。",
+                (
+                    f"已补充 {added_count} 个项目专有名词；仍有 "
+                    f"{len(unresolved_candidates)} 条 OCR 证据线索未确认，可以再次提取。"
+                    if unresolved_candidates
+                    else f"已补充 {added_count} 个项目专有名词。"
+                ),
+            )
+        if unresolved_candidates:
+            return self._project_glossary_extract_result(
+                project_id,
+                session,
+                f"仍有 {len(unresolved_candidates)} 条 OCR 证据线索未确认，本次结果保持可重试。",
             )
         return self._project_glossary_extract_result(
             project_id,

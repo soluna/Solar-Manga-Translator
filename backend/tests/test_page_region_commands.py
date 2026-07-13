@@ -114,7 +114,7 @@ class PageRegionCommandTests(unittest.TestCase):
             self.assertEqual(regions[-1]["kind"], "manual")
             self.assertEqual(regions[-1]["origin"], "user")
             self.assertTrue(all(region["origin"] == "automatic" for region in regions[:3]))
-            self.assertEqual(regions[-1]["style"]["font_size"], 18)
+            self.assertEqual(regions[-1]["style"]["font_size"], 12)
 
     def test_delete_only_user_region_preserves_automatic_regions_and_does_not_resurrect_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

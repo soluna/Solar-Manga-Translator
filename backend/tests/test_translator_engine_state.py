@@ -621,7 +621,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             duplicated_id = duplicated["id"]
             self.assertNotEqual(duplicated["bbox"], [40, 50, 180, 240])
-            self.assertEqual(duplicated["font_size"], 36)
+            self.assertEqual(duplicated["font_size"], 30)
             self.assertEqual(duplicated["stroke_width"], 2.5)
             self.assertEqual(session["translation_region_overrides"][duplicated_id], "新译文")
             self.assertEqual(session["translation_region_layout_overrides"][duplicated_id]["font_key"], "project:test.ttf")
@@ -1534,6 +1534,10 @@ print(json.dumps({
                     "source_text": "original",
                     "translation": {"machine": "translated"},
                     "style": {
+                        "auto_font_style": "mincho",
+                        "font_style_override": "cartoon",
+                        "font_style": "cartoon",
+                        "font_family": "CustomDialogue.otf",
                         "font_size": 24,
                         "font_size_override": 24,
                         "rotation": -12,
@@ -1564,6 +1568,37 @@ print(json.dumps({
             self.assertEqual(style_page["regions"][0]["bg_color"], [250, 251, 252])
             self.assertTrue(translation_page["regions"][0]["preserve_background"])
             self.assertTrue(style_page["regions"][0]["preserve_background"])
+            self.assertEqual(translation_page["regions"][0]["auto_style"], "mincho")
+            self.assertEqual(translation_page["regions"][0]["override_style"], "cartoon")
+            self.assertEqual(translation_page["regions"][0]["resolved_style"], "cartoon")
+            self.assertEqual(translation_page["regions"][0]["font_family"], "CustomDialogue.otf")
+
+    def test_default_render_font_size_is_exposed_to_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            self.assertEqual(engine._resolve_render_font_size(30, None), 24)
+            self.assertEqual(engine._resolve_render_font_size(10, None), 8)
+            self.assertEqual(engine._resolve_render_font_size(30, 30), 30)
+            self.assertEqual(engine._resolve_detected_font_size_from_render_size(24), 30)
+
+    def test_v1_page_document_migrates_detected_size_to_effective_render_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            migrated = engine._migrate_page_document({
+                "page_id": "page-1.png",
+                "regions": [
+                    {"region_id": "auto", "style": {"font_size": 30, "font_size_override": None}},
+                    {"region_id": "edited", "style": {"font_size": 30, "font_size_override": 30}},
+                ],
+                "metadata": {"document_version": 1, "revision": 4},
+            })
+
+            self.assertEqual(migrated["regions"][0]["style"]["detected_font_size"], 30)
+            self.assertEqual(migrated["regions"][0]["style"]["font_size"], 24)
+            self.assertEqual(migrated["regions"][1]["style"]["font_size"], 30)
+            self.assertEqual(migrated["metadata"]["document_version"], engine.PAGE_DOCUMENT_VERSION)
+            self.assertEqual(migrated["metadata"]["revision"], 5)
 
     def test_translation_layout_overrides_normalize_advanced_style(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3517,6 +3552,29 @@ print(json.dumps({
             self.assertTrue(updated["configured_secrets"]["api_key"])
             self.assertEqual(engine.paths.load_settings()["api_key"], "top-secret")
             self.assertEqual(engine.normalize_user_config({})["api_key"], "top-secret")
+
+    def test_persisted_style_font_mappings_round_trip_in_public_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "backend"
+            bundled_font_dir = root / "fonts" / "system"
+            custom_font_dir = root / "fonts" / "custom"
+            bundled_font_dir.mkdir(parents=True)
+            custom_font_dir.mkdir(parents=True)
+            (bundled_font_dir / "SourceHanSansSC-Regular-2.otf").write_bytes(b"bundled-font")
+            custom_font = custom_font_dir / "CustomDialogue.otf"
+            custom_font.write_bytes(b"custom-font")
+            engine = TranslatorEngine(base_dir, app_paths=make_test_paths(root))
+            custom_font_key = f"project:{custom_font.name}"
+
+            saved = engine.save_persisted_settings({
+                "style_font_gothic_key": custom_font_key,
+            })
+            reloaded = engine.load_persisted_settings()
+
+            self.assertEqual(saved["style_font_gothic_key"], custom_font_key)
+            self.assertEqual(reloaded["style_font_gothic_key"], custom_font_key)
+            self.assertEqual(reloaded["style_font_keys"]["gothic"], custom_font_key)
 
     def test_openai_compatible_settings_survive_save_and_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

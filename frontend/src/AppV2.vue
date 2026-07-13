@@ -5,6 +5,7 @@ import {
   createBrowserConfigCache,
   mergePersistedConfigWithBrowserPreferences
 } from './config-persistence.js'
+import { sanitizeSfntFontForBrowser } from './font-preview.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
@@ -153,7 +154,10 @@ const previewFallbackFontNameMap = {
   handwritten: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Regular-2.otf', 'NotoSansSC-Bold.otf'],
   sfx: ['NotoSansCJKtc-Regular.otf', 'SourceHanSansSC-Bold.otf', 'NotoSansSC-Bold.otf']
 }
-const previewFontDecodeDenyList = new Set([
+const previewFontSanitizeHintList = new Set([
+  'SourceHanSansSC-Regular-2.otf',
+  'SourceHanSansSC-Medium-2.otf',
+  'SourceHanSansSC-Bold.otf',
   '華康方圓體.ttf',
   '華康布丁體.ttf',
   '華康竹風體.ttf'
@@ -433,6 +437,18 @@ function normalizeStoredConfig(rawValue) {
     return normalized
   }
 
+  const persistedStyleFontKeys = rawValue.style_font_keys && typeof rawValue.style_font_keys === 'object'
+    ? rawValue.style_font_keys
+    : {}
+  const readStyleFontKey = (style, fallback) => {
+    const flatValue = rawValue[`style_font_${style}_key`]
+    const nestedValue = persistedStyleFontKeys[style]
+    return normalizeFontKey(
+      typeof flatValue === 'string' && flatValue.trim() ? flatValue : nestedValue,
+      fallback,
+    )
+  }
+
   return {
     translator,
     translator_model: translatorModel,
@@ -444,27 +460,12 @@ function normalizeStoredConfig(rawValue) {
     openai_model: typeof rawValue.openai_model === 'string' ? rawValue.openai_model : defaults.openai_model,
     font_key: normalizeFontKey(rawValue.font_key, defaults.font_key),
     font_style_mode: fontStyleMode,
-    style_font_gothic_key: normalizeFontKey(rawValue.style_font_gothic_key, defaults.style_font_gothic_key),
-    style_font_mincho_key: typeof rawValue.style_font_mincho_key === 'string'
-      && rawValue.style_font_mincho_key.trim()
-      ? normalizeFontKey(rawValue.style_font_mincho_key, defaults.style_font_mincho_key)
-      : defaults.style_font_mincho_key,
-    style_font_rounded_key: typeof rawValue.style_font_rounded_key === 'string'
-      && rawValue.style_font_rounded_key.trim()
-      ? normalizeFontKey(rawValue.style_font_rounded_key, defaults.style_font_rounded_key)
-      : defaults.style_font_rounded_key,
-    style_font_cartoon_key: typeof rawValue.style_font_cartoon_key === 'string'
-      && rawValue.style_font_cartoon_key.trim()
-      ? normalizeFontKey(rawValue.style_font_cartoon_key, defaults.style_font_cartoon_key)
-      : defaults.style_font_cartoon_key,
-    style_font_handwritten_key: typeof rawValue.style_font_handwritten_key === 'string'
-      && rawValue.style_font_handwritten_key.trim()
-      ? normalizeFontKey(rawValue.style_font_handwritten_key, defaults.style_font_handwritten_key)
-      : defaults.style_font_handwritten_key,
-    style_font_sfx_key: typeof rawValue.style_font_sfx_key === 'string'
-      && rawValue.style_font_sfx_key.trim()
-      ? normalizeFontKey(rawValue.style_font_sfx_key, defaults.style_font_sfx_key)
-      : defaults.style_font_sfx_key,
+    style_font_gothic_key: readStyleFontKey('gothic', defaults.style_font_gothic_key),
+    style_font_mincho_key: readStyleFontKey('mincho', defaults.style_font_mincho_key),
+    style_font_rounded_key: readStyleFontKey('rounded', defaults.style_font_rounded_key),
+    style_font_cartoon_key: readStyleFontKey('cartoon', defaults.style_font_cartoon_key),
+    style_font_handwritten_key: readStyleFontKey('handwritten', defaults.style_font_handwritten_key),
+    style_font_sfx_key: readStyleFontKey('sfx', defaults.style_font_sfx_key),
     render_alignment: renderAlignment,
     render_letter_spacing: typeof rawValue.render_letter_spacing === 'number'
       ? Math.min(1.35, Math.max(0.85, rawValue.render_letter_spacing))
@@ -849,6 +850,7 @@ let suppressCanvasRegionClickUntil = 0
 let topbarTaskProgressTimer = null
 let reviewInspectionRequestToken = 0
 let styleInspectionRequestToken = 0
+let previewFontWarmRequestToken = 0
 let autoFitCanvasPageIds = new Set()
 let brushEditBaseImage = null
 let brushEditSourceImage = null
@@ -856,6 +858,7 @@ let brushEditActiveStroke = null
 const pageCommandExecutionQueue = new Map()
 const preloadedImageUrls = new Set()
 const imageLoadPromises = new Map()
+const sanitizedPreviewFontFaces = new Map()
 let canvasLayoutFrame = null
 const TRANSLATION_COMPLETION_RECOVERY_DELAY_MS = 15000
 const TRANSLATION_COMPLETION_RECOVERY_RETRY_MS = 15000
@@ -1868,7 +1871,7 @@ const previewFontFaceCss = computed(() => {
     if (!usedFontIds.has(String(font.id))) {
       continue
     }
-    if (isPreviewFontDecodeDenied(font)) {
+    if (shouldSanitizePreviewFont(font)) {
       continue
     }
     const family = getPreviewFontAlias(font.id)
@@ -1880,10 +1883,13 @@ const previewFontFaceCss = computed(() => {
     const srcValue = formatHint
       ? `url('${refreshedFontUrl}') format('${formatHint}')`
       : `url('${refreshedFontUrl}')`
-    rules.push(`@font-face{font-family:'${family}';src:${srcValue};font-style:normal;font-weight:400;font-display:swap;}`)
+    rules.push(`@font-face{font-family:'${family}';src:${srcValue};font-style:normal;font-weight:400;font-display:block;}`)
   }
   return rules.join('\n')
 })
+const usedPreviewFontIdSignature = computed(() => (
+  Array.from(collectUsedPreviewFontIds()).sort().join('|')
+))
 
 const primaryProjectCommand = computed(() => getPrimaryProjectCommand({
   workflowStage: workflowStage.value,
@@ -3746,15 +3752,11 @@ function getPreviewFontState(fontId) {
   return previewFontLoadState.value[normalizedFontId] || { status: 'unknown', error: '' }
 }
 
-function isPreviewFontDecodeDenied(fontOrId) {
+function shouldSanitizePreviewFont(fontOrId) {
   const values = typeof fontOrId === 'object' && fontOrId
     ? [fontOrId.id, fontOrId.name, fontOrId.label, fontOrId.filename]
     : [fontOrId]
-  return values.some((value) => previewFontDecodeDenyList.has(String(value || '').trim()))
-}
-
-function isPreviewFontIdDecodeDenied(fontId) {
-  return isPreviewFontDecodeDenied(fontId) || isPreviewFontDecodeDenied(getFontById(fontId))
+  return values.some((value) => previewFontSanitizeHintList.has(String(value || '').trim()))
 }
 
 function isPreviewFontUnsupported(fontId) {
@@ -3825,15 +3827,12 @@ function collectUsedPreviewFontIds() {
     }
   }
 
-  addFontId(config.value.font_key)
-  for (const styleBucket of styleBucketOptions.map((option) => option.value)) {
-    addFontId(getConfiguredStyleFontId(styleBucket))
-  }
-  for (const override of Object.values(translationRegionLayoutOverrides.value || {})) {
-    addFontId(override?.font_key)
+  if (config.value.font_style_mode !== 'auto-map') {
+    addFontId(config.value.font_key)
   }
   for (const region of selectedEditPage.value?.regions || []) {
     addFontId(getEffectiveRegionFontId(region))
+    addFontId(getResolvedPreviewFontId(region))
   }
 
   return fontIds
@@ -3848,14 +3847,14 @@ function pickPreviewFallbackFontId(region) {
     ? (getResolvedStyle(region) || 'gothic')
     : 'gothic'
   const preferredNames = previewFallbackFontNameMap[fallbackStyle] || previewFallbackFontNameMap.gothic
-  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id) && !isPreviewFontDecodeDenied(font))
+  const compatibleFonts = availableFonts.value.filter((font) => !isPreviewFontUnsupported(font.id))
   const matchedFont = pickMappedStyleFont(compatibleFonts, preferredNames)
   return matchedFont?.id || ''
 }
 
 function getResolvedPreviewFontId(region) {
   const effectiveFontId = getEffectiveRegionFontId(region)
-  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId) && !isPreviewFontIdDecodeDenied(effectiveFontId)) {
+  if (effectiveFontId && !isPreviewFontUnsupported(effectiveFontId)) {
     return effectiveFontId
   }
   return pickPreviewFallbackFontId(region)
@@ -3887,10 +3886,7 @@ function hasRegionWarning(region) {
   const regionText = String(getEditRegionText(region) || '').trim()
   const confidence = Number(region?.ocr_confidence || 0)
   return Boolean(
-    (getEffectiveRegionFontId(region) && (
-      isPreviewFontUnsupported(getEffectiveRegionFontId(region))
-      || isPreviewFontIdDecodeDenied(getEffectiveRegionFontId(region))
-    ))
+    (getEffectiveRegionFontId(region) && isPreviewFontUnsupported(getEffectiveRegionFontId(region)))
     || String(region?.recognition_status || '') === 'failed'
     || !regionText
     || (Number.isFinite(confidence) && confidence > 0 && confidence < 0.72)
@@ -3901,7 +3897,7 @@ function getPreviewFontOptionLabel(font) {
   if (!font) {
     return ''
   }
-  return isPreviewFontUnsupported(font.id) || isPreviewFontDecodeDenied(font)
+  return isPreviewFontUnsupported(font.id)
     ? `${font.label}（仅最终重嵌）`
     : font.label
 }
@@ -5785,7 +5781,7 @@ function getSourceCropImageStyle(region, page) {
 
 function getCanvasPreviewTextStyle(region) {
   const rawFontSize = getCanvasPreviewRenderFontSize(region)
-  const scaledFontSize = Math.max(8, Math.round(rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.1)))
+  const scaledFontSize = Math.max(0.5, rawFontSize * Math.max(translatedPreviewScale.value || 1, 0.001))
   const spacingMultiplier = getRegionLetterSpacing(region)
   const normalizedLineSpacing = getRegionLineSpacing(region)
   const letterSpacing = Math.max(0, (spacingMultiplier - 1) * scaledFontSize)
@@ -5796,7 +5792,7 @@ function getCanvasPreviewTextStyle(region) {
   const strokeWidth = Math.max(0, scaledFontSize * getRegionStrokeStrength(region) * 0.35)
   return {
     fontFamily: getRegionPreviewFontFamily(region),
-    fontSize: `${scaledFontSize}px`,
+    fontSize: `${scaledFontSize.toFixed(2)}px`,
     letterSpacing: `${letterSpacing.toFixed(2)}px`,
     lineHeight: String(lineHeight),
     color: fgColor,
@@ -5856,8 +5852,7 @@ function refreshTranslatedPreviewScale() {
   }
   const stageElement = canvasElement.querySelector?.('.v2-canvas-stage')
   const safeWidth = Math.max(stageElement?.clientWidth || canvasElement.clientWidth || 0, 1)
-  const zoom = getViewportState(page.stored_name, 'main').zoom || 1
-  translatedPreviewScale.value = (safeWidth / Math.max(page.image_width || 1, 1)) * zoom
+  translatedPreviewScale.value = safeWidth / Math.max(page.image_width || 1, 1)
 }
 
 function getManualDraftBBox(page) {
@@ -10263,6 +10258,14 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (typeof document !== 'undefined' && document.fonts) {
+    for (const entry of sanitizedPreviewFontFaces.values()) {
+      if (entry?.face) {
+        document.fonts.delete(entry.face)
+      }
+    }
+  }
+  sanitizedPreviewFontFaces.clear()
   resetTranslationCompletionRecovery()
   clearTaskReconnectTimer()
   closeSocket()
@@ -10294,38 +10297,100 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup', handleGlobalCanvasKeyup)
 })
 
+function withPreviewFontTimeout(promise, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('字体解析超时。')), timeoutMs)
+    Promise.resolve(promise).then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        window.clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+async function installSanitizedPreviewFont(fontId) {
+  if (typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts) {
+    throw new Error('当前浏览器不支持动态字体预览。')
+  }
+  const font = getFontById(fontId)
+  if (!font?.url) {
+    throw new Error('字体文件地址不存在。')
+  }
+  const revision = Number(fontLibraryRevision.value || 0)
+  const cached = sanitizedPreviewFontFaces.get(fontId)
+  if (cached?.revision === revision && cached.face?.status === 'loaded') {
+    return
+  }
+
+  const response = await apiFetch(toApiUrl(font.url), { cache: revision ? 'no-store' : 'default' })
+  if (!response.ok) {
+    throw new Error(`读取字体失败：HTTP ${response.status}`)
+  }
+  const sanitizedBuffer = sanitizeSfntFontForBrowser(await response.arrayBuffer())
+  const face = new FontFace(
+    getPreviewFontAlias(fontId),
+    sanitizedBuffer,
+    { style: 'normal', weight: '400' },
+  )
+  await withPreviewFontTimeout(face.load())
+  if (cached?.face) {
+    document.fonts.delete(cached.face)
+  }
+  document.fonts.add(face)
+  sanitizedPreviewFontFaces.set(fontId, { revision, face })
+}
+
+async function loadPreviewFont(fontId) {
+  const alias = getPreviewFontAlias(fontId)
+  let directLoadError = ''
+  if (!shouldSanitizePreviewFont(fontId) && !shouldSanitizePreviewFont(getFontById(fontId))) {
+    try {
+      await withPreviewFontTimeout(document.fonts.load(`16px "${alias}"`, '測試漢字ABC'))
+      if (document.fonts.check(`16px "${alias}"`, '測試漢字ABC')) {
+        return { status: 'loaded', error: '' }
+      }
+      directLoadError = 'document.fonts.check returned false'
+    } catch (error) {
+      directLoadError = error instanceof Error ? error.message : String(error || '')
+    }
+  }
+
+  try {
+    await installSanitizedPreviewFont(fontId)
+    const loaded = document.fonts.check(`16px "${alias}"`, '測試漢字ABC')
+    return {
+      status: loaded ? 'loaded' : 'unsupported',
+      error: loaded ? '' : 'sanitized font did not become available',
+    }
+  } catch (error) {
+    const sanitizedError = error instanceof Error ? error.message : String(error || '')
+    return {
+      status: 'unsupported',
+      error: [directLoadError, sanitizedError].filter(Boolean).join('; '),
+    }
+  }
+}
+
 async function warmPreviewFonts() {
   if (typeof document === 'undefined' || !document.fonts) {
     return
   }
 
+  const requestToken = ++previewFontWarmRequestToken
+  await nextTick()
   const fontIds = collectUsedPreviewFontIds()
-
-  const nextState = { ...previewFontLoadState.value }
-  await Promise.all(
-    Array.from(fontIds).map(async (fontId) => {
-      if (isPreviewFontIdDecodeDenied(fontId)) {
-        nextState[fontId] = {
-          status: 'unsupported',
-          error: 'Skipped for browser preview because this font file is not web-decodable.'
-        }
-        return
-      }
-      try {
-        await document.fonts.load(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
-        const loaded = document.fonts.check(`16px "${getPreviewFontAlias(fontId)}"`, '測試漢字ABC')
-        nextState[fontId] = {
-          status: loaded ? 'loaded' : 'unsupported',
-          error: loaded ? '' : 'document.fonts.check returned false'
-        }
-      } catch (error) {
-        nextState[fontId] = {
-          status: 'unsupported',
-          error: error instanceof Error ? error.message : String(error || '')
-        }
-      }
-    })
+  const results = await Promise.all(
+    Array.from(fontIds).map(async (fontId) => [fontId, await loadPreviewFont(fontId)])
   )
+  if (requestToken !== previewFontWarmRequestToken) {
+    return
+  }
+  const nextState = { ...previewFontLoadState.value, ...Object.fromEntries(results) }
   previewFontLoadState.value = nextState
   renderNonce.value = Date.now()
 }
@@ -10349,6 +10414,7 @@ watch(
 
 watch(
   [
+    usedPreviewFontIdSignature,
     previewFontFaceCss,
     () => availableFonts.value.length,
     () => config.value.font_key,
@@ -10364,7 +10430,7 @@ watch(
   () => {
     void warmPreviewFonts()
   },
-  { immediate: true }
+  { immediate: true, flush: 'post' }
 )
 
 watch(

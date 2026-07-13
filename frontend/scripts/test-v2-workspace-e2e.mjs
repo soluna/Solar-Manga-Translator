@@ -20,6 +20,18 @@ const FIXTURE_PROJECT_ID = 'canvas-e2e-fixture'
 const FIXTURE_PROJECT_TITLE = 'Canvas E2E Fixture'
 const FIXTURE_OPENAI_BASE_URL = 'https://api.example.invalid/v1'
 const FIXTURE_OPENAI_MODEL = 'fixture-model'
+const PREVIEW_TYPOGRAPHY_ONLY = process.argv.includes('--preview-typography-only')
+const FIXTURE_PAGE_WIDTH = 1280
+const FIXTURE_PAGE_ONE_FONT_SIZES = new Map([
+  ['fixture-0001-r1', 34],
+  ['fixture-0001-r2', 30],
+  ['fixture-0001-r3', 24],
+])
+const FIXTURE_PAGE_ONE_FONT_IDS = new Map([
+  ['fixture-0001-r1', 'system:SourceHanSansSC-Regular-2.otf'],
+  ['fixture-0001-r2', 'system:SourceHanSansSC-Medium-2.otf'],
+  ['fixture-0001-r3', 'system:SourceHanSansSC-Regular-2.otf'],
+])
 const ownsAppDataDir = !process.env.APP_DATA_DIR
 const E2E_APP_DATA_DIR = process.env.APP_DATA_DIR || await fs.mkdtemp(path.join(os.tmpdir(), 'manga-translator-v2-e2e-'))
 const E2E_API_TOKEN = process.env.CANVAS_E2E_API_TOKEN || process.env.APP_API_TOKEN || randomBytes(32).toString('base64url')
@@ -164,11 +176,28 @@ async function seedPersistedSettings() {
       target_lang: 'CHS',
       openai_base_url: FIXTURE_OPENAI_BASE_URL,
       openai_model: FIXTURE_OPENAI_MODEL,
+      font_key: 'system:SourceHanSansSC-Regular-2.otf',
+      font_style_mode: 'auto-map',
+      style_font_gothic_key: 'system:SourceHanSansSC-Regular-2.otf',
+      style_font_mincho_key: 'system:SourceHanSansSC-Medium-2.otf',
+      style_font_rounded_key: 'system:SourceHanSansSC-Bold.otf',
+      style_font_cartoon_key: 'system:SourceHanSansSC-Bold.otf',
+      style_font_handwritten_key: 'system:SourceHanSansSC-Medium-2.otf',
+      style_font_sfx_key: 'system:SourceHanSansSC-Bold.otf',
     }),
   })
   if (!response.ok) {
     throw new Error(`无法准备持久设置夹具：HTTP ${response.status}`)
   }
+}
+
+function hashPreviewFontKey(value) {
+  let hash = 2166136261
+  for (const char of String(value || '')) {
+    hash ^= char.codePointAt(0) || 0
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
 }
 
 async function ensureServices() {
@@ -323,6 +352,83 @@ async function readPreviewTextCentering(locator) {
   })
 }
 
+async function readCanvasPreviewTypography(page) {
+  const previewTexts = page.locator('.v2-pane-card-frame .style-box-preview-text-content')
+  await waitForLocatorCount(
+    previewTexts,
+    FIXTURE_PAGE_ONE_FONT_SIZES.size,
+    '框页没有完整显示首屏文字预览',
+  )
+  await page.evaluate(async () => {
+    await Promise.race([
+      document.fonts?.ready,
+      new Promise((resolve) => setTimeout(resolve, 20000)),
+    ])
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  })
+  return previewTexts.evaluateAll((elements) => elements.map((element) => {
+    const stage = element.closest('.v2-canvas-stage')
+    const computed = getComputedStyle(element)
+    return {
+      regionId: element.dataset.regionId || '',
+      fontSize: Number.parseFloat(computed.fontSize || '0'),
+      fontFamily: computed.fontFamily,
+      fontFaces: Array.from(document.fonts)
+        .filter((face) => computed.fontFamily.includes(face.family))
+        .map((face) => ({ family: face.family, status: face.status })),
+      stageWidth: stage?.clientWidth || 0,
+      stageTransform: getComputedStyle(stage).transform,
+    }
+  }))
+}
+
+async function assertCanvasPreviewTypography(page) {
+  const initialMetrics = await readCanvasPreviewTypography(page)
+  const errors = []
+  for (const metric of initialMetrics) {
+    const sourceFontSize = FIXTURE_PAGE_ONE_FONT_SIZES.get(metric.regionId)
+    if (!sourceFontSize) {
+      errors.push(`出现未知框 ${metric.regionId}`)
+      continue
+    }
+    const expectedFontSize = sourceFontSize * metric.stageWidth / FIXTURE_PAGE_WIDTH
+    if (Math.abs(metric.fontSize - expectedFontSize) > 1) {
+      errors.push(
+        `${metric.regionId} 初始字号应为 ${expectedFontSize.toFixed(2)}px，实际为 ${metric.fontSize.toFixed(2)}px`,
+      )
+    }
+    const expectedFontId = FIXTURE_PAGE_ONE_FONT_IDS.get(metric.regionId)
+    const expectedFontAlias = `codex-preview-font-${hashPreviewFontKey(expectedFontId)}`
+    if (!metric.fontFamily.includes(expectedFontAlias)) {
+      errors.push(
+        `${metric.regionId} 首次打开字体应为 ${expectedFontId}，实际为 ${metric.fontFamily}`,
+      )
+    }
+    if (!metric.fontFaces.some((face) => face.family === expectedFontAlias && face.status === 'loaded')) {
+      errors.push(
+        `${metric.regionId} 的字体 ${expectedFontId} 没有真正加载：${JSON.stringify(metric.fontFaces)}`,
+      )
+    }
+  }
+
+  const initialFontSizes = new Map(initialMetrics.map((metric) => [metric.regionId, metric.fontSize]))
+  await page.getByRole('button', { name: '定位当前框' }).click()
+  await page.waitForTimeout(150)
+  const focusedMetrics = await readCanvasPreviewTypography(page)
+  for (const metric of focusedMetrics) {
+    const initialFontSize = initialFontSizes.get(metric.regionId)
+    if (initialFontSize && Math.abs(metric.fontSize - initialFontSize) > 0.5) {
+      errors.push(
+        `${metric.regionId} 定位缩放后 CSS 字号从 ${initialFontSize.toFixed(2)}px 变成 ${metric.fontSize.toFixed(2)}px，画布缩放被重复计算`,
+      )
+    }
+  }
+
+  if (errors.length) {
+    throw new Error(`框页字体预览与嵌字坐标不一致：\n- ${errors.join('\n- ')}`)
+  }
+}
+
 async function main() {
   await fs.mkdir(artifactDir, { recursive: true })
 
@@ -352,6 +458,21 @@ async function main() {
       throw new Error(`首页仍然保留了示例卡片：${homeGalleryCount}`)
     }
     const homeShot = await saveScreenshot(page, 'v2-home.png')
+
+    if (PREVIEW_TYPOGRAPHY_ONLY) {
+      await page.getByRole('banner').getByRole('button', { name: '项目管理' }).click()
+      await page.getByTestId('v2-history-modal').waitFor({ state: 'visible', timeout: 20000 })
+      const fixtureCard = page.locator('.v2-history-card', { hasText: FIXTURE_PROJECT_TITLE }).first()
+      await fixtureCard.waitFor({ state: 'visible', timeout: 20000 })
+      await fixtureCard.getByRole('button', { name: '恢复项目' }).click()
+      await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+      await page.locator('.v2-page-card').first().click()
+      await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
+      await page.locator('.v2-region-card').first().click()
+      await assertCanvasPreviewTypography(page)
+      console.log(JSON.stringify({ projectId: FIXTURE_PROJECT_ID, previewTypography: 'passed' }, null, 2))
+      return
+    }
 
     await page.getByRole('banner').getByRole('button', { name: '打开设置' }).click()
     await page.getByTestId('v2-settings-panel').waitFor({ state: 'visible', timeout: 20000 })

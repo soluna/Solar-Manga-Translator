@@ -117,10 +117,12 @@ class TranslatorEngine:
         "handwritten": DEFAULT_FONT_KEY,
         "sfx": DEFAULT_FONT_KEY,
     }
+    DEFAULT_RENDER_FONT_SIZE_OFFSET = -6
+    DEFAULT_RENDER_FONT_SIZE_MINIMUM = 8
     TRANSLATED_OUTPUT_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
     REVIEW_MODES = ("classic", "canvas_beta")
     DEFAULT_REVIEW_MODE = "classic"
-    PAGE_DOCUMENT_VERSION = 1
+    PAGE_DOCUMENT_VERSION = 2
     IMAGE_PREVIEW_MIN_SIDE = 96
     IMAGE_PREVIEW_MAX_SIDE = 4096
     IMAGE_PREVIEW_FORMATS = (".webp", ".jpg", ".png")
@@ -324,6 +326,13 @@ class TranslatorEngine:
         }
         for secret_key in self.SECRET_CONFIG_KEYS:
             redacted[secret_key] = ""
+        style_font_keys = normalized.get("style_font_keys") or {}
+        for style in self.STYLE_BUCKETS:
+            redacted[f"style_font_{style}_key"] = str(
+                style_font_keys.get(style)
+                or self.DEFAULT_STYLE_FONT_KEYS.get(style)
+                or self.DEFAULT_FONT_KEY
+            )
         return redacted
 
     async def _validate_openai_compatible_connection(self, config: dict[str, Any]) -> str:
@@ -4053,6 +4062,8 @@ class TranslatorEngine:
                 font_size_override = max(8, int(round(float(layout_override["font_size"]))))
             except (TypeError, ValueError):
                 font_size_override = None
+        detected_font_size = int(max(float(getattr(region, "font_size", 0) or 0), 8))
+        render_font_size = self._resolve_render_font_size(detected_font_size, font_size_override)
 
         return {
             "region_id": region_id,
@@ -4083,7 +4094,8 @@ class TranslatorEngine:
                 "font_family": os.path.basename(font_family) if font_family else "",
                 "font_path": font_family,
                 "font_key_override": str(layout_override.get("font_key") or ""),
-                "font_size": int(max(float(getattr(region, "font_size", 0) or 0), 8)),
+                "font_size": render_font_size,
+                "detected_font_size": detected_font_size,
                 "font_size_override": font_size_override,
                 "letter_spacing": float(getattr(region, "letter_spacing", 1.0) or 1.0),
                 "line_spacing": float(getattr(region, "line_spacing", 1.0) or 1.0),
@@ -4249,13 +4261,48 @@ class TranslatorEngine:
             except Exception as exc:
                 print(f"[WARN] Failed to persist page document for {project_id}/{stored_name}: {exc}")
 
+    def _migrate_page_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        metadata = payload.get("metadata") or {}
+        try:
+            document_version = int(metadata.get("document_version") or 1)
+        except (TypeError, ValueError):
+            document_version = 1
+        if document_version >= self.PAGE_DOCUMENT_VERSION:
+            return payload
+
+        migrated = copy.deepcopy(payload)
+        for region in migrated.get("regions") or []:
+            if not isinstance(region, dict):
+                continue
+            style = region.get("style")
+            if not isinstance(style, dict):
+                continue
+            detected_font_size = style.get("detected_font_size", style.get("font_size"))
+            explicit_font_size = style.get("font_size_override")
+            try:
+                style["detected_font_size"] = max(8, int(round(float(detected_font_size))))
+            except (TypeError, ValueError):
+                style["detected_font_size"] = self.DEFAULT_RENDER_FONT_SIZE_MINIMUM
+            style["font_size"] = self._resolve_render_font_size(
+                style["detected_font_size"],
+                explicit_font_size,
+            )
+
+        migrated_metadata = migrated.setdefault("metadata", {})
+        migrated_metadata["document_version"] = self.PAGE_DOCUMENT_VERSION
+        migrated_metadata["updated_at"] = self._now_iso()
+        migrated_metadata["revision"] = int(migrated_metadata.get("revision") or 0) + 1
+        return migrated
+
     def get_page_document(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
         document_path = self._project_page_document_path(project_id, page_id)
         payload = self._read_json_file(document_path, {})
         if isinstance(payload, dict) and payload:
+            stored_payload = payload
+            payload = self._migrate_page_document(payload)
             normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
             normalized_payload = self._apply_session_overrides_to_page_document(session, normalized_payload)
-            if normalized_payload != payload:
+            if normalized_payload != stored_payload:
                 self._write_json_file(document_path, normalized_payload)
             return normalized_payload
 
@@ -4821,6 +4868,10 @@ class TranslatorEngine:
                     "preserve_background": bool(flags.get("preserve_background")),
                     "current_translation": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or ""),
                     "preview_text": str(translation.get("resolved") or translation.get("edited") or translation.get("machine") or region.get("source_text") or ""),
+                    "auto_style": str(style.get("auto_font_style") or ""),
+                    "override_style": str(style.get("font_style_override") or ""),
+                    "resolved_style": str(style.get("font_style") or ""),
+                    "font_family": str(style.get("font_family") or ""),
                     "font_size": int(style.get("font_size") or 12),
                     "font_size_override": int(style.get("font_size_override") or 0),
                     "font_key_override": str(style.get("font_key_override") or ""),
@@ -6770,13 +6821,47 @@ class TranslatorEngine:
 
     def _normalize_style_font_keys(self, raw_config: dict[str, Any]) -> dict[str, str]:
         normalized: dict[str, str] = {}
+        persisted_style_font_keys = raw_config.get("style_font_keys")
+        if not isinstance(persisted_style_font_keys, dict):
+            persisted_style_font_keys = {}
         for style in self.STYLE_BUCKETS:
+            flat_value = str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
             raw_key = self._canonicalize_font_key(
-                str(raw_config.get(f"style_font_{style}_key", "") or "").strip()
+                flat_value or str(persisted_style_font_keys.get(style) or "").strip()
             )
             fallback_key = self.DEFAULT_STYLE_FONT_KEYS.get(style, self.DEFAULT_FONT_KEY)
             normalized[style] = raw_key if raw_key and self._resolve_font_path(raw_key) else fallback_key
         return normalized
+
+    @classmethod
+    def _resolve_render_font_size(cls, detected_font_size: Any, explicit_font_size: Any = None) -> int:
+        try:
+            detected = int(round(float(detected_font_size)))
+        except (TypeError, ValueError):
+            detected = cls.DEFAULT_RENDER_FONT_SIZE_MINIMUM
+        if explicit_font_size is not None:
+            try:
+                return max(
+                    cls.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
+                    int(round(float(explicit_font_size))),
+                )
+            except (TypeError, ValueError):
+                pass
+        return max(
+            cls.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
+            detected + cls.DEFAULT_RENDER_FONT_SIZE_OFFSET,
+        )
+
+    @classmethod
+    def _resolve_detected_font_size_from_render_size(cls, render_font_size: Any) -> int:
+        try:
+            resolved = int(round(float(render_font_size)))
+        except (TypeError, ValueError):
+            resolved = cls.DEFAULT_RENDER_FONT_SIZE_MINIMUM
+        return max(
+            cls.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
+            resolved - cls.DEFAULT_RENDER_FONT_SIZE_OFFSET,
+        )
 
     def _normalize_style_region_overrides(self, raw_value: Any) -> dict[str, str]:
         if not isinstance(raw_value, dict):
@@ -7174,8 +7259,8 @@ class TranslatorEngine:
             "render": {
                 # Keep text fitting conservative, but preserve the original
                 # detected orientation instead of forcing horizontal Chinese.
-                "font_size_minimum": 8,
-                "font_size_offset": -6,
+                "font_size_minimum": self.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
+                "font_size_offset": self.DEFAULT_RENDER_FONT_SIZE_OFFSET,
                 "alignment": config["render_alignment"],
                 "direction": "auto",
                 "renderer": "none" if is_detect_profile else "default",
@@ -10088,10 +10173,13 @@ class TranslatorEngine:
             current_regions = current_document.get("regions") or []
         except FileNotFoundError:
             current_regions = []
-        recommended_font_size = RegionTypography.recommend_font_size(
+        recommended_render_font_size = RegionTypography.recommend_font_size(
             bbox=normalized_bbox,
             regions=current_regions,
             direction=self._direction_from_bbox(normalized_bbox),
+        )
+        recommended_font_size = self._resolve_detected_font_size_from_render_size(
+            recommended_render_font_size,
         )
 
         payload = self._build_manual_region_payload(
@@ -11472,8 +11560,8 @@ class TranslatorEngine:
                 render_regions,
                 font_path=config["font_path"],
                 font_size_fixed=None,
-                font_size_offset=-6,
-                font_size_minimum=8,
+                font_size_offset=self.DEFAULT_RENDER_FONT_SIZE_OFFSET,
+                font_size_minimum=self.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
                 hyphenate=True,
                 render_mask=None,
                 line_spacing=None,
@@ -11491,8 +11579,8 @@ class TranslatorEngine:
                 rendered_rgb,
                 render_regions,
                 None,
-                -6,
-                8,
+                self.DEFAULT_RENDER_FONT_SIZE_OFFSET,
+                self.DEFAULT_RENDER_FONT_SIZE_MINIMUM,
                 True,
                 None,
                 config["font_path"],

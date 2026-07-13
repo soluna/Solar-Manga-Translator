@@ -14,6 +14,7 @@
     "test:config-persistence": "node scripts/test-config-persistence.mjs",
     "test:local-port": "node scripts/test-local-port.mjs",
     "test:project-artifact-state": "node scripts/test-project-artifact-state.mjs",
+    "test:region-typography": "node scripts/test-region-typography.mjs",
     "test:review-workspace-state": "node scripts/test-review-workspace-state.mjs",
     "test:task-event-state": "node scripts/test-task-event-state.mjs",
     "test:task-connection": "node scripts/test-translation-task-connection.mjs",

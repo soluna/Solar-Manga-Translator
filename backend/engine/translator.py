@@ -27,6 +27,7 @@ from urllib import request as urllib_request
 import cv2
 import numpy as np
 
+from domain.page_regions import PageRegionCollection, is_user_authored_region, region_origin
 from domain.project_artifacts import (
     PROJECT_ARTIFACT_SCHEMA_VERSION,
     LegacyPageArtifactEvidence,
@@ -3696,6 +3697,7 @@ class TranslatorEngine:
             "region_id": region_id,
             "page_id": str(manual_payload.get("stored_name") or ""),
             "kind": kind,
+            "origin": "derived" if kind == "merged" else "user" if kind == "manual" else "automatic",
             "source_ids": source_ids,
             "bbox": bbox,
             "polygon": None,
@@ -3774,9 +3776,26 @@ class TranslatorEngine:
         previous_revision = int((previous_metadata or {}).get("revision") or 0)
         previous_regions = previous_document.get("regions") if isinstance(previous_document, dict) else []
 
-        regions: list[dict[str, Any]] = []
+        manual_payloads_by_id = {
+            str(payload.get("id") or ""): payload
+            for payload in self._manual_regions_for_page(session, stored_name)
+            if isinstance(payload, dict)
+        }
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        authored_prepared_regions = self._prepare_regions_for_page_document_from_regions(
+            source_rgb,
+            [],
+            config,
+            stored_name,
+            session=session,
+        )
+        authored_regions = [
+            self._serialize_page_document_region(region, manual_payloads_by_id, config)
+            for region in authored_prepared_regions
+        ]
+
+        materialized_regions: list[dict[str, Any]] | None = None
         if self._has_rerenderable_page_cache(page_cache_dir):
-            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
             prepared_regions = self._prepare_regions_for_page_document(
                 source_rgb,
                 page_cache_dir,
@@ -3784,56 +3803,33 @@ class TranslatorEngine:
                 stored_name,
                 session=session,
             )
-            manual_payloads_by_id = {
-                str(payload.get("id") or ""): payload
-                for payload in self._manual_regions_for_page(session, stored_name)
-                if isinstance(payload, dict)
-            }
-            regions = [
+            materialized_regions = [
                 self._serialize_page_document_region(region, manual_payloads_by_id, config)
                 for region in prepared_regions
             ]
-            for region_payload in regions:
-                region_payload["page_id"] = stored_name
         else:
-            source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
-            manual_only_regions = self._prepare_regions_for_page_document_from_regions(
-                source_rgb,
-                [],
-                config,
-                stored_name,
-                session=session,
-            )
-            if manual_only_regions:
-                manual_payloads_by_id = {
-                    str(payload.get("id") or ""): payload
-                    for payload in self._manual_regions_for_page(session, stored_name)
-                    if isinstance(payload, dict)
-                }
-                regions = [
-                    self._serialize_page_document_region(region, manual_payloads_by_id, config)
-                    for region in manual_only_regions
-                ]
-                for region_payload in regions:
-                    region_payload["page_id"] = stored_name
+            if authored_regions:
                 print(
                     f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
-                    "using manual regions only while keeping the page editable."
+                    "reconciling persisted automatic regions with user-authored regions."
                 )
             elif isinstance(previous_regions, list) and previous_regions:
-                regions = json.loads(json.dumps(previous_regions, ensure_ascii=False))
-                for region_payload in regions:
-                    if isinstance(region_payload, dict):
-                        region_payload["page_id"] = stored_name
                 print(
                     f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
-                    "falling back to the last persisted page document."
+                    "retaining persisted automatic regions."
                 )
             else:
                 print(
                     f"[WARN] Missing rerender cache for {project_id}/{stored_name}; "
                     "no cached or persisted regions are available."
                 )
+
+        regions = PageRegionCollection.reconcile(
+            page_id=stored_name,
+            persisted_regions=previous_regions if isinstance(previous_regions, list) else [],
+            materialized_regions=materialized_regions,
+            authored_regions=authored_regions,
+        )
 
         document = {
             "page_id": stored_name,
@@ -4449,7 +4445,8 @@ class TranslatorEngine:
                     "id": str(region.get("region_id") or ""),
                     "index": index,
                     "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
-                    "manual": str(region.get("kind") or "") in {"manual", "merged"},
+                    "origin": region_origin(region),
+                    "manual": is_user_authored_region(region),
                     "source_text": str(region.get("source_text") or ""),
                     "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
                     "recognition_status": str((region.get("recognition") or {}).get("status") or ""),
@@ -4503,7 +4500,8 @@ class TranslatorEngine:
                     "id": str(region.get("region_id") or ""),
                     "index": index,
                     "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
-                    "manual": str(region.get("kind") or "") in {"manual", "merged"},
+                    "origin": region_origin(region),
+                    "manual": is_user_authored_region(region),
                     "ocr_confidence": float(region.get("ocr_confidence") or 0.0),
                     "recognition_status": str((region.get("recognition") or {}).get("status") or ""),
                     "recognition_error": str((region.get("recognition") or {}).get("error") or ""),
@@ -4726,6 +4724,27 @@ class TranslatorEngine:
             raise FileNotFoundError("目标页面不存在，请刷新后重试。")
 
         config = self.capture_page_command_config(session, raw_config)
+        structural_command_types = {
+            "create_region",
+            "duplicate_region",
+            "merge_regions",
+            "delete_manual_region",
+            "restore_manual_region",
+        }
+        if any(
+            isinstance(command, dict)
+            and str(command.get("type") or "").strip().lower() in structural_command_types
+            for command in commands
+        ):
+            source_path = Path(session.get("source_dir") or "") / page_id
+            if not self._ensure_editable_page_cache(
+                session_id=project_id,
+                session=session,
+                stored_name=page_id,
+                config=config,
+                source_path=source_path,
+            ):
+                raise RuntimeError("无法为当前页面建立统一的文本区域缓存，请刷新后重试。")
         updated_region_ids: list[str] = []
         snapshot_hints: list[str] = []
         created_region_id = ""
@@ -8863,7 +8882,7 @@ class TranslatorEngine:
         for region_payload in raw_regions or []:
             if not isinstance(region_payload, dict):
                 continue
-            if str(region_payload.get("kind") or "auto") in {"manual", "merged"}:
+            if is_user_authored_region(region_payload):
                 continue
             region = self._page_document_region_to_text_region(region_payload, config, stored_name)
             if region is not None:
@@ -9193,14 +9212,20 @@ class TranslatorEngine:
         bg_color: tuple[int, int, int] | list[int] | None = None,
     ) -> dict[str, Any]:
         x1, y1, x2, y2 = bbox
-        width = max(x2 - x1, 1)
-        height = max(y2 - y1, 1)
         resolved_direction = self._resolve_region_direction(
             bbox,
             direction,
             target_lang,
         )
-        resolved_font_size = int(round(font_size if font_size is not None else max(min(width, height), 14)))
+        resolved_font_size = int(round(
+            font_size
+            if font_size is not None
+            else PageRegionCollection.recommend_font_size(
+                bbox=bbox,
+                regions=[],
+                direction=resolved_direction,
+            )
+        ))
         return {
             "id": f"manual::{stored_name}::{uuid.uuid4().hex}",
             "stored_name": stored_name,
@@ -9389,7 +9414,7 @@ class TranslatorEngine:
             return {
                 "source_text": "",
                 "direction": self._direction_from_bbox(bbox),
-                "font_size": max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14),
+                "font_size": None,
                 "fg_color": (0, 0, 0),
                 "bg_color": (255, 255, 255),
             }
@@ -9398,7 +9423,7 @@ class TranslatorEngine:
         return {
             "source_text": str(getattr(region, "text", "") or "").strip(),
             "direction": str(getattr(region, "direction", "") or self._direction_from_bbox(bbox)),
-            "font_size": float(getattr(region, "font_size", 0) or max(min(bbox[2] - bbox[0], bbox[3] - bbox[1]), 14)),
+            "font_size": float(getattr(region, "font_size", 0) or 0) or None,
             "fg_color": tuple(int(v) for v in getattr(region, "fg_colors", (0, 0, 0))),
             "bg_color": tuple(int(v) for v in getattr(region, "bg_colors", (255, 255, 255))),
         }
@@ -9563,6 +9588,17 @@ class TranslatorEngine:
         if not self._ensure_page_base_image_cache(source_path, cache_page_dir):
             raise RuntimeError("无法为当前页面准备底图，请刷新后重试。")
 
+        try:
+            current_document = self.get_page_document(session_id, session, stored_name)
+            current_regions = current_document.get("regions") or []
+        except FileNotFoundError:
+            current_regions = []
+        recommended_font_size = PageRegionCollection.recommend_font_size(
+            bbox=normalized_bbox,
+            regions=current_regions,
+            direction=self._direction_from_bbox(normalized_bbox),
+        )
+
         payload = self._build_manual_region_payload(
             stored_name=stored_name,
             bbox=normalized_bbox,
@@ -9570,7 +9606,7 @@ class TranslatorEngine:
             translation="",
             target_lang=config["target_lang"],
             direction=self._direction_from_bbox(normalized_bbox),
-            font_size=max(min(normalized_bbox[2] - normalized_bbox[0], normalized_bbox[3] - normalized_bbox[1]), 14),
+            font_size=recommended_font_size,
             fg_color=(0, 0, 0),
             bg_color=(255, 255, 255),
         )
@@ -9641,6 +9677,16 @@ class TranslatorEngine:
             payload["translation_status"] = "skipped"
             return payload
 
+        ocr_font_size = ocr_result.get("font_size")
+        try:
+            resolved_font_size = (
+                max(8, int(round(float(ocr_font_size))))
+                if ocr_font_size is not None
+                else int(payload.get("font_size") or 14)
+            )
+        except (TypeError, ValueError):
+            resolved_font_size = int(payload.get("font_size") or 14)
+
         payload.update({
             "bbox": bbox,
             "lines": self._manual_region_lines(bbox),
@@ -9650,7 +9696,7 @@ class TranslatorEngine:
                 ocr_result.get("direction"),
                 config["target_lang"],
             ),
-            "font_size": max(8, int(round(float(ocr_result.get("font_size") or 14)))),
+            "font_size": resolved_font_size,
             "fg_color": self._rgb_color_payload(ocr_result.get("fg_color"), (0, 0, 0)),
             "bg_color": self._rgb_color_payload(ocr_result.get("bg_color"), (255, 255, 255)),
             "recognition_status": "ready",
@@ -10493,6 +10539,18 @@ class TranslatorEngine:
             region.font_style = payload["font_style"]
         if "preserve_background" in payload:
             region.preserve_background = bool(payload["preserve_background"])
+        for key in (
+            "translation_region_key",
+            "style_region_key",
+            "manual_region_id",
+            "machine_translation",
+            "translation_override",
+        ):
+            if key in payload:
+                setattr(region, key, str(payload.get(key) or ""))
+        for key in ("manual_region", "allow_overlap"):
+            if key in payload:
+                setattr(region, key, bool(payload[key]))
         source_text = str(payload.get("source_text") or payload.get("text_raw") or payload.get("text") or "").strip()
         if source_text:
             region.source_text = source_text

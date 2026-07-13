@@ -405,6 +405,17 @@ async function main() {
     if (handleCount === 0) {
       throw new Error('当前选中框没有出现拖拽/缩放控制点')
     }
+    await page.getByRole('button', { name: '定位当前框' }).click()
+    await page.waitForTimeout(120)
+    const focusedHandleBox = await activeBox.locator('.style-box-handle').first().boundingBox()
+    const focusedSettingsBox = await page.locator('.v2-pane-card-frame .style-box-settings-button').first().boundingBox()
+    if (!focusedHandleBox || focusedHandleBox.width > 14 || focusedHandleBox.height > 14) {
+      throw new Error(`高倍定位后缩放控制点不再保持固定尺寸：${JSON.stringify(focusedHandleBox)}`)
+    }
+    if (!focusedSettingsBox || focusedSettingsBox.width > 30 || focusedSettingsBox.height > 30) {
+      throw new Error(`高倍定位后样式按钮不再保持固定尺寸：${JSON.stringify(focusedSettingsBox)}`)
+    }
+    await page.getByRole('button', { name: '重置视图' }).click()
     const hudText = (await page.locator('.v2-canvas-hud').first().textContent()) || ''
     if (/滚轮|Ctrl|Shift|快捷键/.test(hudText)) {
       throw new Error(`画布 HUD 仍然显示常驻操作说明：${hudText}`)

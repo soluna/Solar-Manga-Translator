@@ -26,6 +26,10 @@ import {
   deriveTaskEventUpdate,
 } from './task-event-state.js'
 import {
+  resolveRegionFontSizeValue,
+  resolveRegionRenderFontSize,
+} from './region-typography.js'
+import {
   buildBatchTranslationConfirmation,
   getProjectStageCommands,
   getPrimaryProjectCommand,
@@ -113,7 +117,6 @@ const canvasHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 const canvasZoomMin = 0.2
 const canvasZoomMax = 6
 const maxCanvasHistoryEntries = 50
-const renderFontSizeOffset = -6
 const renderTextPaddingRatio = 0.12
 const defaultStrokeStrength = 0.2
 const maxStrokeStrength = 5
@@ -1360,7 +1363,7 @@ const filteredEditRegions = computed(() => {
     }
 
     if (filter === 'manual') {
-      return isManualRegion(region)
+      return isUserAuthoredRegion(region)
     }
     if (filter === 'keep-original') {
       return isRegionSkipEnabled(region)
@@ -4105,9 +4108,11 @@ function getCanvasStageBaseStyle(page, pane = 'main') {
 function getCanvasViewportStyle(page, pane = 'main') {
   const pageId = String(page?.stored_name || '').trim()
   const viewport = getViewportState(pageId, pane)
+  const zoom = Math.max(viewport.zoom || 1, 0.001)
   return {
-    transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.zoom})`,
-    transformOrigin: 'top left'
+    transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${zoom})`,
+    transformOrigin: 'top left',
+    '--canvas-control-scale': 1 / zoom,
   }
 }
 
@@ -4238,14 +4243,13 @@ function hexToColorTriplet(value, fallback = [0, 0, 0]) {
 }
 
 function getRegionFontSize(region) {
-  if (Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)) {
-    return fontSizeInputDrafts.value[region.id]
-  }
   const override = translationRegionLayoutOverrides.value[region.id]
-  if (override && typeof override.font_size === 'number') {
-    return override.font_size
-  }
-  return Number(region.font_size || 12)
+  const hasDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+  return resolveRegionFontSizeValue({
+    draftValue: hasDraft ? fontSizeInputDrafts.value[region.id] : undefined,
+    explicitValue: override?.font_size,
+    detectedValue: region.font_size,
+  })
 }
 
 function getRegionLayoutOverride(region) {
@@ -4309,20 +4313,14 @@ function shouldPreserveRegionBackground(region) {
   return Boolean(region?.preserve_background)
 }
 
-function hasRegionExplicitFontSize(region) {
-  return Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
-    || getRegionExplicitFontSizeOverride(region.id) !== null
-    || Number(region?.font_size_override || 0) > 0
-}
-
 function getCanvasPreviewRenderFontSize(region) {
-  const baseFontSize = Number(getRegionFontSize(region) || region?.font_size || 12)
-  if (!Number.isFinite(baseFontSize)) {
-    return 12
-  }
-  return Math.max(8, Math.round(hasRegionExplicitFontSize(region)
-    ? baseFontSize
-    : baseFontSize + renderFontSizeOffset))
+  const override = translationRegionLayoutOverrides.value[region.id]
+  const hasDraft = Object.prototype.hasOwnProperty.call(fontSizeInputDrafts.value, region.id)
+  return resolveRegionRenderFontSize({
+    draftValue: hasDraft ? fontSizeInputDrafts.value[region.id] : undefined,
+    explicitValue: override?.font_size,
+    detectedValue: region.font_size,
+  })
 }
 
 function getRegionExplicitFontSizeOverride(regionId) {
@@ -4823,8 +4821,13 @@ function getStyleRegionLabelClass(region, page) {
   }
 }
 
-function isManualRegion(region) {
-  return Boolean(region?.manual)
+function isUserAuthoredRegion(region) {
+  return ['user', 'derived'].includes(String(region?.origin || '').trim().toLowerCase())
+    || Boolean(region?.manual)
+}
+
+function getRegionOriginLabel(region) {
+  return String(region?.origin || '').trim().toLowerCase() === 'derived' ? '合并生成' : '用户添加'
 }
 
 function getCanvasPoint(event, page) {
@@ -6340,7 +6343,7 @@ async function finishManualDraw(event, page, options = {}) {
 }
 
 async function deleteManualRegion(region) {
-  if (!sessionId.value || !region?.id || !isManualRegion(region)) {
+  if (!sessionId.value || !region?.id || !isUserAuthoredRegion(region)) {
     return
   }
   creatingManualRegion.value = true
@@ -11207,7 +11210,7 @@ watch(
                           type="button"
                           :class="[
                             'style-box',
-                            isManualRegion(region) ? 'manual' : '',
+                            isUserAuthoredRegion(region) ? 'manual' : '',
                             mergeMode && isRegionSelectedForMerge(region) ? 'merge-selected' : '',
                             isRegionSelectedOnCanvas(region) ? 'multi-selected' : '',
                             selectedEditRegionKey === region.id ? 'active' : '',
@@ -11559,7 +11562,7 @@ watch(
                     <strong>#{{ region.index + 1 }}</strong>
                     <span class="v2-inline-badge style">{{ getResolvedRegionStyleLabel(region) }}</span>
                     <span v-if="hasRegionWarning(region)" class="v2-inline-badge warning">需留意</span>
-                    <span v-if="isManualRegion(region)" class="v2-inline-badge">手动框</span>
+                    <span v-if="isUserAuthoredRegion(region)" class="v2-inline-badge">{{ getRegionOriginLabel(region) }}</span>
                   </div>
 
                   <div class="v2-region-card-actions" @click.stop @mousedown.stop>
@@ -11743,7 +11746,7 @@ watch(
                     </div>
                   </div>
 
-                  <div v-if="isManualRegion(region)" class="v2-region-card-footer">
+                  <div v-if="isUserAuthoredRegion(region)" class="v2-region-card-footer">
                     <button
                       type="button"
                       class="v2-secondary-button"
@@ -11761,7 +11764,7 @@ watch(
                     </button>
                   </div>
                   <p
-                    v-if="isManualRegion(region) && region.recognition_status === 'failed'"
+                    v-if="isUserAuthoredRegion(region) && region.recognition_status === 'failed'"
                     class="v2-region-recognition-error"
                     role="status"
                   >

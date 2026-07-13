@@ -1576,7 +1576,8 @@ img {
 
 .style-box-label {
   position: absolute;
-  top: -28px;
+  top: auto;
+  bottom: calc(100% + 2px);
   left: -2px;
   min-width: 26px;
   height: 26px;
@@ -1589,16 +1590,24 @@ img {
   font-size: 0.78rem;
   font-weight: 700;
   pointer-events: none;
+  scale: var(--canvas-control-scale, 1);
+  transform-origin: left bottom;
 }
 
 .style-box.label-below .style-box-label {
-  top: auto;
-  bottom: -28px;
+  top: calc(100% + 2px);
+  bottom: auto;
+  transform-origin: left top;
 }
 
 .style-box.label-right .style-box-label {
   left: auto;
   right: -2px;
+  transform-origin: right bottom;
+}
+
+.style-box.label-below.label-right .style-box-label {
+  transform-origin: right top;
 }
 
 .style-box-source-crop,
@@ -1661,10 +1670,12 @@ img {
   border-radius: 999px;
   background: var(--v2-accent);
   border: 2px solid white;
+  scale: var(--canvas-control-scale, 1);
+  transform-origin: center;
 }
 
 .style-box-handle:hover {
-  transform: scale(1.16);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
 }
 
 .style-box-handle.handle-nw {
@@ -1722,6 +1733,8 @@ img {
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
   font-size: 0.82rem;
   line-height: 1;
+  scale: var(--canvas-control-scale, 1);
+  transform-origin: center;
 }
 
 .style-box-settings-button:hover,

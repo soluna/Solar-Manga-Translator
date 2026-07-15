@@ -113,6 +113,15 @@ WORKFLOW_ACTIONS: dict[str, WorkflowActionDescriptor] = {
     ),
 }
 
+TASK_ACTION_ALIASES: dict[str, str] = {
+    "resume_translate": "resume-translate",
+    "resume": "resume-translate",
+    "translate_page": "translate-page",
+    "page-translate": "translate-page",
+    "render": "rerender",
+    "re-render": "rerender",
+}
+
 ACTION_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "detect": (
         ("prepare", "准备识别任务"),
@@ -187,13 +196,7 @@ STEP_ALIASES = {
 
 def normalize_task_action(action: Any) -> str:
     normalized = str(action or "").strip().lower()
-    if normalized in {"resume_translate", "resume"}:
-        return "resume-translate"
-    if normalized in {"translate_page", "page-translate"}:
-        return "translate-page"
-    if normalized in {"render", "re-render"}:
-        return "rerender"
-    return normalized or "translate"
+    return TASK_ACTION_ALIASES.get(normalized, normalized)
 
 
 def require_task_action(action: Any) -> str:
@@ -210,8 +213,8 @@ def describe_task_action(
     *,
     metadata: dict[str, Any] | None = None,
 ) -> WorkflowActionDescriptor:
-    normalized = normalize_task_action(action)
-    descriptor = WORKFLOW_ACTIONS.get(normalized) or WORKFLOW_ACTIONS["translate"]
+    normalized = require_task_action(action)
+    descriptor = WORKFLOW_ACTIONS[normalized]
     if descriptor.action == "rerender" and str((metadata or {}).get("target_stored_name") or "").strip():
         return WorkflowActionDescriptor(
             **{

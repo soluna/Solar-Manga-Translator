@@ -93,23 +93,35 @@ const taskActionDescriptors = Object.freeze({
   }
 })
 
+const taskActionAliases = Object.freeze({
+  resume_translate: 'resume-translate',
+  resume: 'resume-translate',
+  translate_page: 'translate-page',
+  'page-translate': 'translate-page',
+  render: 'rerender',
+  're-render': 'rerender'
+})
+
+export function getTaskActionContractSnapshot() {
+  return {
+    canonicalActions: Object.keys(taskActionDescriptors),
+    aliases: { ...taskActionAliases }
+  }
+}
+
 export function normalizeTaskAction(action) {
   const normalized = String(action || '').trim().toLowerCase()
-  if (normalized === 'resume_translate' || normalized === 'resume') {
-    return 'resume-translate'
-  }
-  if (normalized === 'translate_page' || normalized === 'page-translate') {
-    return 'translate-page'
-  }
-  if (normalized === 'render' || normalized === 're-render') {
-    return 'rerender'
-  }
-  return normalized || 'translate'
+  return Object.prototype.hasOwnProperty.call(taskActionAliases, normalized)
+    ? taskActionAliases[normalized]
+    : normalized
 }
 
 export function getTaskActionDescriptor(action, options = {}) {
   const normalized = normalizeTaskAction(action)
-  const descriptor = taskActionDescriptors[normalized] || taskActionDescriptors.translate
+  if (!Object.prototype.hasOwnProperty.call(taskActionDescriptors, normalized)) {
+    throw new Error(`不支持的任务动作：${normalized}`)
+  }
+  const descriptor = taskActionDescriptors[normalized]
   const targetStoredName = String(options.targetStoredName || '').trim()
   if (descriptor.action === 'rerender' && targetStoredName) {
     return {

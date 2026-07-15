@@ -9,6 +9,7 @@ import {
   getPrimaryProjectCommand,
   getReviewPrimaryCommand,
   getTaskActionDescriptor,
+  getTaskActionContractSnapshot,
   getTaskFailureStatus,
   getTaskProgressStatus,
   getTaskStartStatus,
@@ -24,22 +25,50 @@ const workflowContract = JSON.parse(fs.readFileSync(
 ))
 
 assert.equal(workflowContract.schema_version, 1)
+const runtimeContract = getTaskActionContractSnapshot()
+const contractAliases = Object.fromEntries(
+  Object.entries(workflowContract.actions).flatMap(([action, descriptor]) => (
+    descriptor.aliases.map((alias) => [alias, action])
+  )),
+)
+assert.deepEqual(
+  [...runtimeContract.canonicalActions].sort(),
+  Object.keys(workflowContract.actions).sort(),
+)
+assert.deepEqual(runtimeContract.aliases, contractAliases)
 for (const [action, expected] of Object.entries(workflowContract.actions)) {
-  const descriptor = getTaskActionDescriptor(action)
-  assert.deepEqual({
-    action_label: descriptor.actionLabel,
-    workflow_phase: descriptor.workflowPhase,
-    phase_label: descriptor.phaseLabel,
-    running_stage: descriptor.runningStage,
-    completed_stage: descriptor.completedStage,
-    scope: descriptor.scope,
-    scope_label: descriptor.scopeLabel,
-    start_message: descriptor.startMessage,
-    progress_message: descriptor.progressMessage,
-    failure_message: descriptor.failureMessage,
-  }, expected, action)
+  const { aliases, ...expectedDescriptor } = expected
+  for (const candidate of [action, ...aliases]) {
+    assert.equal(normalizeTaskAction(candidate), action, candidate)
+    const descriptor = getTaskActionDescriptor(candidate)
+    assert.equal(descriptor.action, action, candidate)
+    assert.deepEqual({
+      action_label: descriptor.actionLabel,
+      workflow_phase: descriptor.workflowPhase,
+      phase_label: descriptor.phaseLabel,
+      running_stage: descriptor.runningStage,
+      completed_stage: descriptor.completedStage,
+      scope: descriptor.scope,
+      scope_label: descriptor.scopeLabel,
+      start_message: descriptor.startMessage,
+      progress_message: descriptor.progressMessage,
+      failure_message: descriptor.failureMessage,
+    }, expectedDescriptor, candidate)
+  }
 }
 
+assert.equal(workflowContract.unknown_action.behavior, 'reject')
+assert.throws(
+  () => getTaskActionDescriptor(workflowContract.unknown_action.example),
+  /不支持的任务动作/,
+)
+for (const emptyAction of ['', null, ' \t ']) {
+  assert.equal(normalizeTaskAction(emptyAction), '', String(emptyAction))
+  assert.throws(
+    () => getTaskActionDescriptor(emptyAction),
+    /不支持的任务动作/,
+  )
+}
 
 assert.equal(normalizeTaskAction('resume_translate'), 'resume-translate')
 assert.equal(normalizeTaskAction('translate_page'), 'translate-page')

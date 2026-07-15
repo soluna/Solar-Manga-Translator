@@ -1,7 +1,20 @@
 {
   "schema_version": 1,
+  "unknown_action": {
+    "example": "future-unknown-action",
+    "behavior": "reject"
+  },
+  "compatibility": {
+    "workflow_stage": {
+      "role": "compatibility_projection",
+      "source_of_truth": "project_head",
+      "capabilities_source": "project_view",
+      "removal_condition": "project_view_capabilities_are_independent"
+    }
+  },
   "actions": {
     "detect": {
+      "aliases": [],
       "action_label": "识别并生成空页",
       "workflow_phase": "recognize",
       "phase_label": "检测、OCR 与擦字",
@@ -14,6 +27,7 @@
       "failure_message": "识别或空页生成失败。"
     },
     "translate": {
+      "aliases": [],
       "action_label": "整本翻译",
       "workflow_phase": "translate",
       "phase_label": "翻译与嵌字",
@@ -26,6 +40,7 @@
       "failure_message": "翻译失败。"
     },
     "resume-translate": {
+      "aliases": ["resume_translate", "resume"],
       "action_label": "继续翻译",
       "workflow_phase": "translate",
       "phase_label": "翻译与嵌字",
@@ -38,6 +53,7 @@
       "failure_message": "继续翻译失败。"
     },
     "translate-page": {
+      "aliases": ["translate_page", "page-translate"],
       "action_label": "当前页翻译",
       "workflow_phase": "translate",
       "phase_label": "翻译与嵌字",
@@ -50,6 +66,7 @@
       "failure_message": "当前页翻译失败。"
     },
     "rerender": {
+      "aliases": ["render", "re-render"],
       "action_label": "重新嵌字",
       "workflow_phase": "render",
       "phase_label": "重新嵌字",

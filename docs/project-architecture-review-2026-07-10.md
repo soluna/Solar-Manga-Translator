@@ -579,14 +579,24 @@ W0 的第一个纵向切片与 W1 已经落地；W0 尚未整包完成：
 当前边界是：W2 的一致快照已完成，但任务 staging 仍会复制整目录，尚未变成“只提交受影响页面 revision”的
 manifest 指针事务；TaskRecord 也尚未进入同一版本化协议。`page_artifacts` 还不是前端唯一状态 owner。
 
+### 8.3 基础退出条件关闭（2026-07-15）
+
+- W0 的动作/别名/阶段契约已由后端与前端共同读取 `workflow-actions-v1.json` 并做双向漂移检查；未知或空动作
+  在 busy 标记与任务创建前失败，`workflow_stage` 明确为 Project Head 的兼容投影。
+- W0/W1 的 Page Artifact 失效、恢复与 capability 语义已由两端共同读取
+  `page-artifact-transitions-v1.json` 表驱动验证，旧产物在失效后保留为 stale evidence。
+- 应用层回归已穿过公开 Workflow、WebSocket/HTTP 和 V2 workspace，覆盖零 Text Regions 页面、部分失败保持旧
+  Project Head、精确匹配 Pending 重试，以及 action/scope/config/base Head 不匹配时禁止复用。
+- 因此 W0 与 W1 的退出条件已关闭；W2 仍保持开放，直到按页 Working Set/CAS 替代整目录 staging，并补齐启动清理。
+
 ### W0：冻结语义与建立架构回归基线
 
 关联：ARCH-02、ARCH-07、ARCH-08。
 
-- [ ] 把第 6 节的三步产物语义和失效表变成后端表驱动测试。
-- [ ] 新增一套当前 JSON payload contract fixture。
-- [ ] 为“识别后空页、翻译后译文、重嵌后 final”补完整应用层测试。
-- [ ] 明确旧 `workflow_stage` 的兼容期和删除条件。
+- [x] 把第 6 节的三步产物语义和失效表变成后端表驱动测试。
+- [x] 新增一套当前 JSON payload contract fixture。
+- [x] 为“识别后空页、翻译后译文、重嵌后 final”补完整应用层测试。
+- [x] 明确旧 `workflow_stage` 的兼容期和删除条件。
 
 完成定义：不改变生产行为；当前修复有能穿过真实 Workflow Interface 的回归测试。
 

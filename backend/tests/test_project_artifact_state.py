@@ -24,6 +24,7 @@ from domain.project_artifacts import (
 from domain.project_state import PROJECT_STATE_SCHEMA_VERSION
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
+from backend.tests._textblock_stub import textblock_module_patch
 
 
 def make_test_paths(root: Path) -> AppPaths:
@@ -39,6 +40,17 @@ def make_test_paths(root: Path) -> AppPaths:
 
 
 class ProjectArtifactStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.textblock_patcher = textblock_module_patch()
+        cls.textblock_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.textblock_patcher.stop()
+        super().tearDownClass()
+
     def test_page_artifacts_follow_the_visible_three_step_workflow(self) -> None:
         state = ProjectArtifactState.create(["0001.png"])
 

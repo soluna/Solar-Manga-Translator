@@ -17,6 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
 from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
+from backend.tests._textblock_stub import textblock_module_patch
 
 
 def make_test_paths(root: Path) -> AppPaths:
@@ -46,6 +47,17 @@ def automatic_region(region_id: str, bbox: list[int]) -> dict:
 
 
 class PageRegionCommandTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.textblock_patcher = textblock_module_patch()
+        cls.textblock_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.textblock_patcher.stop()
+        super().tearDownClass()
+
     def make_project(self, root: Path) -> tuple[TranslatorEngine, str, str, dict]:
         paths = make_test_paths(root)
         engine = TranslatorEngine(BACKEND_DIR, app_paths=paths)

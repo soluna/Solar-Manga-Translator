@@ -35,6 +35,7 @@ from system_fonts import custom_font_directories
 from system_fonts import ensure_project_font_directories
 from task_manager import ProjectTaskConflictError, TaskManager, TaskNotFoundError
 from utils.file_handler import extract_archive, verify_supported_image
+from workflow_events import require_task_action
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
 app = FastAPI(
@@ -1361,6 +1362,7 @@ def start_translation_task(
     config: dict[str, Any],
     target_stored_name: str,
 ) -> str:
+    action = require_task_action(action)
     if not translator_engine.try_mark_session_busy(session_id, action):
         raise ProjectTaskConflictError("Project already has an active task")
 

@@ -212,6 +212,7 @@ class ProjectArtifactStateTests(unittest.TestCase):
             legacy_persisted.pop("artifact_state", None)
             legacy_persisted["workflow_stage"] = "detected"
             engine._write_json_file(state_path, legacy_persisted)
+            engine.project_workspace.project_head_path(project_id).unlink()
 
             engine.restore_project_session(project_id)
 
@@ -259,7 +260,6 @@ class ProjectArtifactStateTests(unittest.TestCase):
                 "style_region_overrides": {},
                 "artifact_state": artifact_state.model_dump(mode="json"),
             }
-            engine.initialize_project(project_id, session, title="Edited artifact")
             engine._write_json_file(
                 engine._project_page_document_path(project_id, page_id),
                 {
@@ -282,6 +282,7 @@ class ProjectArtifactStateTests(unittest.TestCase):
                     "metadata": {"revision": 1},
                 },
             )
+            engine.initialize_project(project_id, session, title="Edited artifact")
 
             result = asyncio.run(
                 engine.apply_page_commands(

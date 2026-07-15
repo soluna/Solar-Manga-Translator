@@ -3,15 +3,20 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from domain.project_state import CorruptProjectStateError, ProjectStateError
 from runtime_paths import AppPaths
+
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidStorageIdentifierError(ValueError):
@@ -20,6 +25,19 @@ class InvalidStorageIdentifierError(ValueError):
 
 class CorruptSnapshotArtifactError(ProjectStateError):
     pass
+
+
+class CorruptProjectArtifactError(ProjectStateError):
+    pass
+
+
+class ProjectHeadConflictError(ProjectStateError):
+    def __init__(self, *, expected_generation: int, actual_generation: int):
+        self.expected_generation = expected_generation
+        self.actual_generation = actual_generation
+        super().__init__(
+            "项目当前版本已变化，请刷新后重试。"
+        )
 
 
 class ProjectWorkspace:
@@ -113,6 +131,20 @@ class ProjectWorkspace:
     def project_snapshot_blobs_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "snapshot_blobs"
 
+    def project_artifact_store_dir(self, project_id: str) -> Path:
+        # Keep the schema-v1 directory name so existing snapshot manifests remain
+        # valid while live revisions migrate lazily into the shared store.
+        return self.project_snapshot_blobs_dir(project_id)
+
+    def project_head_path(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "artifact_head.json"
+
+    def project_revisions_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "artifact_revisions"
+
+    def project_pending_artifact_path(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "pending_artifact_set.json"
+
     def project_pages_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "pages"
 
@@ -163,6 +195,13 @@ class ProjectWorkspace:
             return default
 
     def read_project_session_document(self, project_id: str) -> dict[str, Any] | None:
+        head_payload = self._read_project_head_json(project_id, "state/session.json")
+        if head_payload is not None:
+            if not isinstance(head_payload, dict):
+                raise CorruptProjectStateError(
+                    "项目状态文件已损坏：顶层内容必须是 JSON 对象。"
+                )
+            return head_payload
         path = self.project_session_state_path(project_id)
         if not path.exists():
             return None
@@ -177,6 +216,29 @@ class ProjectWorkspace:
                 "项目状态文件已损坏：顶层内容必须是 JSON 对象。"
             )
         return payload
+
+    def read_project_manifest(self, project_id: str) -> dict[str, Any]:
+        head_payload = self._read_project_head_json(project_id, "project/project.json")
+        if head_payload is not None:
+            if not isinstance(head_payload, dict):
+                raise CorruptProjectArtifactError("项目清单 revision 已损坏，无法安全读取。")
+            return head_payload
+        payload = self.read_json_file(self.project_manifest_path(project_id), {})
+        return payload if isinstance(payload, dict) else {}
+
+    def read_project_page_document(self, project_id: str, page_id: str) -> dict[str, Any]:
+        normalized_page_id = self.validated_page_id(page_id)
+        logical_path = f"pages/{normalized_page_id}/page_document.json"
+        head_payload = self._read_project_head_json(project_id, logical_path)
+        if head_payload is not None:
+            if not isinstance(head_payload, dict):
+                raise CorruptProjectArtifactError("页面文档 revision 已损坏，无法安全读取。")
+            return head_payload
+        payload = self.read_json_file(
+            self.project_page_document_path(project_id, normalized_page_id),
+            {},
+        )
+        return payload if isinstance(payload, dict) else {}
 
     def read_jsonl_file(self, path: Path) -> list[Any]:
         if not path.exists():
@@ -207,9 +269,261 @@ class ProjectWorkspace:
             with contextlib.suppress(FileNotFoundError):
                 os.remove(temp_path)
 
+    def read_project_head(self, project_id: str) -> dict[str, Any] | None:
+        path = self.project_head_path(project_id)
+        if not path.exists():
+            return None
+        payload = self.read_json_file(path, None)
+        if not isinstance(payload, dict):
+            raise CorruptProjectArtifactError("项目当前版本指针已损坏，无法安全恢复。")
+        if payload.get("schema_version") != 1:
+            raise CorruptProjectArtifactError("项目当前版本格式不受支持，请升级应用后重试。")
+        if not isinstance(payload.get("generation"), int) or int(payload["generation"]) < 1:
+            raise CorruptProjectArtifactError("项目当前版本 generation 无效，无法安全恢复。")
+        if not isinstance(payload.get("files"), dict):
+            raise CorruptProjectArtifactError("项目当前版本缺少文件引用，无法安全恢复。")
+        return payload
+
+    def read_pending_artifact_set(self, project_id: str) -> dict[str, Any] | None:
+        path = self.project_pending_artifact_path(project_id)
+        if not path.exists():
+            return None
+        payload = self.read_json_file(path, None)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise CorruptProjectArtifactError("待恢复产物清单已损坏，无法安全恢复。")
+        artifact_bundle = payload.get("artifact_bundle")
+        if (
+            not isinstance(artifact_bundle, dict)
+            or artifact_bundle.get("schema_version") != 1
+            or not isinstance(artifact_bundle.get("files"), dict)
+        ):
+            raise CorruptProjectArtifactError("待恢复产物引用已损坏，无法安全恢复。")
+        if not isinstance(payload.get("state_document"), dict):
+            raise CorruptProjectArtifactError("待恢复项目状态已损坏，无法安全恢复。")
+        return payload
+
+    def write_pending_artifact_set(
+        self,
+        project_id: str,
+        *,
+        action: str,
+        resume_fingerprint: str,
+        base_head: dict[str, Any] | None,
+        state_document: dict[str, Any],
+        files: dict[str, Path],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_project_id = self.validated_project_id(project_id)
+        previous_pending = self.read_pending_artifact_set(normalized_project_id)
+        previous_bundle = (
+            previous_pending.get("artifact_bundle")
+            if isinstance(previous_pending, dict)
+            else None
+        )
+        artifact_bundle = self.capture_snapshot_artifacts(
+            normalized_project_id,
+            files,
+            previous_bundle=previous_bundle,
+        )
+        pending = {
+            **dict(metadata or {}),
+            "schema_version": 1,
+            "pending_id": uuid.uuid4().hex,
+            "project_id": normalized_project_id,
+            "action": str(action or ""),
+            "resume_fingerprint": str(resume_fingerprint or ""),
+            "base_head_generation": int((base_head or {}).get("generation") or 0),
+            "base_head_revision_id": str((base_head or {}).get("revision_id") or ""),
+            "state_document": state_document,
+            "artifact_bundle": artifact_bundle,
+        }
+        self.write_json_file(
+            self.project_pending_artifact_path(normalized_project_id),
+            pending,
+        )
+        return pending
+
+    def restore_pending_artifact_set(
+        self,
+        project_id: str,
+        pending: dict[str, Any],
+        destinations: dict[str, Path],
+    ) -> set[str]:
+        if not isinstance(pending, dict) or pending.get("schema_version") != 1:
+            raise CorruptProjectArtifactError("待恢复产物清单格式无效。")
+        return self.restore_snapshot_artifacts(
+            project_id,
+            pending.get("artifact_bundle"),
+            destinations,
+        )
+
+    def clear_pending_artifact_set(self, project_id: str) -> None:
+        self.project_pending_artifact_path(project_id).unlink(missing_ok=True)
+
+    def commit_project_head(
+        self,
+        project_id: str,
+        *,
+        state_document: dict[str, Any],
+        project_manifest: dict[str, Any],
+        page_documents: dict[str, dict[str, Any]],
+        artifact_files: dict[str, Path] | None = None,
+        expected_generation: int | None = None,
+        replace_prefixes: tuple[str, ...] = (),
+        remove_logical_paths: set[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_project_id = self.validated_project_id(project_id)
+        current_head = self.read_project_head(normalized_project_id)
+        current_generation = int((current_head or {}).get("generation") or 0)
+        if (
+            expected_generation is not None
+            and int(expected_generation) != current_generation
+        ):
+            raise ProjectHeadConflictError(
+                expected_generation=int(expected_generation),
+                actual_generation=current_generation,
+            )
+        normalized_replace_prefixes: list[str] = []
+        for raw_prefix in replace_prefixes:
+            normalized_prefix = str(raw_prefix or "").strip().replace("\\", "/")
+            normalized_prefix = normalized_prefix.rstrip("/") + "/"
+            self._validated_snapshot_logical_path(f"{normalized_prefix}placeholder")
+            normalized_replace_prefixes.append(normalized_prefix)
+        normalized_remove_paths = {
+            str(logical_path or "").strip().replace("\\", "/")
+            for logical_path in (remove_logical_paths or set())
+        }
+        for logical_path in normalized_remove_paths:
+            self._validated_snapshot_logical_path(logical_path)
+        current_files = {
+            logical_path: metadata
+            for logical_path, metadata in dict(
+                (current_head or {}).get("files") or {}
+            ).items()
+            if logical_path not in normalized_remove_paths
+            and not any(
+                logical_path.startswith(prefix)
+                for prefix in normalized_replace_prefixes
+            )
+        }
+        project_dir = self.project_dir(normalized_project_id)
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(
+            prefix=".artifact-head-",
+            dir=str(project_dir),
+        ) as temporary_dir_name:
+            temporary_dir = Path(temporary_dir_name)
+            staged_files: dict[str, Path] = {}
+
+            def stage_json(logical_path: str, payload: dict[str, Any]) -> None:
+                parts = self._validated_snapshot_logical_path(logical_path)
+                staged_path = temporary_dir.joinpath(*parts)
+                self.write_json_file(staged_path, payload)
+                staged_files[logical_path] = staged_path
+
+            stage_json("state/session.json", state_document)
+            stage_json("project/project.json", project_manifest)
+            normalized_page_documents: dict[str, dict[str, Any]] = {}
+            for page_id, document in sorted(page_documents.items()):
+                normalized_page_id = self.validated_page_id(page_id)
+                normalized_page_documents[normalized_page_id] = dict(document)
+                stage_json(
+                    f"pages/{normalized_page_id}/page_document.json",
+                    dict(document),
+                )
+            for logical_path, source_path in sorted((artifact_files or {}).items()):
+                self._validated_snapshot_logical_path(logical_path)
+                # Structured documents above are the new revision being
+                # committed. A legacy compatibility projection may still
+                # exist at the same logical path, but it must never overwrite
+                # the freshly staged document in Project Head.
+                staged_files.setdefault(logical_path, Path(source_path))
+
+            captured = self.capture_snapshot_artifacts(
+                normalized_project_id,
+                staged_files,
+                previous_bundle=current_head,
+            )
+
+        next_files = {**current_files, **captured["files"]}
+        generation = current_generation + 1
+        revision_id = f"g{generation:08d}-{uuid.uuid4().hex[:12]}"
+        next_head = {
+            "schema_version": 1,
+            "project_id": normalized_project_id,
+            "generation": generation,
+            "revision_id": revision_id,
+            "files": next_files,
+        }
+        revisions_dir = self.project_revisions_dir(normalized_project_id)
+        revisions_dir.mkdir(parents=True, exist_ok=True)
+        self.write_json_file(revisions_dir / f"{revision_id}.json", next_head)
+        self.write_json_file(self.project_head_path(normalized_project_id), next_head)
+
+        # These files remain compatibility projections for code that has not yet
+        # migrated to Project Head reads. The atomic head pointer is authoritative.
+        compatibility_projections = {
+            self.project_session_state_path(normalized_project_id): state_document,
+            self.project_manifest_path(normalized_project_id): project_manifest,
+            **{
+                self.project_page_document_path(normalized_project_id, page_id): document
+                for page_id, document in normalized_page_documents.items()
+            },
+        }
+        for projection_path, projection_payload in compatibility_projections.items():
+            try:
+                self.write_json_file(projection_path, projection_payload)
+            except OSError:
+                logger.exception(
+                    "Project Head committed but a compatibility projection could not be refreshed. "
+                    "project=%s generation=%s path=%s",
+                    normalized_project_id,
+                    generation,
+                    projection_path,
+                )
+        return next_head
+
+    def _read_project_head_json(
+        self,
+        project_id: str,
+        logical_path: str,
+    ) -> Any | None:
+        head = self.read_project_head(project_id)
+        if head is None:
+            return None
+        metadata = head["files"].get(logical_path)
+        if metadata is None:
+            return None
+        raw_bytes = self._read_artifact_bytes(project_id, metadata)
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise CorruptProjectArtifactError(
+                f"项目当前版本中的 {logical_path} 已损坏，无法安全读取。"
+            ) from exc
+
+    def _read_artifact_bytes(
+        self,
+        project_id: str,
+        metadata: Any,
+    ) -> bytes:
+        if not isinstance(metadata, dict):
+            raise CorruptProjectArtifactError("项目产物引用格式无效，无法安全读取。")
+        blob_id = str(metadata.get("blob") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", blob_id):
+            raise CorruptProjectArtifactError("项目产物摘要无效，无法安全读取。")
+        blob_path = self.project_artifact_store_dir(project_id) / blob_id[:2] / blob_id
+        if not blob_path.is_file():
+            raise CorruptProjectArtifactError("项目产物文件缺失，无法安全读取。")
+        raw_bytes = blob_path.read_bytes()
+        if hashlib.sha256(raw_bytes).hexdigest() != blob_id:
+            raise CorruptProjectArtifactError("项目产物校验失败，无法安全读取。")
+        return raw_bytes
+
     def page_document_region_count(self, project_id: str, page_id: str) -> int:
         try:
-            payload = self.read_json_file(self.project_page_document_path(project_id, page_id), {})
+            payload = self.read_project_page_document(project_id, page_id)
         except InvalidStorageIdentifierError:
             return 0
         regions = payload.get("regions") if isinstance(payload, dict) else None
@@ -269,7 +583,7 @@ class ProjectWorkspace:
         files: dict[str, Path],
         previous_bundle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        blobs_dir = self.project_artifact_store_dir(project_id)
         staging_dir = blobs_dir / ".staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         captured: dict[str, dict[str, Any]] = {}
@@ -347,7 +661,7 @@ class ProjectWorkspace:
         if not isinstance(raw_files, dict):
             raise CorruptSnapshotArtifactError("快照产物清单已损坏，无法安全恢复。")
 
-        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        blobs_dir = self.project_artifact_store_dir(project_id)
         verified_blobs: set[str] = set()
         restored_roots: set[str] = set()
         for logical_path, metadata in sorted(raw_files.items()):
@@ -385,7 +699,42 @@ class ProjectWorkspace:
         manifests: list[dict[str, Any]],
     ) -> None:
         referenced: set[str] = set()
+        referenced_revisions: set[str] = set()
+        current_head = self.read_project_head(project_id)
+        current_revision_id = str((current_head or {}).get("revision_id") or "").strip()
+        if current_revision_id:
+            referenced_revisions.add(current_revision_id)
+        head_files = (current_head or {}).get("files") or {}
+        if isinstance(head_files, dict):
+            for metadata in head_files.values():
+                blob_id = str(metadata.get("blob") or "").strip().lower() if isinstance(metadata, dict) else ""
+                if re.fullmatch(r"[0-9a-f]{64}", blob_id):
+                    referenced.add(blob_id)
+
+        pending = self.read_pending_artifact_set(project_id)
+        if pending is not None:
+            pending_revision_id = str(
+                pending.get("base_head_revision_id") or ""
+            ).strip()
+            if pending_revision_id:
+                referenced_revisions.add(pending_revision_id)
+            pending_bundle = pending.get("artifact_bundle")
+            pending_files = (
+                pending_bundle.get("files")
+                if isinstance(pending_bundle, dict)
+                else None
+            )
+            if isinstance(pending_files, dict):
+                for metadata in pending_files.values():
+                    blob_id = str(metadata.get("blob") or "").strip().lower() if isinstance(metadata, dict) else ""
+                    if re.fullmatch(r"[0-9a-f]{64}", blob_id):
+                        referenced.add(blob_id)
         for manifest in manifests:
+            snapshot_revision_id = str(
+                manifest.get("project_head_revision_id") or ""
+            ).strip() if isinstance(manifest, dict) else ""
+            if snapshot_revision_id:
+                referenced_revisions.add(snapshot_revision_id)
             bundle = manifest.get("artifact_bundle") if isinstance(manifest, dict) else None
             files = bundle.get("files") if isinstance(bundle, dict) else None
             if not isinstance(files, dict):
@@ -395,7 +744,16 @@ class ProjectWorkspace:
                 if re.fullmatch(r"[0-9a-f]{64}", blob_id):
                     referenced.add(blob_id)
 
-        blobs_dir = self.project_snapshot_blobs_dir(project_id)
+        revisions_dir = self.project_revisions_dir(project_id)
+        if revisions_dir.exists():
+            for revision_path in revisions_dir.glob("*.json"):
+                if revision_path.stem not in referenced_revisions:
+                    with contextlib.suppress(OSError):
+                        revision_path.unlink()
+            with contextlib.suppress(OSError):
+                revisions_dir.rmdir()
+
+        blobs_dir = self.project_artifact_store_dir(project_id)
         if not blobs_dir.exists():
             return
         for blob_path in blobs_dir.glob("[0-9a-f][0-9a-f]/*"):
@@ -435,7 +793,7 @@ class ProjectWorkspace:
                 project_id = self.validated_project_id(project_dir.name)
             except InvalidStorageIdentifierError:
                 continue
-            payload = self.read_json_file(project_dir / "project.json", {})
+            payload = self.read_project_manifest(project_id)
             if not isinstance(payload, dict) or not payload:
                 continue
             manifest_project_id = str(payload.get("project_id") or "").strip()

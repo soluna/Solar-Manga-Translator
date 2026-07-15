@@ -29,23 +29,27 @@ class WorkflowStepDescriptor:
     step_total: int
 
 
+class UnsupportedWorkflowActionError(ValueError):
+    pass
+
+
 PHASE_TOTAL = 6
 
 WORKFLOW_ACTIONS: dict[str, WorkflowActionDescriptor] = {
     "detect": WorkflowActionDescriptor(
         action="detect",
-        action_label="文本框识别",
+        action_label="识别并生成空页",
         workflow_phase="recognize",
-        phase_label="检测与 OCR",
+        phase_label="检测、OCR 与擦字",
         phase_index=2,
         phase_total=PHASE_TOTAL,
         running_stage="detecting",
         completed_stage="detected",
         scope="project",
         scope_label="整组页面",
-        start_message="文本框识别已开始，共 {total} 张图片。",
-        progress_message="正在识别并准备校对：{current} / {total}",
-        failure_message="文本框识别失败。",
+        start_message="识别与空页生成已开始，共 {total} 张图片。",
+        progress_message="正在识别并生成空页：{current} / {total}",
+        failure_message="识别或空页生成失败。",
     ),
     "translate": WorkflowActionDescriptor(
         action="translate",
@@ -190,6 +194,15 @@ def normalize_task_action(action: Any) -> str:
     if normalized in {"render", "re-render"}:
         return "rerender"
     return normalized or "translate"
+
+
+def require_task_action(action: Any) -> str:
+    normalized = normalize_task_action(action)
+    if normalized not in WORKFLOW_ACTIONS:
+        raise UnsupportedWorkflowActionError(
+            f"不支持的任务动作：{normalized}"
+        )
+    return normalized
 
 
 def describe_task_action(

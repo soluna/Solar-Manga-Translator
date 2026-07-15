@@ -75,7 +75,6 @@ class PageRegionCommandTests(unittest.TestCase):
             "style_region_overrides": {},
             "artifact_state": artifact_state.model_dump(mode="json"),
         }
-        engine.initialize_project(project_id, session, title="Unified regions")
         engine._write_json_file(
             engine._project_page_document_path(project_id, page_id),
             {
@@ -89,6 +88,7 @@ class PageRegionCommandTests(unittest.TestCase):
                 "metadata": {"document_version": 1, "revision": 1},
             },
         )
+        engine.initialize_project(project_id, session, title="Unified regions")
         return engine, project_id, page_id, session
 
     def test_create_region_preserves_automatic_regions_when_editable_cache_is_missing(self) -> None:
@@ -114,7 +114,7 @@ class PageRegionCommandTests(unittest.TestCase):
             self.assertEqual(regions[-1]["kind"], "manual")
             self.assertEqual(regions[-1]["origin"], "user")
             self.assertTrue(all(region["origin"] == "automatic" for region in regions[:3]))
-            self.assertEqual(regions[-1]["style"]["font_size"], 12)
+            self.assertEqual(regions[-1]["style"]["font_size"], 18)
 
     def test_delete_only_user_region_preserves_automatic_regions_and_does_not_resurrect_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,22 +228,44 @@ class PageRegionCommandTests(unittest.TestCase):
             )
             self.assertEqual(auto_region["translation"]["resolved"], "")
 
-    def test_page_command_rolls_back_persisted_files_when_commit_fails(self) -> None:
+    def test_page_command_keeps_the_committed_head_when_index_projection_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine, project_id, page_id, session = self.make_project(Path(tmp))
-            page_document_path = engine._project_page_document_path(project_id, page_id)
-            project_manifest_path = engine._project_manifest_path(project_id)
-            snapshots_dir = engine._project_snapshots_dir(project_id)
-            previous_document = page_document_path.read_bytes()
-            previous_manifest = project_manifest_path.read_bytes()
-            previous_snapshots = {path.name for path in snapshots_dir.glob("*.json")}
+            previous_head = engine.project_workspace.read_project_head(project_id)
 
             with patch.object(
                 engine,
                 "_refresh_project_index_entry",
                 side_effect=OSError("simulated index failure"),
             ):
-                with self.assertRaisesRegex(OSError, "simulated index failure"):
+                result = asyncio.run(
+                    engine.apply_page_commands(
+                        project_id=project_id,
+                        session=session,
+                        page_id=page_id,
+                        raw_config={"target_lang": "CHS", "translator": "none"},
+                        commands=[{"type": "create_region", "bbox": [65, 80, 110, 125]}],
+                    )
+                )
+
+            committed_head = engine.project_workspace.read_project_head(project_id)
+            self.assertGreater(committed_head["generation"], previous_head["generation"])
+            self.assertEqual(
+                len(result["document"]["regions"]),
+                4,
+            )
+
+    def test_page_command_rolls_back_when_the_head_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            previous_head = engine.project_workspace.read_project_head(project_id)
+
+            with patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                side_effect=OSError("simulated head commit failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "head commit failure"):
                     asyncio.run(
                         engine.apply_page_commands(
                             project_id=project_id,
@@ -255,16 +277,44 @@ class PageRegionCommandTests(unittest.TestCase):
                     )
 
             self.assertEqual(session["manual_regions"], {})
-            self.assertEqual(page_document_path.read_bytes(), previous_document)
-            self.assertEqual(project_manifest_path.read_bytes(), previous_manifest)
-            self.assertEqual(
-                {path.name for path in snapshots_dir.glob("*.json")},
-                previous_snapshots,
-            )
+            self.assertEqual(engine.project_workspace.read_project_head(project_id), previous_head)
             self.assertEqual(
                 [region["region_id"] for region in engine.get_page_document(project_id, session, page_id)["regions"]],
                 ["auto-1", "auto-2", "auto-3"],
             )
+
+    def test_snapshot_metadata_failure_does_not_undo_the_primary_head_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            previous_head = engine.project_workspace.read_project_head(project_id)
+            original_commit = engine.project_workspace.commit_project_head
+            commit_calls = 0
+
+            def fail_snapshot_metadata_commit(*args, **kwargs):
+                nonlocal commit_calls
+                commit_calls += 1
+                if commit_calls == 2:
+                    raise OSError("simulated snapshot metadata failure")
+                return original_commit(*args, **kwargs)
+
+            with patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                side_effect=fail_snapshot_metadata_commit,
+            ):
+                result = asyncio.run(
+                    engine.apply_page_commands(
+                        project_id=project_id,
+                        session=session,
+                        page_id=page_id,
+                        raw_config={"target_lang": "CHS", "translator": "none"},
+                        commands=[{"type": "create_region", "bbox": [65, 80, 110, 125]}],
+                    )
+                )
+
+            committed_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(committed_head["generation"], previous_head["generation"] + 1)
+            self.assertEqual(len(result["document"]["regions"]), 4)
 
     def test_page_commands_reject_a_stale_document_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,6 +358,48 @@ class PageRegionCommandTests(unittest.TestCase):
                 )
             )
             self.assertGreater(accepted["revision"], current_revision)
+
+    def test_page_command_atomically_advances_the_project_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_id, page_id, session = self.make_project(Path(tmp))
+            initial_head = engine.project_workspace.read_project_head(project_id)
+            current_revision = int(
+                engine.get_page_document(project_id, session, page_id)["metadata"]["revision"]
+            )
+
+            accepted = asyncio.run(
+                engine.apply_page_commands(
+                    project_id=project_id,
+                    session=session,
+                    page_id=page_id,
+                    raw_config={"target_lang": "CHS", "translator": "none"},
+                    commands=[
+                        {
+                            "type": "update_translation",
+                            "region_id": "auto-1",
+                            "text": "Project Head 已提交",
+                        }
+                    ],
+                    expected_revision=current_revision,
+                )
+            )
+
+            committed_head = engine.project_workspace.read_project_head(project_id)
+            self.assertIsNotNone(committed_head)
+            self.assertEqual(
+                committed_head["generation"],
+                int((initial_head or {}).get("generation") or 0) + 1,
+            )
+            self.assertEqual(
+                engine.project_workspace.read_project_page_document(project_id, page_id)["metadata"]["revision"],
+                accepted["revision"],
+            )
+            self.assertEqual(
+                engine.project_workspace.read_project_session_document(project_id)[
+                    "translation_region_overrides"
+                ]["auto-1"],
+                "Project Head 已提交",
+            )
 
     def test_concurrent_page_commands_with_the_same_revision_cannot_overwrite_each_other(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

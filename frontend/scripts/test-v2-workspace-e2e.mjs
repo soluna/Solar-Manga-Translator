@@ -205,9 +205,10 @@ async function ensureServices() {
   try {
     if (!(await httpOk(`${BACKEND_URL}/api/status`))) {
       const python = pickBackendPython()
+      const backendLauncher = path.join(repoRoot, 'scripts', 'run_canvas_e2e_backend.py')
       const backendProcess = spawnProcess(
         python,
-        ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', new URL(BACKEND_URL).port || '8000'],
+        [backendLauncher, '--host', '127.0.0.1', '--port', new URL(BACKEND_URL).port || '8000'],
         {
           cwd: backendDir,
           env: {

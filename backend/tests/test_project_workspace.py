@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 from engine.project_workspace import (
     CorruptSnapshotArtifactError,
     InvalidStorageIdentifierError,
+    ProjectHeadConflictError,
     ProjectWorkspace,
 )
 from runtime_paths import AppPaths
@@ -55,6 +56,203 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 workspace.project_page_document_path("project-a", "0001.png"),
                 workspace.projects_root.resolve() / "project-a" / "pages" / "0001.png" / "page_document.json",
             )
+
+    def test_project_head_reuses_unchanged_page_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            project_id = "project-a"
+            project_manifest = {
+                "project_id": project_id,
+                "title": "Project A",
+                "updated_at": "2026-07-15T00:00:00+00:00",
+            }
+            state_document = {
+                "schema_version": 2,
+                "project_id": project_id,
+                "source_images": [],
+            }
+
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={
+                    "001.png": {"page_id": "001.png", "metadata": {"revision": 1}},
+                    "002.png": {"page_id": "002.png", "metadata": {"revision": 1}},
+                },
+            )
+            second_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest={**project_manifest, "updated_at": "2026-07-15T00:01:00+00:00"},
+                page_documents={
+                    "001.png": {"page_id": "001.png", "metadata": {"revision": 2}},
+                },
+            )
+
+            self.assertEqual(first_head["generation"], 1)
+            self.assertEqual(second_head["generation"], 2)
+            self.assertNotEqual(
+                first_head["files"]["pages/001.png/page_document.json"]["blob"],
+                second_head["files"]["pages/001.png/page_document.json"]["blob"],
+            )
+            self.assertEqual(
+                first_head["files"]["pages/002.png/page_document.json"]["blob"],
+                second_head["files"]["pages/002.png/page_document.json"]["blob"],
+            )
+            self.assertEqual(
+                workspace.read_project_page_document(project_id, "001.png")["metadata"]["revision"],
+                2,
+            )
+            self.assertEqual(
+                workspace.read_project_page_document(project_id, "002.png")["metadata"]["revision"],
+                1,
+            )
+
+    def test_project_head_replaces_stale_artifact_paths_in_the_commit_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            project_id = "project-a"
+            old_cache = root / "old-cache.json"
+            old_output = root / "old-output.png"
+            new_cache = root / "new-cache.json"
+            new_output = root / "new-output.png"
+            old_cache.write_text("old cache", encoding="utf-8")
+            old_output.write_bytes(b"old output")
+            new_cache.write_text("new cache", encoding="utf-8")
+            new_output.write_bytes(b"new output")
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+                artifact_files={
+                    "cache/001.png/obsolete.json": old_cache,
+                    "translated/001-old.png": old_output,
+                },
+            )
+
+            second_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 2}}},
+                artifact_files={
+                    "cache/001.png/current.json": new_cache,
+                    "translated/001-new.png": new_output,
+                },
+                expected_generation=first_head["generation"],
+                replace_prefixes=("cache/001.png/",),
+                remove_logical_paths={"translated/001-old.png"},
+            )
+
+            self.assertNotIn("cache/001.png/obsolete.json", second_head["files"])
+            self.assertNotIn("translated/001-old.png", second_head["files"])
+            self.assertIn("cache/001.png/current.json", second_head["files"])
+            self.assertIn("translated/001-new.png", second_head["files"])
+
+    def test_project_head_rejects_a_stale_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            project_id = "project-a"
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+                expected_generation=0,
+            )
+
+            with self.assertRaises(ProjectHeadConflictError):
+                workspace.commit_project_head(
+                    project_id,
+                    state_document=state_document,
+                    project_manifest=project_manifest,
+                    page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 2}}},
+                    expected_generation=0,
+                )
+
+            self.assertEqual(workspace.read_project_head(project_id), first_head)
+            self.assertEqual(
+                workspace.read_project_page_document(project_id, "001.png")["metadata"]["revision"],
+                1,
+            )
+
+    def test_project_head_pointer_failure_preserves_the_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            project_id = "project-a"
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+            )
+            original_write = workspace.write_json_file
+
+            def fail_only_at_head_pointer(path: Path, payload: object) -> None:
+                if path == workspace.project_head_path(project_id):
+                    raise OSError("simulated head pointer failure")
+                original_write(path, payload)
+
+            with mock.patch.object(
+                workspace,
+                "write_json_file",
+                side_effect=fail_only_at_head_pointer,
+            ):
+                with self.assertRaisesRegex(OSError, "head pointer failure"):
+                    workspace.commit_project_head(
+                        project_id,
+                        state_document=state_document,
+                        project_manifest=project_manifest,
+                        page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 2}}},
+                        expected_generation=1,
+                    )
+
+            self.assertEqual(workspace.read_project_head(project_id), first_head)
+            self.assertEqual(
+                workspace.read_project_page_document(project_id, "001.png")["metadata"]["revision"],
+                1,
+            )
+
+    def test_compatibility_projection_failure_does_not_uncommit_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            project_id = "project-a"
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            original_write = workspace.write_json_file
+
+            def fail_only_at_session_projection(path: Path, payload: object) -> None:
+                if path == workspace.project_session_state_path(project_id):
+                    raise OSError("simulated compatibility projection failure")
+                original_write(path, payload)
+
+            with mock.patch.object(
+                workspace,
+                "write_json_file",
+                side_effect=fail_only_at_session_projection,
+            ):
+                committed_head = workspace.commit_project_head(
+                    project_id,
+                    state_document=state_document,
+                    project_manifest=project_manifest,
+                    page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+                )
+
+            self.assertEqual(workspace.read_project_head(project_id), committed_head)
+            self.assertEqual(
+                workspace.read_project_session_document(project_id),
+                state_document,
+            )
+            self.assertFalse(workspace.project_session_state_path(project_id).exists())
 
     def test_json_helpers_default_bad_json_and_count_page_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,6 +366,95 @@ class ProjectWorkspaceTests(unittest.TestCase):
             self.assertTrue(blob_files[0].exists())
             workspace.garbage_collect_snapshot_blobs("project-a", [])
             self.assertFalse(blob_files[0].exists())
+
+    def test_artifact_gc_keeps_only_head_and_snapshot_revision_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.make_workspace(Path(tmp))
+            project_id = "project-a"
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+            )
+            first_page_blob = first_head["files"]["pages/001.png/page_document.json"]["blob"]
+            second_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 2}}},
+                expected_generation=1,
+            )
+            second_page_blob = second_head["files"]["pages/001.png/page_document.json"]["blob"]
+            first_revision_path = workspace.project_revisions_dir(project_id) / f"{first_head['revision_id']}.json"
+            second_revision_path = workspace.project_revisions_dir(project_id) / f"{second_head['revision_id']}.json"
+            first_blob_path = workspace.project_artifact_store_dir(project_id) / first_page_blob[:2] / first_page_blob
+            second_blob_path = workspace.project_artifact_store_dir(project_id) / second_page_blob[:2] / second_page_blob
+            snapshot = {
+                "project_head_revision_id": first_head["revision_id"],
+                "artifact_bundle": {
+                    "schema_version": 1,
+                    "files": first_head["files"],
+                },
+            }
+
+            workspace.garbage_collect_snapshot_blobs(project_id, [snapshot])
+
+            self.assertTrue(first_revision_path.exists())
+            self.assertTrue(second_revision_path.exists())
+            self.assertTrue(first_blob_path.exists())
+            self.assertTrue(second_blob_path.exists())
+
+            workspace.garbage_collect_snapshot_blobs(project_id, [])
+
+            self.assertFalse(first_revision_path.exists())
+            self.assertTrue(second_revision_path.exists())
+            self.assertFalse(first_blob_path.exists())
+            self.assertTrue(second_blob_path.exists())
+
+    def test_pending_artifact_set_shares_the_store_and_is_a_gc_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            pending_output = root / "pending-page.png"
+            pending_output.write_bytes(b"completed pending page")
+
+            pending = workspace.write_pending_artifact_set(
+                "project-a",
+                action="resume_translation",
+                resume_fingerprint="fingerprint-a",
+                base_head=None,
+                state_document={"schema_version": 2, "project_id": "project-a"},
+                files={"translated/001.png": pending_output},
+            )
+            blob_id = pending["artifact_bundle"]["files"]["translated/001.png"]["blob"]
+            blob_path = workspace.project_artifact_store_dir("project-a") / blob_id[:2] / blob_id
+            restored_dir = root / "restored"
+
+            workspace.garbage_collect_snapshot_blobs("project-a", [])
+            workspace.restore_pending_artifact_set(
+                "project-a",
+                pending,
+                {"translated": restored_dir},
+            )
+
+            self.assertTrue(blob_path.exists())
+            self.assertEqual(
+                (restored_dir / "001.png").read_bytes(),
+                b"completed pending page",
+            )
+            self.assertEqual(
+                workspace.read_pending_artifact_set("project-a")["resume_fingerprint"],
+                "fingerprint-a",
+            )
+
+            workspace.clear_pending_artifact_set("project-a")
+            workspace.garbage_collect_snapshot_blobs("project-a", [])
+
+            self.assertIsNone(workspace.read_pending_artifact_set("project-a"))
+            self.assertFalse(blob_path.exists())
 
     def test_snapshot_artifacts_reject_traversal_and_bad_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -24,6 +24,7 @@ from domain.project_artifacts import (
 from domain.project_state import PROJECT_STATE_SCHEMA_VERSION
 from engine.translator import TranslatorEngine
 from runtime_paths import AppPaths
+from backend.tests._textblock_stub import textblock_module_patch
 
 
 def make_test_paths(root: Path) -> AppPaths:
@@ -39,6 +40,17 @@ def make_test_paths(root: Path) -> AppPaths:
 
 
 class ProjectArtifactStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.textblock_patcher = textblock_module_patch()
+        cls.textblock_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.textblock_patcher.stop()
+        super().tearDownClass()
+
     def test_page_artifacts_follow_the_visible_three_step_workflow(self) -> None:
         state = ProjectArtifactState.create(["0001.png"])
 
@@ -212,6 +224,7 @@ class ProjectArtifactStateTests(unittest.TestCase):
             legacy_persisted.pop("artifact_state", None)
             legacy_persisted["workflow_stage"] = "detected"
             engine._write_json_file(state_path, legacy_persisted)
+            engine.project_workspace.project_head_path(project_id).unlink()
 
             engine.restore_project_session(project_id)
 
@@ -259,7 +272,6 @@ class ProjectArtifactStateTests(unittest.TestCase):
                 "style_region_overrides": {},
                 "artifact_state": artifact_state.model_dump(mode="json"),
             }
-            engine.initialize_project(project_id, session, title="Edited artifact")
             engine._write_json_file(
                 engine._project_page_document_path(project_id, page_id),
                 {
@@ -282,6 +294,7 @@ class ProjectArtifactStateTests(unittest.TestCase):
                     "metadata": {"revision": 1},
                 },
             )
+            engine.initialize_project(project_id, session, title="Edited artifact")
 
             result = asyncio.run(
                 engine.apply_page_commands(

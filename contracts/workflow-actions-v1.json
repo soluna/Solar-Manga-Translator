@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "actions": {
+    "detect": {
+      "action_label": "识别并生成空页",
+      "workflow_phase": "recognize",
+      "phase_label": "检测、OCR 与擦字",
+      "running_stage": "detecting",
+      "completed_stage": "detected",
+      "scope": "project",
+      "scope_label": "整组页面",
+      "start_message": "识别与空页生成已开始，共 {total} 张图片。",
+      "progress_message": "正在识别并生成空页：{current} / {total}",
+      "failure_message": "识别或空页生成失败。"
+    },
+    "translate": {
+      "action_label": "整本翻译",
+      "workflow_phase": "translate",
+      "phase_label": "翻译与嵌字",
+      "running_stage": "translating",
+      "completed_stage": "translated",
+      "scope": "project",
+      "scope_label": "整组页面",
+      "start_message": "翻译已开始，共 {total} 张图片。",
+      "progress_message": "翻译进行中：{current} / {total}",
+      "failure_message": "翻译失败。"
+    },
+    "resume-translate": {
+      "action_label": "继续翻译",
+      "workflow_phase": "translate",
+      "phase_label": "翻译与嵌字",
+      "running_stage": "translating",
+      "completed_stage": "translated",
+      "scope": "project",
+      "scope_label": "整组页面",
+      "start_message": "继续翻译已开始，共 {total} 张图片。",
+      "progress_message": "继续翻译进行中：{current} / {total}",
+      "failure_message": "继续翻译失败。"
+    },
+    "translate-page": {
+      "action_label": "当前页翻译",
+      "workflow_phase": "translate",
+      "phase_label": "翻译与嵌字",
+      "running_stage": "translating",
+      "completed_stage": "translated",
+      "scope": "page",
+      "scope_label": "当前页",
+      "start_message": "当前页翻译已开始。",
+      "progress_message": "当前页翻译进行中：{current} / {total}",
+      "failure_message": "当前页翻译失败。"
+    },
+    "rerender": {
+      "action_label": "重新嵌字",
+      "workflow_phase": "render",
+      "phase_label": "重新嵌字",
+      "running_stage": "translating",
+      "completed_stage": "translated",
+      "scope": "project",
+      "scope_label": "整组页面",
+      "start_message": "重嵌字已开始，共 {total} 张图片。",
+      "progress_message": "重嵌字进行中：{current} / {total}",
+      "failure_message": "重嵌字失败。"
+    }
+  }
+}

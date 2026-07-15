@@ -4,6 +4,8 @@
 
 Accepted on 2026-07-13.
 
+The snapshot-only storage boundary was generalized to Project Head and Pending Artifact Sets by ADR 0004.
+
 ## Context
 
 Project snapshots previously stored mutable output filenames and editing overrides, then copied the project's current rerender cache during restoration. After later recognition, cleanup, page edits, or output replacement, restoring an old snapshot could therefore combine an old manifest with current files. Copying a complete private directory for every snapshot would fix consistency but make storage grow with snapshot count even when most pages did not change.

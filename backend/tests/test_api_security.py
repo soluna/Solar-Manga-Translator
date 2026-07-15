@@ -233,15 +233,20 @@ class ApiSecurityTests(unittest.TestCase):
             )
             project_id = upload.json()["session_id"]
             main.SESSIONS.pop(project_id, None)
-            state_path = main.translator_engine.project_workspace.project_session_state_path(
-                project_id
+            workspace = main.translator_engine.project_workspace
+            head = workspace.read_project_head(project_id)
+            state_blob = head["files"]["state/session.json"]["blob"]
+            state_blob_path = (
+                workspace.project_artifact_store_dir(project_id)
+                / state_blob[:2]
+                / state_blob
             )
-            state_path.write_text("{not valid json", encoding="utf-8")
+            state_blob_path.write_text("{not valid json", encoding="utf-8")
 
             response = self.client.post(f"/api/projects/{project_id}/restore")
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("项目状态文件已损坏", response.json()["detail"])
+        self.assertIn("校验失败", response.json()["detail"])
 
     def test_restore_rejects_an_unknown_project_state_schema(self) -> None:
         image_bytes = io.BytesIO()
@@ -256,14 +261,16 @@ class ApiSecurityTests(unittest.TestCase):
             )
             project_id = upload.json()["session_id"]
             main.SESSIONS.pop(project_id, None)
-            state_path = main.translator_engine.project_workspace.project_session_state_path(
-                project_id
-            )
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            workspace = main.translator_engine.project_workspace
+            head = workspace.read_project_head(project_id)
+            state = workspace.read_project_session_document(project_id)
             state["schema_version"] = 99
-            state_path.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            workspace.commit_project_head(
+                project_id,
+                state_document=state,
+                project_manifest=workspace.read_project_manifest(project_id),
+                page_documents={},
+                expected_generation=head["generation"],
             )
 
             response = self.client.post(f"/api/projects/{project_id}/restore")
@@ -390,23 +397,32 @@ class ApiSecurityTests(unittest.TestCase):
             "auto_extract_completed": True,
             "auto_extracted_at": "2026-07-07T12:56:55+00:00",
         }
-        main.translator_engine._write_json_file(
-            main.translator_engine._project_page_document_path(project_id, page_id),
-            {
-                "page_id": page_id,
-                "regions": [
-                    {
-                        "region_id": "r1",
-                        "source_text": "私の名前は片桐 奈々美",
-                        "translation": {},
-                    },
-                    {
-                        "region_id": "r2",
-                        "source_text": "ど…どうしたの？奈々美ちゃん",
-                        "translation": {},
-                    },
-                ],
-            },
+        page_document = {
+            "page_id": page_id,
+            "regions": [
+                {
+                    "region_id": "r1",
+                    "source_text": "私の名前は片桐 奈々美",
+                    "translation": {},
+                },
+                {
+                    "region_id": "r2",
+                    "source_text": "ど…どうしたの？奈々美ちゃん",
+                    "translation": {},
+                },
+            ],
+        }
+        workspace = main.translator_engine.project_workspace
+        current_head = workspace.read_project_head(project_id)
+        workspace.commit_project_head(
+            project_id,
+            state_document=main.translator_engine._serialize_session_state(
+                project_id,
+                session,
+            ),
+            project_manifest=workspace.read_project_manifest(project_id),
+            page_documents={page_id: page_document},
+            expected_generation=current_head["generation"],
         )
 
         async def fake_glossary_request(_config, prompt):

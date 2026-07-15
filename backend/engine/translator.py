@@ -722,9 +722,9 @@ class TranslatorEngine:
             stored_name = str(image.get("stored_name") or "").strip()
             if not stored_name:
                 continue
-            document = self._read_json_file(
-                self._project_page_document_path(project_id, stored_name),
-                {},
+            document = self.project_workspace.read_project_page_document(
+                project_id,
+                stored_name,
             )
             metadata = document.get("metadata") if isinstance(document, dict) else {}
             document_revision = int(
@@ -1025,7 +1025,10 @@ class TranslatorEngine:
             stored_name = str(image.get("stored_name") or "").strip()
             if not stored_name:
                 continue
-            payload = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+            payload = self.project_workspace.read_project_page_document(
+                project_id,
+                stored_name,
+            )
             regions = payload.get("regions") if isinstance(payload, dict) else None
             if isinstance(regions, list) and any(isinstance(region, dict) for region in regions):
                 return True
@@ -1197,7 +1200,15 @@ class TranslatorEngine:
             if output_path is not None and output_path.is_file() and not output_path.is_symlink():
                 files[f"translated/{output_name}"] = output_path
         collect_tree("cache", self._session_rerender_cache_dir(session, project_id))
-        collect_tree("pages", self._project_pages_dir(project_id))
+        for image in session.get("source_images") or []:
+            if not isinstance(image, dict):
+                continue
+            stored_name = str(image.get("stored_name") or "").strip()
+            if stored_name:
+                collect_tree(
+                    f"pages/{stored_name}",
+                    self._project_page_dir(project_id, stored_name),
+                )
         return files
 
     def _create_project_snapshot(
@@ -1229,13 +1240,22 @@ class TranslatorEngine:
             "cover_image": self._project_cover_url(project_id, session),
             "pinned": False,
         }
-        previous_snapshot = next(iter(self._read_snapshot_manifests(project_id)), None)
-        previous_bundle = previous_snapshot.get("artifact_bundle") if isinstance(previous_snapshot, dict) else None
-        snapshot["artifact_bundle"] = self.project_workspace.capture_snapshot_artifacts(
-            project_id,
-            self._snapshot_artifact_files(project_id, session),
-            previous_bundle=previous_bundle,
-        )
+        current_head = self.project_workspace.read_project_head(project_id)
+        if current_head is not None:
+            snapshot["artifact_bundle"] = {
+                "schema_version": 1,
+                "files": copy.deepcopy(current_head["files"]),
+            }
+            snapshot["project_head_generation"] = int(current_head["generation"])
+            snapshot["project_head_revision_id"] = str(current_head["revision_id"])
+        else:
+            previous_snapshot = next(iter(self._read_snapshot_manifests(project_id)), None)
+            previous_bundle = previous_snapshot.get("artifact_bundle") if isinstance(previous_snapshot, dict) else None
+            snapshot["artifact_bundle"] = self.project_workspace.capture_snapshot_artifacts(
+                project_id,
+                self._snapshot_artifact_files(project_id, session),
+                previous_bundle=previous_bundle,
+            )
         self._write_json_file(self._project_snapshots_dir(project_id) / f"{snapshot_id}.json", snapshot)
         return snapshot
 
@@ -1268,6 +1288,16 @@ class TranslatorEngine:
 
     def _refresh_project_index_entry(self, project_summary: dict[str, Any]) -> None:
         self.project_workspace.refresh_project_index_entry(project_summary)
+
+    def _refresh_project_index_projection(self, project_summary: dict[str, Any]) -> None:
+        try:
+            self._refresh_project_index_entry(project_summary)
+        except Exception:
+            logger.exception(
+                "Project Head committed but the rebuildable project index could not be refreshed. "
+                "project=%s",
+                project_summary.get("project_id"),
+            )
 
     def initialize_project(
         self,
@@ -2276,30 +2306,110 @@ class TranslatorEngine:
         project_dir.mkdir(parents=True, exist_ok=True)
         self._project_snapshots_dir(project_id).mkdir(parents=True, exist_ok=True)
 
-        if persist_page_documents:
-            self._persist_page_documents(project_id, session, page_ids=page_ids)
-
-        latest_snapshot = None
-        if snapshot_kind:
-            latest_snapshot = self._create_project_snapshot(project_id, session, snapshot_kind, snapshot_summary)
-
+        page_documents = (
+            self._build_page_documents(project_id, session, page_ids=page_ids)
+            if persist_page_documents
+            else {}
+        )
         session_state = self._serialize_session_state(project_id, session)
-        self._write_json_file(self._project_session_state_path(project_id), session_state)
-
-        project_summary = self._build_project_summary(project_id, session, latest_snapshot=latest_snapshot)
+        project_summary = self._build_project_summary(project_id, session)
+        if page_documents:
+            project_summary["region_count"] = sum(
+                (
+                    sum(
+                        1
+                        for region in page_documents[stored_name].get("regions") or []
+                        if isinstance(region, dict)
+                    )
+                    if stored_name in page_documents
+                    else self._page_document_region_count(project_id, stored_name)
+                )
+                for stored_name in (
+                    str(image.get("stored_name") or "").strip()
+                    for image in session.get("source_images") or []
+                    if isinstance(image, dict)
+                )
+                if stored_name
+            )
         project_manifest = {
             **project_summary,
             "source_dir": str(session.get("source_dir") or ""),
             "translated_dir": str(session.get("translated_dir") or ""),
         }
-        self._write_json_file(self._project_manifest_path(project_id), project_manifest)
-        self._refresh_project_index_entry(project_summary)
+        current_head = self.project_workspace.read_project_head(project_id)
+        artifact_files = self._project_head_artifact_files(
+            project_id,
+            session,
+            page_ids=page_ids if persist_page_documents else [],
+            bootstrap=current_head is None,
+        )
+        replace_prefixes, remove_logical_paths = self._project_head_replacement_scope(
+            project_id,
+            page_ids=page_ids,
+            persist_page_documents=persist_page_documents,
+            current_head=current_head,
+        )
+        committed_head = self.project_workspace.commit_project_head(
+            project_id,
+            state_document=session_state,
+            project_manifest=project_manifest,
+            page_documents=page_documents,
+            artifact_files=artifact_files,
+            expected_generation=int((current_head or {}).get("generation") or 0),
+            replace_prefixes=replace_prefixes,
+            remove_logical_paths=remove_logical_paths,
+        )
+        self._refresh_project_index_projection(project_summary)
 
         if snapshot_kind:
-            self._enforce_snapshot_retention(project_id, session)
-            refreshed_summary = self._build_project_summary(project_id, session)
-            self._write_json_file(self._project_manifest_path(project_id), {**project_manifest, **refreshed_summary})
-            self._refresh_project_index_entry(refreshed_summary)
+            try:
+                latest_snapshot = self._create_project_snapshot(
+                    project_id,
+                    session,
+                    snapshot_kind,
+                    snapshot_summary,
+                )
+                self._enforce_snapshot_retention(project_id, session)
+                refreshed_summary = self._build_project_summary(
+                    project_id,
+                    session,
+                    latest_snapshot=latest_snapshot,
+                )
+                project_manifest = {**project_manifest, **refreshed_summary}
+                self.project_workspace.commit_project_head(
+                    project_id,
+                    state_document=session_state,
+                    project_manifest=project_manifest,
+                    page_documents={},
+                    expected_generation=int(committed_head["generation"]),
+                )
+                self._refresh_project_index_projection(refreshed_summary)
+            except Exception:
+                logger.exception(
+                    "Primary Project Head committed but automatic snapshot metadata could not be refreshed. "
+                    "project=%s snapshot_kind=%s",
+                    project_id,
+                    snapshot_kind,
+                )
+        try:
+            pending = self.project_workspace.read_pending_artifact_set(project_id)
+            final_head = self.project_workspace.read_project_head(project_id)
+            if (
+                pending is not None
+                and str(pending.get("base_head_revision_id") or "")
+                != str((final_head or {}).get("revision_id") or "")
+            ):
+                self.project_workspace.clear_pending_artifact_set(project_id)
+            self.project_workspace.garbage_collect_snapshot_blobs(
+                project_id,
+                self._read_snapshot_manifests(project_id),
+            )
+        except Exception:
+            logger.exception(
+                "Project Head committed but obsolete internal revisions could not be collected. "
+                "project=%s",
+                project_id,
+            )
 
     def list_projects(self) -> list[dict[str, Any]]:
         items = self.project_workspace.rebuild_project_index()
@@ -2391,7 +2501,7 @@ class TranslatorEngine:
 
     def restore_project_session(self, project_id: str) -> dict[str, Any]:
         state_document = self.project_workspace.read_project_session_document(project_id)
-        manifest = self._read_json_file(self._project_manifest_path(project_id), {})
+        manifest = self.project_workspace.read_project_manifest(project_id)
         restored_from_manifest = False
         if state_document is None:
             recovered_session = self._recover_session_from_manifest(project_id, manifest)
@@ -4144,7 +4254,10 @@ class TranslatorEngine:
             self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
         )
 
-        previous_document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+        previous_document = self.project_workspace.read_project_page_document(
+            project_id,
+            stored_name,
+        )
         previous_metadata = previous_document.get("metadata") if isinstance(previous_document, dict) else {}
         previous_revision = int((previous_metadata or {}).get("revision") or 0)
         previous_regions = previous_document.get("regions") if isinstance(previous_document, dict) else []
@@ -4242,24 +4355,134 @@ class TranslatorEngine:
         project_id: str,
         session: dict[str, Any],
         page_ids: list[str] | None = None,
-    ) -> None:
+    ) -> dict[str, dict[str, Any]]:
+        documents = self._build_page_documents(
+            project_id,
+            session,
+            page_ids=page_ids,
+        )
+        for stored_name, document in documents.items():
+            self._write_json_file(
+                self._project_page_document_path(project_id, stored_name),
+                document,
+            )
+        return documents
+
+    def _build_page_documents(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_ids: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         source_images = list(session.get("source_images") or [])
         if not source_images:
-            return
+            return {}
 
         target_ids = {str(page_id) for page_id in (page_ids or []) if str(page_id)}
         config = self._normalize_config(session.get("last_config") or {})
+        documents: dict[str, dict[str, Any]] = {}
         for image in source_images:
             stored_name = str(image.get("stored_name") or "")
             if not stored_name:
                 continue
             if target_ids and stored_name not in target_ids:
                 continue
-            try:
-                document = self._build_page_document(project_id, session, stored_name, config)
-                self._write_json_file(self._project_page_document_path(project_id, stored_name), document)
-            except Exception as exc:
-                print(f"[WARN] Failed to persist page document for {project_id}/{stored_name}: {exc}")
+            document = self._build_page_document(
+                project_id,
+                session,
+                stored_name,
+                config,
+            )
+            documents[stored_name] = document
+        return documents
+
+    def _project_head_artifact_files(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        *,
+        page_ids: list[str] | None,
+        bootstrap: bool,
+    ) -> dict[str, Path]:
+        if not bootstrap and page_ids == []:
+            return {}
+        if bootstrap or page_ids is None:
+            return self._snapshot_artifact_files(project_id, session)
+
+        target_ids = {
+            str(page_id).strip()
+            for page_id in page_ids
+            if str(page_id).strip()
+        }
+        files: dict[str, Path] = {}
+
+        def collect_tree(prefix: str, root: Path) -> None:
+            if not root.is_dir():
+                return
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and not path.is_symlink():
+                    files[f"{prefix}/{path.relative_to(root).as_posix()}"] = path
+
+        source_dir = Path(str(session.get("source_dir") or ""))
+        translated_dir = Path(str(session.get("translated_dir") or ""))
+        translated_output_map = dict(session.get("translated_output_map") or {})
+        for page_id in sorted(target_ids):
+            source_path = source_dir / page_id
+            if source_path.is_file() and not source_path.is_symlink():
+                files[f"source/{page_id}"] = source_path
+            output_name = str(translated_output_map.get(page_id) or "").strip()
+            if output_name and Path(output_name).name == output_name:
+                output_path = translated_dir / output_name
+                if output_path.is_file() and not output_path.is_symlink():
+                    files[f"translated/{output_name}"] = output_path
+            collect_tree(
+                f"cache/{page_id}",
+                self._session_page_cache_dir(session, project_id, page_id),
+            )
+            collect_tree(
+                f"pages/{page_id}",
+                self._project_page_dir(project_id, page_id),
+            )
+        return files
+
+    def _project_head_replacement_scope(
+        self,
+        project_id: str,
+        *,
+        page_ids: list[str] | None,
+        persist_page_documents: bool,
+        current_head: dict[str, Any] | None,
+    ) -> tuple[tuple[str, ...], set[str]]:
+        if current_head is None or not persist_page_documents:
+            return (), set()
+        target_page_ids = {
+            str(page_id).strip()
+            for page_id in (page_ids or [])
+            if str(page_id).strip()
+        }
+        if not target_page_ids:
+            return ("source/", "translated/", "cache/", "pages/"), set()
+
+        replace_prefixes = tuple(
+            prefix
+            for page_id in sorted(target_page_ids)
+            for prefix in (f"cache/{page_id}/", f"pages/{page_id}/")
+        )
+        current_state = self.project_workspace.read_project_session_document(project_id) or {}
+        current_output_map = (
+            current_state.get("translated_output_map")
+            if isinstance(current_state, dict)
+            else {}
+        )
+        if not isinstance(current_output_map, dict):
+            current_output_map = {}
+        remove_logical_paths = {
+            f"translated/{output_name}"
+            for page_id in target_page_ids
+            for output_name in [str(current_output_map.get(page_id) or "").strip()]
+            if output_name and Path(output_name).name == output_name
+        }
+        return replace_prefixes, remove_logical_paths
 
     def _migrate_page_document(self, payload: dict[str, Any]) -> dict[str, Any]:
         metadata = payload.get("metadata") or {}
@@ -4295,24 +4518,18 @@ class TranslatorEngine:
         return migrated
 
     def get_page_document(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
-        document_path = self._project_page_document_path(project_id, page_id)
-        payload = self._read_json_file(document_path, {})
+        payload = self.project_workspace.read_project_page_document(project_id, page_id)
         if isinstance(payload, dict) and payload:
-            stored_payload = payload
             payload = self._migrate_page_document(payload)
             normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
             normalized_payload = self._apply_session_overrides_to_page_document(session, normalized_payload)
-            if normalized_payload != stored_payload:
-                self._write_json_file(document_path, normalized_payload)
             return normalized_payload
 
         self._persist_page_documents(project_id, session, page_ids=[page_id])
-        payload = self._read_json_file(document_path, {})
+        payload = self.project_workspace.read_project_page_document(project_id, page_id)
         if isinstance(payload, dict) and payload:
             normalized_payload = self._normalize_page_document_image_urls(project_id, session, page_id, payload)
             normalized_payload = self._apply_session_overrides_to_page_document(session, normalized_payload)
-            if normalized_payload != payload:
-                self._write_json_file(document_path, normalized_payload)
             return normalized_payload
         raise FileNotFoundError("当前页面文档不存在，请先完成一次识别或翻译。")
 
@@ -5578,6 +5795,44 @@ class TranslatorEngine:
             },
         }
 
+    def _pending_artifact_resume_fingerprint(
+        self,
+        action: str,
+        raw_config: dict[str, Any] | None,
+        *,
+        target_stored_name: str | None = None,
+    ) -> str:
+        payload = {
+            "action": str(action or ""),
+            "target_stored_name": str(target_stored_name or ""),
+            "config": self._normalize_config(raw_config or {}),
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _pending_artifact_files(
+        staging_output_dir: Path,
+        staging_cache_dir: Path,
+    ) -> dict[str, Path]:
+        files: dict[str, Path] = {}
+        for prefix, root in (
+            ("translated", staging_output_dir),
+            ("cache", staging_cache_dir),
+        ):
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and not path.is_symlink():
+                    files[f"{prefix}/{path.relative_to(root).as_posix()}"] = path
+        return files
+
     @contextlib.contextmanager
     def _project_artifact_transaction(
         self,
@@ -5585,8 +5840,11 @@ class TranslatorEngine:
         session: dict[str, Any],
         *,
         seed_existing: bool = False,
+        action: str,
+        resume_fingerprint: str,
     ):
         previous_session = copy.deepcopy(session)
+        base_head = self.project_workspace.read_project_head(project_id)
         live_output_dir = Path(session["translated_dir"])
         live_cache_dir = self._session_rerender_cache_dir(session, project_id)
         transaction_id = uuid.uuid4().hex
@@ -5613,10 +5871,76 @@ class TranslatorEngine:
         session["translated_dir"] = str(staging_output_dir)
         session["rerender_cache_dir"] = str(staging_cache_dir)
         session["_artifact_transaction_deferred_persistence"] = []
+        session["_artifact_transaction_completed_page_ids"] = []
+        pending_restored = False
+        try:
+            pending = self.project_workspace.read_pending_artifact_set(project_id)
+        except Exception:
+            logger.exception(
+                "Ignoring a corrupt Pending Artifact Set. project=%s",
+                project_id,
+            )
+            pending = None
+        if pending is not None:
+            pending_matches = (
+                str(pending.get("action") or "") == str(action or "")
+                and str(pending.get("resume_fingerprint") or "") == str(resume_fingerprint or "")
+                and int(pending.get("base_head_generation") or 0)
+                == int((base_head or {}).get("generation") or 0)
+                and str(pending.get("base_head_revision_id") or "")
+                == str((base_head or {}).get("revision_id") or "")
+            )
+            if pending_matches:
+                try:
+                    self.project_workspace.restore_pending_artifact_set(
+                        project_id,
+                        pending,
+                        {
+                            "translated": staging_output_dir,
+                            "cache": staging_cache_dir,
+                        },
+                    )
+                    pending_state = ProjectState.load(
+                        pending["state_document"],
+                        expected_project_id=project_id,
+                    ).to_runtime_session()
+                    session.clear()
+                    session.update(pending_state)
+                    session["translated_dir"] = str(staging_output_dir)
+                    session["rerender_cache_dir"] = str(staging_cache_dir)
+                    session["_pending_completed_page_ids"] = list(
+                        pending.get("completed_page_ids") or []
+                    )
+                    session["_artifact_transaction_deferred_persistence"] = []
+                    session["_artifact_transaction_completed_page_ids"] = list(
+                        pending.get("completed_page_ids") or []
+                    )
+                    pending_restored = True
+                except Exception:
+                    logger.exception(
+                        "Pending Artifact Set could not be restored; starting from Project Head. project=%s",
+                        project_id,
+                    )
+                    shutil.rmtree(staging_output_dir, ignore_errors=True)
+                    shutil.rmtree(staging_cache_dir, ignore_errors=True)
+                    if seed_existing and live_output_dir.exists():
+                        shutil.copytree(live_output_dir, staging_output_dir)
+                    else:
+                        staging_output_dir.mkdir(parents=True, exist_ok=True)
+                    if seed_existing and live_cache_dir.exists():
+                        shutil.copytree(live_cache_dir, staging_cache_dir)
+                    else:
+                        staging_cache_dir.mkdir(parents=True, exist_ok=True)
+                    session.clear()
+                    session.update(copy.deepcopy(previous_session))
+                    session["translated_dir"] = str(staging_output_dir)
+                    session["rerender_cache_dir"] = str(staging_cache_dir)
+                    session["_artifact_transaction_deferred_persistence"] = []
+                    session["_artifact_transaction_completed_page_ids"] = []
 
         committed_paths: list[tuple[Path, Path]] = []
         try:
-            yield
+            yield pending_restored
 
             replacements = (
                 (live_output_dir, staging_output_dir, backup_output_dir),
@@ -5636,15 +5960,116 @@ class TranslatorEngine:
 
             session["translated_dir"] = str(live_output_dir)
             session["rerender_cache_dir"] = str(live_cache_dir)
+            session.pop("_pending_completed_page_ids", None)
             deferred_persistence = session.pop("_artifact_transaction_deferred_persistence", [])
             if deferred_persistence:
+                persist_page_documents = any(
+                    bool(request.get("persist_page_documents"))
+                    for request in deferred_persistence
+                )
+                requested_page_ids: list[str] | None = []
                 for request in deferred_persistence:
-                    self.persist_project_state(project_id, session, **request)
+                    page_ids = request.get("page_ids")
+                    if bool(request.get("persist_page_documents")) and page_ids is None:
+                        requested_page_ids = None
+                        break
+                    if requested_page_ids is not None:
+                        requested_page_ids.extend(str(page_id) for page_id in (page_ids or []))
+                snapshot_request = next(
+                    (
+                        request
+                        for request in reversed(deferred_persistence)
+                        if request.get("snapshot_kind")
+                    ),
+                    {},
+                )
+                self.persist_project_state(
+                    project_id,
+                    session,
+                    snapshot_kind=snapshot_request.get("snapshot_kind"),
+                    snapshot_summary=str(snapshot_request.get("snapshot_summary") or ""),
+                    persist_page_documents=persist_page_documents,
+                    page_ids=(
+                        list(dict.fromkeys(requested_page_ids))
+                        if requested_page_ids is not None
+                        else None
+                    ),
+                )
             else:
                 self.persist_project_state(project_id, session, persist_page_documents=True)
+            try:
+                self.project_workspace.clear_pending_artifact_set(project_id)
+                self.project_workspace.garbage_collect_snapshot_blobs(
+                    project_id,
+                    self._read_snapshot_manifests(project_id),
+                )
+            except Exception:
+                logger.exception(
+                    "Project Head committed but obsolete pending artifacts could not be cleaned up. "
+                    "project=%s",
+                    project_id,
+                )
+            session.pop("_artifact_transaction_completed_page_ids", None)
             for _live_dir, backup_dir in committed_paths:
                 shutil.rmtree(backup_dir, ignore_errors=True)
         except BaseException:
+            pending_output_dir = (
+                staging_output_dir
+                if staging_output_dir.is_dir()
+                else live_output_dir
+            )
+            pending_cache_dir = (
+                staging_cache_dir
+                if staging_cache_dir.is_dir()
+                else live_cache_dir
+            )
+            raw_explicitly_completed_page_ids = session.get(
+                "_artifact_transaction_completed_page_ids"
+            )
+            explicitly_completed_page_ids = {
+                str(page_id).strip()
+                for page_id in (
+                    raw_explicitly_completed_page_ids or []
+                )
+                if str(page_id).strip()
+            }
+            completed_page_ids = sorted(
+                page_id
+                for page_id, output_name in dict(
+                    session.get("translated_output_map") or {}
+                ).items()
+                if str(page_id).strip()
+                and str(output_name).strip()
+                and (pending_output_dir / str(output_name)).is_file()
+                and (
+                    not isinstance(raw_explicitly_completed_page_ids, list)
+                    or str(page_id).strip() in explicitly_completed_page_ids
+                )
+            )
+            pending_files = self._pending_artifact_files(
+                pending_output_dir,
+                pending_cache_dir,
+            )
+            if completed_page_ids and pending_files:
+                try:
+                    self.project_workspace.write_pending_artifact_set(
+                        project_id,
+                        action=action,
+                        resume_fingerprint=resume_fingerprint,
+                        base_head=base_head,
+                        state_document=self._serialize_session_state(project_id, session),
+                        files=pending_files,
+                        metadata={
+                            "created_at": self._now_iso(),
+                            "completed_page_ids": completed_page_ids,
+                            "workflow_stage": str(session.get("workflow_stage") or ""),
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to retain completed task work as a Pending Artifact Set. project=%s",
+                        project_id,
+                    )
             for live_dir, backup_dir in reversed(committed_paths):
                 shutil.rmtree(live_dir, ignore_errors=True)
                 if backup_dir.exists():
@@ -5668,29 +6093,48 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
     ) -> dict[str, str]:
-        with self._project_artifact_transaction(session_id, session):
-            await self.detect_session(
-                session_id=session_id,
-                session=session,
-                raw_config=raw_config,
-                progress_callback=progress_callback,
-                auto_continue=True,
-                _transactional=False,
+        resume_fingerprint = self._pending_artifact_resume_fingerprint(
+            "translate",
+            raw_config,
+        )
+        working_session = copy.deepcopy(session)
+        with self._project_artifact_transaction(
+            session_id,
+            working_session,
+            action="translate",
+            resume_fingerprint=resume_fingerprint,
+        ) as pending_restored:
+            can_resume_translation = (
+                pending_restored
+                and bool(working_session.get("_pending_completed_page_ids"))
+                and str(working_session.get("workflow_stage") or "") in {"detected", "translating"}
             )
+            if not can_resume_translation:
+                await self.detect_session(
+                    session_id=session_id,
+                    session=working_session,
+                    raw_config=raw_config,
+                    progress_callback=progress_callback,
+                    auto_continue=True,
+                    _transactional=False,
+                )
             result = await self.resume_translation_session(
                 session_id=session_id,
-                session=session,
+                session=working_session,
                 raw_config={
-                    **dict(raw_config or session.get("last_config") or {}),
-                    "translation_region_overrides": dict(session.get("translation_region_overrides") or {}),
-                    "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
-                    "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
-                    "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
-                    "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+                    **dict(raw_config or working_session.get("last_config") or {}),
+                    "translation_region_overrides": dict(working_session.get("translation_region_overrides") or {}),
+                    "translation_region_skip_overrides": dict(working_session.get("translation_region_skip_overrides") or {}),
+                    "translation_region_disabled_overrides": dict(working_session.get("translation_region_disabled_overrides") or {}),
+                    "translation_region_layout_overrides": dict(working_session.get("translation_region_layout_overrides") or {}),
+                    "style_region_overrides": dict(working_session.get("style_region_overrides") or {}),
                 },
                 progress_callback=progress_callback,
+                skip_completed=can_resume_translation,
                 _transactional=False,
             )
+        session.clear()
+        session.update(working_session)
         result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
         return result
 
@@ -5704,15 +6148,27 @@ class TranslatorEngine:
         _transactional: bool = True,
     ) -> dict[str, str]:
         if _transactional:
-            with self._project_artifact_transaction(session_id, session):
+            working_session = copy.deepcopy(session)
+            resume_fingerprint = self._pending_artifact_resume_fingerprint(
+                "detect",
+                raw_config,
+            )
+            with self._project_artifact_transaction(
+                session_id,
+                working_session,
+                action="detect",
+                resume_fingerprint=resume_fingerprint,
+            ):
                 result = await self.detect_session(
                     session_id=session_id,
-                    session=session,
+                    session=working_session,
                     raw_config=raw_config,
                     progress_callback=progress_callback,
                     auto_continue=auto_continue,
                     _transactional=False,
                 )
+            session.clear()
+            session.update(working_session)
             result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
             return result
 
@@ -5845,16 +6301,30 @@ class TranslatorEngine:
         _transactional: bool = True,
     ) -> dict[str, str]:
         if _transactional:
-            with self._project_artifact_transaction(session_id, session, seed_existing=True):
+            working_session = copy.deepcopy(session)
+            resume_fingerprint = self._pending_artifact_resume_fingerprint(
+                "resume_translation",
+                raw_config,
+                target_stored_name=target_stored_name,
+            )
+            with self._project_artifact_transaction(
+                session_id,
+                working_session,
+                seed_existing=True,
+                action="resume_translation",
+                resume_fingerprint=resume_fingerprint,
+            ) as pending_restored:
                 result = await self.resume_translation_session(
                     session_id=session_id,
-                    session=session,
+                    session=working_session,
                     raw_config=raw_config,
                     progress_callback=progress_callback,
                     target_stored_name=target_stored_name,
-                    skip_completed=skip_completed,
+                    skip_completed=skip_completed or pending_restored,
                     _transactional=False,
                 )
+            session.clear()
+            session.update(working_session)
             result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
             return result
 
@@ -5966,6 +6436,13 @@ class TranslatorEngine:
                 session=session,
             )
             self._update_translated_output_map(session, stored_name, output_path)
+            completed_page_ids = set(
+                session.get("_artifact_transaction_completed_page_ids") or []
+            )
+            completed_page_ids.add(stored_name)
+            session["_artifact_transaction_completed_page_ids"] = sorted(
+                completed_page_ids
+            )
             self._apply_page_artifact_event(
                 session_id,
                 session,
@@ -6065,7 +6542,37 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         progress_callback: ProgressCallback,
         target_stored_name: str | None = None,
+        skip_completed: bool = False,
+        _transactional: bool = True,
     ) -> dict[str, str]:
+        if _transactional:
+            working_session = copy.deepcopy(session)
+            resume_fingerprint = self._pending_artifact_resume_fingerprint(
+                "rerender",
+                raw_config,
+                target_stored_name=target_stored_name,
+            )
+            with self._project_artifact_transaction(
+                session_id,
+                working_session,
+                seed_existing=True,
+                action="rerender",
+                resume_fingerprint=resume_fingerprint,
+            ) as pending_restored:
+                result = await self.rerender_session(
+                    session_id=session_id,
+                    session=working_session,
+                    raw_config=raw_config,
+                    progress_callback=progress_callback,
+                    target_stored_name=target_stored_name,
+                    skip_completed=skip_completed or pending_restored,
+                    _transactional=False,
+                )
+            session.clear()
+            session.update(working_session)
+            result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
+            return result
+
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
         self._attach_project_glossary_context(session, config)
@@ -6074,6 +6581,29 @@ class TranslatorEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         target_images = self._resolve_rerender_images(session, target_stored_name)
+        skipped_completed = 0
+        if skip_completed and target_stored_name is None:
+            pending_completed_page_ids = {
+                str(page_id).strip()
+                for page_id in (session.get("_pending_completed_page_ids") or [])
+                if str(page_id).strip()
+            }
+            remaining_images: list[dict[str, Any]] = []
+            for image in target_images:
+                stored_name = str(image.get("stored_name") or "").strip()
+                output_name = str(
+                    (session.get("translated_output_map") or {}).get(stored_name)
+                    or ""
+                ).strip()
+                if (
+                    stored_name in pending_completed_page_ids
+                    and output_name
+                    and (output_dir / output_name).is_file()
+                ):
+                    skipped_completed += 1
+                else:
+                    remaining_images.append(image)
+            target_images = remaining_images
         rerenderable_pages = 0
         for image in target_images:
             stored_name = str(image.get("stored_name") or "")
@@ -6088,7 +6618,7 @@ class TranslatorEngine:
                 source_path=source_path,
             ):
                 rerenderable_pages += 1
-        if rerenderable_pages == 0:
+        if rerenderable_pages == 0 and skipped_completed == 0:
             raise RuntimeError("当前会话还没有可用的重嵌字缓存，请先用当前版本完整翻译一次。")
 
         total = len(target_images)
@@ -6179,6 +6709,13 @@ class TranslatorEngine:
                     )
 
             self._update_translated_output_map(session, image["stored_name"], rendered_output_path)
+            completed_page_ids = set(
+                session.get("_artifact_transaction_completed_page_ids") or []
+            )
+            completed_page_ids.add(str(image["stored_name"]))
+            session["_artifact_transaction_completed_page_ids"] = sorted(
+                completed_page_ids
+            )
             self._apply_page_artifact_event(
                 session_id,
                 session,
@@ -6270,7 +6807,10 @@ class TranslatorEngine:
         project_id: str,
         stored_name: str,
     ) -> bool:
-        document = self._read_json_file(self._project_page_document_path(project_id, stored_name), {})
+        document = self.project_workspace.read_project_page_document(
+            project_id,
+            stored_name,
+        )
         if not isinstance(document, dict):
             return False
 
@@ -6313,6 +6853,11 @@ class TranslatorEngine:
     ) -> tuple[list[dict[str, Any]], int]:
         remaining_images: list[dict[str, Any]] = []
         skipped_count = 0
+        pending_completed_page_ids = {
+            str(page_id).strip()
+            for page_id in (session.get("_pending_completed_page_ids") or [])
+            if str(page_id).strip()
+        }
         for image in source_images:
             stored_name = str(image.get("stored_name") or "").strip()
             if not stored_name:
@@ -6321,7 +6866,10 @@ class TranslatorEngine:
             if (
                 current_output is not None
                 and current_output.exists()
-                and self._page_has_completed_translation_document(project_id, stored_name)
+                and (
+                    stored_name in pending_completed_page_ids
+                    or self._page_has_completed_translation_document(project_id, stored_name)
+                )
             ):
                 self._update_translated_output_map(session, stored_name, current_output)
                 skipped_count += 1

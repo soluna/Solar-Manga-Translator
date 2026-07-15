@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   buildBatchTranslationConfirmation,
   getProjectStageCommands,
   getPrimaryProjectCommand,
   getReviewPrimaryCommand,
+  getTaskActionDescriptor,
   getTaskFailureStatus,
   getTaskProgressStatus,
   getTaskStartStatus,
@@ -12,6 +16,29 @@ import {
   normalizeTaskAction,
   shouldConfirmBatchTranslation,
 } from '../src/workflow-state.js'
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url))
+const workflowContract = JSON.parse(fs.readFileSync(
+  path.resolve(scriptDir, '../../contracts/workflow-actions-v1.json'),
+  'utf8',
+))
+
+assert.equal(workflowContract.schema_version, 1)
+for (const [action, expected] of Object.entries(workflowContract.actions)) {
+  const descriptor = getTaskActionDescriptor(action)
+  assert.deepEqual({
+    action_label: descriptor.actionLabel,
+    workflow_phase: descriptor.workflowPhase,
+    phase_label: descriptor.phaseLabel,
+    running_stage: descriptor.runningStage,
+    completed_stage: descriptor.completedStage,
+    scope: descriptor.scope,
+    scope_label: descriptor.scopeLabel,
+    start_message: descriptor.startMessage,
+    progress_message: descriptor.progressMessage,
+    failure_message: descriptor.failureMessage,
+  }, expected, action)
+}
 
 
 assert.equal(normalizeTaskAction('resume_translate'), 'resume-translate')

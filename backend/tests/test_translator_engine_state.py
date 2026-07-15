@@ -272,6 +272,148 @@ class TranslatorEngineStateTests(unittest.TestCase):
             )
             self.assertEqual(persisted_state_path.read_bytes(), persisted_state_before)
 
+    def test_failed_book_translation_reuses_pending_completed_pages_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "project-a"
+            source_dir = root / "source"
+            output_dir = root / "translated"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            page_ids = ["page-1.png", "page-2.png"]
+            for page_id in page_ids:
+                Image.new("RGB", (16, 16), (255, 255, 255)).save(source_dir / page_id)
+            cache_dir = engine._prepare_rerender_cache_dir(project_id, reset=True)
+            for page_id in page_ids:
+                page_cache_dir = cache_dir / page_id
+                page_cache_dir.mkdir()
+                (page_cache_dir / "regions.json").write_text("[]", encoding="utf-8")
+                (page_cache_dir / "meta.json").write_text(
+                    json.dumps({"base_kind": "inpainted"}),
+                    encoding="utf-8",
+                )
+                Image.new("RGB", (16, 16), (240, 240, 240)).save(
+                    page_cache_dir / "inpainted.png"
+                )
+            artifact_state = ProjectArtifactState.create(page_ids)
+            for page_id in page_ids:
+                artifact_state = artifact_state.apply(page_id, PageArtifactEvent.RECOGNIZED)
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(output_dir),
+                "source_images": [
+                    {"name": page_id, "stored_name": page_id}
+                    for page_id in page_ids
+                ],
+                "translated_output_map": {},
+                "workflow_stage": "detected",
+                "rerender_cache_dir": str(cache_dir),
+                "manual_regions": {},
+                "last_config": {},
+                "artifact_state": artifact_state.model_dump(mode="json"),
+            }
+            engine.initialize_project(project_id, session, title="Pending retry")
+            initial_head = engine.project_workspace.read_project_head(project_id)
+            attempt = {"number": 1}
+            rendered_by_attempt: dict[int, list[str]] = {1: [], 2: [], 3: []}
+            visible_output_dirs_during_work: list[str] = []
+
+            engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
+            engine._project_glossary_auto_extract_completed = lambda _session: True  # type: ignore[method-assign]
+            engine._attach_project_glossary_context = lambda *_args: None  # type: ignore[method-assign]
+            engine._ensure_editable_page_cache = lambda **_kwargs: True  # type: ignore[method-assign]
+            engine._prepare_cached_regions_for_edit = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+            engine._persist_translated_regions = lambda **_kwargs: None  # type: ignore[method-assign]
+            engine._select_complex_repair_images = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+
+            async def no_op_async(*_args, **_kwargs):
+                return None
+
+            async def render_page(*, output_path, **_kwargs):
+                visible_output_dirs_during_work.append(session["translated_dir"])
+                page_id = Path(output_path).name
+                rendered_by_attempt[attempt["number"]].append(page_id)
+                if attempt["number"] == 1 and page_id == "page-2.png":
+                    raise RuntimeError("synthetic page-2 failure")
+                Image.new("RGB", (16, 16), (0, 200, 0)).save(output_path)
+
+            engine._translate_cached_regions = no_op_async  # type: ignore[method-assign]
+            engine._ensure_translation_base_image = no_op_async  # type: ignore[method-assign]
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            archive_path = root / "translated.zip"
+            engine.build_session_archive = lambda *_args, **_kwargs: str(archive_path)  # type: ignore[method-assign]
+
+            async def progress(_event):
+                return None
+
+            config = {"translator": "none", "target_lang": "CHS"}
+            with self.assertRaisesRegex(RuntimeError, "page-2 failure"):
+                asyncio.run(
+                    engine.resume_translation_session(
+                        session_id=project_id,
+                        session=session,
+                        raw_config=config,
+                        progress_callback=progress,
+                    )
+                )
+
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertIsNotNone(pending)
+            self.assertEqual(engine.project_workspace.read_project_head(project_id), initial_head)
+            self.assertFalse((output_dir / "page-1.png").exists())
+            self.assertIn("page-1.png", pending["completed_page_ids"])
+
+            attempt["number"] = 2
+            with mock.patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                side_effect=OSError("synthetic head commit failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "head commit failure"):
+                    asyncio.run(
+                        engine.resume_translation_session(
+                            session_id=project_id,
+                            session=session,
+                            raw_config=config,
+                            progress_callback=progress,
+                        )
+                    )
+
+            pending_after_commit_failure = (
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+            self.assertEqual(
+                pending_after_commit_failure["completed_page_ids"],
+                page_ids,
+            )
+            self.assertEqual(engine.project_workspace.read_project_head(project_id), initial_head)
+            self.assertFalse((output_dir / "page-1.png").exists())
+            self.assertFalse((output_dir / "page-2.png").exists())
+
+            attempt["number"] = 3
+            result = asyncio.run(
+                engine.resume_translation_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=progress,
+                )
+            )
+
+            self.assertEqual(rendered_by_attempt[1], ["page-1.png", "page-2.png"])
+            self.assertEqual(rendered_by_attempt[2], ["page-2.png"])
+            self.assertEqual(rendered_by_attempt[3], [])
+            self.assertTrue(visible_output_dirs_during_work)
+            self.assertEqual(
+                set(visible_output_dirs_during_work),
+                {str(output_dir)},
+            )
+            self.assertTrue((output_dir / "page-1.png").exists())
+            self.assertTrue((output_dir / "page-2.png").exists())
+            self.assertEqual(result["workflow_stage"], "translated")
+            self.assertIsNone(engine.project_workspace.read_pending_artifact_set(project_id))
+
     def test_translation_stage_builds_inpainted_base_from_detected_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

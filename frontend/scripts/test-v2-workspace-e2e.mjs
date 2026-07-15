@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { findAvailablePort } from '../../scripts/local-port.mjs'
+import { createZeroTextRegionsWorkspaceFixture } from './create-v2-workspace-fixture.mjs'
 import { launchChromium } from './playwright-launcher.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -18,6 +19,7 @@ const artifactDir = path.join(frontendDir, 'test-artifacts', 'v2-workspace')
 
 const FIXTURE_PROJECT_ID = 'canvas-e2e-fixture'
 const FIXTURE_PROJECT_TITLE = 'Canvas E2E Fixture'
+const ZERO_TEXT_REGIONS_FIXTURE = createZeroTextRegionsWorkspaceFixture()
 const FIXTURE_OPENAI_BASE_URL = 'https://api.example.invalid/v1'
 const FIXTURE_OPENAI_MODEL = 'fixture-model'
 const PREVIEW_TYPOGRAPHY_ONLY = process.argv.includes('--preview-typography-only')
@@ -277,6 +279,89 @@ async function assertText(locator, expected, message) {
   }
 }
 
+async function installWorkspaceFixtureRoutes(page, fixture) {
+  const routeHits = new Map()
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    const routeKey = `${request.method()} ${pathname}`
+
+    if (routeKey === 'GET /api/projects') {
+      const response = await route.fetch()
+      const payload = await response.json()
+      routeHits.set(routeKey, (routeHits.get(routeKey) || 0) + 1)
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          projects: [
+            fixture.project,
+            ...(payload.projects || []).filter((project) => project.project_id !== fixture.project.project_id),
+          ],
+        },
+      })
+      return
+    }
+
+    const fixtureResponse = fixture.routeResponses[routeKey]
+    if (!fixtureResponse) {
+      await route.continue()
+      return
+    }
+    routeHits.set(routeKey, (routeHits.get(routeKey) || 0) + 1)
+    await route.fulfill(fixtureResponse)
+  })
+  return routeHits
+}
+
+async function assertZeroTextRegionsWorkspace(page, fixture, routeHits) {
+  const fixtureCard = page.locator('.v2-history-card', { hasText: fixture.project.title }).first()
+  await fixtureCard.waitFor({ state: 'visible', timeout: 20000 })
+  await fixtureCard.getByRole('button', { name: '恢复项目' }).click()
+
+  await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+  const pageCard = page.locator('.v2-page-card').first()
+  await pageCard.waitFor({ state: 'visible', timeout: 20000 })
+  await assertText(pageCard, '0 个框', '零文本框页面没有显示真实框数量')
+  await assertText(pageCard, '已完成', '零文本框页面没有显示翻译完成状态')
+  await assertText(pageCard, '已生成结果', '零文本框页面没有显示最终页面产物')
+
+  await pageCard.click()
+  await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
+  await page.locator('.v2-review-toolbar').waitFor({ state: 'visible', timeout: 20000 })
+  await waitForLocatorCount(page.locator('.v2-region-card'), 0, '零文本框页面错误生成了文本框')
+  await assertText(
+    page.locator('.v2-region-sidebar .v2-page-rail-count'),
+    '0',
+    '审校工作台没有显示零文本框状态',
+  )
+
+  const exportMenu = page.locator('.v2-topbar-actions .v2-export-menu').first()
+  const exportTrigger = exportMenu.locator('.v2-dropdown-trigger')
+  if (await exportTrigger.isDisabled()) {
+    throw new Error('零文本框页面已完成全部 Page Artifact，但导出菜单仍被禁用')
+  }
+  await exportMenu.hover()
+  const exportResultButton = exportMenu.getByRole('button', { name: '导出结果', exact: true })
+  await exportResultButton.waitFor({ state: 'visible', timeout: 20000 })
+  if (await exportResultButton.isDisabled()) {
+    throw new Error('零文本框页面的公开导出动作仍被禁用')
+  }
+  const downloadStarted = page.waitForEvent('download')
+  await exportResultButton.click()
+  const download = await downloadStarted
+  if (download.suggestedFilename() !== fixture.downloadFilename) {
+    throw new Error(`零文本框项目导出文件名异常：${download.suggestedFilename()}`)
+  }
+  await assertText(page.locator('.v2-topbar-status'), '已开始导出翻译结果压缩包', '导出动作没有用户可见反馈')
+
+  for (const requiredRoute of fixture.requiredRouteKeys) {
+    if (!routeHits.get(requiredRoute)) {
+      throw new Error(`零文本框 E2E 没有消费公开 fixture route：${requiredRoute}`)
+    }
+  }
+}
+
 function isPageCommandResponse(response, commandType) {
   if (!response.url().includes(`/api/pages/${FIXTURE_PROJECT_ID}/`) || !response.url().includes('/commands')) {
     return false
@@ -442,6 +527,7 @@ async function main() {
 
     browser = await launchChromium({ headless: true })
     const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } })
+    const fixtureRouteHits = await installWorkspaceFixtureRoutes(page, ZERO_TEXT_REGIONS_FIXTURE)
     const consoleErrors = []
     page.on('console', (message) => {
       if (['error', 'warning'].includes(message.type())) {
@@ -493,11 +579,18 @@ async function main() {
     await page.getByTestId('v2-history-modal').getByRole('button', { name: '新建项目' }).waitFor({ state: 'visible', timeout: 20000 })
     const historyShot = await saveScreenshot(page, 'v2-history-modal.png')
 
+    await assertZeroTextRegionsWorkspace(page, ZERO_TEXT_REGIONS_FIXTURE, fixtureRouteHits)
+    await page.getByRole('button', { name: '← 返回' }).click()
+    await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+    await page.getByRole('banner').getByRole('button', { name: '项目管理' }).click()
+    await page.getByTestId('v2-history-modal').waitFor({ state: 'visible', timeout: 20000 })
+
     const fixtureCard = page.locator('.v2-history-card', { hasText: FIXTURE_PROJECT_TITLE }).first()
     await fixtureCard.waitFor({ state: 'visible', timeout: 20000 })
     await fixtureCard.getByRole('button', { name: '恢复项目' }).click()
 
     await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+    await page.locator('.v2-section-title', { hasText: FIXTURE_PROJECT_TITLE }).first().waitFor({ state: 'visible', timeout: 20000 })
     await assertText(page.locator('.v2-section-title').first(), FIXTURE_PROJECT_TITLE, '选页页项目标题不正确')
     await page.getByRole('banner').getByRole('button', { name: '项目管理' }).waitFor({ state: 'visible', timeout: 20000 })
     await page.getByRole('button', { name: '专有名词库' }).waitFor({ state: 'visible', timeout: 20000 })

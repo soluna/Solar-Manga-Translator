@@ -119,7 +119,7 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertTrue(sentinel.exists())
 
-    def test_new_user_upload_detect_translate_and_export_contract(self) -> None:
+    def test_new_user_zero_region_upload_detect_translate_and_export_contract(self) -> None:
         image_bytes = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")
 
@@ -130,14 +130,20 @@ class ApiSecurityTests(unittest.TestCase):
             )
         self.assertEqual(upload.status_code, 200)
         project_id = upload.json()["session_id"]
+        page_id = upload.json()["images"][0]["stored_name"]
 
         async def fake_detect_session(*, session_id, session, progress_callback, **_kwargs):
             await progress_callback({"event": "status", "message": "mock detect"})
-            cache_dir = main.translator_engine._prepare_rerender_cache_dir(session_id, reset=True)
+            cache_dir = TEST_APP_DATA_DIR / "new-user-cache" / session_id
+            shutil.rmtree(cache_dir, ignore_errors=True)
             for source_image in session["source_images"]:
                 page_cache = cache_dir / source_image["stored_name"]
                 page_cache.mkdir(parents=True)
                 (page_cache / "regions.json").write_text("[]", encoding="utf-8")
+                (page_cache / "meta.json").write_text(
+                    json.dumps({"base_kind": "inpainted"}),
+                    encoding="utf-8",
+                )
                 Image.new("RGB", (32, 32), (255, 255, 255)).save(page_cache / "inpainted.png")
             session["rerender_cache_dir"] = str(cache_dir)
             session["workflow_stage"] = "detected"
@@ -150,6 +156,11 @@ class ApiSecurityTests(unittest.TestCase):
                     PageArtifactEvent.RECOGNIZED,
                 )
             session["artifact_state"] = artifact_state.model_dump(mode="json")
+            main.translator_engine.persist_project_state(
+                session_id,
+                session,
+                persist_page_documents=True,
+            )
             return {"workflow_stage": "detected"}
 
         async def fake_resume_session(*, session_id, session, progress_callback, **_kwargs):
@@ -173,6 +184,12 @@ class ApiSecurityTests(unittest.TestCase):
                 )
             session["artifact_state"] = artifact_state.model_dump(mode="json")
             archive_path = main.translator_engine.build_session_archive(session_id, session)
+            session["download_path"] = archive_path
+            main.translator_engine.persist_project_state(
+                session_id,
+                session,
+                persist_page_documents=True,
+            )
             return {
                 "workflow_stage": "translated",
                 "download_url": f"/api/download/{session_id}",
@@ -191,15 +208,33 @@ class ApiSecurityTests(unittest.TestCase):
             self.assertTrue(events[0]["task_id"])
             self.assertEqual(events[-1]["event"], "completed")
             self.assertEqual(events[-1]["workflow_stage"], "detected")
+            self.assertEqual(events[-1]["images"][0]["region_count"], 0)
+            self.assertTrue(
+                events[-1]["page_artifacts"][page_id]["capabilities"][
+                    "recognition_ready"
+                ]
+            )
+            self.assertTrue(
+                events[-1]["page_artifacts"][page_id]["capabilities"]["blank_ready"]
+            )
 
             with self.client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                 websocket.send_json({"action": "resume-translate", "config": {}})
                 events = self.receive_task_events(websocket)
             self.assertEqual(events[-1]["event"], "completed")
             self.assertEqual(events[-1]["workflow_stage"], "translated")
+            self.assertEqual(events[-1]["download_url"], f"/api/download/{project_id}")
+            self.assertTrue(
+                events[-1]["page_artifacts"][page_id]["capabilities"]["can_export"]
+            )
 
+            restored = self.client.post(f"/api/projects/{project_id}/restore")
             download = self.client.get(f"/api/download/{project_id}")
 
+        self.assertEqual(restored.status_code, 200)
+        self.assertTrue(
+            restored.json()["page_artifacts"][page_id]["capabilities"]["can_export"]
+        )
         self.assertEqual(download.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
             self.assertEqual(len(archive.namelist()), 1)

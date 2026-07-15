@@ -46,6 +46,106 @@ class TranslatorEngineStateTests(unittest.TestCase):
     def make_engine(self, root: Path) -> TranslatorEngine:
         return TranslatorEngine(BACKEND_DIR, app_paths=make_test_paths(root))
 
+    def make_recognized_zero_region_project(
+        self,
+        root: Path,
+        *,
+        project_id: str,
+        page_ids: list[str],
+    ) -> tuple[TranslatorEngine, dict[str, object]]:
+        engine = self.make_engine(root)
+        source_dir = engine.project_workspace.project_source_dir(project_id)
+        output_dir = engine.project_workspace.project_translated_dir(project_id)
+        cache_dir = root / "cache"
+        source_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+        artifact_state = ProjectArtifactState.create(page_ids)
+        for index, page_id in enumerate(page_ids, start=1):
+            Image.new("RGB", (16, 16), (255 - index, 255, 255)).save(
+                source_dir / page_id
+            )
+            page_cache_dir = cache_dir / page_id
+            page_cache_dir.mkdir(parents=True)
+            Image.new("RGB", (16, 16), (255, 255 - index, 255)).save(
+                page_cache_dir / "inpainted.png"
+            )
+            (page_cache_dir / "regions.json").write_text("[]", encoding="utf-8")
+            (page_cache_dir / "meta.json").write_text(
+                json.dumps({"base_kind": "inpainted"}),
+                encoding="utf-8",
+            )
+            engine.project_workspace.write_json_file(
+                engine.project_workspace.project_page_document_path(
+                    project_id,
+                    page_id,
+                ),
+                {
+                    "page_id": page_id,
+                    "dimensions": {"width": 16, "height": 16},
+                    "regions": [],
+                    "metadata": {"revision": 1},
+                },
+            )
+            artifact_state = artifact_state.apply(
+                page_id,
+                PageArtifactEvent.RECOGNIZED,
+            )
+        session: dict[str, object] = {
+            "source_dir": str(source_dir),
+            "translated_dir": str(output_dir),
+            "source_images": [
+                {"name": page_id, "stored_name": page_id}
+                for page_id in page_ids
+            ],
+            "translated_output_map": {},
+            "download_path": "",
+            "workflow_stage": "detected",
+            "rerender_cache_dir": str(cache_dir),
+            "manual_regions": {},
+            "last_config": {},
+            "project_glossary": {
+                "entries": [],
+                "auto_extract_completed": True,
+            },
+            "translation_region_overrides": {},
+            "translation_region_skip_overrides": {},
+            "translation_region_disabled_overrides": {},
+            "translation_region_layout_overrides": {},
+            "style_region_overrides": {},
+            "artifact_state": artifact_state.model_dump(mode="json"),
+        }
+        engine.initialize_project(project_id, session, title="Zero regions")
+        return engine, session
+
+    def interrupt_translation_after_first_verified_page(
+        self,
+        engine: TranslatorEngine,
+        *,
+        project_id: str,
+        session: dict[str, object],
+        config: dict[str, object],
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+
+        async def interrupt(event: dict[str, object]) -> None:
+            events.append(event)
+            if event.get("event") == "progress" and event.get("current") == 1:
+                raise RuntimeError("interrupt after first verified page")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "interrupt after first verified page",
+        ):
+            asyncio.run(
+                engine.resume_translation_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=interrupt,
+                )
+            )
+        return events
+
     def load_patched_text_mask_utils(self):
         vendor_root = BACKEND_DIR / "manga-image-translator" / "manga_translator"
         if not vendor_root.exists():
@@ -413,6 +513,341 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertTrue((output_dir / "page-2.png").exists())
             self.assertEqual(result["workflow_stage"], "translated")
             self.assertIsNone(engine.project_workspace.read_pending_artifact_set(project_id))
+
+    def test_zero_text_region_page_translates_and_exports_through_public_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "zero-region-public-workflow"
+            page_id = "page-1.png"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=[page_id],
+            )
+            initial_head = engine.project_workspace.read_project_head(project_id)
+            events: list[dict[str, object]] = []
+
+            async def collect_event(event: dict[str, object]) -> None:
+                events.append(event)
+
+            result = asyncio.run(
+                engine.resume_translation_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config={
+                        "translator": "none",
+                        "target_lang": "CHS",
+                        "rerender_output_format": "png",
+                    },
+                    progress_callback=collect_event,
+                )
+            )
+
+            page_view = engine.build_client_session_payload(
+                project_id,
+                session,
+            )["page_artifacts"][page_id]
+            restored_session = engine.restore_project_session(project_id)
+            restored_page_view = engine.build_client_session_payload(
+                project_id,
+                restored_session,
+            )["page_artifacts"][page_id]
+            final_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(
+                engine.project_workspace.read_project_page_document(
+                    project_id,
+                    page_id,
+                )["regions"],
+                [],
+            )
+            self.assertTrue(page_view["capabilities"]["recognition_ready"])
+            self.assertTrue(page_view["capabilities"]["blank_ready"])
+            self.assertTrue(page_view["capabilities"]["translation_ready"])
+            self.assertTrue(page_view["capabilities"]["final_ready"])
+            self.assertTrue(page_view["capabilities"]["can_export"])
+            self.assertTrue(restored_page_view["capabilities"]["can_export"])
+            self.assertEqual(result["download_url"], f"/api/download/{project_id}")
+            self.assertGreater(final_head["generation"], initial_head["generation"])
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+            self.assertTrue(
+                any(event.get("event") == "progress" for event in events)
+            )
+
+    def test_interrupted_project_translation_keeps_head_and_only_verified_pending_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "partial-public-workflow"
+            page_ids = ["page-1.png", "page-2.png"]
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=page_ids,
+            )
+            initial_head = engine.project_workspace.read_project_head(project_id)
+            events = self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config={
+                    "translator": "none",
+                    "target_lang": "CHS",
+                    "rerender_output_format": "png",
+                },
+            )
+
+            head_after_failure = engine.project_workspace.read_project_head(project_id)
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            visible_state_document = (
+                engine.project_workspace.read_project_session_document(project_id)
+            )
+            visible_artifacts = ProjectArtifactState.model_validate(
+                visible_state_document["artifact_state"]
+            )
+            self.assertEqual(
+                head_after_failure,
+                initial_head,
+            )
+            self.assertEqual(pending["completed_page_ids"], ["page-1.png"])
+            self.assertEqual(
+                pending["state_document"]["translated_output_map"],
+                {"page-1.png": "page-1.png"},
+            )
+            self.assertFalse(
+                visible_artifacts.page_view("page-1.png").capabilities.translation_ready
+            )
+            self.assertFalse(
+                visible_artifacts.page_view("page-2.png").capabilities.translation_ready
+            )
+            self.assertFalse(
+                (
+                    engine.project_workspace.project_translated_dir(project_id)
+                    / "page-1.png"
+                ).exists()
+            )
+            progress_events = [
+                event for event in events if event.get("event") == "progress"
+            ]
+            self.assertEqual(
+                [event.get("stored_name") for event in progress_events],
+                ["page-1.png"],
+            )
+
+    def test_compatible_retry_resumes_after_verified_pending_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_id = "compatible-public-retry"
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            engine, session = self.make_recognized_zero_region_project(
+                Path(tmp),
+                project_id=project_id,
+                page_ids=["page-1.png", "page-2.png"],
+            )
+            self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config=config,
+            )
+            retry_events: list[dict[str, object]] = []
+
+            async def collect_retry_event(event: dict[str, object]) -> None:
+                retry_events.append(event)
+
+            asyncio.run(
+                engine.resume_translation_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    progress_callback=collect_retry_event,
+                )
+            )
+
+            progress_page_ids = [
+                event.get("stored_name")
+                for event in retry_events
+                if event.get("event") == "progress"
+            ]
+            self.assertEqual(progress_page_ids, ["page-2.png"])
+            self.assertEqual(
+                next(
+                    event["total_pages"]
+                    for event in retry_events
+                    if event.get("event") == "start"
+                ),
+                1,
+            )
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+
+    def test_retry_with_changed_config_starts_from_project_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_id = "changed-config-public-retry"
+            initial_config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            engine, session = self.make_recognized_zero_region_project(
+                Path(tmp),
+                project_id=project_id,
+                page_ids=["page-1.png", "page-2.png"],
+            )
+            self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config=initial_config,
+            )
+            retry_events: list[dict[str, object]] = []
+
+            async def collect_retry_event(event: dict[str, object]) -> None:
+                retry_events.append(event)
+
+            asyncio.run(
+                engine.resume_translation_session(
+                    session_id=project_id,
+                    session=session,
+                    raw_config={**initial_config, "target_lang": "CHT"},
+                    progress_callback=collect_retry_event,
+                )
+            )
+
+            progress_page_ids = [
+                event.get("stored_name")
+                for event in retry_events
+                if event.get("event") == "progress"
+            ]
+            self.assertEqual(progress_page_ids, ["page-1.png", "page-2.png"])
+            self.assertEqual(
+                next(
+                    event["total_pages"]
+                    for event in retry_events
+                    if event.get("event") == "start"
+                ),
+                2,
+            )
+
+    def test_retry_with_changed_scope_or_base_head_starts_from_page_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            for changed_dimension in ("scope", "base-head"):
+                with self.subTest(changed_dimension=changed_dimension):
+                    project_id = f"changed-{changed_dimension}-public-retry"
+                    engine, session = self.make_recognized_zero_region_project(
+                        root / changed_dimension,
+                        project_id=project_id,
+                        page_ids=["page-1.png", "page-2.png"],
+                    )
+                    self.interrupt_translation_after_first_verified_page(
+                        engine,
+                        project_id=project_id,
+                        session=session,
+                        config=config,
+                    )
+                    pending_before_retry = (
+                        engine.project_workspace.read_pending_artifact_set(project_id)
+                    )
+                    target_stored_name = None
+                    expected_total = 2
+                    if changed_dimension == "scope":
+                        target_stored_name = "page-1.png"
+                        expected_total = 1
+                    else:
+                        engine.update_project_metadata(
+                            project_id,
+                            session,
+                            title="Advanced Project Head",
+                        )
+
+                    retry_events: list[dict[str, object]] = []
+
+                    async def collect_retry_event(event: dict[str, object]) -> None:
+                        retry_events.append(event)
+
+                    asyncio.run(
+                        engine.resume_translation_session(
+                            session_id=project_id,
+                            session=session,
+                            raw_config=config,
+                            progress_callback=collect_retry_event,
+                            target_stored_name=target_stored_name,
+                        )
+                    )
+
+                    progress_page_ids = [
+                        event.get("stored_name")
+                        for event in retry_events
+                        if event.get("event") == "progress"
+                    ]
+                    self.assertEqual(pending_before_retry["completed_page_ids"], ["page-1.png"])
+                    self.assertEqual(progress_page_ids[0], "page-1.png")
+                    self.assertEqual(
+                        next(
+                            event["total_pages"]
+                            for event in retry_events
+                            if event.get("event") == "start"
+                        ),
+                        expected_total,
+                    )
+                    if changed_dimension == "scope":
+                        committed_state = ProjectArtifactState.model_validate(
+                            engine.project_workspace.read_project_session_document(
+                                project_id
+                            )["artifact_state"]
+                        )
+                        self.assertEqual(
+                            committed_state.pages["page-1.png"].translation.revision,
+                            1,
+                        )
+
+    def test_retry_with_changed_action_does_not_reuse_verified_pending_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_id = "changed-action-public-retry"
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            engine, session = self.make_recognized_zero_region_project(
+                Path(tmp),
+                project_id=project_id,
+                page_ids=["page-1.png", "page-2.png"],
+            )
+            self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config=config,
+            )
+            rerender_events: list[dict[str, object]] = []
+
+            async def observe_changed_action(event: dict[str, object]) -> None:
+                rerender_events.append(event)
+                if event.get("event") == "start":
+                    raise RuntimeError("changed action observed")
+
+            with self.assertRaisesRegex(RuntimeError, "changed action observed"):
+                asyncio.run(
+                    engine.rerender_session(
+                        session_id=project_id,
+                        session=session,
+                        raw_config=config,
+                        progress_callback=observe_changed_action,
+                    )
+                )
+
+            self.assertEqual(rerender_events, [{"event": "start", "total_pages": 2}])
 
     def test_translation_stage_builds_inpainted_base_from_detected_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

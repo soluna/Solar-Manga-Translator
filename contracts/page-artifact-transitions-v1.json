@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "artifact_schema_version": 2,
+  "authority": "project_head_page_artifacts",
+  "workflow_stage_role": "compatibility_projection",
+  "scenarios": [
+    {
+      "id": "recognized_page_is_ready_for_review_and_translation",
+      "events": ["recognized"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 0, "ready": false, "current": false, "stale": false},
+          "final": {"revision": 0, "ready": false, "current": false, "stale": false}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": false,
+          "final_available": false,
+          "final_ready": false,
+          "final_stale": false,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": false,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "translated_page_has_current_final_and_export_capability",
+      "events": ["recognized", "translated"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": true, "stale": false}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": true,
+          "final_stale": false,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": true
+        }
+      }
+    },
+    {
+      "id": "source_text_edit_invalidates_translation_and_final_but_not_blank",
+      "events": ["recognized", "translated", "source_edited"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": false,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": false,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "translation_edit_keeps_render_inputs_ready_and_marks_final_stale",
+      "events": ["recognized", "translated", "translation_edited"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "layout_edit_only_invalidates_final",
+      "events": ["recognized", "translated", "layout_edited"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "style_edit_only_invalidates_final",
+      "events": ["recognized", "translated", "style_edited"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "render_recovers_stale_final_and_export_capability",
+      "events": ["recognized", "translated", "translation_edited", "rendered"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 2, "ready": true, "current": true, "stale": false}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": true,
+          "final_stale": false,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": true
+        }
+      }
+    },
+    {
+      "id": "attached_blank_is_current_and_invalidates_only_final",
+      "events": ["recognized", "translated", "blank_attached"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "text_region_delete_invalidates_blank_translation_and_final",
+      "events": ["recognized", "translated", "text_region_deleted"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "translation": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": false,
+          "translation_ready": false,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": false,
+          "can_translate": false,
+          "can_render": false,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "text_region_merge_invalidates_blank_translation_and_final",
+      "events": ["recognized", "translated", "text_regions_merged"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "translation": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": false,
+          "translation_ready": false,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": false,
+          "can_translate": false,
+          "can_render": false,
+          "can_export": false
+        }
+      }
+    },
+    {
+      "id": "project_head_restore_recovers_saved_final_and_export_capability",
+      "events": ["recognized", "translated", "translation_edited"],
+      "restore": {"after_event_index": 1},
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "final": {"revision": 1, "ready": true, "current": true, "stale": false}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": true,
+          "final_available": true,
+          "final_ready": true,
+          "final_stale": false,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": true,
+          "can_export": true
+        }
+      }
+    },
+    {
+      "id": "rerecognition_preserves_prior_outputs_as_stale",
+      "events": ["recognized", "translated", "recognized"],
+      "expected": {
+        "artifacts": {
+          "source": {"revision": 1, "ready": true, "current": true, "stale": false},
+          "recognition": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "blank": {"revision": 2, "ready": true, "current": true, "stale": false},
+          "translation": {"revision": 1, "ready": true, "current": false, "stale": true},
+          "final": {"revision": 1, "ready": true, "current": false, "stale": true}
+        },
+        "capabilities": {
+          "recognition_ready": true,
+          "blank_ready": true,
+          "translation_ready": false,
+          "final_available": true,
+          "final_ready": false,
+          "final_stale": true,
+          "can_review_recognition": true,
+          "can_translate": true,
+          "can_render": false,
+          "can_export": false
+        }
+      }
+    }
+  ]
+}

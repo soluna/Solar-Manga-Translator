@@ -24,11 +24,16 @@ class UnsupportedProjectArtifactSchemaError(ProjectArtifactSchemaError):
 class PageArtifactEvent(StrEnum):
     SOURCE_REPLACED = "source_replaced"
     RECOGNIZED = "recognized"
+    SOURCE_EDITED = "source_edited"
     BLANK_REPLACED = "blank_replaced"
+    BLANK_ATTACHED = "blank_attached"
     BLANK_EDITED = "blank_edited"
     TRANSLATED = "translated"
     TRANSLATION_EDITED = "translation_edited"
     LAYOUT_EDITED = "layout_edited"
+    STYLE_EDITED = "style_edited"
+    TEXT_REGION_DELETED = "text_region_deleted"
+    TEXT_REGIONS_MERGED = "text_regions_merged"
     RENDERED = "rendered"
 
 
@@ -60,7 +65,14 @@ class PageArtifactState(BaseModel):
     final: ArtifactRevision = Field(default_factory=ArtifactRevision)
     layout_revision: int = Field(default=1, ge=1)
 
-    def apply(self, event: PageArtifactEvent) -> PageArtifactState:
+    def apply(self, event: PageArtifactEvent | str) -> PageArtifactState:
+        try:
+            event = PageArtifactEvent(event)
+        except (TypeError, ValueError) as exc:
+            raise ArtifactTransitionError(
+                f"Unsupported page artifact event: {event!r}"
+            ) from exc
+
         if event == PageArtifactEvent.SOURCE_REPLACED:
             return PageArtifactState(
                 page_id=self.page_id,
@@ -84,12 +96,45 @@ class PageArtifactState(BaseModel):
                 update={
                     "recognition": recognition,
                     "blank": blank,
-                    "translation": ArtifactRevision(),
-                    "final": ArtifactRevision(),
                 }
             )
 
-        if event == PageArtifactEvent.BLANK_REPLACED:
+        if event == PageArtifactEvent.SOURCE_EDITED:
+            self._require_current_recognition(PageArtifactEvent.SOURCE_EDITED)
+            recognition = ArtifactRevision(
+                revision=self.recognition.revision + 1,
+                derived_from={"source": self.source.revision},
+            )
+            blank = self.blank
+            if self.blank.is_current(self._current_blank_dependencies()):
+                blank_dependencies = {"source": self.source.revision}
+                if "recognition" in self.blank.derived_from:
+                    blank_dependencies["recognition"] = recognition.revision
+                blank = self.blank.model_copy(
+                    update={"derived_from": blank_dependencies}
+                )
+            return self.model_copy(
+                update={"recognition": recognition, "blank": blank}
+            )
+
+        if event in {
+            PageArtifactEvent.TEXT_REGION_DELETED,
+            PageArtifactEvent.TEXT_REGIONS_MERGED,
+        }:
+            self._require_current_recognition(event)
+            return self.model_copy(
+                update={
+                    "recognition": ArtifactRevision(
+                        revision=self.recognition.revision + 1,
+                        derived_from={"source": self.source.revision},
+                    )
+                }
+            )
+
+        if event in {
+            PageArtifactEvent.BLANK_REPLACED,
+            PageArtifactEvent.BLANK_ATTACHED,
+        }:
             return self.model_copy(
                 update={
                     "blank": ArtifactRevision(
@@ -126,7 +171,10 @@ class PageArtifactState(BaseModel):
                 )
             return self.model_copy(update=updates)
 
-        if event == PageArtifactEvent.LAYOUT_EDITED:
+        if event in {
+            PageArtifactEvent.LAYOUT_EDITED,
+            PageArtifactEvent.STYLE_EDITED,
+        }:
             return self.model_copy(update={"layout_revision": self.layout_revision + 1})
 
         if event == PageArtifactEvent.RENDERED:
@@ -458,7 +506,7 @@ class ProjectArtifactState(BaseModel):
     def apply(
         self,
         page_id: str,
-        event: PageArtifactEvent,
+        event: PageArtifactEvent | str,
     ) -> ProjectArtifactState:
         normalized_page_id = str(page_id or "").strip()
         page = self.pages.get(normalized_page_id)

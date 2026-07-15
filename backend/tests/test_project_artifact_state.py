@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,10 +11,15 @@ from PIL import Image
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_DIR.parent
+TRANSITION_CONTRACT_PATH = (
+    REPO_ROOT / "contracts" / "page-artifact-transitions-v1.json"
+)
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from domain.project_artifacts import (
+    ArtifactTransitionError,
     LegacyPageArtifactEvidence,
     PageArtifactEvent,
     ProjectArtifactSchemaError,
@@ -50,6 +55,62 @@ class ProjectArtifactStateTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.textblock_patcher.stop()
         super().tearDownClass()
+
+    def test_shared_page_artifact_transition_scenarios(self) -> None:
+        contract = json.loads(
+            TRANSITION_CONTRACT_PATH.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(contract["schema_version"], 1)
+        self.assertEqual(contract["artifact_schema_version"], 2)
+        self.assertEqual(
+            contract["workflow_stage_role"],
+            "compatibility_projection",
+        )
+        for scenario in contract["scenarios"]:
+            with self.subTest(scenario=scenario["id"]):
+                state = ProjectArtifactState.create(["0001.png"])
+                saved_states = []
+                for event in scenario["events"]:
+                    state = state.apply("0001.png", event)
+                    saved_states.append(state.model_dump(mode="json"))
+                if restore := scenario.get("restore"):
+                    state = ProjectArtifactState.load(
+                        saved_states[restore["after_event_index"]],
+                        legacy_pages=[
+                            LegacyPageArtifactEvidence(page_id="0001.png")
+                        ],
+                    )
+                view = state.page_view("0001.png")
+                actual = {
+                    "artifacts": {
+                        name: {
+                            "revision": artifact.revision,
+                            "ready": artifact.ready,
+                            "current": artifact.current,
+                            "stale": artifact.stale,
+                        }
+                        for name, artifact in view.artifacts
+                    },
+                    "capabilities": view.capabilities.model_dump(mode="json"),
+                }
+                self.assertEqual(actual, scenario["expected"])
+
+    def test_unknown_artifact_schema_and_event_fail_closed(self) -> None:
+        state = ProjectArtifactState.create(["0001.png"])
+        before = state.page_view("0001.png")
+
+        with self.assertRaises(ArtifactTransitionError):
+            state.apply("0001.png", "future_unknown_event")
+        self.assertEqual(state.page_view("0001.png"), before)
+
+        with self.assertRaises(UnsupportedProjectArtifactSchemaError):
+            ProjectArtifactState.load(
+                {"schema_version": 99, "pages": {}},
+                legacy_pages=[
+                    LegacyPageArtifactEvidence(page_id="0001.png")
+                ],
+            )
 
     def test_page_artifacts_follow_the_visible_three_step_workflow(self) -> None:
         state = ProjectArtifactState.create(["0001.png"])

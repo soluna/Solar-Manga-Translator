@@ -40,6 +40,12 @@ _Avoid_: Workflow stage, latest files on disk
 Uncommitted Page Artifact revisions produced by an active or interrupted project command. They may be reused when the command resumes but are not part of the Project Head.
 _Avoid_: Partial project result
 
+**Project Command**:
+A typed request for one canonical workflow action against a project, optionally narrowed to one page and based on an expected Page Revision. It expresses user intent without carrying loaded project state, storage paths, or transaction machinery.
+_Avoid_: Session task payload, Engine call parameters
+
+Compatibility removal condition: the task starter's ignored legacy `session` input is removed once WU-0A callers and regressions construct only Project Commands.
+
 **Project Glossary Candidate**:
 A source-language clue supported by high-confidence OCR evidence such as an explicit self-introduction or honorific. A candidate highlights evidence inside the broad LLM extraction context but does not define the final word boundary and is not an accepted glossary entry until the model supplies a translation.
 _Avoid_: Automatically generated glossary translation

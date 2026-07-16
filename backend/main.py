@@ -35,7 +35,11 @@ from system_fonts import custom_font_directories
 from system_fonts import ensure_project_font_directories
 from task_manager import ProjectTaskConflictError, TaskManager, TaskNotFoundError
 from utils.file_handler import extract_archive, verify_supported_image
-from workflow_events import require_task_action
+from workflow_coordinator import (
+    ProjectCommand,
+    TranslatorEngineWorkflowAdapter,
+    WorkflowCoordinator,
+)
 
 ENABLE_API_DOCS = os.getenv("APP_ENABLE_API_DOCS", "").strip().lower() in {"1", "true", "yes"}
 app = FastAPI(
@@ -342,6 +346,13 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
 
     SESSIONS[project_id] = session
     return session
+
+
+workflow_coordinator = WorkflowCoordinator(
+    project_loader=get_or_restore_session,
+    execution_adapter=TranslatorEngineWorkflowAdapter(translator_engine),
+    project_view_builder=translator_engine.build_client_session_payload,
+)
 
 
 def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str) -> str:
@@ -1357,70 +1368,32 @@ async def download_blank_archive(session_id: str):
 def start_translation_task(
     *,
     session_id: str,
-    session: dict[str, Any],
+    session: dict[str, Any] | None = None,
     action: str,
     config: dict[str, Any],
     target_stored_name: str,
+    expected_page_revision: int | None = None,
 ) -> str:
-    action = require_task_action(action)
-    if not translator_engine.try_mark_session_busy(session_id, action):
+    command = ProjectCommand(
+        project_id=session_id,
+        action=action,
+        config=config,
+        target_stored_name=target_stored_name,
+        expected_page_revision=expected_page_revision,
+    )
+    if not translator_engine.try_mark_session_busy(session_id, command.action):
         raise ProjectTaskConflictError("Project already has an active task")
 
     async def run_task(publish):
         try:
-            if action == "rerender":
-                result = await translator_engine.rerender_session(
-                    session_id=session_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=publish,
-                    target_stored_name=target_stored_name or None,
-                )
-            elif action == "detect":
-                result = await translator_engine.detect_session(
-                    session_id=session_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=publish,
-                )
-            elif action == "resume-translate":
-                result = await translator_engine.resume_translation_session(
-                    session_id=session_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=publish,
-                    skip_completed=True,
-                )
-            elif action == "translate-page":
-                result = await translator_engine.resume_translation_session(
-                    session_id=session_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=publish,
-                    target_stored_name=target_stored_name or None,
-                )
-            else:
-                result = await translator_engine.translate_session(
-                    session_id=session_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=publish,
-                )
-
-            completed_payload = {
-                **translator_engine.build_client_session_payload(session_id, session),
-                **result,
-            }
-            if isinstance(completed_payload.get("project"), dict):
-                completed_payload["project"] = {
-                    **completed_payload["project"],
-                    "is_busy": False,
-                    "busy_action": "",
-                }
+            completed_payload = await workflow_coordinator.execute(
+                command,
+                progress=publish,
+            )
             logger.info(
                 "Translation task completed. session_id=%s action=%s",
                 session_id,
-                action,
+                command.action,
             )
             return completed_payload
         finally:
@@ -1429,9 +1402,9 @@ def start_translation_task(
     try:
         return task_manager.start(
             session_id,
-            action,
+            command.action,
             run_task,
-            metadata={"target_stored_name": target_stored_name},
+            metadata={"target_stored_name": command.target_stored_name or ""},
         )
     except Exception:
         translator_engine.clear_session_busy(session_id)
@@ -1482,7 +1455,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
     action = "translate"
 
     try:
-        session = get_or_restore_session(session_id)
+        get_or_restore_session(session_id)
     except HTTPException:
         logger.warning("Translation websocket rejected because session was not found. session_id=%s", session_id)
         await websocket.send_json({"event": "error", "message": "会话不存在，请重新上传文件。"})
@@ -1513,10 +1486,10 @@ async def translate_session(websocket: WebSocket, session_id: str):
             target_stored_name = str(payload.get("target_stored_name") or "").strip()
             task_id = start_translation_task(
                 session_id=session_id,
-                session=session,
                 action=action,
                 config=config,
                 target_stored_name=target_stored_name,
+                expected_page_revision=payload.get("expected_page_revision"),
             )
             logger.info(
                 "Translation task started. session_id=%s task_id=%s action=%s target=%s",

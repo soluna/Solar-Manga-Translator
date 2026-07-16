@@ -3529,7 +3529,7 @@ print(json.dumps({
             start_events = [event for event in events if event.get("event") == "start"]
             self.assertEqual(start_events[0]["total_pages"], 1)
 
-    def test_single_page_rerender_skips_archive_rebuild(self) -> None:
+    def test_render_page_working_set_skips_archive_rebuild_and_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             engine = self.make_engine(root)
@@ -3570,7 +3570,6 @@ print(json.dumps({
                 ).model_dump(mode="json"),
             }
             events: list[dict[str, object]] = []
-            persisted: dict[str, object] = {}
 
             async def fake_render_cached_page(*_args, **kwargs) -> None:
                 output_path = kwargs.get("output_path") if "output_path" in kwargs else _args[1]
@@ -3582,37 +3581,71 @@ print(json.dumps({
             def fail_archive(*_args, **_kwargs) -> str:
                 raise AssertionError("single-page rerender should not rebuild the archive synchronously")
 
-            def fake_persist_project_state(_project_id, _session, **kwargs) -> None:
-                persisted.update(kwargs)
-
             engine._ensure_runtime_patches = lambda: None  # type: ignore[method-assign]
             engine._ensure_editable_page_cache = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
             engine._render_cached_page = fake_render_cached_page  # type: ignore[method-assign]
             engine.build_session_archive = fail_archive  # type: ignore[method-assign]
-            engine.persist_project_state = fake_persist_project_state  # type: ignore[method-assign]
+            engine.persist_project_state(
+                "project-a",
+                session,
+                persist_page_documents=True,
+            )
+            base = engine.project_workspace.read_command_base(
+                "project-a",
+                "page-1.png",
+            )
 
-            result = asyncio.run(engine.rerender_session(
-                session_id="project-a",
-                session=session,
-                raw_config={"rerender_output_format": "png"},
-                progress_callback=collect_event,
-                target_stored_name="page-1.png",
-            ))
+            with (
+                engine.project_workspace.materialize_page_working_set(base) as working_set,
+                mock.patch.object(
+                    engine,
+                    "persist_project_state",
+                    side_effect=AssertionError(
+                        "RenderPage preparation must not persist or commit"
+                    ),
+                ) as persist_project_state,
+            ):
+                prepared = asyncio.run(
+                    engine.render_page_working_set(
+                        working_set=working_set,
+                        raw_config={"rerender_output_format": "png"},
+                        progress_callback=collect_event,
+                    )
+                )
+                rendered_logical_path = next(
+                    logical_path
+                    for logical_path in prepared.artifact_files
+                    if logical_path.startswith("translated/")
+                )
+                rendered_file = prepared.artifact_files[rendered_logical_path]
+                self.assertTrue(rendered_file.is_file())
 
-            self.assertEqual(result["download_url"], "/api/download/project-a")
-            self.assertEqual(result["download_path"], str(existing_archive.resolve()))
-            self.assertEqual(session["workflow_stage"], "translated")
-            self.assertIn("page-1.png", session["translated_output_map"])
-            self.assertEqual(persisted.get("page_ids"), ["page-1.png"])
+            persist_project_state.assert_not_called()
+            self.assertEqual(
+                prepared.execution_extras["download_url"],
+                "/api/download/project-a",
+            )
+            self.assertEqual(
+                prepared.execution_extras["download_path"],
+                str(existing_archive.resolve()),
+            )
+            self.assertEqual(prepared.runtime_session["workflow_stage"], "translated")
+            self.assertIn(
+                "page-1.png",
+                prepared.runtime_session["translated_output_map"],
+            )
+            self.assertEqual(
+                prepared.page_documents["page-1.png"]["metadata"]["revision"],
+                base.page_revision + 1,
+            )
             self.assertEqual(events[-1]["event"], "progress")
             self.assertEqual(events[-1]["current"], 1)
             self.assertEqual(events[-1]["total"], 1)
-            page_artifact = engine.build_client_session_payload(
-                "project-a",
-                session,
-            )["page_artifacts"]["page-1.png"]
-            self.assertEqual(page_artifact["artifacts"]["final"]["revision"], 2)
-            self.assertTrue(page_artifact["capabilities"]["final_ready"])
+            page_artifact = ProjectArtifactState.model_validate(
+                prepared.runtime_session["artifact_state"]
+            ).page_view("page-1.png")
+            self.assertEqual(page_artifact.artifacts.final.revision, 2)
+            self.assertTrue(page_artifact.capabilities.final_ready)
 
     def test_advanced_erase_composite_preserves_pixels_outside_change_mask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

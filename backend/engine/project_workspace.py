@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 from domain.project_state import CorruptProjectStateError, ProjectStateError
 from runtime_paths import AppPaths
@@ -32,12 +34,66 @@ class CorruptProjectArtifactError(ProjectStateError):
 
 
 class ProjectHeadConflictError(ProjectStateError):
-    def __init__(self, *, expected_generation: int, actual_generation: int):
+    def __init__(
+        self,
+        *,
+        expected_generation: int,
+        actual_generation: int,
+        expected_revision_id: str = "",
+        actual_revision_id: str = "",
+    ):
         self.expected_generation = expected_generation
         self.actual_generation = actual_generation
+        self.expected_revision_id = expected_revision_id
+        self.actual_revision_id = actual_revision_id
         super().__init__(
             "项目当前版本已变化，请刷新后重试。"
         )
+
+
+@dataclass(frozen=True)
+class CommandBase:
+    project_id: str
+    page_id: str
+    head: dict[str, Any] | None
+    head_generation: int
+    head_revision_id: str
+    state_document: dict[str, Any]
+    project_manifest: dict[str, Any]
+    page_document: dict[str, Any]
+    page_revision: int
+
+
+@dataclass(frozen=True)
+class PageWorkingSet:
+    base: CommandBase
+    root: Path
+    source_dir: Path
+    translated_dir: Path
+    cache_dir: Path
+    canonical_source_dir: Path | None
+    canonical_translated_dir: Path | None
+    canonical_cache_dir: Path | None
+    legacy_runtime_session: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class PreparedHeadUpdate:
+    state_document: dict[str, Any]
+    project_manifest: dict[str, Any]
+    page_documents: dict[str, dict[str, Any]]
+    artifact_files: dict[str, Path]
+    replace_prefixes: tuple[str, ...]
+    remove_logical_paths: set[str]
+    runtime_session: dict[str, Any]
+    execution_extras: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ProjectHeadCommitResult:
+    head: dict[str, Any]
+    warnings: tuple[str, ...]
+    runtime_session: dict[str, Any]
 
 
 class ProjectWorkspace:
@@ -71,6 +127,16 @@ class ProjectWorkspace:
         self.output_root = paths.output_dir
         self.temp_dir = paths.cache_dir
         self.logs_dir = paths.logs_dir
+        self._head_commit_locks: dict[str, threading.RLock] = {}
+        self._head_commit_locks_guard = threading.Lock()
+
+    def _head_commit_lock(self, project_id: str) -> threading.RLock:
+        normalized_project_id = self.validated_project_id(project_id)
+        with self._head_commit_locks_guard:
+            return self._head_commit_locks.setdefault(
+                normalized_project_id,
+                threading.RLock(),
+            )
 
     def validated_project_id(self, project_id: str) -> str:
         normalized = str(project_id or "")
@@ -302,6 +368,314 @@ class ProjectWorkspace:
             raise CorruptProjectArtifactError("待恢复项目状态已损坏，无法安全恢复。")
         return payload
 
+    def _read_bound_head_json(
+        self,
+        project_id: str,
+        head: dict[str, Any],
+        logical_path: str,
+    ) -> Any | None:
+        metadata = dict(head.get("files") or {}).get(logical_path)
+        if metadata is None:
+            return None
+        raw_bytes = self._read_artifact_bytes(project_id, metadata)
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise CorruptProjectArtifactError(
+                f"项目绑定版本中的 {logical_path} 已损坏，无法安全读取。"
+            ) from exc
+
+    def read_command_base(self, project_id: str, page_id: str) -> CommandBase:
+        normalized_project_id = self.validated_project_id(project_id)
+        normalized_page_id = self.validated_page_id(page_id)
+        head = self.read_project_head(normalized_project_id)
+        if head is None:
+            state_document = self.read_project_session_document(normalized_project_id)
+            project_manifest = self.read_project_manifest(normalized_project_id)
+            page_document = self.read_project_page_document(
+                normalized_project_id,
+                normalized_page_id,
+            )
+        else:
+            state_document = self._read_bound_head_json(
+                normalized_project_id,
+                head,
+                "state/session.json",
+            )
+            project_manifest = self._read_bound_head_json(
+                normalized_project_id,
+                head,
+                "project/project.json",
+            )
+            page_document = self._read_bound_head_json(
+                normalized_project_id,
+                head,
+                f"pages/{normalized_page_id}/page_document.json",
+            )
+        if not isinstance(state_document, dict):
+            raise CorruptProjectArtifactError(
+                "项目绑定版本缺少有效的 Project State。"
+            )
+        if not isinstance(project_manifest, dict):
+            raise CorruptProjectArtifactError(
+                "项目绑定版本缺少有效的项目清单。"
+            )
+        if not isinstance(page_document, dict):
+            raise CorruptProjectArtifactError(
+                "项目绑定版本缺少有效的 Page Document。"
+            )
+        try:
+            page_revision = int(
+                (page_document.get("metadata") or {}).get("revision")
+            )
+        except (TypeError, ValueError) as exc:
+            raise CorruptProjectArtifactError(
+                "Page Document revision 无效，无法安全执行页面命令。"
+            ) from exc
+        if page_revision <= 0:
+            raise CorruptProjectArtifactError(
+                "Page Document revision 无效，无法安全执行页面命令。"
+            )
+        return CommandBase(
+            project_id=normalized_project_id,
+            page_id=normalized_page_id,
+            head=head,
+            head_generation=int((head or {}).get("generation") or 0),
+            head_revision_id=str((head or {}).get("revision_id") or ""),
+            state_document=state_document,
+            project_manifest=project_manifest,
+            page_document=page_document,
+            page_revision=page_revision,
+        )
+
+    def read_project_state_from_head(
+        self,
+        project_id: str,
+        head: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_project_id = self.validated_project_id(project_id)
+        state_document = self._read_bound_head_json(
+            normalized_project_id,
+            head,
+            "state/session.json",
+        )
+        if not isinstance(state_document, dict):
+            raise CorruptProjectArtifactError(
+                "已提交的 Project Head 缺少有效的 Project State。"
+            )
+        return state_document
+
+    def materialize_project_head_artifact(
+        self,
+        project_id: str,
+        logical_path: str,
+        destination: Path,
+    ) -> Path:
+        normalized_project_id = self.validated_project_id(project_id)
+        self._validated_snapshot_logical_path(logical_path)
+        head = self.read_project_head(normalized_project_id)
+        if head is None:
+            raise FileNotFoundError("项目还没有可读取的 Project Head。")
+        metadata = dict(head.get("files") or {}).get(logical_path)
+        if metadata is None:
+            raise FileNotFoundError("Project Head 中不存在请求的产物。")
+        raw_bytes = self._read_artifact_bytes(normalized_project_id, metadata)
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".head-artifact",
+            dir=str(destination.parent),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, destination)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(temporary_name)
+        return destination
+
+    @contextlib.contextmanager
+    def materialize_page_working_set(
+        self,
+        base: CommandBase,
+        *,
+        legacy_project: dict[str, Any] | None = None,
+    ) -> Iterator[PageWorkingSet]:
+        project_dir = self.project_dir(base.project_id)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        root = Path(
+            tempfile.mkdtemp(
+                prefix=".page-working-set-",
+                dir=str(project_dir),
+            )
+        )
+        source_dir = root / "source"
+        translated_dir = root / "translated"
+        cache_dir = root / "cache"
+        def optional_path(field_name: str) -> Path | None:
+            raw_path = str(base.state_document.get(field_name) or "").strip()
+            return Path(raw_path) if raw_path else None
+
+        canonical_source_dir = optional_path("source_dir")
+        canonical_translated_dir = optional_path("translated_dir")
+        canonical_cache_dir = optional_path("rerender_cache_dir")
+        for path in (source_dir, translated_dir, cache_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        try:
+            if base.head is not None:
+                self.restore_snapshot_artifacts(
+                    base.project_id,
+                    {
+                        "schema_version": 1,
+                        "files": dict(base.head.get("files") or {}),
+                    },
+                    {
+                        "source": source_dir,
+                        "translated": translated_dir,
+                        "cache": cache_dir,
+                    },
+                )
+            else:
+                if not isinstance(legacy_project, dict):
+                    raise CorruptProjectArtifactError(
+                        "旧项目缺少可迁移的运行状态，无法创建 Working Set。"
+                    )
+                legacy_roots = {
+                    "source": canonical_source_dir,
+                    "translated": canonical_translated_dir,
+                    "cache": canonical_cache_dir,
+                }
+                for name, legacy_root in legacy_roots.items():
+                    destination = {
+                        "source": source_dir,
+                        "translated": translated_dir,
+                        "cache": cache_dir,
+                    }[name]
+                    if legacy_root is not None and legacy_root.is_dir():
+                        shutil.copytree(
+                            legacy_root,
+                            destination,
+                            dirs_exist_ok=True,
+                        )
+            yield PageWorkingSet(
+                base=base,
+                root=root,
+                source_dir=source_dir,
+                translated_dir=translated_dir,
+                cache_dir=cache_dir,
+                canonical_source_dir=canonical_source_dir,
+                canonical_translated_dir=canonical_translated_dir,
+                canonical_cache_dir=canonical_cache_dir,
+                legacy_runtime_session=(
+                    dict(legacy_project) if base.head is None else None
+                ),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def commit_page_working_set(
+        self,
+        working_set: PageWorkingSet,
+        prepared: PreparedHeadUpdate,
+    ) -> ProjectHeadCommitResult:
+        warnings: list[str] = []
+        head = self.commit_project_head(
+            working_set.base.project_id,
+            state_document=prepared.state_document,
+            project_manifest=prepared.project_manifest,
+            page_documents=prepared.page_documents,
+            artifact_files=prepared.artifact_files,
+            expected_generation=working_set.base.head_generation,
+            expected_revision_id=working_set.base.head_revision_id,
+            replace_prefixes=prepared.replace_prefixes,
+            remove_logical_paths=prepared.remove_logical_paths,
+            warning_sink=warnings,
+        )
+
+        try:
+            for logical_path in prepared.remove_logical_paths:
+                parts = self._validated_snapshot_logical_path(logical_path)
+                if (
+                    parts[0] == "translated"
+                    and working_set.canonical_translated_dir is not None
+                ):
+                    working_set.canonical_translated_dir.joinpath(*parts[1:]).unlink(
+                        missing_ok=True
+                    )
+            if working_set.canonical_cache_dir is not None:
+                target_cache_dir = (
+                    working_set.canonical_cache_dir / working_set.base.page_id
+                )
+                shutil.rmtree(target_cache_dir, ignore_errors=True)
+            destinations: dict[str, Path] = {}
+            if working_set.canonical_translated_dir is not None:
+                destinations["translated"] = working_set.canonical_translated_dir
+            if working_set.canonical_cache_dir is not None:
+                destinations["cache"] = working_set.canonical_cache_dir
+            if destinations:
+                self.restore_snapshot_artifacts(
+                    working_set.base.project_id,
+                    {"schema_version": 1, "files": dict(head.get("files") or {})},
+                    destinations,
+                )
+        except Exception as exc:
+            warnings.append(
+                "Project Head committed but translated/cache compatibility "
+                f"projection failed: {exc}"
+            )
+            logger.exception(
+                "Project Head committed but artifact compatibility projection failed. "
+                "project=%s page=%s",
+                working_set.base.project_id,
+                working_set.base.page_id,
+            )
+
+        try:
+            self.refresh_project_index_entry(
+                {
+                    field: prepared.project_manifest[field]
+                    for field in self.PROJECT_INDEX_FIELDS
+                    if field in prepared.project_manifest
+                }
+            )
+        except Exception as exc:
+            warnings.append(
+                f"Project Head committed but project index projection failed: {exc}"
+            )
+            logger.exception(
+                "Project Head committed but project index projection failed. project=%s",
+                working_set.base.project_id,
+            )
+
+        try:
+            pending = self.read_pending_artifact_set(working_set.base.project_id)
+            if pending is not None and str(
+                pending.get("base_head_revision_id") or ""
+            ) != str(head.get("revision_id") or ""):
+                self.clear_pending_artifact_set(working_set.base.project_id)
+            self.garbage_collect_snapshot_blobs(
+                working_set.base.project_id,
+                self.read_snapshot_manifests(working_set.base.project_id),
+            )
+        except Exception as exc:
+            warnings.append(
+                f"Project Head committed but post-commit cleanup failed: {exc}"
+            )
+            logger.exception(
+                "Project Head committed but post-commit cleanup failed. project=%s",
+                working_set.base.project_id,
+            )
+
+        return ProjectHeadCommitResult(
+            head=head,
+            warnings=tuple(warnings),
+            runtime_session=dict(prepared.runtime_session),
+        )
+
     def write_pending_artifact_set(
         self,
         project_id: str,
@@ -369,8 +743,10 @@ class ProjectWorkspace:
         page_documents: dict[str, dict[str, Any]],
         artifact_files: dict[str, Path] | None = None,
         expected_generation: int | None = None,
+        expected_revision_id: str | None = None,
         replace_prefixes: tuple[str, ...] = (),
         remove_logical_paths: set[str] | None = None,
+        warning_sink: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized_project_id = self.validated_project_id(project_id)
         current_head = self.read_project_head(normalized_project_id)
@@ -382,6 +758,19 @@ class ProjectWorkspace:
             raise ProjectHeadConflictError(
                 expected_generation=int(expected_generation),
                 actual_generation=current_generation,
+                expected_revision_id=str(expected_revision_id or ""),
+                actual_revision_id=str((current_head or {}).get("revision_id") or ""),
+            )
+        current_revision_id = str((current_head or {}).get("revision_id") or "")
+        if (
+            expected_revision_id is not None
+            and str(expected_revision_id) != current_revision_id
+        ):
+            raise ProjectHeadConflictError(
+                expected_generation=int(expected_generation or 0),
+                actual_generation=current_generation,
+                expected_revision_id=str(expected_revision_id),
+                actual_revision_id=current_revision_id,
             )
         normalized_replace_prefixes: list[str] = []
         for raw_prefix in replace_prefixes:
@@ -456,10 +845,29 @@ class ProjectWorkspace:
             "revision_id": revision_id,
             "files": next_files,
         }
-        revisions_dir = self.project_revisions_dir(normalized_project_id)
-        revisions_dir.mkdir(parents=True, exist_ok=True)
-        self.write_json_file(revisions_dir / f"{revision_id}.json", next_head)
-        self.write_json_file(self.project_head_path(normalized_project_id), next_head)
+        with self._head_commit_lock(normalized_project_id):
+            head_before_swap = self.read_project_head(normalized_project_id)
+            actual_generation = int((head_before_swap or {}).get("generation") or 0)
+            actual_revision_id = str(
+                (head_before_swap or {}).get("revision_id") or ""
+            )
+            if (
+                expected_generation is not None
+                and int(expected_generation) != actual_generation
+            ) or (
+                expected_revision_id is not None
+                and str(expected_revision_id) != actual_revision_id
+            ):
+                raise ProjectHeadConflictError(
+                    expected_generation=int(expected_generation or 0),
+                    actual_generation=actual_generation,
+                    expected_revision_id=str(expected_revision_id or ""),
+                    actual_revision_id=actual_revision_id,
+                )
+            revisions_dir = self.project_revisions_dir(normalized_project_id)
+            revisions_dir.mkdir(parents=True, exist_ok=True)
+            self.write_json_file(revisions_dir / f"{revision_id}.json", next_head)
+            self.write_json_file(self.project_head_path(normalized_project_id), next_head)
 
         # These files remain compatibility projections for code that has not yet
         # migrated to Project Head reads. The atomic head pointer is authoritative.
@@ -474,7 +882,21 @@ class ProjectWorkspace:
         for projection_path, projection_payload in compatibility_projections.items():
             try:
                 self.write_json_file(projection_path, projection_payload)
-            except OSError:
+            except Exception:
+                logical_projection = (
+                    "state/session.json"
+                    if projection_path
+                    == self.project_session_state_path(normalized_project_id)
+                    else "project/project.json"
+                    if projection_path
+                    == self.project_manifest_path(normalized_project_id)
+                    else str(projection_path.relative_to(project_dir))
+                )
+                if warning_sink is not None:
+                    warning_sink.append(
+                        "Project Head committed but compatibility projection "
+                        f"failed: {logical_projection}"
+                    )
                 logger.exception(
                     "Project Head committed but a compatibility projection could not be refreshed. "
                     "project=%s generation=%s path=%s",

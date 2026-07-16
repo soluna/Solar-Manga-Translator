@@ -348,10 +348,13 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
     return session
 
 
+workflow_execution_adapter = TranslatorEngineWorkflowAdapter(translator_engine)
 workflow_coordinator = WorkflowCoordinator(
     project_loader=get_or_restore_session,
-    execution_adapter=TranslatorEngineWorkflowAdapter(translator_engine),
+    execution_adapter=workflow_execution_adapter,
     project_view_builder=translator_engine.build_client_session_payload,
+    project_workspace=translator_engine.project_workspace,
+    render_page_adapter=workflow_execution_adapter,
 )
 
 
@@ -1411,6 +1414,24 @@ def start_translation_task(
         raise
 
 
+def project_command_page_revision(payload: dict[str, Any]) -> int | None:
+    expected_page_revision = payload.get("expected_page_revision")
+    expected_revision = payload.get("expected_revision")
+    if (
+        expected_page_revision is not None
+        and expected_revision is not None
+        and expected_page_revision != expected_revision
+    ):
+        raise ValueError(
+            "expected_revision 与 expected_page_revision 不一致。"
+        )
+    return (
+        expected_page_revision
+        if expected_page_revision is not None
+        else expected_revision
+    )
+
+
 def get_task_snapshot_or_404(task_id: str) -> dict[str, Any]:
     try:
         return task_manager.snapshot(task_id)
@@ -1489,7 +1510,7 @@ async def translate_session(websocket: WebSocket, session_id: str):
                 action=action,
                 config=config,
                 target_stored_name=target_stored_name,
-                expected_page_revision=payload.get("expected_page_revision"),
+                expected_page_revision=project_command_page_revision(payload),
             )
             logger.info(
                 "Translation task started. session_id=%s task_id=%s action=%s target=%s",

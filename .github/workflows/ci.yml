@@ -35,11 +35,13 @@ jobs:
             backend/runtime_paths.py \
             backend/system_fonts.py \
             backend/task_manager.py \
+            backend/workflow_coordinator.py \
             backend/workflow_events.py \
             backend/domain/project_artifacts.py \
             backend/domain/project_state.py \
             backend/utils/file_handler.py \
             backend/engine/translator.py \
+            backend/engine/project_workspace.py \
             backend/patched_custom_openai.py \
             backend/patched_model_download.py \
             backend/patch_pydensecrf.py \

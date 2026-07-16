@@ -62,7 +62,12 @@ from .image_cleanup import (
     SEEDREAM_IMAGE_API_URL,
     create_image_cleanup_client,
 )
-from .project_workspace import InvalidStorageIdentifierError, ProjectWorkspace
+from .project_workspace import (
+    InvalidStorageIdentifierError,
+    PageWorkingSet,
+    PreparedHeadUpdate,
+    ProjectWorkspace,
+)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -2888,6 +2893,12 @@ class TranslatorEngine:
             stored_name = str(image.get("stored_name") or "")
             current_output = self._current_translated_output(session, output_dir, stored_name, preferred_output_format)
             if current_output is None:
+                current_output = self._materialize_head_translated_output(
+                    project_id,
+                    session,
+                    stored_name,
+                )
+            if current_output is None:
                 continue
             translated_images.append(
                 {
@@ -4233,6 +4244,7 @@ class TranslatorEngine:
         session: dict[str, Any],
         stored_name: str,
         config: dict[str, Any],
+        previous_document: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         source_dir = Path(session.get("source_dir") or "")
         output_dir = Path(session.get("translated_dir") or "")
@@ -4254,10 +4266,11 @@ class TranslatorEngine:
             self._normalize_rerender_output_format((session.get("last_config") or {}).get("rerender_output_format")),
         )
 
-        previous_document = self.project_workspace.read_project_page_document(
-            project_id,
-            stored_name,
-        )
+        if previous_document is None:
+            previous_document = self.project_workspace.read_project_page_document(
+                project_id,
+                stored_name,
+            )
         previous_metadata = previous_document.get("metadata") if isinstance(previous_document, dict) else {}
         previous_revision = int((previous_metadata or {}).get("revision") or 0)
         previous_regions = previous_document.get("regions") if isinstance(previous_document, dict) else []
@@ -4373,6 +4386,7 @@ class TranslatorEngine:
         project_id: str,
         session: dict[str, Any],
         page_ids: list[str] | None = None,
+        previous_page_documents: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         source_images = list(session.get("source_images") or [])
         if not source_images:
@@ -4392,6 +4406,7 @@ class TranslatorEngine:
                 session,
                 stored_name,
                 config,
+                previous_document=(previous_page_documents or {}).get(stored_name),
             )
             documents[stored_name] = document
         return documents
@@ -4576,7 +4591,44 @@ class TranslatorEngine:
             translated_path = self._current_translated_output(session, output_dir, page_id, preferred_format)
             if translated_path is not None and translated_path.exists():
                 return translated_path
+        head_output = self._materialize_head_translated_output(
+            project_id,
+            session,
+            page_id,
+        )
+        if head_output is not None:
+            return head_output
         raise FileNotFoundError("当前页面还没有可用的已嵌字结果。")
+
+    def _materialize_head_translated_output(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+    ) -> Path | None:
+        output_name = str(
+            (session.get("translated_output_map") or {}).get(page_id) or ""
+        ).strip()
+        if not output_name or Path(output_name).name != output_name:
+            return None
+        try:
+            cache_root = self.project_workspace.safe_storage_child(
+                self.temp_dir / "head-artifacts",
+                self._validated_project_id(project_id),
+                label="项目标识",
+            )
+            destination = self.project_workspace.safe_storage_child(
+                cache_root,
+                output_name,
+                label="页面产物",
+            )
+            return self.project_workspace.materialize_project_head_artifact(
+                project_id,
+                f"translated/{output_name}",
+                destination,
+            )
+        except (FileNotFoundError, InvalidStorageIdentifierError):
+            return None
 
     def get_page_preview_image_path(self, project_id: str, session: dict[str, Any], page_id: str) -> Path:
         with contextlib.suppress(FileNotFoundError):
@@ -6543,35 +6595,170 @@ class TranslatorEngine:
         progress_callback: ProgressCallback,
         target_stored_name: str | None = None,
         skip_completed: bool = False,
-        _transactional: bool = True,
     ) -> dict[str, str]:
-        if _transactional:
-            working_session = copy.deepcopy(session)
-            resume_fingerprint = self._pending_artifact_resume_fingerprint(
-                "rerender",
-                raw_config,
+        if target_stored_name:
+            # Compatibility facade for composite Engine operations that own a
+            # larger transaction. User-facing RenderPage commands are routed
+            # through WorkflowCoordinator and never enter this non-persisting
+            # path.
+            return await self._rerender_session_core(
+                session_id=session_id,
+                session=session,
+                raw_config=raw_config,
+                progress_callback=progress_callback,
                 target_stored_name=target_stored_name,
+                skip_completed=skip_completed,
             )
-            with self._project_artifact_transaction(
+        working_session = copy.deepcopy(session)
+        resume_fingerprint = self._pending_artifact_resume_fingerprint(
+            "rerender",
+            raw_config,
+        )
+        with self._project_artifact_transaction(
+            session_id,
+            working_session,
+            seed_existing=True,
+            action="rerender",
+            resume_fingerprint=resume_fingerprint,
+        ) as pending_restored:
+            result = await self._rerender_session_core(
+                session_id=session_id,
+                session=working_session,
+                raw_config=raw_config,
+                progress_callback=progress_callback,
+                target_stored_name=None,
+                skip_completed=skip_completed or pending_restored,
+            )
+            self.persist_project_state(
                 session_id,
                 working_session,
-                seed_existing=True,
-                action="rerender",
-                resume_fingerprint=resume_fingerprint,
-            ) as pending_restored:
-                result = await self.rerender_session(
-                    session_id=session_id,
-                    session=working_session,
-                    raw_config=raw_config,
-                    progress_callback=progress_callback,
-                    target_stored_name=target_stored_name,
-                    skip_completed=skip_completed or pending_restored,
-                    _transactional=False,
+                snapshot_kind="rerender",
+                snapshot_summary="整组页面重新嵌字完成",
+                persist_page_documents=True,
+            )
+        session.clear()
+        session.update(working_session)
+        result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
+        return result
+
+    async def render_page_working_set(
+        self,
+        *,
+        working_set: PageWorkingSet,
+        raw_config: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+    ) -> PreparedHeadUpdate:
+        base = working_set.base
+        if base.head is None:
+            if working_set.legacy_runtime_session is None:
+                raise InvalidProjectStateError(
+                    "旧项目缺少可迁移的运行状态，无法执行 RenderPage。"
                 )
-            session.clear()
-            session.update(working_session)
-            result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
-            return result
+            session = copy.deepcopy(working_set.legacy_runtime_session)
+        else:
+            session = ProjectState.load(
+                base.state_document,
+                expected_project_id=base.project_id,
+            ).to_runtime_session()
+        session["source_dir"] = str(working_set.source_dir)
+        session["translated_dir"] = str(working_set.translated_dir)
+        session["rerender_cache_dir"] = str(working_set.cache_dir)
+        session["mask_debug_dir"] = str(working_set.root / "mask-debug")
+        result = await self._rerender_session_core(
+            session_id=base.project_id,
+            session=session,
+            raw_config=raw_config,
+            progress_callback=progress_callback,
+            target_stored_name=base.page_id,
+            style_debug_dir=working_set.root / "style-debug",
+        )
+        page_documents = self._build_page_documents(
+            base.project_id,
+            session,
+            page_ids=[base.page_id],
+            previous_page_documents={base.page_id: base.page_document},
+        )
+        artifact_files = self._project_head_artifact_files(
+            base.project_id,
+            session,
+            page_ids=[base.page_id],
+            bootstrap=base.head is None,
+        )
+        runtime_session = copy.deepcopy(session)
+        for field_name in (
+            "source_dir",
+            "translated_dir",
+            "rerender_cache_dir",
+            "mask_debug_dir",
+        ):
+            runtime_session[field_name] = str(
+                base.state_document.get(field_name) or ""
+            )
+        runtime_session["download_path"] = str(
+            base.state_document.get("download_path") or ""
+        )
+        state_document = self._serialize_session_state(
+            base.project_id,
+            runtime_session,
+        )
+        project_summary = self._build_project_summary(
+            base.project_id,
+            runtime_session,
+        )
+        project_summary["region_count"] = sum(
+            len(document.get("regions") or [])
+            if page_id == base.page_id
+            else self._page_document_region_count(base.project_id, page_id)
+            for page_id, document in {
+                **{
+                    str(image.get("stored_name") or ""): {}
+                    for image in runtime_session.get("source_images") or []
+                    if isinstance(image, dict)
+                },
+                **page_documents,
+            }.items()
+            if page_id
+        )
+        project_manifest = {
+            **project_summary,
+            "source_dir": str(runtime_session.get("source_dir") or ""),
+            "translated_dir": str(runtime_session.get("translated_dir") or ""),
+        }
+        previous_output_name = str(
+            (base.state_document.get("translated_output_map") or {}).get(
+                base.page_id
+            )
+            or ""
+        ).strip()
+        remove_logical_paths = (
+            {f"translated/{previous_output_name}"}
+            if previous_output_name and Path(previous_output_name).name == previous_output_name
+            else set()
+        )
+        return PreparedHeadUpdate(
+            state_document=state_document,
+            project_manifest=project_manifest,
+            page_documents=page_documents,
+            artifact_files=artifact_files,
+            replace_prefixes=(
+                f"cache/{base.page_id}/",
+                f"pages/{base.page_id}/",
+            ),
+            remove_logical_paths=remove_logical_paths,
+            runtime_session=runtime_session,
+            execution_extras=dict(result),
+        )
+
+    async def _rerender_session_core(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+        target_stored_name: str | None = None,
+        skip_completed: bool = False,
+        style_debug_dir: Path | None = None,
+    ) -> dict[str, str]:
 
         self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
@@ -6637,7 +6824,14 @@ class TranslatorEngine:
 
         style_debug_enabled = config.get("font_style_mode") == "auto-map"
         if style_debug_enabled:
-            self._prepare_style_rerender_debug_dir(session_id, reset=True)
+            if style_debug_dir is None:
+                style_debug_dir = self._prepare_style_rerender_debug_dir(
+                    session_id,
+                    reset=True,
+                )
+            else:
+                shutil.rmtree(style_debug_dir, ignore_errors=True)
+                style_debug_dir.mkdir(parents=True, exist_ok=True)
 
         rerender_variant = self._next_rerender_variant(session)
 
@@ -6682,7 +6876,11 @@ class TranslatorEngine:
                     cache_page_dir,
                     config,
                     prepared_regions=prepared_regions,
-                    debug_output_dir=self._prepare_style_rerender_debug_dir(session_id, reset=False) / Path(image["stored_name"]).stem if style_debug_enabled else None,
+                    debug_output_dir=(
+                        style_debug_dir / Path(image["stored_name"]).stem
+                        if style_debug_enabled and style_debug_dir is not None
+                        else None
+                    ),
                     session=session,
                 )
                 if style_debug_enabled and debug_info is not None:
@@ -6692,6 +6890,7 @@ class TranslatorEngine:
                         output_path=output_path,
                         debug_info=debug_info,
                         regions=prepared_regions or [],
+                        debug_dir=style_debug_dir,
                     )
             else:
                 current_output = self._current_translated_output(
@@ -6750,16 +6949,6 @@ class TranslatorEngine:
             )
             session["download_path"] = archive_path
         session["workflow_stage"] = "translated"
-        rerender_scope = "当前页" if target_stored_name else "整组页面"
-        self.persist_project_state(
-            session_id,
-            session,
-            snapshot_kind="rerender",
-            snapshot_summary=f"{rerender_scope}重新嵌字完成",
-            persist_page_documents=True,
-            page_ids=[target_stored_name] if target_stored_name else None,
-        )
-
         return {
             "download_url": f"/api/download/{session_id}",
             "download_path": str(Path(archive_path or session.get("download_path") or "").resolve()) if (archive_path or session.get("download_path")) else "",
@@ -11446,8 +11635,15 @@ class TranslatorEngine:
         output_path: Path,
         debug_info: dict[str, Any],
         regions: list[Any],
+        debug_dir: Path | None = None,
     ) -> None:
-        debug_dir = self._prepare_style_rerender_debug_dir(session_id, reset=False)
+        if debug_dir is None:
+            debug_dir = self._prepare_style_rerender_debug_dir(
+                session_id,
+                reset=False,
+            )
+        else:
+            debug_dir.mkdir(parents=True, exist_ok=True)
         report_path = debug_dir / f"{Path(stored_name).stem}.json"
         report = {
             "stored_name": stored_name,

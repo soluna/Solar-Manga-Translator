@@ -222,6 +222,70 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 1,
             )
 
+    def test_project_head_rechecks_generation_and_revision_immediately_before_swap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            project_id = "project-a"
+            state_document = {"schema_version": 2, "project_id": project_id}
+            project_manifest = {"project_id": project_id, "title": "Project A"}
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={
+                    "001.png": {"page_id": "001.png", "metadata": {"revision": 1}}
+                },
+            )
+            original_capture = workspace.capture_snapshot_artifacts
+            concurrent_head = {
+                **first_head,
+                "generation": 2,
+                "revision_id": "g00000002-concurrent",
+            }
+            advanced = False
+
+            def capture_then_advance(*args, **kwargs):
+                nonlocal advanced
+                captured = original_capture(*args, **kwargs)
+                if not advanced:
+                    advanced = True
+                    workspace.write_json_file(
+                        workspace.project_revisions_dir(project_id)
+                        / f"{concurrent_head['revision_id']}.json",
+                        concurrent_head,
+                    )
+                    workspace.write_json_file(
+                        workspace.project_head_path(project_id),
+                        concurrent_head,
+                    )
+                return captured
+
+            with mock.patch.object(
+                workspace,
+                "capture_snapshot_artifacts",
+                side_effect=capture_then_advance,
+            ):
+                with self.assertRaises(ProjectHeadConflictError) as raised:
+                    workspace.commit_project_head(
+                        project_id,
+                        state_document=state_document,
+                        project_manifest=project_manifest,
+                        page_documents={
+                            "001.png": {
+                                "page_id": "001.png",
+                                "metadata": {"revision": 2},
+                            }
+                        },
+                        expected_generation=first_head["generation"],
+                        expected_revision_id=first_head["revision_id"],
+                    )
+
+            self.assertEqual(raised.exception.actual_generation, 2)
+            self.assertEqual(workspace.read_project_head(project_id), concurrent_head)
+
     def test_compatibility_projection_failure_does_not_uncommit_the_head(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = self.make_workspace(Path(tmp))
@@ -240,11 +304,13 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 "write_json_file",
                 side_effect=fail_only_at_session_projection,
             ):
+                warnings: list[str] = []
                 committed_head = workspace.commit_project_head(
                     project_id,
                     state_document=state_document,
                     project_manifest=project_manifest,
                     page_documents={"001.png": {"page_id": "001.png", "metadata": {"revision": 1}}},
+                    warning_sink=warnings,
                 )
 
             self.assertEqual(workspace.read_project_head(project_id), committed_head)
@@ -253,6 +319,115 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 state_document,
             )
             self.assertFalse(workspace.project_session_state_path(project_id).exists())
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("state/session.json", warnings[0])
+
+    def test_page_working_set_is_bound_to_head_artifacts_and_is_cleaned_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            project_id = "project-a"
+            source = root / "head-source.png"
+            translated = root / "head-translated.png"
+            cache = root / "head-cache.json"
+            source.write_bytes(b"head source")
+            translated.write_bytes(b"head translated")
+            cache.write_text("head cache", encoding="utf-8")
+            workspace.commit_project_head(
+                project_id,
+                state_document={"schema_version": 2, "project_id": project_id},
+                project_manifest={"project_id": project_id, "title": "Project A"},
+                page_documents={
+                    "001.png": {"page_id": "001.png", "metadata": {"revision": 4}}
+                },
+                artifact_files={
+                    "source/001.png": source,
+                    "translated/001.png": translated,
+                    "cache/001.png/regions.json": cache,
+                },
+            )
+            source.write_bytes(b"stale live source")
+            translated.write_bytes(b"stale live translated")
+            cache.write_text("stale live cache", encoding="utf-8")
+
+            base = workspace.read_command_base(project_id, "001.png")
+            with workspace.materialize_page_working_set(base) as working_set:
+                working_root = working_set.root
+                self.assertEqual(base.page_revision, 4)
+                self.assertEqual(
+                    (working_set.source_dir / "001.png").read_bytes(),
+                    b"head source",
+                )
+                self.assertEqual(
+                    (working_set.translated_dir / "001.png").read_bytes(),
+                    b"head translated",
+                )
+                self.assertEqual(
+                    (working_set.cache_dir / "001.png" / "regions.json").read_text(
+                        encoding="utf-8"
+                    ),
+                    "head cache",
+                )
+
+            self.assertFalse(working_root.exists())
+
+    def test_legacy_page_working_set_materializes_from_legacy_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.make_workspace(root)
+            project_id = "legacy-project"
+            source_dir = root / "legacy-source"
+            translated_dir = root / "legacy-translated"
+            cache_dir = root / "legacy-cache"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            (cache_dir / "001.png").mkdir(parents=True)
+            (source_dir / "001.png").write_bytes(b"legacy source")
+            (translated_dir / "001.png").write_bytes(b"legacy translated")
+            (cache_dir / "001.png" / "regions.json").write_text(
+                "legacy cache",
+                encoding="utf-8",
+            )
+            legacy_state = {
+                "project_id": project_id,
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "rerender_cache_dir": str(cache_dir),
+            }
+            workspace.write_json_file(
+                workspace.project_session_state_path(project_id),
+                legacy_state,
+            )
+            workspace.write_json_file(
+                workspace.project_manifest_path(project_id),
+                {"project_id": project_id, "title": "Legacy"},
+            )
+            workspace.write_json_file(
+                workspace.project_page_document_path(project_id, "001.png"),
+                {"page_id": "001.png", "metadata": {"revision": 1}},
+            )
+
+            base = workspace.read_command_base(project_id, "001.png")
+            with workspace.materialize_page_working_set(
+                base,
+                legacy_project=legacy_state,
+            ) as working_set:
+                self.assertIsNone(base.head)
+                self.assertEqual(base.head_generation, 0)
+                self.assertEqual(
+                    (working_set.source_dir / "001.png").read_bytes(),
+                    b"legacy source",
+                )
+                self.assertEqual(
+                    (working_set.translated_dir / "001.png").read_bytes(),
+                    b"legacy translated",
+                )
+                self.assertEqual(
+                    (working_set.cache_dir / "001.png" / "regions.json").read_text(
+                        encoding="utf-8"
+                    ),
+                    "legacy cache",
+                )
 
     def test_json_helpers_default_bad_json_and_count_page_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -19,6 +19,7 @@ import {
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolvePageEntryCoverUrl,
+  resolvePageListCoverWorkflowStage,
   resolveReviewRegionTranslation,
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
@@ -1624,6 +1625,13 @@ const activeTaskPhaseProgressLabel = computed(() => {
   }
   return canCancelTask.value ? '可随时停止' : ''
 })
+const pageListCoverWorkflowStage = computed(() => {
+  return resolvePageListCoverWorkflowStage({
+    workflowStage: workflowStage.value,
+    translating: translating.value,
+    activeAction: activeAction.value,
+  })
+})
 const v2SettingsOpen = computed({
   get() {
     return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
@@ -1736,7 +1744,7 @@ const v2PageEntries = computed(() => {
 
   return order.map((key) => {
     const entry = mapped.get(key)
-    const fallback = resolvePageEntryCoverUrl(entry, workflowStage.value)
+    const fallback = resolvePageEntryCoverUrl(entry, pageListCoverWorkflowStage.value)
     const status = entry?.finalUrl
       ? '已完成'
       : entry?.reviewReady

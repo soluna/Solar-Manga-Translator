@@ -20,8 +20,6 @@ from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 import cv2
 import numpy as np
@@ -41,12 +39,22 @@ from domain.project_state import (
     ProjectState,
 )
 from domain.region_typography import RegionTypography
-from http_requests import build_json_post_request
 from inference_backend import (
     InferenceBackend,
     InferenceProgress,
     InferenceRequest,
     UpstreamInferenceBackend,
+)
+from translation_provider import (
+    DOUBAO_ARK_BASE_URL,
+    DOUBAO_DEFAULT_MODEL,
+    DOUBAO_GLOSSARY_FALLBACK_MODEL,
+    HTTP_CLIENT_COMPAT as urllib_request,
+    GlossaryRequest,
+    TranslationProvider,
+    TranslationProviderError,
+    TranslationRequest,
+    UpstreamTranslationProvider,
 )
 from runtime_paths import AppPaths, resolve_app_paths
 from system_fonts import (
@@ -147,9 +155,9 @@ class TranslatorEngine:
     PROJECT_GLOSSARY_FALLBACK_PROMPT_CHAR_LIMIT = 16000
     PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS = 120
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
-    DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-    DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
-    DOUBAO_GLOSSARY_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
+    DOUBAO_ARK_BASE_URL = DOUBAO_ARK_BASE_URL
+    DOUBAO_DEFAULT_MODEL = DOUBAO_DEFAULT_MODEL
+    DOUBAO_GLOSSARY_FALLBACK_MODEL = DOUBAO_GLOSSARY_FALLBACK_MODEL
     STYLE_BUCKETS = ("gothic", "mincho", "rounded", "cartoon", "handwritten", "sfx")
     DEFAULT_FONT_KEY = f"system:{BUNDLED_DEFAULT_FONT_NAME}"
     LEGACY_DEFAULT_FONT_KEYS = {"system:auto"}
@@ -190,17 +198,12 @@ class TranslatorEngine:
         "行业术语",
         "其他",
     }
-    DOUBAO_CURATED_MODELS = {
-        "doubao-seed-translation-250915",
-        "doubao-seed-2-0-pro-260215",
-        "doubao-seed-2-0-lite-260215",
-        "doubao-seed-2-0-mini-260215",
-    }
     def __init__(
         self,
         base_dir: Path,
         app_paths: AppPaths | None = None,
         inference_backend: InferenceBackend | None = None,
+        translation_provider: TranslationProvider | None = None,
     ):
         self.base_dir = Path(base_dir)
         self.paths = app_paths or resolve_app_paths(self.base_dir)
@@ -219,6 +222,10 @@ class TranslatorEngine:
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.inference_backend = inference_backend or UpstreamInferenceBackend(self.base_dir)
+        self.translation_provider = translation_provider or UpstreamTranslationProvider(
+            self.inference_backend,
+            compatibility_hooks=self,
+        )
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
@@ -322,45 +329,29 @@ class TranslatorEngine:
 
     async def validate_user_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
         config = self._normalize_config(raw_config)
-        selected_translator = str(config.get("selected_translator") or "").strip()
-        if selected_translator not in {"gemini", "doubao-ark", "openai-compatible"}:
-            return {
-                "ok": False,
-                "message": f"当前只支持校验 Gemini / Doubao / OpenAI Compatible，暂不支持 {selected_translator or '当前引擎'}。",
-                "translator": selected_translator,
-            }
-
-        if not str(config.get("api_key") or "").strip():
-            return {
-                "ok": False,
-                "message": "缺少 API Key。",
-                "translator": selected_translator,
-            }
-
+        provider_config = self.translation_provider.configure(config)
+        selected_translator = provider_config.provider_name
         try:
-            if selected_translator == "openai-compatible":
-                translated = [await self._validate_openai_compatible_connection(config)]
-            elif selected_translator == "doubao-ark":
-                translated = [await self._validate_doubao_connection(config)]
-            else:
-                translated = await self._translate_text_batch(
-                    ["テスト"],
-                    config,
-                    session_id=f"settings-validation-{uuid.uuid4().hex[:8]}",
-                )
+            validation = await self.translation_provider.validate(provider_config)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
+            message = (
+                str(exc)
+                if isinstance(exc, TranslationProviderError)
+                else "翻译服务配置校验失败，请稍后重试。"
+            )
             return {
                 "ok": False,
-                "message": str(exc),
+                "message": message,
                 "translator": selected_translator,
             }
 
-        preview = str(translated[0] or "").strip() if translated else ""
         return {
             "ok": True,
             "message": "连接成功",
             "translator": selected_translator,
-            "preview": preview,
+            "preview": validation.preview,
         }
 
     def _redact_settings(self, normalized: dict[str, Any]) -> dict[str, Any]:
@@ -386,42 +377,16 @@ class TranslatorEngine:
         return redacted
 
     async def _validate_openai_compatible_connection(self, config: dict[str, Any]) -> str:
-        base_url = str(config.get("openai_base_url") or "").strip()
-        model = str(config.get("openai_model") or config.get("translator_model") or "").strip()
-        api_key = str(config.get("api_key") or "").strip()
-        if not base_url:
-            raise ValueError("缺少 OpenAI Compatible API Base URL。")
-        if not model:
-            raise ValueError("缺少 OpenAI Compatible 模型名称。")
-
-        return await asyncio.to_thread(
-            self._request_chat_completions_validation_sync,
-            provider_label="OpenAI Compatible",
-            base_url=base_url,
-            model=model,
-            api_key=api_key,
+        result = await self.translation_provider.validate(
+            self.translation_provider.configure(config)
         )
+        return result.preview
 
     async def _validate_doubao_connection(self, config: dict[str, Any]) -> str:
-        model = str(config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL).strip()
-        api_key = str(config.get("api_key") or "").strip()
-        if model.startswith("doubao-seed-translation"):
-            return await asyncio.to_thread(
-                self._request_responses_validation_sync,
-                provider_label="Doubao Ark",
-                base_url=self.DOUBAO_ARK_BASE_URL,
-                model=model,
-                api_key=api_key,
-                target_lang=config.get("target_lang"),
-            )
-
-        return await asyncio.to_thread(
-            self._request_chat_completions_validation_sync,
-            provider_label="Doubao Ark",
-            base_url=self.DOUBAO_ARK_BASE_URL,
-            model=model,
-            api_key=api_key,
+        result = await self.translation_provider.validate(
+            self.translation_provider.configure(config)
         )
+        return result.preview
 
     def _request_chat_completions_validation_sync(
         self,
@@ -431,29 +396,12 @@ class TranslatorEngine:
         model: str,
         api_key: str,
     ) -> str:
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a translation connectivity test. Return only the translated text.",
-                },
-                {
-                    "role": "user",
-                    "content": "Translate this Japanese text to Chinese: テスト",
-                },
-            ],
-            "max_tokens": 64,
-            "temperature": 0,
-            "stream": False,
-        }
-        response = self._post_validation_json(
+        return self._upstream_translation_provider().request_chat_completions_validation_sync(
             provider_label=provider_label,
-            url=self._chat_completions_url(base_url),
+            base_url=base_url,
+            model=model,
             api_key=api_key,
-            payload=payload,
         )
-        return self._extract_chat_completions_preview(response)
 
     def _request_chat_completions_text_sync(
         self,
@@ -467,36 +415,16 @@ class TranslatorEngine:
         max_tokens: int = 1600,
         timeout_seconds: int = 30,
     ) -> str:
-        if not str(base_url or "").strip():
-            raise ValueError(f"缺少 {provider_label} API Base URL。")
-        if not str(model or "").strip():
-            raise ValueError(f"缺少 {provider_label} 模型名称。")
-        if not str(api_key or "").strip():
-            raise ValueError(f"缺少 {provider_label} API Key。")
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "stream": False,
-        }
-        response = self._post_validation_json(
+        return self._upstream_translation_provider().request_chat_completions_text_sync(
             provider_label=provider_label,
-            url=self._chat_completions_url(base_url),
+            base_url=base_url,
+            model=model,
             api_key=api_key,
-            payload=payload,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
         )
-        return self._extract_chat_completions_preview(response)
 
     def _request_gemini_text_sync(
         self,
@@ -506,27 +434,12 @@ class TranslatorEngine:
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        if not str(api_key or "").strip():
-            raise ValueError("缺少 Gemini API Key。")
-        try:
-            from google import genai
-            from google.genai import types
-        except Exception as exc:
-            raise RuntimeError("当前环境缺少 Gemini SDK，无法提取专有名词。") from exc
-
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model or "gemini-3.1-pro-preview",
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0,
-            ),
+        return self._upstream_translation_provider().request_gemini_text_sync(
+            model=model,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-        raise RuntimeError("Gemini 已响应，但没有返回可读取的文本。")
 
     def _request_responses_validation_sync(
         self,
@@ -537,30 +450,13 @@ class TranslatorEngine:
         api_key: str,
         target_lang: Any,
     ) -> str:
-        payload = {
-            "model": model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "テスト",
-                            "translation_options": {
-                                "target_language": self._validation_language_code(target_lang) or "zh",
-                            },
-                        }
-                    ],
-                }
-            ],
-        }
-        response = self._post_validation_json(
+        return self._upstream_translation_provider().request_responses_validation_sync(
             provider_label=provider_label,
-            url=self._responses_url(base_url),
+            base_url=base_url,
+            model=model,
             api_key=api_key,
-            payload=payload,
+            target_lang=target_lang,
         )
-        return self._extract_responses_preview(response)
 
     def _post_validation_json(
         self,
@@ -571,135 +467,48 @@ class TranslatorEngine:
         payload: dict[str, Any],
         timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        request = build_json_post_request(url, api_key=api_key, payload=payload)
-        timeout = max(5, int(timeout_seconds or 30))
-        try:
-            with urllib_request.urlopen(request, timeout=timeout) as response:
-                body = response.read().decode("utf-8")
-        except urllib_error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(self._format_validation_http_error(provider_label, exc.code, body)) from exc
-        except urllib_error.URLError as exc:
-            raise RuntimeError(f"{provider_label} 请求失败：{exc}") from exc
-        except TimeoutError as exc:
-            raise RuntimeError(f"{provider_label} 请求超时：模型响应超过 {timeout} 秒，请稍后重试或换用更快的模型。") from exc
+        return self._upstream_translation_provider().post_json_direct(
+            provider_label=provider_label,
+            url=url,
+            api_key=api_key,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+        )
 
-        try:
-            parsed = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"{provider_label} 返回了无法解析的 JSON。") from exc
-        if not isinstance(parsed, dict):
-            raise RuntimeError(f"{provider_label} 返回格式异常。")
-        return parsed
+    def _upstream_translation_provider(self) -> UpstreamTranslationProvider:
+        if not isinstance(self.translation_provider, UpstreamTranslationProvider):
+            raise RuntimeError("当前翻译 Provider 不支持旧版兼容调用。")
+        return self.translation_provider
 
     def _chat_completions_url(self, base_url: str) -> str:
-        normalized = str(base_url or "").strip().rstrip("/")
-        if normalized.endswith("/chat/completions"):
-            return normalized
-        return f"{normalized}/chat/completions"
+        return self._upstream_translation_provider()._chat_completions_url(base_url)
 
     def _responses_url(self, base_url: str) -> str:
-        normalized = str(base_url or "").strip().rstrip("/")
-        if normalized.endswith("/responses"):
-            return normalized
-        return f"{normalized}/responses"
+        return self._upstream_translation_provider()._responses_url(base_url)
 
     def _extract_chat_completions_preview(self, payload: dict[str, Any]) -> str:
-        def content_text(value: Any) -> str:
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if not isinstance(value, list):
-                return ""
-            pieces: list[str] = []
-            for item in value:
-                if isinstance(item, str) and item.strip():
-                    pieces.append(item.strip())
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                text = item.get("text")
-                if isinstance(text, dict):
-                    text = text.get("value")
-                if isinstance(text, str) and text.strip():
-                    pieces.append(text.strip())
-            return "\n".join(pieces).strip()
-
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict):
-                    preview = content_text(message.get("content"))
-                    if preview:
-                        return preview
-                text = first.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-                if isinstance(message, dict):
-                    for field_name in ("reasoning_content", "reasoning"):
-                        preview = content_text(message.get(field_name))
-                        if preview:
-                            return preview
-        output_text = payload.get("output_text")
-        if isinstance(output_text, str) and output_text.strip():
-            return output_text.strip()
-        return ""
+        return self._upstream_translation_provider()._extract_chat_completions_text(
+            payload,
+            allow_empty=True,
+        )
 
     def _extract_responses_preview(self, payload: dict[str, Any]) -> str:
-        output_text = payload.get("output_text")
-        if isinstance(output_text, str) and output_text.strip():
-            return output_text.strip()
-
-        pieces: list[str] = []
-        output = payload.get("output")
-        if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if not isinstance(content, list):
-                    continue
-                for content_item in content:
-                    if isinstance(content_item, dict):
-                        text = content_item.get("text")
-                        if isinstance(text, str) and text.strip():
-                            pieces.append(text.strip())
-
-        preview = "\n".join(pieces).strip()
-        if preview:
-            return preview
-        return ""
+        return self._upstream_translation_provider()._extract_responses_text(
+            payload,
+            allow_empty=True,
+        )
 
     def _format_validation_http_error(self, provider_label: str, status_code: int, body: str) -> str:
-        detail = ""
-        try:
-            payload = json.loads(body)
-            error = payload.get("error") if isinstance(payload, dict) else None
-            if isinstance(error, dict):
-                detail = str(error.get("message") or error.get("detail") or "").strip()
-            elif isinstance(error, str):
-                detail = error.strip()
-            if not detail and isinstance(payload, dict):
-                detail = str(payload.get("message") or payload.get("detail") or "").strip()
-        except Exception:
-            detail = ""
-
-        if not detail:
-            detail = str(body or "").strip()
-        if len(detail) > 500:
-            detail = f"{detail[:500]}..."
-        return f"{provider_label} 请求失败：HTTP {status_code} {detail}".strip()
+        return str(
+            self._upstream_translation_provider()._http_error(
+                provider_label,
+                status_code,
+                body,
+            )
+        )
 
     def _validation_language_code(self, raw_value: Any) -> str | None:
-        normalized = str(raw_value or "").strip().upper()
-        return {
-            "CHS": "zh",
-            "CHT": "zh-Hant",
-            "JPN": "ja",
-            "ENG": "en",
-            "KOR": "ko",
-        }.get(normalized)
+        return self._upstream_translation_provider()._language_code(raw_value)
 
     def _font_directories_by_source(self) -> dict[str, list[Path]]:
         return {
@@ -3462,63 +3271,19 @@ class TranslatorEngine:
         config: dict[str, Any],
         prompt: str,
     ) -> str:
-        selected_translator = str(config.get("selected_translator") or config.get("translator") or "").strip()
-        api_key = str(config.get("api_key") or "").strip()
-        system_prompt = self._project_glossary_extraction_system_prompt()
-
-        if selected_translator == "openai-compatible":
-            return await asyncio.to_thread(
-                self._request_chat_completions_text_sync,
-                provider_label="OpenAI Compatible",
-                base_url=str(config.get("openai_base_url") or "").strip(),
-                model=str(config.get("openai_model") or config.get("translator_model") or "").strip(),
-                api_key=api_key,
-                system_prompt=system_prompt,
+        result = await self.translation_provider.extract_glossary(
+            GlossaryRequest(
+                config=self.translation_provider.configure(config),
+                system_prompt=self._project_glossary_extraction_system_prompt(),
                 user_prompt=prompt,
                 max_tokens=3200,
                 timeout_seconds=self.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS,
             )
+        )
+        return result.text
 
-        if selected_translator == "doubao-ark":
-            model = str(config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL).strip()
-            if model.startswith("doubao-seed-translation"):
-                model = self.DOUBAO_GLOSSARY_FALLBACK_MODEL
-            return await asyncio.to_thread(
-                self._request_chat_completions_text_sync,
-                provider_label="Doubao Ark",
-                base_url=self.DOUBAO_ARK_BASE_URL,
-                model=model,
-                api_key=api_key,
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                max_tokens=3200,
-                timeout_seconds=self.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS,
-            )
-
-        if selected_translator == "gemini":
-            return await asyncio.to_thread(
-                self._request_gemini_text_sync,
-                model="gemini-3.1-pro-preview",
-                api_key=api_key,
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-            )
-
-        return ""
-
-    @staticmethod
-    def _is_glossary_context_length_error(exc: Exception) -> bool:
-        message = str(exc or "").casefold()
-        return any(marker in message for marker in (
-            "context length",
-            "context_length_exceeded",
-            "maximum context",
-            "max context",
-            "too many tokens",
-            "prompt is too long",
-            "上下文长度",
-            "请求内容过长",
-        ))
+    def _is_glossary_context_length_error(self, exc: Exception) -> bool:
+        return self.translation_provider.is_context_length_error(exc)
 
     async def _request_project_glossary_with_context_fallback(
         self,
@@ -7343,35 +7108,25 @@ class TranslatorEngine:
             for secret_key in self.SECRET_CONFIG_KEYS:
                 if not str(raw_config.get(secret_key) or "").strip():
                     raw_config[secret_key] = str(stored.get(secret_key) or "").strip()
-        selected_translator = str(raw_config.get("translator") or "gemini").strip() or "gemini"
-        if selected_translator == "custom_openai":
-            persisted_selected = str(raw_config.get("selected_translator") or "").strip()
-            selected_translator = (
-                persisted_selected
-                if persisted_selected in {"doubao-ark", "openai-compatible"}
-                else "doubao-ark"
-            )
-        translator = selected_translator
-        target_lang = str(raw_config.get("target_lang") or "CHS").strip().upper() or "CHS"
-        translator_model = self._normalize_translator_model(
-            selected_translator,
-            raw_config.get("translator_model"),
-            raw_config.get("translator_model_custom"),
+        provider_config = self.translation_provider.configure(raw_config)
+        selected_translator = provider_config.provider_name
+        translator = provider_config.translator_name
+        target_lang = provider_config.target_lang
+        translator_model = (
+            provider_config.model if selected_translator == "doubao-ark" else ""
         )
-
-        # Sugoi doesn't support Chinese
-        if translator == "sugoi" and target_lang in ["CHS", "CHT"]:
-            print(f"[DEBUG] Sugoi translator does not support {target_lang}. Falling back to 'gemini'")
-            translator = "gemini"
-        elif selected_translator == "doubao-ark":
-            translator = "custom_openai"
-        elif selected_translator == "openai-compatible":
-            translator = "custom_openai"
-
-        use_gpu = bool(raw_config.get("use_gpu", True))
-        api_key = str(raw_config.get("api_key", "")).strip()
-        openai_base_url = str(raw_config.get("openai_base_url", "")).strip()
-        openai_model = str(raw_config.get("openai_model", "")).strip()
+        use_gpu = provider_config.use_gpu
+        api_key = provider_config.api_key
+        openai_base_url = (
+            provider_config.base_url
+            if selected_translator == "openai-compatible"
+            else str(raw_config.get("openai_base_url") or "").strip()
+        )
+        openai_model = (
+            provider_config.model
+            if selected_translator == "openai-compatible"
+            else str(raw_config.get("openai_model") or "").strip()
+        )
         render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
         render_letter_spacing = self._normalize_render_letter_spacing(raw_config.get("render_letter_spacing"))
         font_style_mode = self._normalize_font_style_mode(raw_config.get("font_style_mode"))
@@ -7501,18 +7256,6 @@ class TranslatorEngine:
         if not value:
             return ADVANCED_IMAGE_SELECTION_ERASE_PROMPT
         return value[:self.ADVANCED_ERASE_PROMPT_MAX_LENGTH]
-
-    def _normalize_translator_model(
-        self,
-        translator: str,
-        raw_value: Any,
-        raw_custom_value: Any = None,
-    ) -> str:
-        value = str(raw_value or "").strip()
-        custom_value = str(raw_custom_value or "").strip()
-        if translator in {"doubao-ark", "custom_openai"}:
-            return custom_value or value or self.DOUBAO_DEFAULT_MODEL
-        return ""
 
     def _normalize_image_cleanup_mode(self, raw_value: Any) -> str:
         value = str(raw_value or "off").strip().lower()
@@ -8065,29 +7808,11 @@ class TranslatorEngine:
     ) -> dict[str, str]:
         env = os.environ.copy()
         env["MT_DISABLE_INTERNAL_LOG_FILE"] = "1"
-        env["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
-        api_key = config.get("api_key")
-        if api_key and config.get("translator") == "gemini":
-            env["GEMINI_API_KEY"] = api_key
-        if config.get("selected_translator") == "doubao-ark":
-            env["CUSTOM_OPENAI_API_BASE"] = self.DOUBAO_ARK_BASE_URL
-            model_name = config.get("translator_model") or self.DOUBAO_DEFAULT_MODEL
-            env["CUSTOM_OPENAI_MODEL"] = model_name
-            env["CUSTOM_OPENAI_MODEL_CONF"] = ""
-            env["CUSTOM_OPENAI_USE_RESPONSES"] = "1" if str(model_name).startswith("doubao-seed-translation") else "0"
-            if api_key:
-                env["CUSTOM_OPENAI_API_KEY"] = api_key
-        elif config.get("selected_translator") == "openai-compatible":
-            base_url = str(config.get("openai_base_url") or "").strip()
-            model = str(config.get("openai_model") or config.get("translator_model") or "").strip()
-            if base_url:
-                env["CUSTOM_OPENAI_API_BASE"] = base_url
-            if model:
-                env["CUSTOM_OPENAI_MODEL"] = model
-            env["CUSTOM_OPENAI_MODEL_CONF"] = ""
-            env["CUSTOM_OPENAI_USE_RESPONSES"] = "0"
-            if api_key:
-                env["CUSTOM_OPENAI_API_KEY"] = api_key
+        env.update(
+            self.translation_provider.runtime_environment(
+                self.translation_provider.configure(config)
+            )
+        )
         glossary_context = str(config.get("project_glossary_context") or "").strip()
         if glossary_context:
             env["MT_PROJECT_GLOSSARY_TEXT"] = glossary_context
@@ -10698,19 +10423,14 @@ class TranslatorEngine:
         if config.get("translator") == "none":
             return ["" for _ in cleaned_texts]
 
-        env_updates = self._build_env(config, session_id)
-        translated = await self.inference_backend.translate_texts(
-            cleaned_texts,
-            translator_name=str(config["translator"]),
-            target_lang=str(config["target_lang"]),
-            device=self._select_inference_device(bool(config.get("use_gpu"))),
-            environment=env_updates,
+        translated = await self.translation_provider.translate(
+            TranslationRequest(
+                config=self.translation_provider.configure(config),
+                texts=tuple(cleaned_texts),
+                device=self._select_inference_device(bool(config.get("use_gpu"))),
+            )
         )
-
-        normalized = [str(item or "").strip() for item in (translated or [])]
-        if len(normalized) < len(cleaned_texts):
-            normalized.extend([""] * (len(cleaned_texts) - len(normalized)))
-        return normalized[:len(cleaned_texts)]
+        return list(translated.texts)
 
     async def _translate_cached_regions(
         self,

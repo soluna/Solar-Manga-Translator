@@ -28,6 +28,7 @@ jobs:
             backend/main.py \
             backend/http_requests.py \
             backend/inference_backend.py \
+            backend/translation_provider.py \
             backend/dependency_state.py \
             backend/diagnostics_bundle.py \
             backend/model_manager.py \
@@ -47,6 +48,7 @@ jobs:
             backend/patched_model_download.py \
             backend/patch_pydensecrf.py \
             backend/install_deps.py
+          python -m py_compile backend/tests/test_translation_provider.py
       - name: Run backend tests
         run: |
           python -m unittest discover -s backend/tests -t . -v

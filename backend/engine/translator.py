@@ -3838,7 +3838,7 @@ class TranslatorEngine:
             source_page_count = len(session.get("source_images") or [])
             if affected_pages and len(set(affected_pages)) < source_page_count:
                 for page_id in dict.fromkeys(affected_pages):
-                    await self.rerender_session(
+                    await self._rerender_session_core(
                         session_id=project_id,
                         session=session,
                         raw_config=raw_config,
@@ -3860,7 +3860,7 @@ class TranslatorEngine:
                     page_ids=list(dict.fromkeys(affected_pages)),
                 )
             else:
-                await self.rerender_session(
+                await self._rerender_session(
                     session_id=project_id,
                     session=session,
                     raw_config=raw_config,
@@ -5675,7 +5675,7 @@ class TranslatorEngine:
                     files[f"{prefix}/{path.relative_to(root).as_posix()}"] = path
         return files
 
-    async def translate_session(
+    async def _translate_session(
         self,
         session_id: str,
         session: dict[str, Any],
@@ -5688,6 +5688,35 @@ class TranslatorEngine:
         checkpoint_callback: CheckpointCallback | None = None,
         archive_destination: Path | None = None,
     ) -> dict[str, str]:
+        return await self._translate_session_with_operations(
+            session_id=session_id,
+            session=session,
+            raw_config=raw_config,
+            progress_callback=progress_callback,
+            persist=persist,
+            pending_restored=pending_restored,
+            page_checkpoints=page_checkpoints,
+            checkpoint_callback=checkpoint_callback,
+            archive_destination=archive_destination,
+            detect_operation=self._detect_session,
+            resume_operation=self._resume_translation_session,
+        )
+
+    async def _translate_session_with_operations(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        progress_callback: ProgressCallback,
+        *,
+        persist: bool = True,
+        pending_restored: bool = False,
+        page_checkpoints: dict[str, str] | None = None,
+        checkpoint_callback: CheckpointCallback | None = None,
+        archive_destination: Path | None = None,
+        detect_operation: Callable[..., Awaitable[dict[str, str]]],
+        resume_operation: Callable[..., Awaitable[dict[str, str]]],
+    ) -> dict[str, str]:
         page_checkpoints = page_checkpoints if page_checkpoints is not None else {}
         restored_stage = str(session.get("workflow_stage") or "")
         can_skip_detection = (
@@ -5696,7 +5725,7 @@ class TranslatorEngine:
         )
         can_resume_translation = can_skip_detection and restored_stage == "translating"
         if not can_skip_detection:
-            await self.detect_session(
+            await detect_operation(
                 session_id=session_id,
                 session=session,
                 raw_config=raw_config,
@@ -5706,7 +5735,7 @@ class TranslatorEngine:
                 page_checkpoints=page_checkpoints,
                 checkpoint_callback=checkpoint_callback,
             )
-        result = await self.resume_translation_session(
+        result = await resume_operation(
             session_id=session_id,
             session=session,
             raw_config={
@@ -5735,7 +5764,7 @@ class TranslatorEngine:
         result["translated_dir"] = str(Path(session["translated_dir"]).resolve())
         return result
 
-    async def detect_session(
+    async def _detect_session(
         self,
         session_id: str,
         session: dict[str, Any],
@@ -5862,7 +5891,7 @@ class TranslatorEngine:
             "workflow_stage": session["workflow_stage"],
         }
 
-    async def resume_translation_session(
+    async def _resume_translation_session(
         self,
         session_id: str,
         session: dict[str, Any],
@@ -6132,7 +6161,7 @@ class TranslatorEngine:
             "workflow_stage": session["workflow_stage"],
         }
 
-    async def rerender_session(
+    async def _rerender_session(
         self,
         session_id: str,
         session: dict[str, Any],
@@ -6317,7 +6346,7 @@ class TranslatorEngine:
                     "workflow_stage": "detected",
                 }
             else:
-                result = await self.detect_session(
+                result = await self._detect_session(
                     session_id=base.project_id,
                     session=session,
                     raw_config=raw_config,
@@ -6327,7 +6356,7 @@ class TranslatorEngine:
                     checkpoint_callback=checkpoint,
                 )
         elif action == "translate":
-            result = await self.translate_session(
+            result = await self._translate_session(
                 session_id=base.project_id,
                 session=session,
                 raw_config=raw_config,
@@ -6339,7 +6368,7 @@ class TranslatorEngine:
                 archive_destination=working_set.archive_dir / "result.zip",
             )
         elif action in {"resume-translate", "translate-page"}:
-            result = await self.resume_translation_session(
+            result = await self._resume_translation_session(
                 session_id=base.project_id,
                 session=session,
                 raw_config=raw_config,

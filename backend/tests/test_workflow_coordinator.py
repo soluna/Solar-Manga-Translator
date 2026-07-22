@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import copy
 import inspect
 import sys
 import tempfile
+import textwrap
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -281,6 +283,19 @@ class DeterministicProjectCommandAdapter(DeterministicRenderPageAdapter):
 
 
 class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    def test_legacy_workflow_facade_is_deleted(self) -> None:
+        legacy_names = (
+            "detect_" + "session",
+            "translate_" + "session",
+            "resume_translation_" + "session",
+            "rerender_" + "session",
+        )
+
+        for legacy_name in legacy_names:
+            with self.subTest(legacy_name=legacy_name):
+                self.assertNotIn(legacy_name, vars(main.TranslatorEngine))
+        self.assertNotIn("execute", vars(TranslatorEngineWorkflowAdapter))
+
     def make_render_page_coordinator(
         self,
         workspace: ProjectWorkspace,
@@ -289,7 +304,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     ) -> WorkflowCoordinator:
         return WorkflowCoordinator(
             project_loader=lambda _project_id: shared_project,
-            execution_adapter=DeterministicExecutionAdapter(),
+            volatile_execution_adapter=DeterministicExecutionAdapter(),
             project_view_builder=lambda project_id, project: {
                 "session_id": project_id,
                 "workflow_stage": project["workflow_stage"],
@@ -309,7 +324,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
             project_workspace=workspace,
-            render_page_adapter=render_adapter,
+            preparation_adapter=render_adapter,
         )
 
     async def test_project_commands_use_head_bound_coordinator_execution(self) -> None:
@@ -323,14 +338,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     legacy_execution = mock.AsyncMock()
                     coordinator = WorkflowCoordinator(
                         project_loader=lambda _project_id: shared_project,
-                        execution_adapter=legacy_execution,
+                        volatile_execution_adapter=legacy_execution,
                         project_view_builder=lambda project_id, project: {
                             "session_id": project_id,
                             "workflow_stage": project["workflow_stage"],
                             "project": {"is_busy": True, "busy_action": action},
                         },
                         project_workspace=workspace,
-                        render_page_adapter=adapter,
+                        preparation_adapter=adapter,
                     )
 
                     result = await coordinator.execute(
@@ -400,10 +415,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 legacy_execution = mock.AsyncMock()
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda _project_id: shared_project,
-                    execution_adapter=legacy_execution,
+                    volatile_execution_adapter=legacy_execution,
                     project_view_builder=lambda _project_id, _project: {},
                     project_workspace=workspace,
-                    render_page_adapter=adapter,
+                    preparation_adapter=adapter,
                 )
 
                 with self.assertRaises(CorruptProjectArtifactError):
@@ -473,10 +488,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 legacy_execution = mock.AsyncMock()
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda _project_id: shared_project,
-                    execution_adapter=legacy_execution,
+                    volatile_execution_adapter=legacy_execution,
                     project_view_builder=lambda _project_id, _project: {},
                     project_workspace=workspace,
-                    render_page_adapter=adapter,
+                    preparation_adapter=adapter,
                 )
 
                 with self.assertRaises(CorruptProjectArtifactError):
@@ -566,10 +581,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 legacy_execution = mock.AsyncMock()
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda _project_id: shared_project,
-                    execution_adapter=legacy_execution,
+                    volatile_execution_adapter=legacy_execution,
                     project_view_builder=lambda _project_id, _project: {},
                     project_workspace=workspace,
-                    render_page_adapter=adapter,
+                    preparation_adapter=adapter,
                 )
 
                 with self.assertRaises(CorruptProjectArtifactError):
@@ -602,10 +617,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda _project_id, _project: {},
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
 
             with self.assertRaises(CorruptProjectArtifactError):
@@ -730,10 +745,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 diagnostic_evidence = pending_path.read_bytes()
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda _project_id: shared_project,
-                    execution_adapter=DeterministicExecutionAdapter(),
+                    volatile_execution_adapter=DeterministicExecutionAdapter(),
                     project_view_builder=lambda _project_id, _project: {},
                     project_workspace=workspace,
-                    render_page_adapter=adapter,
+                    preparation_adapter=adapter,
                 )
 
                 with self.assertRaises(CorruptProjectArtifactError):
@@ -785,10 +800,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 legacy_execution = mock.AsyncMock()
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda _project_id: shared_project,
-                    execution_adapter=legacy_execution,
+                    volatile_execution_adapter=legacy_execution,
                     project_view_builder=lambda _project_id, _project: {},
                     project_workspace=workspace,
-                    render_page_adapter=adapter,
+                    preparation_adapter=adapter,
                 )
 
                 with mock.patch.object(
@@ -884,10 +899,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = ArchivePreparingAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda _project_id, _project: {},
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
             with mock.patch.object(
                 workspace,
@@ -927,10 +942,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             view_builder = mock.Mock()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=legacy_execution,
+                volatile_execution_adapter=legacy_execution,
                 project_view_builder=view_builder,
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
 
             with mock.patch.object(
@@ -963,10 +978,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda _project_id, _project: {},
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
 
             with self.assertRaises(PageDocumentRevisionConflict):
@@ -991,14 +1006,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
 
             async def disconnected(_event):
@@ -1059,14 +1074,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = CheckpointingProjectAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
             with mock.patch.object(
                 workspace,
@@ -1106,14 +1121,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
             original_refresh = workspace.refresh_project_index_entry
             concurrent_evidence: dict[str, object] = {}
@@ -1188,14 +1203,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
             with mock.patch.object(
                 workspace,
@@ -1230,14 +1245,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=DeterministicProjectCommandAdapter(),
+                preparation_adapter=DeterministicProjectCommandAdapter(),
             )
             with mock.patch.object(
                 workspace,
@@ -1281,14 +1296,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=DeterministicProjectCommandAdapter(),
+                preparation_adapter=DeterministicProjectCommandAdapter(),
             )
 
             await coordinator.execute(
@@ -1317,14 +1332,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=DeterministicProjectCommandAdapter(),
+                preparation_adapter=DeterministicProjectCommandAdapter(),
             )
             events: list[str] = []
             original_create = workspace.create_project_head_snapshot
@@ -1392,14 +1407,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=DeterministicProjectCommandAdapter(),
+                preparation_adapter=DeterministicProjectCommandAdapter(),
             )
 
             with mock.patch.object(
@@ -1448,14 +1463,14 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             adapter = DeterministicProjectCommandAdapter()
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=lambda project_id, project: {
                     "session_id": project_id,
                     "workflow_stage": project["workflow_stage"],
                     "project": {},
                 },
                 project_workspace=workspace,
-                render_page_adapter=adapter,
+                preparation_adapter=adapter,
             )
             with mock.patch.object(
                 workspace,
@@ -1703,10 +1718,10 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
             coordinator = WorkflowCoordinator(
                 project_loader=lambda _project_id: shared_project,
-                execution_adapter=DeterministicExecutionAdapter(),
+                volatile_execution_adapter=DeterministicExecutionAdapter(),
                 project_view_builder=fail_view,
                 project_workspace=workspace,
-                render_page_adapter=render_adapter,
+                preparation_adapter=render_adapter,
             )
 
             result = await coordinator.execute(
@@ -1831,7 +1846,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         coordinator = WorkflowCoordinator(
             project_loader=lambda project_id: {"project_id": project_id},
-            execution_adapter=ProgressAdapter(),
+            volatile_execution_adapter=ProgressAdapter(),
             project_view_builder=lambda project_id, _project: {
                 "session_id": project_id,
             },
@@ -1861,7 +1876,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 view_calls: list[str] = []
                 coordinator = WorkflowCoordinator(
                     project_loader=lambda project_id: {"project_id": project_id},
-                    execution_adapter=RaisingAdapter(error),
+                    volatile_execution_adapter=RaisingAdapter(error),
                     project_view_builder=lambda project_id, _project: (
                         view_calls.append(project_id) or {}
                     ),
@@ -1934,73 +1949,193 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         expected_page_revision=3,
                     )
 
-    async def test_production_adapter_maps_every_canonical_action_explicitly(
+    async def test_production_adapter_only_delegates_head_bound_preparation(
         self,
     ) -> None:
         engine = mock.Mock()
-        for method_name in (
-            "rerender_session",
-            "detect_session",
-            "resume_translation_session",
-            "translate_session",
-        ):
-            setattr(engine, method_name, mock.AsyncMock(return_value={}))
+        prepared = object()
+        engine.prepare_project_command_working_set = mock.AsyncMock(
+            return_value=prepared
+        )
         adapter = TranslatorEngineWorkflowAdapter(engine)
 
         async def ignore_progress(_event: dict[str, Any]) -> None:
             return None
 
-        cases = (
-            ("rerender", "page-1.png", "rerender_session", {}),
-            ("detect", None, "detect_session", {}),
-            (
-                "resume-translate",
-                None,
-                "resume_translation_session",
-                {"skip_completed": True},
-            ),
-            (
-                "translate-page",
-                "page-1.png",
-                "resume_translation_session",
-                {"target_stored_name": "page-1.png"},
-            ),
-            ("translate", None, "translate_session", {}),
+        command = ProjectCommand(
+            project_id="project-a",
+            action="translate",
+            config={"target_lang": "CHS"},
         )
-        self.assertEqual({case[0] for case in cases}, set(WORKFLOW_ACTIONS))
-        for action, target, expected_method, expected_extra in cases:
+        working_set = object()
+
+        result = await adapter.prepare_project_command(
+            command,
+            working_set,
+            ignore_progress,
+        )
+
+        self.assertIs(result, prepared)
+        engine.prepare_project_command_working_set.assert_awaited_once_with(
+            command=command,
+            working_set=working_set,
+            progress_callback=ignore_progress,
+        )
+        self.assertNotIn("execute", vars(type(adapter)))
+
+    def test_main_assembly_injects_one_backend_and_provider_identity(self) -> None:
+        inference_backend = object()
+        translation_provider = object()
+        engine = mock.Mock()
+        with (
+            mock.patch.object(
+                main,
+                "UpstreamInferenceBackend",
+                return_value=inference_backend,
+            ) as inference_constructor,
+            mock.patch.object(
+                main,
+                "UpstreamTranslationProvider",
+                return_value=translation_provider,
+            ) as provider_constructor,
+            mock.patch.object(
+                main,
+                "TranslatorEngine",
+                return_value=engine,
+            ) as engine_constructor,
+        ):
+            assembled = main.assemble_workflow_engine(
+                main.BASE_DIR,
+                main.APP_PATHS,
+            )
+
+        self.assertEqual(
+            assembled,
+            (inference_backend, translation_provider, engine),
+        )
+        inference_constructor.assert_called_once_with(main.BASE_DIR)
+        provider_constructor.assert_called_once_with(inference_backend)
+        engine_constructor.assert_called_once_with(
+            main.BASE_DIR,
+            app_paths=main.APP_PATHS,
+            inference_backend=inference_backend,
+            translation_provider=translation_provider,
+        )
+        self.assertIs(main.translator_engine.inference_backend, main.inference_backend)
+        self.assertIs(
+            main.translator_engine.translation_provider,
+            main.translation_provider,
+        )
+        self.assertIs(main.workflow_preparation_adapter._engine, main.translator_engine)
+
+    async def test_production_workspace_dispatch_never_calls_legacy_methods(
+        self,
+    ) -> None:
+        for action, target in (
+            ("rerender", None),
+            ("detect", None),
+            ("translate", None),
+            ("resume-translate", None),
+            ("translate-page", "001.png"),
+        ):
             with self.subTest(action=action):
-                engine.reset_mock()
-                command = ProjectCommand(
-                    project_id="project-a",
-                    action=action,
-                    config={"target_lang": "CHS"},
-                    target_stored_name=target,
-                )
-
-                await adapter.execute(command, {"project": "loaded"}, ignore_progress)
-
-                called_method = getattr(engine, expected_method)
-                called_method.assert_awaited_once()
-                kwargs = called_method.await_args.kwargs
-                self.assertEqual(kwargs["session_id"], "project-a")
-                self.assertEqual(kwargs["session"], {"project": "loaded"})
-                self.assertEqual(kwargs["raw_config"], {"target_lang": "CHS"})
-                self.assertIs(kwargs["progress_callback"], ignore_progress)
-                for key, value in expected_extra.items():
-                    self.assertEqual(kwargs[key], value)
-
-                awaited_methods = [
-                    method_name
-                    for method_name in (
-                        "rerender_session",
-                        "detect_session",
-                        "resume_translation_session",
-                        "translate_session",
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace, shared_project, first_head = seed_render_page_project(
+                        Path(tmp)
                     )
-                    if getattr(engine, method_name).await_count
-                ]
-                self.assertEqual(awaited_methods, [expected_method])
+                    deterministic = DeterministicProjectCommandAdapter()
+                    engine = mock.Mock()
+                    engine.project_command_fingerprint.side_effect = lambda **fields: repr(
+                        (
+                            fields["action"],
+                            fields["target_stored_name"],
+                            sorted(fields["raw_config"].items()),
+                        )
+                    )
+
+                    async def prepare_from_engine(
+                        *, command, working_set, progress_callback
+                    ):
+                        return await deterministic.prepare_project_command(
+                            command,
+                            working_set,
+                            progress_callback,
+                        )
+
+                    engine.prepare_project_command_working_set = mock.AsyncMock(
+                        side_effect=prepare_from_engine
+                    )
+                    adapter = TranslatorEngineWorkflowAdapter(engine)
+                    coordinator = WorkflowCoordinator(
+                        project_loader=lambda _project_id: shared_project,
+                        project_view_builder=lambda project_id, project: {
+                            "session_id": project_id,
+                            "workflow_stage": project["workflow_stage"],
+                            "project": {"is_busy": True, "busy_action": action},
+                        },
+                        project_workspace=workspace,
+                        preparation_adapter=adapter,
+                    )
+
+                    result = await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action=action,
+                            config={"target_lang": "CHS"},
+                            target_stored_name=target,
+                            expected_page_revision=4 if target else None,
+                        )
+                    )
+
+                    engine.prepare_project_command_working_set.assert_awaited_once()
+                    self.assertEqual(
+                        workspace.read_project_head("project-a")["generation"],
+                        first_head["generation"] + 1,
+                    )
+                    self.assertEqual(result["workflow_stage"], "translated")
+
+    def test_phase_a_cutover_keeps_shallow_modules_free_of_adapter_knowledge(
+        self,
+    ) -> None:
+        coordinator_source = inspect.getsource(sys.modules["workflow_coordinator"])
+        main_source = inspect.getsource(main)
+        production_preparation = inspect.getsource(
+            main.TranslatorEngine.prepare_project_command_working_set
+        )
+
+        for forbidden in (
+            "create_subprocess_exec",
+            "manga_translator",
+            "provider_name ==",
+            "selected_translator ==",
+            "CUSTOM_OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+        ):
+            with self.subTest(module="workflow_coordinator", forbidden=forbidden):
+                self.assertNotIn(forbidden, coordinator_source)
+        for forbidden in (
+            "provider_name ==",
+            "selected_translator ==",
+            "create_subprocess_exec",
+        ):
+            with self.subTest(module="main", forbidden=forbidden):
+                self.assertNotIn(forbidden, main_source)
+        production_calls = {
+            node.func.attr
+            for node in ast.walk(
+                ast.parse(textwrap.dedent(production_preparation))
+            )
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        legacy_names = (
+            "detect_" + "session",
+            "translate_" + "session",
+            "resume_translation_" + "session",
+            "rerender_" + "session",
+        )
+        for legacy_name in legacy_names:
+            with self.subTest(legacy_name=legacy_name):
+                self.assertNotIn(legacy_name, production_calls)
 
     async def test_main_runner_delegates_without_capturing_legacy_session(self) -> None:
         loaded_project = {
@@ -2012,7 +2147,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 **loaded_project,
                 "project_id": project_id,
             },
-            execution_adapter=DeterministicExecutionAdapter(),
+            volatile_execution_adapter=DeterministicExecutionAdapter(),
             project_view_builder=lambda project_id, loaded: {
                 "session_id": project_id,
                 "workflow_stage": loaded["workflow_stage"],
@@ -2261,7 +2396,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 **project,
                 "project_id": project_id,
             },
-            execution_adapter=DeterministicExecutionAdapter(),
+            volatile_execution_adapter=DeterministicExecutionAdapter(),
             project_view_builder=lambda project_id, loaded: {
                 "session_id": project_id,
                 "loaded_title": loaded["title"],

@@ -23,9 +23,11 @@ from engine.translator import (
     PageDocumentRevisionConflict,
     TranslatorEngine,
 )
+from inference_backend import UpstreamInferenceBackend
+from translation_provider import UpstreamTranslationProvider
 from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
-from runtime_paths import resolve_app_paths
+from runtime_paths import AppPaths, resolve_app_paths
 from logging_config import configure_rotating_file_logging
 from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
 from system_fonts import BUNDLED_DEFAULT_FONT_NAME
@@ -103,7 +105,27 @@ def iter_font_directories(source: str) -> list[Path]:
 
 
 SESSIONS: dict[str, dict[str, Any]] = {}
-translator_engine = TranslatorEngine(BASE_DIR, app_paths=APP_PATHS)
+
+
+def assemble_workflow_engine(
+    base_dir: Path,
+    app_paths: AppPaths,
+) -> tuple[UpstreamInferenceBackend, UpstreamTranslationProvider, TranslatorEngine]:
+    inference_backend = UpstreamInferenceBackend(base_dir)
+    translation_provider = UpstreamTranslationProvider(inference_backend)
+    engine = TranslatorEngine(
+        base_dir,
+        app_paths=app_paths,
+        inference_backend=inference_backend,
+        translation_provider=translation_provider,
+    )
+    return inference_backend, translation_provider, engine
+
+
+inference_backend, translation_provider, translator_engine = assemble_workflow_engine(
+    BASE_DIR,
+    APP_PATHS,
+)
 logger = logging.getLogger("manga_translator.api")
 task_manager = TaskManager(logger=logger)
 
@@ -348,13 +370,12 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
     return session
 
 
-workflow_execution_adapter = TranslatorEngineWorkflowAdapter(translator_engine)
+workflow_preparation_adapter = TranslatorEngineWorkflowAdapter(translator_engine)
 workflow_coordinator = WorkflowCoordinator(
     project_loader=get_or_restore_session,
-    execution_adapter=workflow_execution_adapter,
     project_view_builder=translator_engine.build_client_session_payload,
     project_workspace=translator_engine.project_workspace,
-    render_page_adapter=workflow_execution_adapter,
+    preparation_adapter=workflow_preparation_adapter,
 )
 
 
@@ -1459,7 +1480,7 @@ async def cancel_task(task_id: str):
 
 
 @app.websocket("/ws/translate/{session_id}")
-async def translate_session(websocket: WebSocket, session_id: str):
+async def translation_websocket(websocket: WebSocket, session_id: str):
     if not websocket_has_valid_api_token(websocket):
         logger.warning("Translation websocket rejected because the local API token was invalid.")
         await websocket.close(code=1008)

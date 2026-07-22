@@ -61,10 +61,9 @@ class TranslatorEngineStateTests(unittest.TestCase):
         adapter = TranslatorEngineWorkflowAdapter(engine)
         return WorkflowCoordinator(
             project_loader=lambda _project_id: session,
-            execution_adapter=adapter,
             project_view_builder=engine.build_client_session_payload,
             project_workspace=engine.project_workspace,
-            render_page_adapter=adapter,
+            preparation_adapter=adapter,
         )
 
     def test_snapshot_pin_and_retention_share_one_project_lock(self) -> None:
@@ -270,7 +269,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 ),
             )
 
-    def test_translate_session_separates_detection_and_translation_checkpoints(
+    def test_private_translation_composition_separates_phase_checkpoints(
         self,
     ) -> None:
         cases = (
@@ -321,7 +320,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 page_checkpoints = dict(initial_completed)
                 observed: dict[str, object] = {"detect_called": False}
 
-                async def fake_detect_session(**kwargs):
+                async def fake_detection(**kwargs):
                     observed["detect_called"] = True
                     kwargs["page_checkpoints"].update(
                         {"page-1.png": "detected", "page-2.png": "detected"}
@@ -329,7 +328,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
                     session["workflow_stage"] = "detected"
                     return {"workflow_stage": "detected"}
 
-                async def fake_resume_translation_session(**kwargs):
+                async def fake_translation_resume(**kwargs):
                     observed["translation_completed"] = dict(
                         kwargs["page_checkpoints"]
                     )
@@ -338,15 +337,15 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
                 with mock.patch.object(
                     engine,
-                    "detect_session",
-                    side_effect=fake_detect_session,
+                    "_detect_session",
+                    side_effect=fake_detection,
                 ), mock.patch.object(
                     engine,
-                    "resume_translation_session",
-                    side_effect=fake_resume_translation_session,
+                    "_resume_translation_session",
+                    side_effect=fake_translation_resume,
                 ):
                     asyncio.run(
-                        engine.translate_session(
+                        engine._translate_session(
                             session_id="project-a",
                             session=session,
                             raw_config={},
@@ -4681,7 +4680,7 @@ print(json.dumps({
             })
             rerender_calls: list[dict[str, object]] = []
 
-            async def fake_rerender_session(**kwargs):
+            async def fake_rerender_core(**kwargs):
                 rerender_calls.append(kwargs)
                 Image.new("RGB", (16, 16), (240, 240, 240)).save(output_dir / "page-1.png")
                 session["translated_output_map"] = {"page-1.png": "page-1.png"}
@@ -4693,7 +4692,7 @@ print(json.dumps({
                     "workflow_stage": "translated",
                 }
 
-            engine.rerender_session = fake_rerender_session  # type: ignore[method-assign]
+            engine._rerender_session_core = fake_rerender_core  # type: ignore[method-assign]
 
             result = asyncio.run(engine.apply_project_glossary(project_id, session, [{
                 "id": "term-yamada",
@@ -4792,7 +4791,7 @@ print(json.dumps({
 
             rerender_targets: list[str | None] = []
 
-            async def fake_rerender_session(**kwargs):
+            async def fake_rerender_core(**kwargs):
                 target = kwargs.get("target_stored_name")
                 rerender_targets.append(target)
                 stored_name = str(target or "page-1.png")
@@ -4805,7 +4804,7 @@ print(json.dumps({
                     "workflow_stage": "translated",
                 }
 
-            engine.rerender_session = fake_rerender_session  # type: ignore[method-assign]
+            engine._rerender_session_core = fake_rerender_core  # type: ignore[method-assign]
             engine.build_session_archive = lambda *_args, **_kwargs: str(root / "translated.zip")  # type: ignore[method-assign]
 
             result = asyncio.run(engine.apply_project_glossary(project_id, session, saved_glossary["entries"]))
@@ -5441,7 +5440,7 @@ print(json.dumps({
             engine.persist_project_state = fake_persist_project_state  # type: ignore[method-assign]
             engine.build_session_archive = fake_archive  # type: ignore[method-assign]
 
-            result = asyncio.run(engine.resume_translation_session(
+            result = asyncio.run(engine._resume_translation_session(
                 session_id=project_id,
                 session=session,
                 raw_config={"rerender_output_format": "png"},
@@ -5545,7 +5544,7 @@ print(json.dumps({
             engine.build_session_archive = fake_archive  # type: ignore[method-assign]
             engine._request_project_glossary_extraction = fake_glossary_request  # type: ignore[method-assign]
 
-            asyncio.run(engine.resume_translation_session(
+            asyncio.run(engine._resume_translation_session(
                 session_id=project_id,
                 session=session,
                 raw_config={"rerender_output_format": "png"},

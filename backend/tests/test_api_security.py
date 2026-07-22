@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import copy
 import io
 import json
 import os
@@ -29,11 +30,100 @@ os.environ["APP_DATA_DIR"] = str(TEST_APP_DATA_DIR)
 
 import main
 from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
+from domain.project_state import ProjectState
+from engine.project_workspace import PreparedHeadUpdate
 
 
 class DummyUpload:
     def __init__(self, data: bytes) -> None:
         self.file = io.BytesIO(data)
+
+
+class DeterministicWorkflowPreparationAdapter:
+    """Test owner for preparing a complete Head update without upstream I/O."""
+
+    def __init__(self, delegate, action) -> None:
+        self._delegate = delegate
+        self._action = action
+
+    def project_command_fingerprint(self, command) -> str:
+        return self._delegate.project_command_fingerprint(command)
+
+    async def prepare_render_page(self, command, working_set, progress):
+        return await self._delegate.prepare_render_page(
+            command,
+            working_set,
+            progress,
+        )
+
+    async def prepare_project_command(self, command, working_set, progress):
+        engine = main.translator_engine
+        base = working_set.base
+        session = ProjectState.load(
+            working_set.initial_state_document,
+            expected_project_id=base.project_id,
+        ).to_runtime_session()
+        session["source_dir"] = str(working_set.source_dir)
+        session["translated_dir"] = str(working_set.translated_dir)
+        session["rerender_cache_dir"] = str(working_set.cache_dir)
+        session["mask_debug_dir"] = str(working_set.root / "mask-debug")
+
+        execution_extras = await self._action(
+            command,
+            session,
+            working_set,
+            progress,
+        )
+        runtime_session = copy.deepcopy(session)
+        for field_name, canonical_path in (
+            ("source_dir", working_set.canonical_source_dir),
+            ("translated_dir", working_set.canonical_translated_dir),
+            ("rerender_cache_dir", working_set.canonical_cache_dir),
+        ):
+            runtime_session[field_name] = (
+                str(canonical_path) if canonical_path is not None else ""
+            )
+        runtime_session["mask_debug_dir"] = str(
+            base.state_document.get("mask_debug_dir") or ""
+        )
+        if (working_set.archive_dir / "result.zip").is_file():
+            runtime_session["download_path"] = str(
+                working_set.canonical_archive_path
+            )
+
+        state_document = engine._serialize_session_state(
+            base.project_id,
+            runtime_session,
+        )
+        page_documents = engine._build_page_documents(
+            base.project_id,
+            session,
+            previous_page_documents=base.page_documents,
+        )
+        project_manifest = {
+            **engine._build_project_summary(base.project_id, runtime_session),
+            "source_dir": str(runtime_session.get("source_dir") or ""),
+            "translated_dir": str(runtime_session.get("translated_dir") or ""),
+            "region_count": sum(
+                len(document.get("regions") or [])
+                for document in {**base.page_documents, **page_documents}.values()
+            ),
+        }
+        artifact_files = engine._working_set_artifact_files(
+            working_set.translated_dir,
+            working_set.cache_dir,
+            working_set.archive_dir,
+        )
+        return PreparedHeadUpdate(
+            state_document=state_document,
+            project_manifest=project_manifest,
+            page_documents=page_documents,
+            artifact_files=artifact_files,
+            replace_prefixes=("translated/", "cache/", "pages/", "archive/"),
+            remove_logical_paths=set(),
+            runtime_session=runtime_session,
+            execution_extras=dict(execution_extras),
+        )
 
 
 class ApiSecurityTests(unittest.TestCase):
@@ -132,41 +222,38 @@ class ApiSecurityTests(unittest.TestCase):
         project_id = upload.json()["session_id"]
         page_id = upload.json()["images"][0]["stored_name"]
 
-        async def fake_detect_session(*, session_id, session, progress_callback, **kwargs):
-            await progress_callback({"event": "status", "message": "mock detect"})
-            cache_dir = TEST_APP_DATA_DIR / "new-user-cache" / session_id
-            shutil.rmtree(cache_dir, ignore_errors=True)
-            for source_image in session["source_images"]:
-                page_cache = cache_dir / source_image["stored_name"]
-                page_cache.mkdir(parents=True)
-                (page_cache / "regions.json").write_text("[]", encoding="utf-8")
-                (page_cache / "meta.json").write_text(
-                    json.dumps({"base_kind": "inpainted"}),
-                    encoding="utf-8",
+        async def prepare_action(command, session, working_set, progress):
+            if command.action == "detect":
+                await progress({"event": "status", "message": "mock detect"})
+                cache_dir = working_set.cache_dir
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                cache_dir.mkdir(parents=True)
+                for source_image in session["source_images"]:
+                    page_cache = cache_dir / source_image["stored_name"]
+                    page_cache.mkdir(parents=True)
+                    (page_cache / "regions.json").write_text("[]", encoding="utf-8")
+                    (page_cache / "meta.json").write_text(
+                        json.dumps({"base_kind": "inpainted"}),
+                        encoding="utf-8",
+                    )
+                    Image.new("RGB", (32, 32), (255, 255, 255)).save(
+                        page_cache / "inpainted.png"
+                    )
+                session["workflow_stage"] = "detected"
+                artifact_state = ProjectArtifactState.model_validate(
+                    session["artifact_state"]
                 )
-                Image.new("RGB", (32, 32), (255, 255, 255)).save(page_cache / "inpainted.png")
-            session["rerender_cache_dir"] = str(cache_dir)
-            session["workflow_stage"] = "detected"
-            artifact_state = ProjectArtifactState.model_validate(
-                session["artifact_state"]
-            )
-            for source_image in session["source_images"]:
-                artifact_state = artifact_state.apply(
-                    source_image["stored_name"],
-                    PageArtifactEvent.RECOGNIZED,
-                )
-            session["artifact_state"] = artifact_state.model_dump(mode="json")
-            if kwargs.get("persist", True):
-                main.translator_engine.persist_project_state(
-                    session_id,
-                    session,
-                    persist_page_documents=True,
-                )
-            return {"workflow_stage": "detected"}
+                for source_image in session["source_images"]:
+                    artifact_state = artifact_state.apply(
+                        source_image["stored_name"],
+                        PageArtifactEvent.RECOGNIZED,
+                    )
+                session["artifact_state"] = artifact_state.model_dump(mode="json")
+                return {"workflow_stage": "detected"}
 
-        async def fake_resume_session(*, session_id, session, progress_callback, **kwargs):
-            await progress_callback({"event": "status", "message": "mock translate"})
-            output_dir = Path(session["translated_dir"])
+            self.assertEqual(command.action, "resume-translate")
+            await progress({"event": "status", "message": "mock translate"})
+            output_dir = working_set.translated_dir
             output_dir.mkdir(parents=True, exist_ok=True)
             translated_output_map = {}
             for source_image in session["source_images"]:
@@ -185,27 +272,28 @@ class ApiSecurityTests(unittest.TestCase):
                 )
             session["artifact_state"] = artifact_state.model_dump(mode="json")
             archive_path = main.translator_engine.build_session_archive(
-                session_id,
+                command.project_id,
                 session,
-                destination=kwargs.get("archive_destination"),
+                destination=working_set.archive_dir / "result.zip",
             )
             session["download_path"] = archive_path
-            if kwargs.get("persist", True):
-                main.translator_engine.persist_project_state(
-                    session_id,
-                    session,
-                    persist_page_documents=True,
-                )
             return {
                 "workflow_stage": "translated",
-                "download_url": f"/api/download/{session_id}",
+                "download_url": f"/api/download/{command.project_id}",
                 "download_path": archive_path,
             }
 
+        preparation_adapter = DeterministicWorkflowPreparationAdapter(
+            main.workflow_preparation_adapter,
+            prepare_action,
+        )
         with (
             mock.patch.object(main, "API_TOKEN", ""),
-            mock.patch.object(main.translator_engine, "detect_session", side_effect=fake_detect_session),
-            mock.patch.object(main.translator_engine, "resume_translation_session", side_effect=fake_resume_session),
+            mock.patch.object(
+                main.workflow_coordinator,
+                "_preparation_adapter",
+                preparation_adapter,
+            ),
         ):
             with self.client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                 websocket.send_json({"action": "detect", "config": {}})
@@ -514,16 +602,25 @@ class ApiSecurityTests(unittest.TestCase):
                 )
             project_id = upload.json()["session_id"]
 
-            async def fake_detect_session(*, session, progress_callback, **_kwargs):
-                await progress_callback({"event": "status", "message": "waiting"})
+            async def prepare_detection(command, session, _working_set, progress):
+                self.assertEqual(command.action, "detect")
+                await progress({"event": "status", "message": "waiting"})
                 while not release_path.exists():
                     await asyncio.sleep(0.01)
                 session["workflow_stage"] = "detected"
                 return {"workflow_stage": "detected"}
 
+            preparation_adapter = DeterministicWorkflowPreparationAdapter(
+                main.workflow_preparation_adapter,
+                prepare_detection,
+            )
             with (
                 mock.patch.object(main, "API_TOKEN", ""),
-                mock.patch.object(main.translator_engine, "detect_session", side_effect=fake_detect_session),
+                mock.patch.object(
+                    main.workflow_coordinator,
+                    "_preparation_adapter",
+                    preparation_adapter,
+                ),
             ):
                 with client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                     websocket.send_json({"action": "detect", "config": {}})
@@ -570,13 +667,22 @@ class ApiSecurityTests(unittest.TestCase):
                 )
             project_id = upload.json()["session_id"]
 
-            async def fake_detect_session(*, progress_callback, **_kwargs):
-                await progress_callback({"event": "status", "message": "waiting"})
+            async def prepare_detection(command, _session, _working_set, progress):
+                self.assertEqual(command.action, "detect")
+                await progress({"event": "status", "message": "waiting"})
                 await asyncio.Event().wait()
 
+            preparation_adapter = DeterministicWorkflowPreparationAdapter(
+                main.workflow_preparation_adapter,
+                prepare_detection,
+            )
             with (
                 mock.patch.object(main, "API_TOKEN", ""),
-                mock.patch.object(main.translator_engine, "detect_session", side_effect=fake_detect_session),
+                mock.patch.object(
+                    main.workflow_coordinator,
+                    "_preparation_adapter",
+                    preparation_adapter,
+                ),
             ):
                 with client.websocket_connect(f"/ws/translate/{project_id}") as websocket:
                     websocket.send_json({"action": "detect", "config": {}})

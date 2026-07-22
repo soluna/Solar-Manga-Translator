@@ -31,7 +31,13 @@ async def _noop_progress(_event: dict[str, Any]) -> None:
 NOOP_PROGRESS: ProgressCallback = _noop_progress
 
 
-class ExecutionAdapter(Protocol):
+class VolatileExecutionAdapter(Protocol):
+    """Explicit non-durable execution seam for isolated coordinator tests.
+
+    Production Project Commands must use ``WorkflowPreparationAdapter`` with a
+    ``ProjectWorkspace`` so execution and the Head commit share one owner.
+    """
+
     async def execute(
         self,
         command: ProjectCommand,
@@ -61,53 +67,6 @@ class WorkflowPreparationAdapter(Protocol):
 class TranslatorEngineWorkflowAdapter:
     def __init__(self, engine: TranslatorEngine) -> None:
         self._engine = engine
-
-    async def execute(
-        self,
-        command: ProjectCommand,
-        project: dict[str, Any],
-        progress: ProgressCallback,
-    ) -> dict[str, Any]:
-        config = dict(command.config)
-        if command.action == "rerender":
-            return await self._engine.rerender_session(
-                session_id=command.project_id,
-                session=project,
-                raw_config=config,
-                progress_callback=progress,
-                target_stored_name=command.target_stored_name,
-            )
-        if command.action == "detect":
-            return await self._engine.detect_session(
-                session_id=command.project_id,
-                session=project,
-                raw_config=config,
-                progress_callback=progress,
-            )
-        if command.action == "resume-translate":
-            return await self._engine.resume_translation_session(
-                session_id=command.project_id,
-                session=project,
-                raw_config=config,
-                progress_callback=progress,
-                skip_completed=True,
-            )
-        if command.action == "translate-page":
-            return await self._engine.resume_translation_session(
-                session_id=command.project_id,
-                session=project,
-                raw_config=config,
-                progress_callback=progress,
-                target_stored_name=command.target_stored_name,
-            )
-        if command.action == "translate":
-            return await self._engine.translate_session(
-                session_id=command.project_id,
-                session=project,
-                raw_config=config,
-                progress_callback=progress,
-            )
-        raise RuntimeError(f"Unsupported canonical Project Command: {command.action}")
 
     async def prepare_render_page(
         self,
@@ -146,16 +105,16 @@ class WorkflowCoordinator:
         self,
         *,
         project_loader: ProjectLoader,
-        execution_adapter: ExecutionAdapter,
         project_view_builder: ProjectViewBuilder,
         project_workspace: ProjectWorkspace | None = None,
-        render_page_adapter: WorkflowPreparationAdapter | None = None,
+        preparation_adapter: WorkflowPreparationAdapter | None = None,
+        volatile_execution_adapter: VolatileExecutionAdapter | None = None,
     ) -> None:
         self._project_loader = project_loader
-        self._execution_adapter = execution_adapter
+        self._volatile_execution_adapter = volatile_execution_adapter
         self._project_view_builder = project_view_builder
         self._project_workspace = project_workspace
-        self._workflow_adapter = render_page_adapter
+        self._preparation_adapter = preparation_adapter
 
     async def execute(
         self,
@@ -165,7 +124,7 @@ class WorkflowCoordinator:
     ) -> dict[str, Any]:
         project = self._project_loader(command.project_id)
         if command.action == "rerender" and command.target_stored_name:
-            if self._project_workspace is None or self._workflow_adapter is None:
+            if self._project_workspace is None or self._preparation_adapter is None:
                 raise RuntimeError(
                     "RenderPage requires an explicitly assembled ProjectWorkspace "
                     "and render adapter"
@@ -173,12 +132,21 @@ class WorkflowCoordinator:
             return await self._execute_render_page(command, project, progress)
         if (
             self._project_workspace is not None
-            and self._workflow_adapter is not None
+            and self._preparation_adapter is not None
             and command.action
             in {"rerender", "detect", "translate", "resume-translate", "translate-page"}
         ):
             return await self._execute_project_command(command, project, progress)
-        result = await self._execution_adapter.execute(command, project, progress)
+        if self._volatile_execution_adapter is None:
+            raise RuntimeError(
+                "Project Command execution requires an explicitly assembled "
+                "ProjectWorkspace and preparation adapter"
+            )
+        result = await self._volatile_execution_adapter.execute(
+            command,
+            project,
+            progress,
+        )
         return self._build_completion_payload(command.project_id, project, result)
 
     async def _execute_project_command(
@@ -188,7 +156,7 @@ class WorkflowCoordinator:
         progress: ProgressCallback,
     ) -> dict[str, Any]:
         assert self._project_workspace is not None
-        assert self._workflow_adapter is not None
+        assert self._preparation_adapter is not None
         base = self._project_workspace.read_project_command_base(command.project_id)
         if command.target_stored_name is not None:
             page_document = base.page_documents.get(command.target_stored_name)
@@ -225,11 +193,11 @@ class WorkflowCoordinator:
             base,
             action=command.action,
             resume_fingerprint=(
-                self._workflow_adapter.project_command_fingerprint(command)
+                self._preparation_adapter.project_command_fingerprint(command)
             ),
             legacy_project=shared_project,
         ) as working_set:
-            prepared = await self._workflow_adapter.prepare_project_command(
+            prepared = await self._preparation_adapter.prepare_project_command(
                 command,
                 working_set,
                 best_effort_progress,
@@ -254,7 +222,7 @@ class WorkflowCoordinator:
     ) -> dict[str, Any]:
         assert command.target_stored_name is not None
         assert self._project_workspace is not None
-        assert self._workflow_adapter is not None
+        assert self._preparation_adapter is not None
         base = self._project_workspace.read_command_base(
             command.project_id,
             command.target_stored_name,
@@ -287,7 +255,7 @@ class WorkflowCoordinator:
             base,
             legacy_project=shared_project,
         ) as working_set:
-            prepared = await self._workflow_adapter.prepare_render_page(
+            prepared = await self._preparation_adapter.prepare_render_page(
                 command,
                 working_set,
                 best_effort_progress,

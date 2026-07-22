@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import uuid
 import zipfile
 from argparse import Namespace
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -26,8 +30,11 @@ if str(BACKEND_DIR) not in sys.path:
 import engine.translator as translator_module
 from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
 from engine.image_cleanup import SeedreamImageCleanupClient
+from engine.project_workspace import CorruptProjectArtifactError
 from engine.translator import InvalidStorageIdentifierError, TranslatorEngine
 from runtime_paths import AppPaths
+from workflow_coordinator import TranslatorEngineWorkflowAdapter, WorkflowCoordinator
+from workflow_events import ProjectCommand
 
 
 def make_test_paths(root: Path) -> AppPaths:
@@ -45,6 +52,323 @@ def make_test_paths(root: Path) -> AppPaths:
 class TranslatorEngineStateTests(unittest.TestCase):
     def make_engine(self, root: Path) -> TranslatorEngine:
         return TranslatorEngine(BACKEND_DIR, app_paths=make_test_paths(root))
+
+    def make_workflow_coordinator(
+        self,
+        engine: TranslatorEngine,
+        session: dict[str, object],
+    ) -> WorkflowCoordinator:
+        adapter = TranslatorEngineWorkflowAdapter(engine)
+        return WorkflowCoordinator(
+            project_loader=lambda _project_id: session,
+            execution_adapter=adapter,
+            project_view_builder=engine.build_client_session_payload,
+            project_workspace=engine.project_workspace,
+            render_page_adapter=adapter,
+        )
+
+    def test_snapshot_pin_and_retention_share_one_project_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            workspace = engine.project_workspace
+            project_id = "atomic-snapshot-pin"
+            snapshots_dir = workspace.project_snapshots_dir(project_id)
+            snapshots_dir.mkdir(parents=True)
+            for index in range(21):
+                snapshot_id = f"snapshot-{index:02d}"
+                workspace.write_json_file(
+                    snapshots_dir / f"{snapshot_id}.json",
+                    {
+                        "snapshot_id": snapshot_id,
+                        "created_at": f"2026-07-01T00:{index:02d}:00+00:00",
+                        "kind": "automatic",
+                        "pinned": False,
+                    },
+                )
+
+            target_snapshot_id = "snapshot-00"
+            target_path = snapshots_dir / f"{target_snapshot_id}.json"
+            pin_write_reached = threading.Event()
+            pin_write_allowed = threading.Event()
+            pin_write_completed = threading.Event()
+            retention_lock_probed = threading.Event()
+            retention_blocked_on_pin = threading.Event()
+            retention_acquired_without_waiting = threading.Event()
+            retention_catalog_read = threading.Event()
+            thread_errors: list[BaseException] = []
+            pin_results: list[list[dict[str, object]]] = []
+            original_write_json = workspace.write_json_file
+            original_read_manifests = workspace.read_snapshot_manifests
+            project_lock = workspace._head_commit_lock(project_id)
+
+            class RetentionLockProbe:
+                def __enter__(self):
+                    acquired = project_lock.acquire(blocking=False)
+                    if acquired:
+                        retention_acquired_without_waiting.set()
+                        retention_lock_probed.set()
+                    else:
+                        retention_blocked_on_pin.set()
+                        retention_lock_probed.set()
+                        pin_write_allowed.set()
+                        project_lock.acquire()
+                    return project_lock
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    project_lock.release()
+                    return False
+
+            def observe_project_lock(requested_project_id: str):
+                if threading.current_thread().name == "snapshot-retention":
+                    return RetentionLockProbe()
+                return project_lock
+
+            def pause_pin_write(path: Path, payload: object) -> None:
+                if (
+                    threading.current_thread().name == "snapshot-pin"
+                    and Path(path) == target_path
+                ):
+                    pin_write_reached.set()
+                    if not retention_lock_probed.wait(timeout=5):
+                        raise RuntimeError("retention did not attempt the project lock")
+                    if not pin_write_allowed.wait(timeout=5):
+                        raise RuntimeError("pin write was not released")
+                    try:
+                        original_write_json(path, payload)
+                    finally:
+                        pin_write_completed.set()
+                    return
+                original_write_json(path, payload)
+
+            def pause_retention_after_catalog_read(
+                requested_project_id: str,
+            ) -> list[dict[str, object]]:
+                manifests = original_read_manifests(requested_project_id)
+                if threading.current_thread().name == "snapshot-retention":
+                    retention_catalog_read.set()
+                    pin_write_allowed.set()
+                    if not pin_write_completed.wait(timeout=5):
+                        raise RuntimeError("pin write did not complete")
+                return manifests
+
+            def pin_snapshot() -> None:
+                try:
+                    pin_results.append(
+                        engine.set_snapshot_pinned(
+                            project_id,
+                            target_snapshot_id,
+                            True,
+                        )
+                    )
+                except BaseException as exc:
+                    thread_errors.append(exc)
+
+            def enforce_retention() -> None:
+                try:
+                    workspace.enforce_snapshot_retention(project_id)
+                except BaseException as exc:
+                    thread_errors.append(exc)
+
+            self.addCleanup(pin_write_allowed.set)
+            self.addCleanup(pin_write_completed.set)
+            with (
+                mock.patch.object(
+                    workspace,
+                    "write_json_file",
+                    side_effect=pause_pin_write,
+                ),
+                mock.patch.object(
+                    workspace,
+                    "read_snapshot_manifests",
+                    side_effect=pause_retention_after_catalog_read,
+                ),
+                mock.patch.object(
+                    workspace,
+                    "_head_commit_lock",
+                    side_effect=observe_project_lock,
+                ),
+            ):
+                pin_thread = threading.Thread(
+                    target=pin_snapshot,
+                    name="snapshot-pin",
+                    daemon=True,
+                )
+                pin_thread.start()
+                self.assertTrue(pin_write_reached.wait(timeout=5))
+
+                retention_thread = threading.Thread(
+                    target=enforce_retention,
+                    name="snapshot-retention",
+                    daemon=True,
+                )
+                retention_thread.start()
+                self.assertTrue(retention_lock_probed.wait(timeout=5))
+
+                pin_thread.join(timeout=5)
+                retention_thread.join(timeout=5)
+                self.assertFalse(pin_thread.is_alive())
+                self.assertFalse(retention_thread.is_alive())
+
+            self.assertEqual(thread_errors, [])
+            self.assertTrue(retention_blocked_on_pin.is_set())
+            self.assertFalse(retention_acquired_without_waiting.is_set())
+            self.assertTrue(retention_catalog_read.is_set())
+            self.assertEqual(len(pin_results), 1)
+            returned_target = next(
+                (
+                    item
+                    for item in pin_results[0]
+                    if item["snapshot_id"] == target_snapshot_id
+                ),
+                None,
+            )
+            self.assertIsNotNone(returned_target)
+            self.assertTrue(returned_target["pinned"])
+            authoritative_target = next(
+                (
+                    item
+                    for item in workspace.read_snapshot_manifests(project_id)
+                    if item["snapshot_id"] == target_snapshot_id
+                ),
+                None,
+            )
+            self.assertIsNotNone(authoritative_target)
+            self.assertTrue(authoritative_target["pinned"])
+
+    def test_project_command_fingerprint_uses_canonical_action_normalized_config_and_scope(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            implicit_defaults = engine.project_command_fingerprint(
+                action="resume-translate",
+                raw_config={},
+                target_stored_name=None,
+            )
+            explicit_defaults = engine.project_command_fingerprint(
+                action="resume-translate",
+                raw_config={"target_lang": "CHS"},
+                target_stored_name=None,
+            )
+
+            self.assertEqual(implicit_defaults, explicit_defaults)
+            self.assertNotEqual(
+                implicit_defaults,
+                engine.project_command_fingerprint(
+                    action="translate",
+                    raw_config={},
+                    target_stored_name=None,
+                ),
+            )
+            self.assertNotEqual(
+                implicit_defaults,
+                engine.project_command_fingerprint(
+                    action="resume-translate",
+                    raw_config={},
+                    target_stored_name="page-1.png",
+                ),
+            )
+
+    def test_translate_session_separates_detection_and_translation_checkpoints(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "fresh",
+                False,
+                "idle",
+                {},
+                True,
+                {"page-1.png": "detected", "page-2.png": "detected"},
+                False,
+            ),
+            (
+                "restored-detected",
+                True,
+                "detected",
+                {"page-1.png": "detected", "page-2.png": "detected"},
+                False,
+                {"page-1.png": "detected", "page-2.png": "detected"},
+                False,
+            ),
+            (
+                "restored-translating",
+                True,
+                "translating",
+                {"page-1.png": "rendered"},
+                False,
+                {"page-1.png": "rendered"},
+                True,
+            ),
+        )
+        for (
+            label,
+            pending_restored,
+            workflow_stage,
+            initial_completed,
+            expected_detect_called,
+            expected_translation_completed,
+            expected_skip_completed,
+        ) in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                engine = self.make_engine(Path(tmp))
+                session = {
+                    "translated_dir": str(Path(tmp) / "translated"),
+                    "workflow_stage": workflow_stage,
+                    "last_config": {},
+                }
+                page_checkpoints = dict(initial_completed)
+                observed: dict[str, object] = {"detect_called": False}
+
+                async def fake_detect_session(**kwargs):
+                    observed["detect_called"] = True
+                    kwargs["page_checkpoints"].update(
+                        {"page-1.png": "detected", "page-2.png": "detected"}
+                    )
+                    session["workflow_stage"] = "detected"
+                    return {"workflow_stage": "detected"}
+
+                async def fake_resume_translation_session(**kwargs):
+                    observed["translation_completed"] = dict(
+                        kwargs["page_checkpoints"]
+                    )
+                    observed["skip_completed"] = kwargs["skip_completed"]
+                    return {"workflow_stage": "translated"}
+
+                with mock.patch.object(
+                    engine,
+                    "detect_session",
+                    side_effect=fake_detect_session,
+                ), mock.patch.object(
+                    engine,
+                    "resume_translation_session",
+                    side_effect=fake_resume_translation_session,
+                ):
+                    asyncio.run(
+                        engine.translate_session(
+                            session_id="project-a",
+                            session=session,
+                            raw_config={},
+                            progress_callback=lambda _event: None,
+                            persist=False,
+                            pending_restored=pending_restored,
+                            page_checkpoints=page_checkpoints,
+                        )
+                    )
+
+                self.assertIs(
+                    observed["detect_called"],
+                    expected_detect_called,
+                )
+                self.assertEqual(
+                    observed["translation_completed"],
+                    expected_translation_completed,
+                )
+                self.assertIs(
+                    observed["skip_completed"],
+                    expected_skip_completed,
+                )
 
     def make_recognized_zero_region_project(
         self,
@@ -126,24 +450,38 @@ class TranslatorEngineStateTests(unittest.TestCase):
         config: dict[str, object],
     ) -> list[dict[str, object]]:
         events: list[dict[str, object]] = []
+        render_count = 0
+        original_render = engine._render_cached_page
 
-        async def interrupt(event: dict[str, object]) -> None:
+        async def collect_progress(event: dict[str, object]) -> None:
             events.append(event)
-            if event.get("event") == "progress" and event.get("current") == 1:
-                raise RuntimeError("interrupt after first verified page")
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "interrupt after first verified page",
+        async def interrupt_second_render(*args, **kwargs):
+            nonlocal render_count
+            render_count += 1
+            if render_count == 2:
+                raise RuntimeError("interrupt after first verified page")
+            return await original_render(*args, **kwargs)
+
+        with mock.patch.object(
+            engine,
+            "_render_cached_page",
+            side_effect=interrupt_second_render,
         ):
-            asyncio.run(
-                engine.resume_translation_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=interrupt,
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "interrupt after first verified page",
+            ):
+                asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="resume-translate",
+                            config=config,
+                        ),
+                        progress=collect_progress,
+                    )
                 )
-            )
         return events
 
     def load_patched_text_mask_utils(self):
@@ -351,11 +689,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
                 asyncio.run(
-                    engine.detect_session(
-                        session_id=project_id,
-                        session=session,
-                        raw_config={"translator": "gemini", "api_key": "invalid"},
-                        progress_callback=progress,
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="detect",
+                            config={"translator": "gemini", "api_key": "invalid"},
+                        ),
+                        progress=progress,
                     )
                 )
 
@@ -431,7 +771,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 return None
 
             async def render_page(*, output_path, **_kwargs):
-                visible_output_dirs_during_work.append(session["translated_dir"])
+                visible_output_dirs_during_work.append(str(Path(output_path).parent))
                 page_id = Path(output_path).name
                 rendered_by_attempt[attempt["number"]].append(page_id)
                 if attempt["number"] == 1 and page_id == "page-2.png":
@@ -448,21 +788,22 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 return None
 
             config = {"translator": "none", "target_lang": "CHS"}
+            coordinator = self.make_workflow_coordinator(engine, session)
+            command = ProjectCommand(
+                project_id=project_id,
+                action="resume-translate",
+                config=config,
+            )
             with self.assertRaisesRegex(RuntimeError, "page-2 failure"):
                 asyncio.run(
-                    engine.resume_translation_session(
-                        session_id=project_id,
-                        session=session,
-                        raw_config=config,
-                        progress_callback=progress,
-                    )
+                    coordinator.execute(command, progress=progress)
                 )
 
             pending = engine.project_workspace.read_pending_artifact_set(project_id)
             self.assertIsNotNone(pending)
             self.assertEqual(engine.project_workspace.read_project_head(project_id), initial_head)
             self.assertFalse((output_dir / "page-1.png").exists())
-            self.assertIn("page-1.png", pending["completed_page_ids"])
+            self.assertEqual(pending["page_checkpoints"]["page-1.png"], "rendered")
 
             attempt["number"] = 2
             with mock.patch.object(
@@ -472,20 +813,15 @@ class TranslatorEngineStateTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(OSError, "head commit failure"):
                     asyncio.run(
-                        engine.resume_translation_session(
-                            session_id=project_id,
-                            session=session,
-                            raw_config=config,
-                            progress_callback=progress,
-                        )
+                        coordinator.execute(command, progress=progress)
                     )
 
             pending_after_commit_failure = (
                 engine.project_workspace.read_pending_artifact_set(project_id)
             )
             self.assertEqual(
-                pending_after_commit_failure["completed_page_ids"],
-                page_ids,
+                pending_after_commit_failure["page_checkpoints"],
+                {page_id: "finalized" for page_id in page_ids},
             )
             self.assertEqual(engine.project_workspace.read_project_head(project_id), initial_head)
             self.assertFalse((output_dir / "page-1.png").exists())
@@ -493,26 +829,369 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             attempt["number"] = 3
             result = asyncio.run(
-                engine.resume_translation_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=progress,
-                )
+                coordinator.execute(command, progress=progress)
             )
 
             self.assertEqual(rendered_by_attempt[1], ["page-1.png", "page-2.png"])
             self.assertEqual(rendered_by_attempt[2], ["page-2.png"])
             self.assertEqual(rendered_by_attempt[3], [])
             self.assertTrue(visible_output_dirs_during_work)
-            self.assertEqual(
-                set(visible_output_dirs_during_work),
-                {str(output_dir)},
+            self.assertTrue(
+                all(path != str(output_dir) for path in visible_output_dirs_during_work)
             )
             self.assertTrue((output_dir / "page-1.png").exists())
             self.assertTrue((output_dir / "page-2.png").exists())
             self.assertEqual(result["workflow_stage"], "translated")
             self.assertIsNone(engine.project_workspace.read_pending_artifact_set(project_id))
+            snapshots = engine.project_workspace.read_snapshot_manifests(project_id)
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["kind"], "resume_translation")
+            self.assertEqual(
+                snapshots[0]["project_head_revision_id"],
+                engine.project_workspace.read_project_head(project_id)[
+                    "revision_id"
+                ],
+            )
+
+    def test_project_command_snapshot_keeps_logical_config_without_runtime_paths_or_credentials(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "snapshot-storage-boundary"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            config = {
+                "translator": "none",
+                "target_lang": "ENG",
+                "api_key": "translator-secret-literal",
+                "openai_base_url": "https://provider.example/v1",
+                "openai_model": "logical-translation-model",
+                "font_key": "project:NotoSansSC-Bold.otf",
+                "style_font_keys": {
+                    "gothic": "system:SourceHanSansSC-Bold.otf",
+                },
+                "image_cleanup_mode": "seedream-image",
+                "image_cleanup_model": "doubao-seedream-4-0-250828",
+                "image_cleanup_api_key": "cleanup-secret-literal",
+                "advanced_erase_provider": "volcengine-ark",
+                "advanced_erase_base_url": "https://erase.example/v3",
+                "advanced_erase_model": "logical-erase-model",
+                "advanced_erase_api_key": "erase-secret-literal",
+            }
+            original_normalize_config = engine._normalize_config
+
+            def normalize_with_storage_boundary_aliases(*args, **kwargs):
+                normalized = original_normalize_config(*args, **kwargs)
+                normalized["provider_options"] = {
+                    "accessToken": "camel-access-token-secret",
+                    "client secret": "spaced-client-secret",
+                    "APIKey": "acronym-api-key-secret",
+                    "auth-token": "hyphen-auth-token-secret",
+                    "nested": {
+                        "access_token": "exact-access-token-secret",
+                        "auth token": "spaced-auth-token-secret",
+                        "fontPath": str(root / "private-font-path.otf"),
+                        "private---dir": str(root / ".project-working-set-private"),
+                    },
+                    "base_url": "https://nested-provider.example/v1",
+                    "font_key": "project:NotoSansSC-Bold.otf",
+                    "style_font_keys": {
+                        "gothic": "system:SourceHanSansSC-Bold.otf",
+                    },
+                }
+                return normalized
+
+            with mock.patch.object(
+                engine,
+                "_normalize_config",
+                side_effect=normalize_with_storage_boundary_aliases,
+            ):
+                result = asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="resume-translate",
+                            config=config,
+                        )
+                    )
+                )
+
+            manifest_path = next(
+                engine.project_workspace.project_snapshots_dir(project_id).glob(
+                    "*.json"
+                )
+            )
+            raw_manifest = manifest_path.read_bytes()
+            snapshot = json.loads(raw_manifest)
+            last_config = snapshot["last_config"]
+            self.assertEqual(last_config["font_key"], config["font_key"])
+            self.assertEqual(
+                last_config["style_font_keys"]["gothic"],
+                config["style_font_keys"]["gothic"],
+            )
+            self.assertEqual(
+                last_config["openai_base_url"],
+                config["openai_base_url"],
+            )
+            self.assertEqual(last_config["openai_model"], config["openai_model"])
+            self.assertEqual(
+                last_config["advanced_erase_provider"],
+                config["advanced_erase_provider"],
+            )
+            self.assertEqual(
+                last_config["advanced_erase_base_url"],
+                config["advanced_erase_base_url"],
+            )
+            self.assertEqual(
+                last_config["advanced_erase_model"],
+                config["advanced_erase_model"],
+            )
+            provider_options = last_config["provider_options"]
+            self.assertEqual(
+                provider_options["base_url"],
+                "https://nested-provider.example/v1",
+            )
+            self.assertEqual(
+                provider_options["font_key"],
+                "project:NotoSansSC-Bold.otf",
+            )
+            self.assertEqual(
+                provider_options["style_font_keys"]["gothic"],
+                "system:SourceHanSansSC-Bold.otf",
+            )
+            for credential_alias in (
+                "accessToken",
+                "client secret",
+                "APIKey",
+                "auth-token",
+            ):
+                self.assertEqual(provider_options[credential_alias], "")
+            self.assertEqual(provider_options["nested"]["access_token"], "")
+            self.assertEqual(provider_options["nested"]["auth token"], "")
+            self.assertNotIn("fontPath", provider_options["nested"])
+            self.assertNotIn("private---dir", provider_options["nested"])
+            self.assertNotIn("font_path", last_config)
+            self.assertNotIn("style_font_paths", last_config)
+            for forbidden_key in (
+                "source_dir",
+                "translated_dir",
+                "rerender_cache_dir",
+                "mask_debug_dir",
+                "download_path",
+            ):
+                self.assertNotIn(forbidden_key, last_config)
+                self.assertNotIn(f'"{forbidden_key}"'.encode(), raw_manifest)
+            for forbidden_literal in (
+                b"translator-secret-literal",
+                b"cleanup-secret-literal",
+                b"erase-secret-literal",
+                b"camel-access-token-secret",
+                b"spaced-client-secret",
+                b"acronym-api-key-secret",
+                b"hyphen-auth-token-secret",
+                b"exact-access-token-secret",
+                b"spaced-auth-token-secret",
+                b"private-font-path.otf",
+                b".project-working-set-private",
+                b".project-working-set-",
+                str(root).encode(),
+                str(root.resolve()).encode(),
+                str(Path(__file__).resolve().parents[2]).encode(),
+            ):
+                self.assertNotIn(forbidden_literal, raw_manifest)
+            self.assertEqual(
+                snapshot["project_head_generation"],
+                result["project_head_generation"],
+            )
+            self.assertEqual(
+                snapshot["project_head_revision_id"],
+                result["project_head_revision_id"],
+            )
+            self.assertEqual(
+                snapshot["project_head_revision_id"],
+                engine.project_workspace.read_project_head(project_id)[
+                    "revision_id"
+                ],
+            )
+
+    def test_snapshot_config_sanitizer_canonicalizes_nested_alias_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            sanitized = engine._sanitize_config_for_storage(
+                {
+                    "provider_options": [
+                        {
+                            "access__token": "repeated-underscore-access-secret",
+                            "AUTH Token": "uppercase-auth-secret",
+                            "API---Key": "punctuated-api-secret",
+                            "client...secret": "punctuated-client-secret",
+                            "refreshToken": "camel-refresh-secret",
+                            "font...Path": "/private/runtime-font.otf",
+                            "private___dir": "/private/working-set",
+                            "base_url": "https://provider.example/v1",
+                            "font_key": "project:font.otf",
+                            "style_font_keys": {"gothic": "system:font.otf"},
+                        }
+                    ]
+                }
+            )
+
+            provider = sanitized["provider_options"][0]
+            for credential_alias in (
+                "access__token",
+                "AUTH Token",
+                "API---Key",
+                "client...secret",
+                "refreshToken",
+            ):
+                self.assertEqual(provider[credential_alias], "")
+            self.assertNotIn("font...Path", provider)
+            self.assertNotIn("private___dir", provider)
+            self.assertEqual(provider["base_url"], "https://provider.example/v1")
+            self.assertEqual(provider["font_key"], "project:font.otf")
+            self.assertEqual(
+                provider["style_font_keys"],
+                {"gothic": "system:font.otf"},
+            )
+            serialized = json.dumps(sanitized, ensure_ascii=False)
+            for forbidden_literal in (
+                "repeated-underscore-access-secret",
+                "uppercase-auth-secret",
+                "punctuated-api-secret",
+                "punctuated-client-secret",
+                "camel-refresh-secret",
+                "/private/runtime-font.otf",
+                "/private/working-set",
+            ):
+                self.assertNotIn(forbidden_literal, serialized)
+
+    def test_project_command_succeeds_with_one_head_commit_when_snapshot_creation_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "snapshot-create-failure"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            initial_head = engine.project_workspace.read_project_head(project_id)
+
+            with mock.patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                wraps=engine.project_workspace.commit_project_head,
+            ) as commit_head, mock.patch.object(
+                engine.project_workspace,
+                "create_project_head_snapshot",
+                side_effect=OSError("synthetic snapshot create failure"),
+            ):
+                result = asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="resume-translate",
+                            config={"translator": "none", "target_lang": "CHS"},
+                        )
+                    )
+                )
+
+            committed_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(commit_head.call_count, 1)
+            self.assertEqual(
+                committed_head["generation"],
+                initial_head["generation"] + 1,
+            )
+            self.assertEqual(
+                result["project_head_revision_id"],
+                committed_head["revision_id"],
+            )
+            self.assertEqual(result["workflow_stage"], "translated")
+            self.assertTrue(
+                any(
+                    "automatic snapshot/retention failed" in warning
+                    and "synthetic snapshot create failure" in warning
+                    for warning in result["warnings"]
+                )
+            )
+            self.assertEqual(
+                list(
+                    engine.project_workspace.project_snapshots_dir(project_id).glob(
+                        "*.json"
+                    )
+                ),
+                [],
+            )
+
+    def test_project_command_succeeds_with_one_head_commit_when_snapshot_retention_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "snapshot-retention-failure"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            initial_head = engine.project_workspace.read_project_head(project_id)
+
+            with mock.patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                wraps=engine.project_workspace.commit_project_head,
+            ) as commit_head, mock.patch.object(
+                engine.project_workspace,
+                "enforce_snapshot_retention",
+                side_effect=OSError("synthetic snapshot retention failure"),
+            ):
+                result = asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="resume-translate",
+                            config={"translator": "none", "target_lang": "CHS"},
+                        )
+                    )
+                )
+
+            committed_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(commit_head.call_count, 1)
+            self.assertEqual(
+                committed_head["generation"],
+                initial_head["generation"] + 1,
+            )
+            self.assertEqual(
+                result["project_head_revision_id"],
+                committed_head["revision_id"],
+            )
+            self.assertEqual(result["workflow_stage"], "translated")
+            self.assertTrue(
+                any(
+                    "automatic snapshot/retention failed" in warning
+                    and "synthetic snapshot retention failure" in warning
+                    for warning in result["warnings"]
+                )
+            )
+            manifest_path = next(
+                engine.project_workspace.project_snapshots_dir(project_id).glob(
+                    "*.json"
+                )
+            )
+            snapshot = json.loads(manifest_path.read_bytes())
+            self.assertEqual(
+                snapshot["project_head_generation"],
+                committed_head["generation"],
+            )
+            self.assertEqual(
+                snapshot["project_head_revision_id"],
+                committed_head["revision_id"],
+            )
 
     def test_zero_text_region_page_translates_and_exports_through_public_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -531,15 +1210,17 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 events.append(event)
 
             result = asyncio.run(
-                engine.resume_translation_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config={
+                self.make_workflow_coordinator(engine, session).execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="resume-translate",
+                        config={
                         "translator": "none",
                         "target_lang": "CHS",
                         "rerender_output_format": "png",
-                    },
-                    progress_callback=collect_event,
+                        },
+                    ),
+                    progress=collect_event,
                 )
             )
 
@@ -568,12 +1249,421 @@ class TranslatorEngineStateTests(unittest.TestCase):
             self.assertTrue(restored_page_view["capabilities"]["can_export"])
             self.assertEqual(result["download_url"], f"/api/download/{project_id}")
             self.assertGreater(final_head["generation"], initial_head["generation"])
+            self.assertIn("archive/result.zip", final_head["files"])
+            self.assertTrue(Path(session["download_path"]).is_file())
+            self.assertNotIn(".project-working-set-", str(session["download_path"]))
+            Path(session["download_path"]).unlink()
+            Path(session["translated_dir"], page_id).unlink()
+            recovered_archive = engine.build_session_archive(
+                project_id,
+                session,
+            )
+            self.assertTrue(Path(recovered_archive).is_file())
             self.assertIsNone(
                 engine.project_workspace.read_pending_artifact_set(project_id)
             )
             self.assertTrue(
                 any(event.get("event") == "progress" for event in events)
             )
+
+    def test_translated_page_retry_repackages_checkpointed_page_from_stable_head_stage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "translated-page-archive-retry"
+            page_id = "page-1.png"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=[page_id],
+            )
+            coordinator = self.make_workflow_coordinator(engine, session)
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            asyncio.run(
+                coordinator.execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="resume-translate",
+                        config=config,
+                    )
+                )
+            )
+            config = {
+                **config,
+                "advanced_text_repair": "force",
+                "use_gpu": True,
+            }
+            translated_head = engine.project_workspace.read_project_head(project_id)
+            translated_state = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                translated_head,
+            )
+            self.assertEqual(translated_state["workflow_stage"], "translated")
+            old_archive_path = root / "old-head.zip"
+            engine.project_workspace.materialize_project_head_artifact(
+                project_id,
+                "archive/result.zip",
+                old_archive_path,
+            )
+            old_archive_bytes = old_archive_path.read_bytes()
+            old_archive_blob = copy.deepcopy(
+                translated_head["files"]["archive/result.zip"]
+            )
+            render_calls = 0
+            repair_calls = 0
+            archive_calls = 0
+            rendered_color = (17, 34, 51)
+            repaired_color = (0, 255, 0)
+
+            async def render_updated_page(*_args, **kwargs) -> None:
+                nonlocal render_calls
+                render_calls += 1
+                output_path = Path(kwargs["output_path"])
+                Image.new("RGB", (16, 16), rendered_color).save(output_path)
+
+            async def repair_updated_page(*_args, **kwargs) -> int:
+                nonlocal repair_calls
+                repair_calls += 1
+                self.assertEqual(
+                    [image["stored_name"] for image in kwargs["complex_images"]],
+                    [page_id],
+                )
+                Image.new("RGB", (16, 16), repaired_color).save(
+                    Path(kwargs["session"]["translated_dir"]) / page_id
+                )
+                return 1
+
+            def build_updated_archive(*_args, **kwargs) -> str:
+                nonlocal archive_calls
+                archive_calls += 1
+                if archive_calls == 1:
+                    raise RuntimeError("synthetic archive build failure")
+                current_session = kwargs["session"]
+                destination = Path(kwargs["destination"])
+                output_name = current_session["translated_output_map"][page_id]
+                page_path = Path(current_session["translated_dir"]) / output_name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(destination, "w") as archive:
+                    archive.writestr(page_id, page_path.read_bytes())
+                return str(destination)
+
+            engine._render_cached_page = render_updated_page  # type: ignore[method-assign]
+            engine._enhance_complex_pages = repair_updated_page  # type: ignore[method-assign]
+            engine.build_session_archive = build_updated_archive  # type: ignore[method-assign]
+            command = ProjectCommand(
+                project_id=project_id,
+                action="translate-page",
+                config=config,
+                target_stored_name=page_id,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "archive build failure"):
+                asyncio.run(coordinator.execute(command))
+
+            self.assertEqual(
+                engine.project_workspace.read_project_head(project_id),
+                translated_head,
+            )
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["page_checkpoints"], {page_id: "finalized"})
+            pending_output_dir = root / "pending-translated"
+            engine.project_workspace.restore_pending_artifact_set(
+                project_id,
+                pending,
+                {"translated": pending_output_dir},
+            )
+            self.assertEqual(
+                Image.open(pending_output_dir / page_id).getpixel((0, 0)),
+                repaired_color,
+            )
+
+            with mock.patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                wraps=engine.project_workspace.commit_project_head,
+            ) as commit_head:
+                result = asyncio.run(coordinator.execute(command))
+
+            self.assertEqual(render_calls, 1)
+            self.assertEqual(repair_calls, 1)
+            self.assertEqual(archive_calls, 2)
+            self.assertEqual(commit_head.call_count, 1)
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+            final_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(
+                final_head["generation"],
+                translated_head["generation"] + 1,
+            )
+            self.assertEqual(result["workflow_stage"], "translated")
+            final_state = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                final_head,
+            )
+            self.assertEqual(final_state["workflow_stage"], "translated")
+            self.assertNotEqual(
+                final_head["files"]["archive/result.zip"],
+                old_archive_blob,
+            )
+            final_archive_path = root / "final-head.zip"
+            final_page_path = root / "final-page.png"
+            engine.project_workspace.materialize_project_head_artifact(
+                project_id,
+                "archive/result.zip",
+                final_archive_path,
+            )
+            engine.project_workspace.materialize_project_head_artifact(
+                project_id,
+                f"translated/{page_id}",
+                final_page_path,
+            )
+            self.assertEqual(
+                Image.open(final_page_path).getpixel((0, 0)),
+                repaired_color,
+            )
+            self.assertNotEqual(final_archive_path.read_bytes(), old_archive_bytes)
+            with zipfile.ZipFile(final_archive_path) as archive:
+                self.assertEqual(archive.read(page_id), final_page_path.read_bytes())
+
+    def test_detected_page_translation_stays_detected_without_building_archive(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "detected-page-no-archive"
+            page_id = "page-1.png"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=[page_id],
+            )
+            initial_head = engine.project_workspace.read_project_head(project_id)
+            archive_calls = 0
+
+            async def render_page(*_args, **kwargs) -> None:
+                Image.new("RGB", (16, 16), (68, 85, 102)).save(
+                    kwargs["output_path"]
+                )
+
+            def reject_archive(*_args, **_kwargs) -> str:
+                nonlocal archive_calls
+                archive_calls += 1
+                raise AssertionError(
+                    "a detected Head page translation must not build an archive"
+                )
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            engine.build_session_archive = reject_archive  # type: ignore[method-assign]
+            result = asyncio.run(
+                self.make_workflow_coordinator(engine, session).execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="translate-page",
+                        config={
+                            "translator": "none",
+                            "target_lang": "CHS",
+                            "rerender_output_format": "png",
+                        },
+                        target_stored_name=page_id,
+                    )
+                )
+            )
+
+            self.assertEqual(archive_calls, 0)
+            self.assertEqual(result["workflow_stage"], "detected")
+            final_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(
+                final_head["generation"],
+                initial_head["generation"] + 1,
+            )
+            final_state = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                final_head,
+            )
+            self.assertEqual(final_state["workflow_stage"], "detected")
+            self.assertNotIn("archive/result.zip", final_head["files"])
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+
+    def test_project_retry_only_skips_pages_verified_by_matching_pending_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "translated-project-explicit-checkpoint-retry"
+            page_ids = ["page-1.png", "page-2.png"]
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=page_ids,
+            )
+            coordinator = self.make_workflow_coordinator(engine, session)
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+                "advanced_text_repair": "off",
+            }
+            asyncio.run(
+                coordinator.execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="resume-translate",
+                        config=config,
+                    )
+                )
+            )
+            command_base = engine.project_workspace.read_project_command_base(
+                project_id
+            )
+            translated_page_documents = copy.deepcopy(command_base.page_documents)
+            for page_id in page_ids:
+                translated_page_documents[page_id]["regions"] = [
+                    {
+                        "region_id": f"translated::{page_id}",
+                        "source_text": "原文",
+                        "translation": {
+                            "machine": "Translation",
+                            "resolved": "Translation",
+                        },
+                        "flags": {},
+                    }
+                ]
+            engine.project_workspace.commit_project_head(
+                project_id,
+                state_document=command_base.state_document,
+                project_manifest=command_base.project_manifest,
+                page_documents=translated_page_documents,
+                expected_generation=command_base.head_generation,
+                expected_revision_id=command_base.head_revision_id,
+            )
+            for page_id, document in translated_page_documents.items():
+                engine.project_workspace.write_json_file(
+                    engine.project_workspace.project_page_document_path(
+                        project_id,
+                        page_id,
+                    ),
+                    document,
+                )
+            translated_head = engine.project_workspace.read_project_head(project_id)
+            translated_state = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                translated_head,
+            )
+            self.assertEqual(translated_state["workflow_stage"], "translated")
+            config = {
+                **config,
+                "advanced_text_repair": "force",
+                "use_gpu": True,
+            }
+            rendered_by_attempt: dict[int, list[str]] = {1: [], 2: []}
+            attempt = 1
+            archive_calls = 0
+            repaired_scopes: list[list[str]] = []
+
+            async def render_page(*_args, **kwargs) -> None:
+                page_id = Path(kwargs["output_path"]).name
+                rendered_by_attempt[attempt].append(page_id)
+                if attempt == 1 and page_id == "page-2.png":
+                    raise RuntimeError("synthetic second-page render failure")
+                color = (17, 34, 51) if page_id == "page-1.png" else (68, 85, 102)
+                Image.new("RGB", (16, 16), color).save(kwargs["output_path"])
+
+            def build_archive(*_args, **kwargs) -> str:
+                nonlocal archive_calls
+                archive_calls += 1
+                current_session = kwargs["session"]
+                destination = Path(kwargs["destination"])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(destination, "w") as archive:
+                    for page_id in page_ids:
+                        output_name = current_session["translated_output_map"][page_id]
+                        output_path = (
+                            Path(current_session["translated_dir"]) / output_name
+                        )
+                        archive.writestr(page_id, output_path.read_bytes())
+                return str(destination)
+
+            async def repair_pages(*_args, **kwargs) -> int:
+                repaired_scopes.append(
+                    [image["stored_name"] for image in kwargs["complex_images"]]
+                )
+                return len(kwargs["complex_images"])
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            engine._enhance_complex_pages = repair_pages  # type: ignore[method-assign]
+            engine.build_session_archive = build_archive  # type: ignore[method-assign]
+            command = ProjectCommand(
+                project_id=project_id,
+                action="resume-translate",
+                config=config,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "second-page render failure"):
+                asyncio.run(coordinator.execute(command))
+
+            self.assertEqual(
+                rendered_by_attempt[1],
+                ["page-1.png", "page-2.png"],
+            )
+            self.assertEqual(
+                engine.project_workspace.read_project_head(project_id),
+                translated_head,
+            )
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertIsNotNone(pending)
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {"page-1.png": "rendered"},
+            )
+
+            attempt = 2
+            with mock.patch.object(
+                engine.project_workspace,
+                "commit_project_head",
+                wraps=engine.project_workspace.commit_project_head,
+            ) as commit_head:
+                result = asyncio.run(coordinator.execute(command))
+
+            self.assertEqual(rendered_by_attempt[2], ["page-2.png"])
+            self.assertEqual(repaired_scopes, [page_ids])
+            self.assertEqual(archive_calls, 1)
+            self.assertEqual(commit_head.call_count, 1)
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+            final_head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(
+                final_head["generation"],
+                translated_head["generation"] + 1,
+            )
+            self.assertEqual(result["workflow_stage"], "translated")
+            archive_path = root / "retried-project.zip"
+            engine.project_workspace.materialize_project_head_artifact(
+                project_id,
+                "archive/result.zip",
+                archive_path,
+            )
+            with zipfile.ZipFile(archive_path) as archive:
+                for page_id in page_ids:
+                    final_page_path = root / f"final-{page_id}"
+                    engine.project_workspace.materialize_project_head_artifact(
+                        project_id,
+                        f"translated/{page_id}",
+                        final_page_path,
+                    )
+                    self.assertEqual(
+                        archive.read(page_id),
+                        final_page_path.read_bytes(),
+                    )
 
     def test_interrupted_project_translation_keeps_head_and_only_verified_pending_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,7 +1699,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 head_after_failure,
                 initial_head,
             )
-            self.assertEqual(pending["completed_page_ids"], ["page-1.png"])
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {"page-1.png": "rendered"},
+            )
             self.assertEqual(
                 pending["state_document"]["translated_output_map"],
                 {"page-1.png": "page-1.png"},
@@ -633,6 +1726,762 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 [event.get("stored_name") for event in progress_events],
                 ["page-1.png"],
             )
+
+    def test_repair_cancellation_retries_only_the_unfinalized_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "repair-cancellation-page-checkpoints"
+            page_ids = ["page-1.png", "page-2.png"]
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=page_ids,
+            )
+            coordinator = self.make_workflow_coordinator(engine, session)
+            render_calls: list[str] = []
+            repair_scopes: list[list[str]] = []
+            repair_attempt = 1
+
+            async def render_page(*_args, **kwargs) -> None:
+                page_id = Path(kwargs["output_path"]).name
+                render_calls.append(page_id)
+                Image.new("RGB", (16, 16), (20, 40, 60)).save(
+                    kwargs["output_path"]
+                )
+
+            async def repair_pages(*_args, **kwargs) -> int:
+                nonlocal repair_attempt
+                scope = [
+                    image["stored_name"] for image in kwargs["complex_images"]
+                ]
+                repair_scopes.append(scope)
+                finalize = kwargs["page_finalized_callback"]
+                if repair_attempt == 1:
+                    finalize(page_ids[0])
+                    raise asyncio.CancelledError()
+                finalize(page_ids[1])
+                return 1
+
+            def build_archive(*_args, **kwargs) -> str:
+                destination = Path(kwargs["destination"])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(destination, "w") as archive:
+                    for page_id in page_ids:
+                        archive.write(
+                            Path(kwargs["session"]["translated_dir"]) / page_id,
+                            page_id,
+                        )
+                return str(destination)
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            engine._enhance_complex_pages = repair_pages  # type: ignore[method-assign]
+            engine.build_session_archive = build_archive  # type: ignore[method-assign]
+            command = ProjectCommand(
+                project_id=project_id,
+                action="resume-translate",
+                config={
+                    "translator": "none",
+                    "target_lang": "CHS",
+                    "rerender_output_format": "png",
+                    "advanced_text_repair": "force",
+                    "use_gpu": True,
+                },
+            )
+
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(coordinator.execute(command))
+
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {
+                    "page-1.png": "finalized",
+                    "page-2.png": "rendered",
+                },
+            )
+            self.assertEqual(render_calls, page_ids)
+
+            repair_attempt = 2
+            result = asyncio.run(coordinator.execute(command))
+
+            self.assertEqual(render_calls, page_ids)
+            self.assertEqual(repair_scopes, [page_ids, ["page-2.png"]])
+            self.assertEqual(result["workflow_stage"], "translated")
+            self.assertIsNone(
+                engine.project_workspace.read_pending_artifact_set(project_id)
+            )
+
+    def test_pending_checkpoint_claims_must_match_state_and_artifacts(self) -> None:
+        config = {
+            "translator": "none",
+            "target_lang": "CHS",
+            "rerender_output_format": "png",
+        }
+        for corruption in ("unverified-page", "missing-state", "missing-artifact"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as tmp:
+                project_id = f"corrupt-checkpoint-{corruption}"
+                engine, session = self.make_recognized_zero_region_project(
+                    Path(tmp),
+                    project_id=project_id,
+                    page_ids=["page-1.png", "page-2.png"],
+                )
+                initial_head = engine.project_workspace.read_project_head(project_id)
+                self.interrupt_translation_after_first_verified_page(
+                    engine,
+                    project_id=project_id,
+                    session=session,
+                    config=config,
+                )
+                pending_path = engine.project_workspace.project_pending_artifact_path(
+                    project_id
+                )
+                pending = engine.project_workspace.read_json_file(pending_path, {})
+                if corruption == "unverified-page":
+                    pending["page_checkpoints"]["page-2.png"] = "rendered"
+                elif corruption == "missing-state":
+                    pending["state_document"]["translated_output_map"].pop(
+                        "page-1.png"
+                    )
+                else:
+                    pending["artifact_bundle"]["files"].pop(
+                        "translated/page-1.png"
+                    )
+                engine.project_workspace.write_json_file(pending_path, pending)
+                diagnostic_evidence = pending_path.read_bytes()
+
+                with self.assertRaises(CorruptProjectArtifactError):
+                    asyncio.run(
+                        self.make_workflow_coordinator(engine, session).execute(
+                            ProjectCommand(
+                                project_id=project_id,
+                                action="resume-translate",
+                                config=config,
+                            )
+                        )
+                    )
+
+                self.assertEqual(
+                    engine.project_workspace.read_project_head(project_id),
+                    initial_head,
+                )
+                self.assertEqual(pending_path.read_bytes(), diagnostic_evidence)
+
+    def test_legacy_translate_detection_checkpoint_renders_and_rewrites_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "translate-detection-checkpoint"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+                "advanced_text_repair": "off",
+            }
+            head = engine.project_workspace.read_project_head(project_id)
+            state_document = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                head,
+            )
+            page_cache_dir = Path(
+                state_document["rerender_cache_dir"]
+            ) / "page-1.png"
+
+            engine.project_workspace.write_pending_artifact_set(
+                project_id,
+                action="translate",
+                resume_fingerprint=engine.project_command_fingerprint(
+                    action="translate",
+                    raw_config=config,
+                    target_stored_name=None,
+                ),
+                base_head=head,
+                state_document=state_document,
+                files={
+                    "cache/page-1.png/regions.json": page_cache_dir / "regions.json",
+                    "cache/page-1.png/meta.json": page_cache_dir / "meta.json",
+                    "cache/page-1.png/inpainted.png": page_cache_dir / "inpainted.png",
+                },
+                metadata={
+                    "page_checkpoints": {"page-1.png": "detected"},
+                    "state_validated": True,
+                },
+            )
+            pending_path = engine.project_workspace.project_pending_artifact_path(
+                project_id
+            )
+            legacy_pending = engine.project_workspace.read_json_file(
+                pending_path,
+                {},
+            )
+            legacy_pending["schema_version"] = 1
+            legacy_pending["completed_page_ids"] = ["page-1.png"]
+            legacy_pending.pop("page_checkpoints", None)
+            legacy_pending.pop("state_validated", None)
+            engine.project_workspace.write_json_file(pending_path, legacy_pending)
+
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+
+            self.assertEqual(pending["schema_version"], 1)
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {"page-1.png": "detected"},
+            )
+            render_calls = 0
+
+            async def render_page(*_args, **kwargs) -> None:
+                nonlocal render_calls
+                render_calls += 1
+                Image.new("RGB", (16, 16), (30, 60, 90)).save(
+                    kwargs["output_path"]
+                )
+
+            def fail_archive(*_args, **_kwargs) -> str:
+                raise RuntimeError("synthetic legacy detection archive failure")
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            engine.build_session_archive = fail_archive  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(RuntimeError, "legacy detection archive"):
+                asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="translate",
+                            config=config,
+                        )
+                    )
+                )
+
+            rewritten = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertEqual(render_calls, 1)
+            self.assertEqual(rewritten["schema_version"], 2)
+            self.assertEqual(
+                rewritten["page_checkpoints"],
+                {"page-1.png": "finalized"},
+            )
+
+    def test_legacy_translating_checkpoint_reuses_render_but_retries_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "legacy-rendered-repair-retry"
+            page_id = "page-1.png"
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=[page_id],
+            )
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+                "advanced_text_repair": "force",
+                "use_gpu": True,
+            }
+            command = ProjectCommand(
+                project_id=project_id,
+                action="resume-translate",
+                config=config,
+            )
+            coordinator = self.make_workflow_coordinator(engine, session)
+            render_calls = 0
+            repair_calls = 0
+
+            async def render_page(*_args, **kwargs) -> None:
+                nonlocal render_calls
+                render_calls += 1
+                Image.new("RGB", (16, 16), (25, 50, 75)).save(
+                    kwargs["output_path"]
+                )
+
+            async def repair_page(*_args, **_kwargs) -> int:
+                nonlocal repair_calls
+                repair_calls += 1
+                if repair_calls == 1:
+                    raise RuntimeError("synthetic repair interruption")
+                return 1
+
+            def fail_archive(*_args, **_kwargs) -> str:
+                raise RuntimeError("synthetic legacy rendered archive failure")
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            engine._enhance_complex_pages = repair_page  # type: ignore[method-assign]
+            engine.build_session_archive = fail_archive  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(RuntimeError, "repair interruption"):
+                asyncio.run(coordinator.execute(command))
+
+            pending_path = engine.project_workspace.project_pending_artifact_path(
+                project_id
+            )
+            legacy_pending = engine.project_workspace.read_json_file(
+                pending_path,
+                {},
+            )
+            self.assertEqual(
+                legacy_pending["page_checkpoints"],
+                {page_id: "rendered"},
+            )
+            legacy_pending["schema_version"] = 1
+            legacy_pending["completed_page_ids"] = [page_id]
+            legacy_pending.pop("page_checkpoints", None)
+            legacy_pending.pop("state_validated", None)
+            engine.project_workspace.write_json_file(pending_path, legacy_pending)
+
+            with self.assertRaisesRegex(RuntimeError, "legacy rendered archive"):
+                asyncio.run(coordinator.execute(command))
+
+            rewritten = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertEqual(render_calls, 1)
+            self.assertEqual(repair_calls, 2)
+            self.assertEqual(rewritten["schema_version"], 2)
+            self.assertEqual(
+                rewritten["page_checkpoints"],
+                {page_id: "finalized"},
+            )
+
+    def test_detected_checkpoint_map_remains_monotonic_during_partial_render(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "detected-to-rendered-monotonic"
+            page_ids = ["page-1.png", "page-2.png"]
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=page_ids,
+            )
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+                "advanced_text_repair": "off",
+            }
+            head = engine.project_workspace.read_project_head(project_id)
+            state_document = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                head,
+            )
+            cache_root = Path(state_document["rerender_cache_dir"])
+            checkpoint_files = {
+                f"cache/{page_id}/{file_name}": cache_root / page_id / file_name
+                for page_id in page_ids
+                for file_name in ("regions.json", "meta.json", "inpainted.png")
+            }
+            engine.project_workspace.write_pending_artifact_set(
+                project_id,
+                action="translate",
+                resume_fingerprint=engine.project_command_fingerprint(
+                    action="translate",
+                    raw_config=config,
+                    target_stored_name=None,
+                ),
+                base_head=head,
+                state_document=state_document,
+                files=checkpoint_files,
+                metadata={
+                    "page_checkpoints": {
+                        page_id: "detected" for page_id in page_ids
+                    }
+                },
+            )
+
+            async def render_page(*_args, **kwargs) -> None:
+                page_id = Path(kwargs["output_path"]).name
+                if page_id == "page-2.png":
+                    raise RuntimeError("synthetic partial render failure")
+                Image.new("RGB", (16, 16), (40, 80, 120)).save(
+                    kwargs["output_path"]
+                )
+
+            engine._render_cached_page = render_page  # type: ignore[method-assign]
+            with self.assertRaisesRegex(RuntimeError, "partial render failure"):
+                asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="translate",
+                            config=config,
+                        )
+                    )
+                )
+
+            pending = engine.project_workspace.read_pending_artifact_set(project_id)
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {
+                    "page-1.png": "rendered",
+                    "page-2.png": "detected",
+                },
+            )
+
+    def test_detection_pending_requires_canonical_recoverable_page_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "detection-checkpoint-cache-contract"
+            engine, _session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            head = engine.project_workspace.read_project_head(project_id)
+            state_document = engine.project_workspace.read_project_state_from_head(
+                project_id,
+                head,
+            )
+            irrelevant_cache = root / "debug.txt"
+            irrelevant_cache.write_text("not a page cache", encoding="utf-8")
+            with self.assertRaises(CorruptProjectArtifactError):
+                engine.project_workspace.write_pending_artifact_set(
+                    project_id,
+                    action="detect",
+                    resume_fingerprint="detect-command",
+                    base_head=head,
+                    state_document=state_document,
+                    files={"cache/page-1.png/debug.txt": irrelevant_cache},
+                    metadata={
+                        "page_checkpoints": {"page-1.png": "detected"},
+                        "state_validated": True,
+                    },
+                )
+
+    def test_pending_action_and_workflow_stage_matrix_is_strict(self) -> None:
+        allowed_stages = {
+            "detect": {"detecting", "detected"},
+            "translate": {"detecting", "detected", "translating"},
+            "resume-translate": {"translating"},
+            "translate-page": {"translating"},
+            "rerender": {"translated"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            project_id = "pending-action-stage-matrix"
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            engine, session = self.make_recognized_zero_region_project(
+                Path(tmp),
+                project_id=project_id,
+                page_ids=["page-1.png", "page-2.png"],
+            )
+            self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config=config,
+            )
+            pending_path = engine.project_workspace.project_pending_artifact_path(
+                project_id
+            )
+            original_pending = engine.project_workspace.read_json_file(
+                pending_path,
+                {},
+            )
+
+            for action, allowed in allowed_stages.items():
+                for workflow_stage in (
+                    "idle",
+                    "detecting",
+                    "detected",
+                    "translating",
+                    "translated",
+                ):
+                    with self.subTest(action=action, workflow_stage=workflow_stage):
+                        pending = copy.deepcopy(original_pending)
+                        pending["schema_version"] = 1
+                        pending["completed_page_ids"] = ["page-1.png"]
+                        pending.pop("page_checkpoints", None)
+                        pending.pop("state_validated", None)
+                        pending["action"] = action
+                        pending["state_document"]["workflow_stage"] = workflow_stage
+                        engine.project_workspace.write_json_file(pending_path, pending)
+                        if workflow_stage in allowed:
+                            restored = (
+                                engine.project_workspace.read_pending_artifact_set(
+                                    project_id
+                                )
+                            )
+                            self.assertEqual(restored["action"], action)
+                            expected_page_stage = (
+                                "detected"
+                                if workflow_stage in {"detecting", "detected"}
+                                else (
+                                    "finalized"
+                                    if action == "rerender"
+                                    else "rendered"
+                                )
+                            )
+                            self.assertEqual(
+                                restored["page_checkpoints"],
+                                {"page-1.png": expected_page_stage},
+                            )
+                        else:
+                            with self.assertRaises(CorruptProjectArtifactError):
+                                engine.project_workspace.read_pending_artifact_set(
+                                    project_id
+                                )
+
+    def test_translated_pending_requires_complete_decodable_page_artifacts(self) -> None:
+        corruptions = (
+            "missing-regions",
+            "corrupt-regions",
+            "unsafe-region-element",
+            "missing-meta",
+            "corrupt-meta",
+            "unknown-base-kind",
+            "missing-inpainted",
+            "corrupt-inpainted",
+            "bool-region-count",
+            "mismatched-region-count",
+            "missing-translated",
+            "corrupt-translated",
+            "truncated-translated-jpeg",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "pending-page-artifact-contract"
+            config = {
+                "translator": "none",
+                "target_lang": "CHS",
+                "rerender_output_format": "png",
+            }
+            engine, session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png", "page-2.png"],
+            )
+            self.interrupt_translation_after_first_verified_page(
+                engine,
+                project_id=project_id,
+                session=session,
+                config=config,
+            )
+            workspace = engine.project_workspace
+            pending_path = workspace.project_pending_artifact_path(project_id)
+            self.assertIsNotNone(workspace.read_pending_artifact_set(project_id))
+            original_pending = workspace.read_json_file(pending_path, {})
+            jpeg_buffer = BytesIO()
+            Image.new("RGB", (64, 64), (123, 45, 67)).save(
+                jpeg_buffer,
+                format="JPEG",
+                quality=95,
+            )
+            truncated_jpeg = jpeg_buffer.getvalue()[:-2]
+            with Image.open(BytesIO(truncated_jpeg)) as image:
+                image.verify()
+            with self.assertRaises(OSError):
+                with Image.open(BytesIO(truncated_jpeg)) as image:
+                    image.load()
+
+            def replace_artifact(
+                pending: dict[str, object],
+                logical_path: str,
+                payload: bytes,
+            ) -> None:
+                replacement = root / f"replacement-{uuid.uuid4().hex}"
+                replacement.write_bytes(payload)
+                artifact_bundle = pending["artifact_bundle"]
+                original_paths = set(artifact_bundle["files"])
+                replacement_bundle = workspace.capture_snapshot_artifacts(
+                    project_id,
+                    {logical_path: replacement},
+                    previous_bundle=artifact_bundle,
+                )
+                artifact_bundle["files"][logical_path] = replacement_bundle["files"][
+                    logical_path
+                ]
+                self.assertEqual(set(artifact_bundle["files"]), original_paths)
+
+            for corruption in corruptions:
+                with self.subTest(corruption=corruption):
+                    pending = copy.deepcopy(original_pending)
+                    files = pending["artifact_bundle"]["files"]
+                    if corruption == "missing-regions":
+                        files.pop("cache/page-1.png/regions.json")
+                    elif corruption == "corrupt-regions":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/regions.json",
+                            b"{not-json",
+                        )
+                    elif corruption == "unsafe-region-element":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/regions.json",
+                            b"[42]",
+                        )
+                    elif corruption == "missing-meta":
+                        files.pop("cache/page-1.png/meta.json")
+                    elif corruption == "corrupt-meta":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/meta.json",
+                            b"[]",
+                        )
+                    elif corruption == "unknown-base-kind":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/meta.json",
+                            json.dumps({"base_kind": "mystery"}).encode(),
+                        )
+                    elif corruption == "missing-inpainted":
+                        files.pop("cache/page-1.png/inpainted.png")
+                    elif corruption == "corrupt-inpainted":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/inpainted.png",
+                            b"not-an-image",
+                        )
+                    elif corruption == "bool-region-count":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/meta.json",
+                            json.dumps(
+                                {
+                                    "base_kind": "inpainted",
+                                    "inpainting_region_count": True,
+                                }
+                            ).encode(),
+                        )
+                    elif corruption == "mismatched-region-count":
+                        replace_artifact(
+                            pending,
+                            "cache/page-1.png/meta.json",
+                            json.dumps(
+                                {
+                                    "base_kind": "inpainted",
+                                    "inpainting_region_count": 1,
+                                }
+                            ).encode(),
+                        )
+                    elif corruption == "missing-translated":
+                        files.pop("translated/page-1.png")
+                    elif corruption == "truncated-translated-jpeg":
+                        replace_artifact(
+                            pending,
+                            "translated/page-1.png",
+                            truncated_jpeg,
+                        )
+                    else:
+                        replace_artifact(
+                            pending,
+                            "translated/page-1.png",
+                            b"not-an-image",
+                        )
+                    workspace.write_json_file(pending_path, pending)
+
+                    with self.assertRaises(CorruptProjectArtifactError):
+                        workspace.read_pending_artifact_set(project_id)
+
+    def test_source_no_text_pending_cache_is_valid_without_inpainted_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_id = "source-no-text-pending"
+            engine, _session = self.make_recognized_zero_region_project(
+                root,
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            workspace = engine.project_workspace
+            head = workspace.read_project_head(project_id)
+            state_document = workspace.read_project_state_from_head(project_id, head)
+            regions_path = root / "source-no-text-regions.json"
+            meta_path = root / "source-no-text-meta.json"
+            regions_path.write_text("[]", encoding="utf-8")
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "base_kind": "source_no_text",
+                        "inpainting_region_count": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            workspace.write_pending_artifact_set(
+                project_id,
+                action="detect",
+                resume_fingerprint="detect-source-no-text",
+                base_head=head,
+                state_document=state_document,
+                files={
+                    "cache/page-1.png/regions.json": regions_path,
+                    "cache/page-1.png/meta.json": meta_path,
+                },
+                metadata={
+                    "page_checkpoints": {"page-1.png": "detected"},
+                    "state_validated": True,
+                },
+            )
+
+            pending = workspace.read_pending_artifact_set(project_id)
+
+            self.assertEqual(
+                pending["page_checkpoints"],
+                {"page-1.png": "detected"},
+            )
+
+    def test_project_preparation_never_persists_through_glossary_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_id = "glossary-private-preparation"
+            engine, session = self.make_recognized_zero_region_project(
+                Path(tmp),
+                project_id=project_id,
+                page_ids=["page-1.png"],
+            )
+            session["project_glossary"] = {
+                "entries": [],
+                "auto_extract_completed": False,
+            }
+            engine.persist_project_state(
+                project_id,
+                session,
+                persist_page_documents=True,
+            )
+            observed_persist_values: list[bool] = []
+
+            async def fake_extract(
+                _project_id,
+                working_session,
+                _config,
+                progress_callback=None,
+                force=False,
+                persist=True,
+            ):
+                observed_persist_values.append(persist)
+                working_session["project_glossary"] = {
+                    "entries": [],
+                    "auto_extract_completed": True,
+                }
+                return {"entries": []}
+
+            with mock.patch.object(
+                engine,
+                "extract_project_glossary",
+                side_effect=fake_extract,
+            ), mock.patch.object(
+                engine,
+                "persist_project_state",
+                side_effect=AssertionError("Working Set attempted an early persist"),
+            ):
+                result = asyncio.run(
+                    self.make_workflow_coordinator(engine, session).execute(
+                        ProjectCommand(
+                            project_id=project_id,
+                            action="resume-translate",
+                            config={
+                                "translator": "none",
+                                "target_lang": "CHS",
+                                "rerender_output_format": "png",
+                            },
+                        )
+                    )
+                )
+
+            self.assertEqual(observed_persist_values, [False])
+            self.assertEqual(result["workflow_stage"], "translated")
 
     def test_compatible_retry_resumes_after_verified_pending_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -659,11 +2508,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 retry_events.append(event)
 
             asyncio.run(
-                engine.resume_translation_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config=config,
-                    progress_callback=collect_retry_event,
+                self.make_workflow_coordinator(engine, session).execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="resume-translate",
+                        config=config,
+                    ),
+                    progress=collect_retry_event,
                 )
             )
 
@@ -710,11 +2561,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 retry_events.append(event)
 
             asyncio.run(
-                engine.resume_translation_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config={**initial_config, "target_lang": "CHT"},
-                    progress_callback=collect_retry_event,
+                self.make_workflow_coordinator(engine, session).execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="resume-translate",
+                        config={**initial_config, "target_lang": "CHT"},
+                    ),
+                    progress=collect_retry_event,
                 )
             )
 
@@ -776,12 +2629,18 @@ class TranslatorEngineStateTests(unittest.TestCase):
                         retry_events.append(event)
 
                     asyncio.run(
-                        engine.resume_translation_session(
-                            session_id=project_id,
-                            session=session,
-                            raw_config=config,
-                            progress_callback=collect_retry_event,
-                            target_stored_name=target_stored_name,
+                        self.make_workflow_coordinator(engine, session).execute(
+                            ProjectCommand(
+                                project_id=project_id,
+                                action=(
+                                    "translate-page"
+                                    if target_stored_name
+                                    else "resume-translate"
+                                ),
+                                config=config,
+                                target_stored_name=target_stored_name,
+                            ),
+                            progress=collect_retry_event,
                         )
                     )
 
@@ -790,7 +2649,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
                         for event in retry_events
                         if event.get("event") == "progress"
                     ]
-                    self.assertEqual(pending_before_retry["completed_page_ids"], ["page-1.png"])
+                    self.assertEqual(
+                        pending_before_retry["page_checkpoints"],
+                        {"page-1.png": "rendered"},
+                    )
                     self.assertEqual(progress_page_ids[0], "page-1.png")
                     self.assertEqual(
                         next(
@@ -834,20 +2696,24 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             async def observe_changed_action(event: dict[str, object]) -> None:
                 rerender_events.append(event)
-                if event.get("event") == "start":
-                    raise RuntimeError("changed action observed")
 
-            with self.assertRaisesRegex(RuntimeError, "changed action observed"):
-                asyncio.run(
-                    engine.rerender_session(
-                        session_id=project_id,
-                        session=session,
-                        raw_config=config,
-                        progress_callback=observe_changed_action,
+            async def fail_render(*_args, **_kwargs):
+                raise RuntimeError("changed action observed")
+
+            with mock.patch.object(engine, "_render_cached_page", side_effect=fail_render):
+                with self.assertRaisesRegex(RuntimeError, "changed action observed"):
+                    asyncio.run(
+                        self.make_workflow_coordinator(engine, session).execute(
+                            ProjectCommand(
+                                project_id=project_id,
+                                action="rerender",
+                                config=config,
+                            ),
+                            progress=observe_changed_action,
+                        )
                     )
-                )
 
-            self.assertEqual(rerender_events, [{"event": "start", "total_pages": 2}])
+            self.assertEqual(rerender_events[0], {"event": "start", "total_pages": 2})
 
     def test_translation_stage_builds_inpainted_base_from_detected_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1075,11 +2941,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 return None
 
             result = asyncio.run(
-                engine.detect_session(
-                    session_id=project_id,
-                    session=session,
-                    raw_config={"translator": "none"},
-                    progress_callback=progress,
+                self.make_workflow_coordinator(engine, session).execute(
+                    ProjectCommand(
+                        project_id=project_id,
+                        action="detect",
+                        config={"translator": "none"},
+                    ),
+                    progress=progress,
                 )
             )
 
@@ -1528,6 +3396,52 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             self.assertEqual(restored_session["manual_regions"], {})
 
+    def test_persist_project_state_delegates_pending_cleanup_to_atomic_workspace_seam(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            project_id = "atomic-persist-cleanup"
+            session = {
+                "source_dir": str(root / "source"),
+                "translated_dir": str(root / "translated"),
+                "source_images": [],
+                "translated_output_map": {},
+                "workflow_stage": "idle",
+            }
+            engine.initialize_project(project_id, session, title="Atomic cleanup")
+
+            with (
+                mock.patch.object(
+                    engine.project_workspace,
+                    "clear_obsolete_pending_artifact_set",
+                    return_value=False,
+                ) as clear_obsolete,
+                mock.patch.object(
+                    engine.project_workspace,
+                    "read_pending_artifact_set",
+                    side_effect=AssertionError(
+                        "Translator must not make a lock-free Pending decision"
+                    ),
+                ),
+                mock.patch.object(
+                    engine.project_workspace,
+                    "clear_pending_artifact_set",
+                    side_effect=AssertionError(
+                        "Translator must not unconditionally clear Pending"
+                    ),
+                ),
+                mock.patch.object(
+                    engine.project_workspace,
+                    "garbage_collect_snapshot_blobs",
+                ) as collect,
+            ):
+                engine.persist_project_state(project_id, session)
+
+            clear_obsolete.assert_called_once_with(project_id)
+            collect.assert_called_once_with(project_id)
+
     def test_snapshot_restore_uses_snapshot_time_artifacts_instead_of_current_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1616,6 +3530,121 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
             self.assertNotIn("missing-region", session["translation_region_overrides"])
             self.assertNotIn("missing-region", session["translation_region_layout_overrides"])
+
+    def test_page_command_rollback_preserves_a_concurrently_published_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            workspace = engine.project_workspace
+            project_id = "concurrent-snapshot-rollback"
+            page_id = "001.png"
+            state_document = {
+                "schema_version": 2,
+                "project_id": project_id,
+                "source_images": [{"name": page_id, "stored_name": page_id}],
+            }
+            project_manifest = {
+                "project_id": project_id,
+                "title": "Concurrent snapshot rollback",
+            }
+            first_head = workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={
+                    page_id: {
+                        "page_id": page_id,
+                        "metadata": {"revision": 1},
+                    }
+                },
+            )
+            workspace.commit_project_head(
+                project_id,
+                state_document=state_document,
+                project_manifest=project_manifest,
+                page_documents={
+                    page_id: {
+                        "page_id": page_id,
+                        "metadata": {"revision": 2},
+                    }
+                },
+                expected_generation=first_head["generation"],
+                expected_revision_id=first_head["revision_id"],
+            )
+            published_snapshots: list[dict[str, object]] = []
+
+            async def publish_snapshot_then_fail(**_kwargs) -> dict[str, object]:
+                snapshot = await asyncio.to_thread(
+                    workspace.create_project_head_snapshot,
+                    project_id,
+                    first_head,
+                    {
+                        "kind": "manual",
+                        "summary": "Concurrent durable snapshot",
+                        "created_at": "2026-07-19T07:00:00+00:00",
+                    },
+                )
+                published_snapshots.append(snapshot)
+                raise RuntimeError("synthetic page-command failure")
+
+            session: dict[str, object] = {
+                "source_images": [{"name": page_id, "stored_name": page_id}],
+                "translation_region_overrides": {},
+                "translation_region_layout_overrides": {},
+                "last_config": {},
+            }
+            with mock.patch.object(
+                engine,
+                "_apply_page_commands_once",
+                side_effect=publish_snapshot_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "synthetic page-command failure",
+                ):
+                    asyncio.run(
+                        engine.apply_page_commands(
+                            project_id=project_id,
+                            session=session,
+                            page_id=page_id,
+                            raw_config={},
+                            commands=[{"type": "rerender_page"}],
+                        )
+                    )
+
+            self.assertEqual(len(published_snapshots), 1)
+            snapshot = published_snapshots[0]
+            restored_pages = root / "restored-pages"
+            workspace.restore_snapshot_artifacts(
+                project_id,
+                snapshot["artifact_bundle"],
+                {"pages": restored_pages},
+            )
+            restored_page_document = json.loads(
+                (restored_pages / page_id / "page_document.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            first_page_blob = first_head["files"][
+                f"pages/{page_id}/page_document.json"
+            ]["blob"]
+            self.assertEqual(restored_page_document["metadata"]["revision"], 1)
+            self.assertEqual(len(workspace.read_snapshot_manifests(project_id)), 1)
+            self.assertTrue(
+                (
+                    workspace.project_revisions_dir(project_id)
+                    / f"{first_head['revision_id']}.json"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    workspace.project_artifact_store_dir(project_id)
+                    / first_page_blob[:2]
+                    / first_page_blob
+                ).is_file()
+            )
 
     def test_translation_override_preserves_single_space(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3418,6 +5447,7 @@ print(json.dumps({
                 raw_config={"rerender_output_format": "png"},
                 progress_callback=collect_event,
                 skip_completed=True,
+                page_checkpoints={"page-1.png": "rendered"},
             ))
 
             self.assertEqual(rendered_pages, ["page-2.png"])

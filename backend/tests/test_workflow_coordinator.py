@@ -24,6 +24,7 @@ from workflow_coordinator import (
 from domain.project_artifacts import PageArtifactEvent, ProjectArtifactState
 from domain.project_state import ProjectState
 from engine.project_workspace import (
+    CorruptProjectArtifactError,
     PreparedHeadUpdate,
     ProjectHeadConflictError,
     ProjectWorkspace,
@@ -36,6 +37,9 @@ from workflow_events import (
     UnsupportedWorkflowActionError,
 )
 import main
+
+
+MISSING_PAGE_REVISION = object()
 
 
 class DeterministicExecutionAdapter:
@@ -66,6 +70,8 @@ def make_workspace(root: Path) -> ProjectWorkspace:
 
 def seed_render_page_project(
     root: Path,
+    *,
+    page_revision: object = 4,
 ) -> tuple[ProjectWorkspace, dict[str, Any], dict[str, Any]]:
     workspace = make_workspace(root)
     project_id = "project-a"
@@ -103,10 +109,13 @@ def seed_render_page_project(
         session=session,
         artifact_state=artifact_state,
     ).model_dump(mode="json")
+    page_metadata: dict[str, object] = {"document_version": 2}
+    if page_revision is not MISSING_PAGE_REVISION:
+        page_metadata["revision"] = page_revision
     page_document = {
         "page_id": "001.png",
         "regions": [],
-        "metadata": {"document_version": 2, "revision": 4},
+        "metadata": page_metadata,
     }
     head = workspace.commit_project_head(
         project_id,
@@ -129,12 +138,59 @@ def seed_render_page_project(
     ).to_runtime_session(), head
 
 
+def durable_command_surfaces(
+    workspace: ProjectWorkspace,
+    project_id: str,
+) -> dict[str, object]:
+    def optional_bytes(path: Path) -> bytes | None:
+        return path.read_bytes() if path.is_file() else None
+
+    def tree_bytes(root: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        } if root.is_dir() else {}
+
+    snapshots_dir = workspace.project_snapshots_dir(project_id)
+    state_document = workspace.read_project_session_document(project_id) or {}
+    projected_roots = {
+        field: tree_bytes(Path(path))
+        for field in ("source_dir", "translated_dir", "rerender_cache_dir")
+        if isinstance((path := state_document.get(field)), str) and path
+    }
+    return {
+        "head": optional_bytes(workspace.project_head_path(project_id)),
+        "pending": optional_bytes(workspace.project_pending_artifact_path(project_id)),
+        "snapshots": tree_bytes(snapshots_dir),
+        "compatibility": {
+            "state": optional_bytes(workspace.project_session_state_path(project_id)),
+            "manifest": optional_bytes(workspace.project_manifest_path(project_id)),
+            "pages": tree_bytes(workspace.project_pages_dir(project_id)),
+            "artifact_roots": projected_roots,
+            "archive": optional_bytes(
+                workspace.project_temp_path(project_id, "result.zip")
+            ),
+            "index": optional_bytes(workspace.project_index_path),
+        },
+    }
+
+
 class DeterministicRenderPageAdapter:
     def __init__(self, error: BaseException | None = None) -> None:
         self.error = error
         self.calls = 0
         self.working_root: Path | None = None
         self.observed_source = b""
+
+    def project_command_fingerprint(self, command):
+        return repr(
+            (
+                command.action,
+                command.target_stored_name,
+                sorted(dict(command.config).items()),
+            )
+        )
 
     async def prepare_render_page(self, command, working_set, progress):
         self.calls += 1
@@ -190,6 +246,40 @@ class DeterministicRenderPageAdapter:
         )
 
 
+class DeterministicProjectCommandAdapter(DeterministicRenderPageAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.project_actions: list[str] = []
+
+    async def prepare_project_command(self, command, working_set, progress):
+        self.project_actions.append(command.action)
+        await progress({"event": "status", "message": "project command"})
+        state_document = copy.deepcopy(working_set.base.state_document)
+        state_document["workflow_stage"] = "translated"
+        runtime_session = ProjectState.load(
+            state_document,
+            expected_project_id=working_set.base.project_id,
+        ).to_runtime_session()
+        return PreparedHeadUpdate(
+            state_document=state_document,
+            project_manifest={
+                **working_set.base.project_manifest,
+                "workflow_stage": "translated",
+            },
+            page_documents=copy.deepcopy(working_set.base.page_documents),
+            artifact_files={},
+            replace_prefixes=(),
+            remove_logical_paths=set(),
+            runtime_session=runtime_session,
+            execution_extras={},
+            snapshot_document={
+                "kind": "deterministic_project_command",
+                "summary": command.action,
+                "workflow_stage": "translated",
+            },
+        )
+
+
 class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def make_render_page_coordinator(
         self,
@@ -221,6 +311,1188 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             project_workspace=workspace,
             render_page_adapter=render_adapter,
         )
+
+    async def test_project_commands_use_head_bound_coordinator_execution(self) -> None:
+        for action in ("rerender", "detect", "translate", "resume-translate"):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace, shared_project, first_head = seed_render_page_project(
+                        Path(tmp)
+                    )
+                    adapter = DeterministicProjectCommandAdapter()
+                    legacy_execution = mock.AsyncMock()
+                    coordinator = WorkflowCoordinator(
+                        project_loader=lambda _project_id: shared_project,
+                        execution_adapter=legacy_execution,
+                        project_view_builder=lambda project_id, project: {
+                            "session_id": project_id,
+                            "workflow_stage": project["workflow_stage"],
+                            "project": {"is_busy": True, "busy_action": action},
+                        },
+                        project_workspace=workspace,
+                        render_page_adapter=adapter,
+                    )
+
+                    result = await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action=action,
+                            config={"target_lang": "CHS"},
+                        )
+                    )
+
+                    self.assertEqual(adapter.project_actions, [action])
+                    legacy_execution.execute.assert_not_awaited()
+                    self.assertEqual(
+                        workspace.read_project_head("project-a")["generation"],
+                        first_head["generation"] + 1,
+                    )
+                    snapshots = workspace.read_snapshot_manifests("project-a")
+                    self.assertEqual(len(snapshots), 1)
+                    self.assertEqual(
+                        snapshots[0]["project_head_revision_id"],
+                        workspace.read_project_head("project-a")["revision_id"],
+                    )
+                    self.assertEqual(result["workflow_stage"], "translated")
+
+    async def test_translate_page_rejects_invalid_stored_revision_without_durable_writes(
+        self,
+    ) -> None:
+        cases = (
+            ("missing", MISSING_PAGE_REVISION),
+            ("true", True),
+            ("false", False),
+            ("string", "4"),
+            ("float", 4.0),
+            ("zero", 0),
+            ("negative", -1),
+        )
+        for label, invalid_revision in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(
+                    root,
+                    page_revision=invalid_revision,
+                )
+                pending_output = root / "pending-output.png"
+                pending_output.write_bytes(b"pending output")
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="rerender",
+                    resume_fingerprint="different-command",
+                    base_head=first_head,
+                    state_document=workspace.read_project_state_from_head(
+                        "project-a",
+                        first_head,
+                    ),
+                    files={"translated/001.png": pending_output},
+                )
+                workspace.create_project_head_snapshot(
+                    "project-a",
+                    first_head,
+                    {"kind": "baseline"},
+                )
+                durable_before = durable_command_surfaces(
+                    workspace,
+                    "project-a",
+                )
+                adapter = DeterministicProjectCommandAdapter()
+                legacy_execution = mock.AsyncMock()
+                coordinator = WorkflowCoordinator(
+                    project_loader=lambda _project_id: shared_project,
+                    execution_adapter=legacy_execution,
+                    project_view_builder=lambda _project_id, _project: {},
+                    project_workspace=workspace,
+                    render_page_adapter=adapter,
+                )
+
+                with self.assertRaises(CorruptProjectArtifactError):
+                    await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action="translate-page",
+                            config={},
+                            target_stored_name="001.png",
+                        )
+                    )
+
+                self.assertEqual(adapter.project_actions, [])
+                legacy_execution.execute.assert_not_awaited()
+                self.assertEqual(
+                    durable_command_surfaces(workspace, "project-a"),
+                    durable_before,
+                )
+
+    async def test_project_command_rejects_invalid_orphan_head_page_without_durable_writes(
+        self,
+    ) -> None:
+        for action in ("detect", "translate"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(root)
+                orphan_head = workspace.commit_project_head(
+                    "project-a",
+                    state_document=workspace.read_project_state_from_head(
+                        "project-a",
+                        first_head,
+                    ),
+                    project_manifest=workspace.read_project_manifest("project-a"),
+                    page_documents={
+                        "002.png": {
+                            "page_id": "002.png",
+                            "regions": [],
+                            "metadata": {
+                                "document_version": 2,
+                                "revision": "bad",
+                            },
+                        }
+                    },
+                    expected_generation=first_head["generation"],
+                    expected_revision_id=first_head["revision_id"],
+                )
+                pending_output = root / "pending-output.png"
+                pending_output.write_bytes(b"pending output")
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="rerender",
+                    resume_fingerprint="different-command",
+                    base_head=orphan_head,
+                    state_document=workspace.read_project_state_from_head(
+                        "project-a",
+                        orphan_head,
+                    ),
+                    files={"translated/001.png": pending_output},
+                )
+                workspace.create_project_head_snapshot(
+                    "project-a",
+                    orphan_head,
+                    {"kind": "baseline"},
+                )
+                durable_before = durable_command_surfaces(workspace, "project-a")
+                adapter = DeterministicProjectCommandAdapter()
+                legacy_execution = mock.AsyncMock()
+                coordinator = WorkflowCoordinator(
+                    project_loader=lambda _project_id: shared_project,
+                    execution_adapter=legacy_execution,
+                    project_view_builder=lambda _project_id, _project: {},
+                    project_workspace=workspace,
+                    render_page_adapter=adapter,
+                )
+
+                with self.assertRaises(CorruptProjectArtifactError):
+                    await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action=action,
+                            config={},
+                        )
+                    )
+
+                self.assertEqual(adapter.project_actions, [])
+                legacy_execution.execute.assert_not_awaited()
+                self.assertEqual(
+                    durable_command_surfaces(workspace, "project-a"),
+                    durable_before,
+                )
+
+    async def test_render_page_rejects_invalid_head_inventory_without_durable_writes(
+        self,
+    ) -> None:
+        for case in ("orphan-invalid-revision", "ambiguous-page-path"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(root)
+                if case == "orphan-invalid-revision":
+                    current_head = workspace.commit_project_head(
+                        "project-a",
+                        state_document=workspace.read_project_state_from_head(
+                            "project-a",
+                            first_head,
+                        ),
+                        project_manifest=workspace.read_project_manifest("project-a"),
+                        page_documents={
+                            "002.png": {
+                                "page_id": "002.png",
+                                "regions": [],
+                                "metadata": {
+                                    "document_version": 2,
+                                    "revision": "bad",
+                                },
+                            }
+                        },
+                        expected_generation=first_head["generation"],
+                        expected_revision_id=first_head["revision_id"],
+                    )
+                else:
+                    workspace.create_project_head_snapshot(
+                        "project-a",
+                        first_head,
+                        {"kind": "baseline"},
+                    )
+                    current_head = {
+                        **first_head,
+                        "files": {
+                            **first_head["files"],
+                            "pages//001.png/page_document.json": first_head["files"][
+                                "pages/001.png/page_document.json"
+                            ],
+                        },
+                    }
+                    workspace.write_json_file(
+                        workspace.project_head_path("project-a"),
+                        current_head,
+                    )
+                pending_output = root / "pending-output.png"
+                pending_output.write_bytes(b"pending output")
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="rerender",
+                    resume_fingerprint="different-command",
+                    base_head=current_head,
+                    state_document=workspace.read_project_state_from_head(
+                        "project-a",
+                        current_head,
+                    ),
+                    files={"translated/001.png": pending_output},
+                )
+                if case == "orphan-invalid-revision":
+                    workspace.create_project_head_snapshot(
+                        "project-a",
+                        current_head,
+                        {"kind": "baseline"},
+                    )
+                durable_before = durable_command_surfaces(workspace, "project-a")
+                adapter = DeterministicRenderPageAdapter()
+                legacy_execution = mock.AsyncMock()
+                coordinator = WorkflowCoordinator(
+                    project_loader=lambda _project_id: shared_project,
+                    execution_adapter=legacy_execution,
+                    project_view_builder=lambda _project_id, _project: {},
+                    project_workspace=workspace,
+                    render_page_adapter=adapter,
+                )
+
+                with self.assertRaises(CorruptProjectArtifactError):
+                    await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action="rerender",
+                            config={},
+                            target_stored_name="001.png",
+                            expected_page_revision=4,
+                        )
+                    )
+
+                self.assertEqual(adapter.calls, 0)
+                legacy_execution.execute.assert_not_awaited()
+                self.assertEqual(
+                    durable_command_surfaces(workspace, "project-a"),
+                    durable_before,
+                )
+
+    async def test_corrupt_pending_fails_closed_before_project_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            workspace.project_pending_artifact_path("project-a").write_text(
+                "{not-json",
+                encoding="utf-8",
+            )
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda _project_id, _project: {},
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+
+            with self.assertRaises(CorruptProjectArtifactError):
+                await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            self.assertEqual(adapter.project_actions, [])
+            self.assertEqual(workspace.read_project_head("project-a"), first_head)
+
+    async def test_pending_reuse_matches_base_generation_and_revision_independently(
+        self,
+    ) -> None:
+        cases = (
+            ("exact", None, True),
+            ("generation", "base_head_generation", False),
+            ("revision", "base_head_revision_id", False),
+        )
+        for label, changed_field, expected_restored in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(root)
+                pending_output = root / "pending-output.png"
+                pending_output.write_bytes(b"verified pending output")
+                pending_state = workspace.read_project_state_from_head(
+                    "project-a",
+                    first_head,
+                )
+                pending_state["workflow_stage"] = "translating"
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="translate",
+                    resume_fingerprint="exact-command",
+                    base_head=first_head,
+                    state_document=pending_state,
+                    files={"translated/001.png": pending_output},
+                )
+                pending_path = workspace.project_pending_artifact_path("project-a")
+                if changed_field is not None:
+                    pending = workspace.read_json_file(pending_path, {})
+                    if changed_field == "base_head_generation":
+                        pending[changed_field] = first_head["generation"] + 1
+                    else:
+                        pending[changed_field] = "another-valid-revision"
+                    workspace.write_json_file(pending_path, pending)
+                diagnostic_evidence = pending_path.read_bytes()
+                base = workspace.read_project_command_base("project-a")
+
+                with workspace.materialize_project_working_set(
+                    base,
+                    action="translate",
+                    resume_fingerprint="exact-command",
+                    legacy_project=shared_project,
+                ) as working_set:
+                    self.assertIs(
+                        working_set.pending_restored,
+                        expected_restored,
+                    )
+
+                self.assertEqual(pending_path.read_bytes(), diagnostic_evidence)
+
+    async def test_markerless_corrupt_pending_fails_closed_even_when_nonmatching(
+        self,
+    ) -> None:
+        cases = (
+            ("matching-state", True, "state"),
+            ("nonmatching-state", False, "state"),
+            ("nonmatching-path", False, "path"),
+            ("nonmatching-root-only", False, "root-only"),
+            ("nonmatching-unknown-root", False, "unknown-root"),
+        )
+        for label, matching, corruption in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(root)
+                adapter = DeterministicProjectCommandAdapter()
+                command = ProjectCommand(
+                    project_id="project-a",
+                    action="translate",
+                    config={},
+                )
+                pending_artifact = root / "pending-output.png"
+                pending_artifact.write_bytes(b"verified pending output")
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="rerender",
+                    resume_fingerprint=(
+                        adapter.project_command_fingerprint(command)
+                        if matching
+                        else "different-command-fingerprint"
+                    ),
+                    base_head=first_head,
+                    state_document=workspace.read_project_state_from_head(
+                        "project-a",
+                        first_head,
+                    ),
+                    files={"translated/001.png": pending_artifact},
+                )
+                pending_path = workspace.project_pending_artifact_path("project-a")
+                pending = workspace.read_json_file(pending_path, {})
+                if matching:
+                    pending["action"] = "translate"
+                self.assertNotIn("state_validated", pending)
+                if corruption == "state":
+                    pending["state_document"] = {}
+                elif corruption == "path":
+                    files = pending["artifact_bundle"]["files"]
+                    files["../escape.png"] = files.pop("translated/001.png")
+                elif corruption == "root-only":
+                    files = pending["artifact_bundle"]["files"]
+                    files["translated"] = files.pop("translated/001.png")
+                else:
+                    files = pending["artifact_bundle"]["files"]
+                    files["diagnostics/output.png"] = files.pop(
+                        "translated/001.png"
+                    )
+                workspace.write_json_file(pending_path, pending)
+                diagnostic_evidence = pending_path.read_bytes()
+                coordinator = WorkflowCoordinator(
+                    project_loader=lambda _project_id: shared_project,
+                    execution_adapter=DeterministicExecutionAdapter(),
+                    project_view_builder=lambda _project_id, _project: {},
+                    project_workspace=workspace,
+                    render_page_adapter=adapter,
+                )
+
+                with self.assertRaises(CorruptProjectArtifactError):
+                    await coordinator.execute(command)
+
+                self.assertEqual(adapter.project_actions, [])
+                self.assertEqual(workspace.read_project_head("project-a"), first_head)
+                self.assertEqual(pending_path.read_bytes(), diagnostic_evidence)
+
+    async def test_empty_pending_still_validates_action_stage_before_nonmatching_execution(
+        self,
+    ) -> None:
+        cases = (
+            ("unknown-action", "future-action", "translated"),
+            ("impossible-stage", "detect", "translated"),
+        )
+        for label, pending_action, pending_stage in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace, shared_project, first_head = seed_render_page_project(root)
+                adapter = DeterministicProjectCommandAdapter()
+                command = ProjectCommand(
+                    project_id="project-a",
+                    action="translate",
+                    config={},
+                )
+                pending_artifact = root / "pending-output.png"
+                pending_artifact.write_bytes(b"verified pending output")
+                pending_state = workspace.read_project_state_from_head(
+                    "project-a",
+                    first_head,
+                )
+                pending_state["workflow_stage"] = "translated"
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action="rerender",
+                    resume_fingerprint="different-command-fingerprint",
+                    base_head=first_head,
+                    state_document=pending_state,
+                    files={"translated/001.png": pending_artifact},
+                    metadata={"page_checkpoints": {}},
+                )
+                pending_path = workspace.project_pending_artifact_path("project-a")
+                corrupt_pending = workspace.read_json_file(pending_path, {})
+                corrupt_pending["action"] = pending_action
+                corrupt_pending["state_document"]["workflow_stage"] = pending_stage
+                workspace.write_json_file(pending_path, corrupt_pending)
+                diagnostic_evidence = pending_path.read_bytes()
+                legacy_execution = mock.AsyncMock()
+                coordinator = WorkflowCoordinator(
+                    project_loader=lambda _project_id: shared_project,
+                    execution_adapter=legacy_execution,
+                    project_view_builder=lambda _project_id, _project: {},
+                    project_workspace=workspace,
+                    render_page_adapter=adapter,
+                )
+
+                with mock.patch.object(
+                    workspace,
+                    "restore_pending_artifact_set",
+                    wraps=workspace.restore_pending_artifact_set,
+                ) as restore_pending:
+                    with self.assertRaises(CorruptProjectArtifactError):
+                        await coordinator.execute(command)
+
+                restore_pending.assert_not_called()
+                self.assertEqual(adapter.project_actions, [])
+                legacy_execution.execute.assert_not_awaited()
+                self.assertEqual(workspace.read_project_head("project-a"), first_head)
+                self.assertEqual(pending_path.read_bytes(), diagnostic_evidence)
+
+    async def test_empty_pending_accepts_canonical_action_stage_matrix(self) -> None:
+        allowed_pairs = (
+            ("detect", "detecting"),
+            ("detect", "detected"),
+            ("translate", "detecting"),
+            ("translate", "detected"),
+            ("translate", "translating"),
+            ("resume-translate", "translating"),
+            ("translate-page", "translating"),
+            ("rerender", "translated"),
+        )
+        for pending_action, pending_stage in allowed_pairs:
+            with (
+                self.subTest(action=pending_action, stage=pending_stage),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                workspace, _shared_project, first_head = seed_render_page_project(root)
+                pending_artifact = root / "pending-output.png"
+                pending_artifact.write_bytes(b"verified pending output")
+                pending_state = workspace.read_project_state_from_head(
+                    "project-a",
+                    first_head,
+                )
+                pending_state["workflow_stage"] = pending_stage
+                workspace.write_pending_artifact_set(
+                    "project-a",
+                    action=pending_action,
+                    resume_fingerprint="canonical-empty-checkpoint",
+                    base_head=first_head,
+                    state_document=pending_state,
+                    files={"translated/001.png": pending_artifact},
+                    metadata={"page_checkpoints": {}},
+                )
+
+                pending = workspace.read_pending_artifact_set("project-a")
+
+                self.assertEqual(pending["action"], pending_action)
+                self.assertEqual(
+                    pending["state_document"]["workflow_stage"],
+                    pending_stage,
+                )
+                self.assertEqual(pending["page_checkpoints"], {})
+
+    async def test_project_archive_stays_private_when_head_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            canonical_archive = workspace.project_temp_path(
+                "project-a",
+                "result.zip",
+            )
+            canonical_archive.parent.mkdir(parents=True, exist_ok=True)
+            canonical_archive.write_bytes(b"old archive")
+
+            class ArchivePreparingAdapter(DeterministicProjectCommandAdapter):
+                async def prepare_project_command(self, command, working_set, progress):
+                    prepared = await super().prepare_project_command(
+                        command,
+                        working_set,
+                        progress,
+                    )
+                    private_archive = working_set.archive_dir / "result.zip"
+                    private_archive.write_bytes(b"new archive")
+                    return PreparedHeadUpdate(
+                        state_document=prepared.state_document,
+                        project_manifest=prepared.project_manifest,
+                        page_documents=prepared.page_documents,
+                        artifact_files={"archive/result.zip": private_archive},
+                        replace_prefixes=("archive/",),
+                        remove_logical_paths=set(),
+                        runtime_session=prepared.runtime_session,
+                        execution_extras=prepared.execution_extras,
+                    )
+
+            adapter = ArchivePreparingAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda _project_id, _project: {},
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+            with mock.patch.object(
+                workspace,
+                "commit_project_working_set",
+                side_effect=OSError("synthetic CAS failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "CAS failure"):
+                    await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action="translate",
+                            config={},
+                        )
+                    )
+
+            self.assertEqual(canonical_archive.read_bytes(), b"old archive")
+            self.assertEqual(workspace.read_project_head("project-a"), first_head)
+
+    async def test_project_command_cancellation_propagates_without_commit_or_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            cancellation = asyncio.CancelledError()
+
+            class CancellingProjectAdapter(DeterministicProjectCommandAdapter):
+                async def prepare_project_command(self, command, working_set, progress):
+                    self.project_actions.append(command.action)
+                    self.working_root = working_set.root
+                    await progress({"event": "status", "message": "cancelling"})
+                    raise cancellation
+
+            adapter = CancellingProjectAdapter()
+            legacy_execution = mock.AsyncMock()
+            view_builder = mock.Mock()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=legacy_execution,
+                project_view_builder=view_builder,
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+
+            with mock.patch.object(
+                workspace,
+                "commit_project_working_set",
+                wraps=workspace.commit_project_working_set,
+            ) as commit:
+                with self.assertRaises(asyncio.CancelledError) as raised:
+                    await coordinator.execute(
+                        ProjectCommand(
+                            project_id="project-a",
+                            action="translate",
+                            config={},
+                        )
+                    )
+
+            self.assertIs(raised.exception, cancellation)
+            self.assertEqual(adapter.project_actions, ["translate"])
+            self.assertFalse(adapter.working_root.exists())
+            self.assertEqual(workspace.read_project_head("project-a"), first_head)
+            commit.assert_not_called()
+            legacy_execution.execute.assert_not_awaited()
+            view_builder.assert_not_called()
+
+    async def test_translate_page_rejects_stale_revision_before_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda _project_id, _project: {},
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+
+            with self.assertRaises(PageDocumentRevisionConflict):
+                await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate-page",
+                        config={},
+                        target_stored_name="001.png",
+                        expected_page_revision=3,
+                    )
+                )
+
+            self.assertEqual(adapter.project_actions, [])
+            self.assertEqual(workspace.read_project_head("project-a"), first_head)
+
+    async def test_project_progress_failure_cannot_change_committed_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+
+            async def disconnected(_event):
+                raise OSError("subscriber unavailable")
+
+            result = await coordinator.execute(
+                ProjectCommand(
+                    project_id="project-a",
+                    action="translate",
+                    config={},
+                ),
+                progress=disconnected,
+            )
+
+            self.assertEqual(
+                workspace.read_project_head("project-a")["generation"],
+                first_head["generation"] + 1,
+            )
+            self.assertTrue(
+                any("subscriber unavailable" in warning for warning in result["warnings"])
+            )
+
+    async def test_project_pending_cleanup_failure_after_cas_is_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+
+            class CheckpointingProjectAdapter(DeterministicProjectCommandAdapter):
+                async def prepare_project_command(
+                    self,
+                    command,
+                    working_set,
+                    progress,
+                ):
+                    prepared = await super().prepare_project_command(
+                        command,
+                        working_set,
+                        progress,
+                    )
+                    pending_state = copy.deepcopy(
+                        working_set.base.state_document
+                    )
+                    pending_state["workflow_stage"] = "translating"
+                    workspace.write_pending_artifact_set(
+                        working_set.base.project_id,
+                        action=command.action,
+                        resume_fingerprint=self.project_command_fingerprint(
+                            command
+                        ),
+                        base_head=working_set.base.head,
+                        state_document=pending_state,
+                        files={},
+                        metadata={"page_checkpoints": {}},
+                    )
+                    return prepared
+
+            adapter = CheckpointingProjectAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+            with mock.patch.object(
+                workspace,
+                "clear_pending_artifact_set",
+                side_effect=OSError("pending cleanup unavailable"),
+            ), mock.patch.object(
+                workspace,
+                "garbage_collect_snapshot_blobs",
+                wraps=workspace.garbage_collect_snapshot_blobs,
+            ) as collect:
+                result = await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            self.assertEqual(
+                workspace.read_project_head("project-a")["generation"],
+                first_head["generation"] + 1,
+            )
+            self.assertTrue(
+                any(
+                    "pending cleanup unavailable" in warning
+                    for warning in result["warnings"]
+                )
+            )
+            collect.assert_called_once()
+
+    async def test_project_closeout_preserves_pending_owned_by_a_new_head_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, shared_project, first_head = seed_render_page_project(root)
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+            original_refresh = workspace.refresh_project_index_entry
+            concurrent_evidence: dict[str, object] = {}
+
+            def refresh_and_start_concurrent_command(summary):
+                result = original_refresh(summary)
+                current_head = workspace.read_project_head("project-a")
+                if (
+                    not concurrent_evidence
+                    and current_head is not None
+                    and current_head["generation"] == first_head["generation"] + 1
+                ):
+                    concurrent_pending = workspace.write_pending_artifact_set(
+                        "project-a",
+                        action="rerender",
+                        resume_fingerprint="concurrent-new-head-command",
+                        base_head=current_head,
+                        state_document=workspace.read_project_state_from_head(
+                            "project-a",
+                            current_head,
+                        ),
+                        files={},
+                        metadata={"page_checkpoints": {}},
+                    )
+                    pending_path = workspace.project_pending_artifact_path(
+                        "project-a"
+                    )
+                    concurrent_evidence.update(
+                        {
+                            "pending": concurrent_pending,
+                            "bytes": pending_path.read_bytes(),
+                        }
+                    )
+                return result
+
+            with mock.patch.object(
+                workspace,
+                "refresh_project_index_entry",
+                side_effect=refresh_and_start_concurrent_command,
+            ):
+                await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            self.assertTrue(concurrent_evidence)
+            pending_path = workspace.project_pending_artifact_path("project-a")
+            self.assertTrue(pending_path.is_file())
+            self.assertEqual(
+                pending_path.read_bytes(),
+                concurrent_evidence["bytes"],
+            )
+            pending = workspace.read_pending_artifact_set("project-a")
+            self.assertEqual(pending["action"], "rerender")
+            self.assertEqual(
+                pending["resume_fingerprint"],
+                "concurrent-new-head-command",
+            )
+            self.assertEqual(
+                pending["base_head_generation"],
+                first_head["generation"] + 1,
+            )
+
+    async def test_project_gc_failure_after_cas_is_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+            with mock.patch.object(
+                workspace,
+                "garbage_collect_snapshot_blobs",
+                side_effect=OSError("snapshot GC unavailable"),
+            ):
+                result = await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            self.assertEqual(
+                workspace.read_project_head("project-a")["generation"],
+                first_head["generation"] + 1,
+            )
+            self.assertTrue(
+                any(
+                    "snapshot GC unavailable" in warning
+                    for warning in result["warnings"]
+                )
+            )
+
+    async def test_project_snapshot_create_failure_indexes_actual_empty_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=DeterministicProjectCommandAdapter(),
+            )
+            with mock.patch.object(
+                workspace,
+                "create_project_head_snapshot",
+                side_effect=OSError("snapshot create unavailable"),
+            ), mock.patch.object(
+                workspace,
+                "enforce_snapshot_retention",
+                wraps=workspace.enforce_snapshot_retention,
+            ) as retention, mock.patch.object(
+                workspace,
+                "commit_project_head",
+                wraps=workspace.commit_project_head,
+            ) as commit:
+                result = await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            committed_head = workspace.read_project_head("project-a")
+            self.assertEqual(committed_head["generation"], first_head["generation"] + 1)
+            self.assertEqual(commit.call_count, 1)
+            retention.assert_called_once_with("project-a")
+            self.assertEqual(workspace.read_snapshot_manifests("project-a"), [])
+            index_entry = workspace.read_json_file(workspace.project_index_path, [])[0]
+            self.assertEqual(index_entry["snapshot_count"], 0)
+            self.assertEqual(index_entry["latest_snapshot_id"], "")
+            self.assertEqual(index_entry["latest_snapshot_kind"], "")
+            self.assertEqual(index_entry["latest_snapshot_summary"], "")
+            self.assertTrue(
+                any("snapshot create unavailable" in warning for warning in result["warnings"])
+            )
+
+    async def test_project_snapshot_success_listing_and_rebuild_share_catalog_summary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=DeterministicProjectCommandAdapter(),
+            )
+
+            await coordinator.execute(
+                ProjectCommand(project_id="project-a", action="translate", config={})
+            )
+
+            committed_head = workspace.read_project_head("project-a")
+            self.assertEqual(committed_head["generation"], first_head["generation"] + 1)
+            snapshots = workspace.read_snapshot_manifests("project-a")
+            self.assertEqual(len(snapshots), 1)
+            index_entry = workspace.read_json_file(workspace.project_index_path, [])[0]
+            self.assertEqual(index_entry["snapshot_count"], len(snapshots))
+            self.assertEqual(index_entry["latest_snapshot_id"], snapshots[0]["snapshot_id"])
+            self.assertEqual(index_entry["latest_snapshot_kind"], snapshots[0]["kind"])
+            self.assertEqual(index_entry["latest_snapshot_summary"], snapshots[0]["summary"])
+
+            workspace.project_index_path.unlink()
+            rebuilt = workspace.rebuild_project_index()
+
+            self.assertEqual(rebuilt[0], index_entry)
+
+    async def test_project_post_cas_snapshot_pipeline_has_one_head_commit_and_fixed_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=DeterministicProjectCommandAdapter(),
+            )
+            events: list[str] = []
+            original_create = workspace.create_project_head_snapshot
+            original_catalog = workspace.read_snapshot_manifests
+            original_refresh = workspace.refresh_project_index_entry
+
+            def create(*args, **kwargs):
+                events.append("create")
+                return original_create(*args, **kwargs)
+
+            def retention(*_args, **_kwargs):
+                events.append("retention")
+
+            def catalog(*args, **kwargs):
+                events.append("catalog")
+                return original_catalog(*args, **kwargs)
+
+            def refresh(*args, **kwargs):
+                events.append("index")
+                return original_refresh(*args, **kwargs)
+
+            def collect(*_args, **_kwargs):
+                events.append("gc")
+
+            with mock.patch.object(
+                workspace,
+                "commit_project_head",
+                wraps=workspace.commit_project_head,
+            ) as commit, mock.patch.object(
+                workspace,
+                "create_project_head_snapshot",
+                side_effect=create,
+            ), mock.patch.object(
+                workspace,
+                "enforce_snapshot_retention",
+                side_effect=retention,
+            ), mock.patch.object(
+                workspace,
+                "read_snapshot_manifests",
+                side_effect=catalog,
+            ), mock.patch.object(
+                workspace,
+                "refresh_project_index_entry",
+                side_effect=refresh,
+            ), mock.patch.object(
+                workspace,
+                "garbage_collect_snapshot_blobs",
+                side_effect=collect,
+            ):
+                await coordinator.execute(
+                    ProjectCommand(project_id="project-a", action="translate", config={})
+                )
+
+            self.assertEqual(events, ["create", "retention", "catalog", "index", "gc"])
+            self.assertEqual(commit.call_count, 1)
+            self.assertEqual(
+                workspace.read_project_head("project-a")["generation"],
+                first_head["generation"] + 1,
+            )
+
+    async def test_project_index_failure_after_snapshot_is_warning_and_does_not_block_gc(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=DeterministicProjectCommandAdapter(),
+            )
+
+            with mock.patch.object(
+                workspace,
+                "refresh_project_index_entry",
+                side_effect=OSError("project index unavailable"),
+            ), mock.patch.object(
+                workspace,
+                "garbage_collect_snapshot_blobs",
+                wraps=workspace.garbage_collect_snapshot_blobs,
+            ) as collect:
+                result = await coordinator.execute(
+                    ProjectCommand(project_id="project-a", action="translate", config={})
+                )
+
+            self.assertEqual(
+                workspace.read_project_head("project-a")["generation"],
+                first_head["generation"] + 1,
+            )
+            self.assertEqual(len(workspace.read_snapshot_manifests("project-a")), 1)
+            self.assertTrue(
+                any("project index unavailable" in warning for warning in result["warnings"])
+            )
+            collect.assert_called_once()
+
+    async def test_project_snapshot_retention_failure_after_cas_is_warning(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(
+                Path(tmp)
+            )
+            snapshots_dir = workspace.project_snapshots_dir("project-a")
+            snapshots_dir.mkdir(parents=True)
+            for index in range(20):
+                snapshot_id = f"legacy-{index:02d}"
+                workspace.write_json_file(
+                    snapshots_dir / f"{snapshot_id}.json",
+                    {
+                        "snapshot_id": snapshot_id,
+                        "created_at": f"2026-06-{index + 1:02d}T00:00:00+00:00",
+                        "kind": "legacy",
+                        "summary": "legacy snapshot",
+                    },
+                )
+            adapter = DeterministicProjectCommandAdapter()
+            coordinator = WorkflowCoordinator(
+                project_loader=lambda _project_id: shared_project,
+                execution_adapter=DeterministicExecutionAdapter(),
+                project_view_builder=lambda project_id, project: {
+                    "session_id": project_id,
+                    "workflow_stage": project["workflow_stage"],
+                    "project": {},
+                },
+                project_workspace=workspace,
+                render_page_adapter=adapter,
+            )
+            with mock.patch.object(
+                workspace,
+                "enforce_snapshot_retention",
+                side_effect=OSError("snapshot retention unavailable"),
+            ):
+                result = await coordinator.execute(
+                    ProjectCommand(
+                        project_id="project-a",
+                        action="translate",
+                        config={},
+                    )
+                )
+
+            committed_head = workspace.read_project_head("project-a")
+            self.assertEqual(
+                committed_head["generation"],
+                first_head["generation"] + 1,
+            )
+            snapshots = workspace.read_snapshot_manifests("project-a")
+            self.assertEqual(len(snapshots), 21)
+            self.assertEqual(
+                snapshots[0]["project_head_revision_id"],
+                committed_head["revision_id"],
+            )
+            index_entry = workspace.read_json_file(workspace.project_index_path, [])[0]
+            self.assertEqual(index_entry["snapshot_count"], 21)
+            self.assertEqual(
+                index_entry["latest_snapshot_id"],
+                snapshots[0]["snapshot_id"],
+            )
+            self.assertTrue(
+                any(
+                    "snapshot retention unavailable" in warning
+                    for warning in result["warnings"]
+                )
+            )
 
     async def test_render_page_commits_one_head_from_bound_working_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

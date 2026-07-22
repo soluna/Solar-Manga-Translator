@@ -132,7 +132,7 @@ class ApiSecurityTests(unittest.TestCase):
         project_id = upload.json()["session_id"]
         page_id = upload.json()["images"][0]["stored_name"]
 
-        async def fake_detect_session(*, session_id, session, progress_callback, **_kwargs):
+        async def fake_detect_session(*, session_id, session, progress_callback, **kwargs):
             await progress_callback({"event": "status", "message": "mock detect"})
             cache_dir = TEST_APP_DATA_DIR / "new-user-cache" / session_id
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -156,14 +156,15 @@ class ApiSecurityTests(unittest.TestCase):
                     PageArtifactEvent.RECOGNIZED,
                 )
             session["artifact_state"] = artifact_state.model_dump(mode="json")
-            main.translator_engine.persist_project_state(
-                session_id,
-                session,
-                persist_page_documents=True,
-            )
+            if kwargs.get("persist", True):
+                main.translator_engine.persist_project_state(
+                    session_id,
+                    session,
+                    persist_page_documents=True,
+                )
             return {"workflow_stage": "detected"}
 
-        async def fake_resume_session(*, session_id, session, progress_callback, **_kwargs):
+        async def fake_resume_session(*, session_id, session, progress_callback, **kwargs):
             await progress_callback({"event": "status", "message": "mock translate"})
             output_dir = Path(session["translated_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -183,13 +184,18 @@ class ApiSecurityTests(unittest.TestCase):
                     PageArtifactEvent.TRANSLATED,
                 )
             session["artifact_state"] = artifact_state.model_dump(mode="json")
-            archive_path = main.translator_engine.build_session_archive(session_id, session)
-            session["download_path"] = archive_path
-            main.translator_engine.persist_project_state(
+            archive_path = main.translator_engine.build_session_archive(
                 session_id,
                 session,
-                persist_page_documents=True,
+                destination=kwargs.get("archive_destination"),
             )
+            session["download_path"] = archive_path
+            if kwargs.get("persist", True):
+                main.translator_engine.persist_project_state(
+                    session_id,
+                    session,
+                    persist_page_documents=True,
+                )
             return {
                 "workflow_stage": "translated",
                 "download_url": f"/api/download/{session_id}",

@@ -27,6 +27,7 @@ jobs:
             backend/bootstrap_command.py \
             backend/main.py \
             backend/http_requests.py \
+            backend/inference_backend.py \
             backend/dependency_state.py \
             backend/diagnostics_bundle.py \
             backend/model_manager.py \

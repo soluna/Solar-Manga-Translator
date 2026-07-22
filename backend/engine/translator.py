@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import copy
 import hashlib
-import importlib
 import json
 import logging
 import shutil
@@ -43,7 +42,12 @@ from domain.project_state import (
 )
 from domain.region_typography import RegionTypography
 from http_requests import build_json_post_request
-from patch_pydensecrf import patch_mask_refinement
+from inference_backend import (
+    InferenceBackend,
+    InferenceProgress,
+    InferenceRequest,
+    UpstreamInferenceBackend,
+)
 from runtime_paths import AppPaths, resolve_app_paths
 from system_fonts import (
     BUNDLED_DEFAULT_FONT_NAME,
@@ -192,7 +196,12 @@ class TranslatorEngine:
         "doubao-seed-2-0-lite-260215",
         "doubao-seed-2-0-mini-260215",
     }
-    def __init__(self, base_dir: Path, app_paths: AppPaths | None = None):
+    def __init__(
+        self,
+        base_dir: Path,
+        app_paths: AppPaths | None = None,
+        inference_backend: InferenceBackend | None = None,
+    ):
         self.base_dir = Path(base_dir)
         self.paths = app_paths or resolve_app_paths(self.base_dir)
         self.project_workspace = ProjectWorkspace(self.paths)
@@ -209,6 +218,7 @@ class TranslatorEngine:
         self.custom_font_dirs = list(custom_font_directories(self.base_dir))
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.inference_backend = inference_backend or UpstreamInferenceBackend(self.base_dir)
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self.active_sessions: dict[str, str] = {}
@@ -5973,7 +5983,6 @@ class TranslatorEngine:
         checkpoint_callback: CheckpointCallback | None = None,
     ) -> dict[str, str]:
         page_checkpoints = page_checkpoints if page_checkpoints is not None else {}
-        self._ensure_runtime_patches()
         config = self.capture_session_config(session, raw_config)
         source_dir = Path(session["source_dir"])
         output_dir = Path(session["translated_dir"])
@@ -6011,15 +6020,11 @@ class TranslatorEngine:
             }
         )
 
-        command = self._build_command(
-            source_dir,
-            output_dir,
-            config_path,
-            config,
-            prep_manual=True,
-        )
         process_returncode = await self._run_translation_command(
-            command=command,
+            source_dir=source_dir,
+            output_dir=output_dir,
+            config_path=config_path,
+            detection_only=True,
             log_path=log_path,
             config=config,
             session_id=session_id,
@@ -7216,17 +7221,14 @@ class TranslatorEngine:
         return f"{project_name}_{normalized_kind}.zip"
 
     def _ensure_runtime_patches(self) -> None:
-        if os.getenv("APP_RUNTIME_PATCHES_PREPARED") == "1":
-            return
-        try:
-            if not patch_mask_refinement():
-                print("[WARN] Runtime patch sync did not complete successfully.")
-        except Exception as exc:
-            print(f"[WARN] Failed to sync runtime patches: {exc}")
+        self.inference_backend.prepare_runtime_patches()
 
     async def _run_translation_command(
         self,
-        command: list[str],
+        source_dir: Path,
+        output_dir: Path,
+        config_path: Path,
+        detection_only: bool,
         log_path: Path,
         config: dict[str, Any],
         session_id: str,
@@ -7236,70 +7238,42 @@ class TranslatorEngine:
         progress_callback: ProgressCallback | None,
     ) -> int:
         env = self._build_env(config, session_id, session)
-        if "--prep-manual" in command:
+        if detection_only:
             env["MT_DETECT_ONLY"] = "1"
 
-        print(f"[DEBUG] Starting manga translator engine with command: {' '.join(command)}")
-        print(f"[DEBUG] Log file: {log_path}")
-
-        process = None
-        wait_task = None
-        try:
-            with log_path.open("wb") as log_file:
-                process = await asyncio.create_subprocess_exec(
-                    *command,
-                    cwd=str(self.base_dir / "manga-image-translator"),
-                    env=env,
-                    stdout=log_file,
-                    stderr=log_file,
+        async def on_inference_progress(progress: InferenceProgress) -> None:
+            if expected_outputs is not None and reported is not None and progress_callback is not None:
+                await self._emit_completed_images(
+                    session_id,
+                    session,
+                    expected_outputs,
+                    reported,
+                    progress_callback,
                 )
-                wait_task = asyncio.create_task(process.wait())
-                last_download_notice = ""
-                last_runtime_notice = ""
+            if progress.message and progress_callback is not None:
+                await progress_callback(
+                    {
+                        "event": "status",
+                        "progress_step": progress.step,
+                        "message": progress.message,
+                    }
+                )
 
-                while not wait_task.done():
-                    if expected_outputs is not None and reported is not None and progress_callback is not None:
-                        await self._emit_completed_images(
-                            session_id,
-                            session,
-                            expected_outputs,
-                            reported,
-                            progress_callback,
-                        )
-                        download_notice = self._model_download_notice(log_path)
-                        if download_notice and download_notice != last_download_notice:
-                            last_download_notice = download_notice
-                            await progress_callback({
-                                "event": "status",
-                                "progress_step": "model",
-                                "message": download_notice,
-                            })
-                        runtime_notice = self._runtime_contract_notice(log_path)
-                        if runtime_notice and runtime_notice != last_runtime_notice:
-                            last_runtime_notice = runtime_notice
-                            await progress_callback({
-                                "event": "status",
-                                "progress_step": "model",
-                                "message": runtime_notice,
-                            })
-                    await asyncio.sleep(1)
-
-                await wait_task
-        except BaseException:
-            if process is not None and process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.terminate()
-                try:
-                    if wait_task is not None:
-                        await asyncio.wait_for(wait_task, timeout=5)
-                except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        process.kill()
-                    await process.wait()
-            raise
-
-        print(f"[DEBUG] Engine finished with return code {process.returncode}")
-        self._dump_log_output(log_path, failed=bool(process.returncode))
+        result = await self.inference_backend.run(
+            InferenceRequest(
+                source_dir=Path(source_dir),
+                output_dir=Path(output_dir),
+                config_path=Path(config_path),
+                log_path=Path(log_path),
+                model_dir=self.model_dir,
+                required_outputs=tuple(expected_outputs or ()),
+                use_gpu=bool(config.get("use_gpu")),
+                detection_only=detection_only,
+                font_path=str(config.get("font_path") or ""),
+                environment=env,
+                progress=on_inference_progress,
+            )
+        )
 
         if expected_outputs is not None and reported is not None and progress_callback is not None:
             await self._emit_completed_images(
@@ -7310,44 +7284,13 @@ class TranslatorEngine:
                 progress_callback,
             )
 
-        return process.returncode
+        return result.exit_code
 
     def _model_download_notice(self, log_path: Path) -> str:
-        if not log_path.exists():
-            return ""
-        try:
-            with log_path.open("rb") as handle:
-                handle.seek(0, 2)
-                handle.seek(max(0, handle.tell() - 32 * 1024))
-                content = handle.read().decode("utf-8", errors="ignore")
-        except OSError:
-            return ""
-        matches = re.findall(r'-- Downloading:\s*"([^"]+)"', content)
-        if not matches:
-            return ""
-        filename = Path(matches[-1].split("?", 1)[0]).name or "模型文件"
-        return f"首次使用正在下载模型：{filename}。下载失败时会自动切换备用源。"
+        return self.inference_backend.model_download_notice(log_path)
 
     def _runtime_contract_notice(self, log_path: Path) -> str:
-        if not log_path.exists():
-            return ""
-        try:
-            with log_path.open("rb") as handle:
-                handle.seek(0, 2)
-                handle.seek(max(0, handle.tell() - 32 * 1024))
-                content = handle.read().decode("utf-8", errors="ignore")
-        except OSError:
-            return ""
-        matches = re.findall(r"\[RuntimeContract\]\s+device=(\S+)\s+model_dir=(.+)", content)
-        if not matches:
-            return ""
-        device, _model_dir = matches[-1]
-        device_label = {
-            "cuda": "NVIDIA CUDA",
-            "mps": "Apple Metal",
-            "cpu": "CPU",
-        }.get(device.lower(), device)
-        return f"推理运行时已确认：{device_label}，模型将写入应用模型目录。"
+        return self.inference_backend.runtime_contract_notice(log_path)
 
     async def _emit_completed_images(
         self,
@@ -8076,28 +8019,17 @@ class TranslatorEngine:
         config: dict[str, Any],
         prep_manual: bool = False,
     ) -> list[str]:
-        command = [
-            sys.executable,
-            "-m",
-            "manga_translator",
-            "local",
-            "-i",
-            str(source_dir),
-            "-o",
-            str(output_dir),
-            "--overwrite",
-            "--config-file",
-            str(config_path),
-            "--model-dir",
-            str(self.model_dir),
-        ]
-        if config["font_path"]:
-            command.extend(["--font-path", config["font_path"]])
-        if prep_manual:
-            command.append("--prep-manual")
-        if config["use_gpu"]:
-            command.append("--use-gpu")
-        return command
+        request = InferenceRequest(
+            source_dir=Path(source_dir),
+            output_dir=Path(output_dir),
+            config_path=Path(config_path),
+            log_path=self.logs_dir / "compat-command.log",
+            model_dir=self.model_dir,
+            use_gpu=bool(config.get("use_gpu")),
+            detection_only=prep_manual,
+            font_path=str(config.get("font_path") or ""),
+        )
+        return list(self.inference_backend.build_command(request))
 
     def build_inference_runtime_contract(
         self,
@@ -8539,16 +8471,12 @@ class TranslatorEngine:
 
         complex_config_path = self._write_config(session_id, config, profile="complex")
         complex_log_path = self._project_log_path(session_id, "complex_translation.log")
-        complex_command = self._build_command(
-            enhanced_source_dir,
-            enhanced_output_dir,
-            complex_config_path,
-            config,
-        )
-
         try:
             returncode = await self._run_translation_command(
-                command=complex_command,
+                source_dir=enhanced_source_dir,
+                output_dir=enhanced_output_dir,
+                config_path=complex_config_path,
+                detection_only=False,
                 log_path=complex_log_path,
                 config=config,
                 session_id=session_id,
@@ -8993,26 +8921,12 @@ class TranslatorEngine:
         *,
         device: str,
     ) -> np.ndarray:
-        self._ensure_vendor_import_path()
-        self._ensure_runtime_patches()
-        from manga_translator.config import Inpainter, InpainterConfig, InpaintPrecision
-        from manga_translator.inpainting import dispatch as dispatch_inpainting
-        from manga_translator.utils import ModelWrapper
-
-        ModelWrapper._MODEL_DIR = str(self.model_dir)
-        config = InpainterConfig(
-            inpainter=Inpainter.lama_large,
-            inpainting_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
-            inpainting_precision=InpaintPrecision.bf16,
-        )
-        return await dispatch_inpainting(
-            Inpainter.lama_large,
+        return await self.inference_backend.erase_selection(
             base_rgb,
             selection_mask,
-            config,
-            self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
-            device,
-            False,
+            model_dir=self.model_dir,
+            device=device,
+            inpainting_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
         )
 
     async def _ensure_translation_base_image(
@@ -10339,17 +10253,6 @@ class TranslatorEngine:
         if vendor_root not in sys.path:
             sys.path.insert(0, vendor_root)
 
-    def _reload_vendor_translator_modules(self) -> None:
-        self._ensure_vendor_import_path()
-        importlib.invalidate_caches()
-        for module_name in (
-            "manga_translator.translators.custom_openai",
-            "manga_translator.translators",
-        ):
-            module = sys.modules.get(module_name)
-            if module is not None:
-                importlib.reload(module)
-
     def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
         try:
@@ -10631,9 +10534,6 @@ class TranslatorEngine:
         }
 
     def _manual_region_to_text_region(self, payload: dict[str, Any]) -> Any:
-        self._ensure_vendor_import_path()
-        from manga_translator.utils.textblock import TextBlock
-
         bbox = payload.get("bbox") or [0, 0, 0, 0]
         direction = self._resolve_region_direction(
             bbox,
@@ -10642,7 +10542,7 @@ class TranslatorEngine:
         )
         translation = str(payload.get("translation") or payload.get("machine_translation") or "").strip()
         source_text = str(payload.get("source_text") or "").strip()
-        region = TextBlock(
+        region = self.inference_backend.create_text_region(
             lines=payload.get("lines") or self._manual_region_lines(bbox),
             texts=[source_text],
             language=payload.get("source_lang", "unknown"),
@@ -10749,48 +10649,16 @@ class TranslatorEngine:
         manual_regions[stored_name] = page_regions
         return normalized
 
-    @contextlib.contextmanager
-    def _temporary_environment(self, updates: dict[str, str]):
-        sentinel = object()
-        previous: dict[str, Any] = {}
-        try:
-            for key, value in updates.items():
-                previous[key] = os.environ.get(key, sentinel)
-                if value is None or value == "":
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(value)
-            yield
-        finally:
-            for key, value in previous.items():
-                if value is sentinel:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(value)
-
     async def _ocr_manual_region(
         self,
         source_rgb: np.ndarray,
         bbox: list[int],
         use_gpu: bool,
     ) -> dict[str, Any]:
-        self._ensure_vendor_import_path()
-        from manga_translator.config import Ocr, OcrConfig
-        from manga_translator.ocr import dispatch as dispatch_ocr
-        from manga_translator.utils import Quadrilateral
-
-        pts = np.array(
-            [[bbox[0], bbox[1]], [bbox[2], bbox[1]], [bbox[2], bbox[3]], [bbox[0], bbox[3]]],
-            dtype=np.int32,
-        )
-        quad = Quadrilateral(pts, "", 1.0)
-        recognized = await dispatch_ocr(
-            Ocr.ocr48px,
+        recognized = await self.inference_backend.recognize_region(
             source_rgb,
-            [quad],
-            OcrConfig(use_mocr_merge=True, ocr=Ocr.ocr48px),
-            self._select_inference_device(use_gpu),
-            False,
+            bbox,
+            device=self._select_inference_device(use_gpu),
         )
         if not recognized:
             return {
@@ -10801,13 +10669,9 @@ class TranslatorEngine:
                 "bg_color": (255, 255, 255),
             }
 
-        region = recognized[0]
         return {
-            "source_text": str(getattr(region, "text", "") or "").strip(),
-            "direction": str(getattr(region, "direction", "") or self._direction_from_bbox(bbox)),
-            "font_size": float(getattr(region, "font_size", 0) or 0) or None,
-            "fg_color": tuple(int(v) for v in getattr(region, "fg_colors", (0, 0, 0))),
-            "bg_color": tuple(int(v) for v in getattr(region, "bg_colors", (255, 255, 255))),
+            **recognized,
+            "direction": str(recognized.get("direction") or self._direction_from_bbox(bbox)),
         }
 
     async def _translate_manual_text(
@@ -10834,37 +10698,14 @@ class TranslatorEngine:
         if config.get("translator") == "none":
             return ["" for _ in cleaned_texts]
 
-        self._ensure_vendor_import_path()
-        self._reload_vendor_translator_modules()
-        from manga_translator.config import Translator, TranslatorConfig
-        from manga_translator.translators import dispatch as dispatch_translation, unload as unload_translator
-
-        translator_key = Translator[config["translator"]]
-        translator_config = TranslatorConfig(
-            translator=translator_key,
-            target_lang=config["target_lang"],
-        )
         env_updates = self._build_env(config, session_id)
-
-        with self._temporary_environment(env_updates):
-            try:
-                await unload_translator(translator_key)
-            except Exception:
-                pass
-            try:
-                translated = await dispatch_translation(
-                    translator_config.translator_gen,
-                    cleaned_texts,
-                    translator_config=translator_config,
-                    use_mtpe=False,
-                    args=None,
-                    device=self._select_inference_device(bool(config.get("use_gpu"))),
-                )
-            finally:
-                try:
-                    await unload_translator(translator_key)
-                except Exception:
-                    pass
+        translated = await self.inference_backend.translate_texts(
+            cleaned_texts,
+            translator_name=str(config["translator"]),
+            target_lang=str(config["target_lang"]),
+            device=self._select_inference_device(bool(config.get("use_gpu"))),
+            environment=env_updates,
+        )
 
         normalized = [str(item or "").strip() for item in (translated or [])]
         if len(normalized) < len(cleaned_texts):
@@ -11867,9 +11708,6 @@ class TranslatorEngine:
         return prepared_regions
 
     def _deserialize_text_region(self, payload: dict[str, Any]) -> Any:
-        self._ensure_vendor_import_path()
-        from manga_translator.utils.textblock import TextBlock
-
         texts = payload.get("texts")
         if not isinstance(texts, list) or not texts:
             texts = [
@@ -11894,7 +11732,7 @@ class TranslatorEngine:
         fg_payload = payload.get("fg_colors") if payload.get("fg_colors") is not None else payload.get("fg_color")
         bg_payload = payload.get("bg_colors") if payload.get("bg_colors") is not None else payload.get("bg_color")
 
-        region = TextBlock(
+        region = self.inference_backend.create_text_region(
             lines=lines,
             texts=texts,
             language=payload.get("language", "unknown"),
@@ -12525,18 +12363,7 @@ class TranslatorEngine:
                 child.unlink()
 
     def _format_failure(self, log_path: Path) -> str:
-        if not log_path.exists():
-            return "manga-image-translator 执行失败，且没有生成日志。"
-
-        pre_render_failure = self._detect_pre_render_failure(log_path, "manga-image-translator 执行")
-        if pre_render_failure:
-            return pre_render_failure
-
-        lines = deque(log_path.read_text(encoding="utf-8", errors="ignore").splitlines(), maxlen=24)
-        if not lines:
-            return "manga-image-translator 执行失败，请检查依赖是否安装完整。"
-
-        return "manga-image-translator 执行失败:\n" + "\n".join(lines)
+        return self.inference_backend.format_failure(log_path)
 
     def _format_missing_rerender_cache_failure(
         self,
@@ -12550,58 +12377,7 @@ class TranslatorEngine:
         return default_message
 
     def _detect_pre_render_failure(self, log_path: Path, stage_label: str) -> str:
-        if not log_path.exists():
-            return ""
-
-        content = log_path.read_text(encoding="utf-8", errors="ignore")
-        if not content.strip():
-            return ""
-
-        tail_lines = deque(content.splitlines(), maxlen=18)
-        never_reached_render = "Running rendering" not in content and 'Saving "' not in content
-
-        if "ChunkedEncodingError" in content or "IncompleteRead(" in content:
-            download_dir = self._extract_log_match(content, r"Downloading models into\s+([^\n\r]+)")
-            download_url = self._extract_log_match(content, r'-- Downloading:\s+"([^"]+)"')
-            detail_lines = [
-                f"{stage_label}未真正完成：模型下载过程中网络连接中断，因此没有生成任何可校对缓存。"
-            ]
-            if download_url:
-                detail_lines.append(f"下载地址：{download_url}")
-            if download_dir:
-                detail_lines.append(f"本地模型目录：{download_dir}")
-            detail_lines.append("建议重试；如果问题反复出现，可先手动下载对应模型文件到本地后再继续。")
-            detail_lines.append("日志摘要：")
-            detail_lines.extend(tail_lines)
-            return "\n".join(detail_lines)
-
-        if "Downloading models into" in content and "Traceback" in content:
-            download_dir = self._extract_log_match(content, r"Downloading models into\s+([^\n\r]+)")
-            detail_lines = [
-                f"{stage_label}未真正完成：模型准备阶段发生异常，因此没有生成任何可校对缓存。"
-            ]
-            if download_dir:
-                detail_lines.append(f"本地模型目录：{download_dir}")
-            detail_lines.append("日志摘要：")
-            detail_lines.extend(tail_lines)
-            return "\n".join(detail_lines)
-
-        if "Traceback" in content and never_reached_render:
-            return (
-                f"{stage_label}未真正完成：引擎在渲染前发生异常，因此没有生成任何可校对缓存。\n"
-                "日志摘要：\n"
-                + "\n".join(tail_lines)
-            )
-
-        return ""
-
-    def _extract_log_match(self, content: str, pattern: str) -> str:
-        if not content:
-            return ""
-        match = re.search(pattern, content)
-        if not match:
-            return ""
-        return str(match.group(1) or "").strip()
+        return self.inference_backend.pre_render_failure(log_path, stage_label)
 
     def _format_quality_failure(self, log_path: Path, target_lang: str | None) -> str:
         if not log_path.exists():

@@ -156,6 +156,45 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
 
+    def test_remote_diagnostics_controls_are_local_api_protected_and_validate_ttl(self) -> None:
+        started_status = {
+            "active": True,
+            "read_only": True,
+            "port": 8765,
+            "urls": ["http://192.168.1.20:8765"],
+            "expires_at": "2026-07-26T13:00:00+00:00",
+            "remaining_seconds": 3600,
+            "token": "temporary-test-token",
+        }
+        with (
+            mock.patch.object(main, "API_TOKEN", "local-secret"),
+            mock.patch.object(
+                main.remote_diagnostics_manager,
+                "start",
+                return_value=started_status,
+            ) as start_mock,
+        ):
+            denied = self.client.post(
+                "/api/app/remote-diagnostics/start",
+                json={"ttl_minutes": 60},
+            )
+            invalid = self.client.post(
+                "/api/app/remote-diagnostics/start",
+                headers={"Authorization": "Bearer local-secret"},
+                json={"ttl_minutes": 121},
+            )
+            allowed = self.client.post(
+                "/api/app/remote-diagnostics/start",
+                headers={"Authorization": "Bearer local-secret"},
+                json={"ttl_minutes": 60},
+            )
+
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertTrue(allowed.json()["remote_diagnostics"]["read_only"])
+        start_mock.assert_called_once_with(ttl_seconds=3600)
+
     def test_cors_preflight_is_not_blocked_by_bearer_token(self) -> None:
         with mock.patch.object(main, "API_TOKEN", "local-secret"):
             response = self.client.options(

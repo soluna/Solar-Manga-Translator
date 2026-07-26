@@ -93,6 +93,16 @@ def _read_log_tail_bytes(path: Path) -> bytes:
     return content.encode("utf-8")
 
 
+def redact_diagnostics_data(value: Any) -> Any:
+    """Return diagnostic data with secrets and local filesystem paths removed."""
+    return _redact(value)
+
+
+def read_sanitized_log_tail_bytes(path: Path) -> bytes:
+    """Read the bounded, content-scrubbed tail used by local and remote diagnostics."""
+    return _read_log_tail_bytes(path)
+
+
 def build_diagnostics_zip(
     *,
     diagnostics: dict[str, Any],

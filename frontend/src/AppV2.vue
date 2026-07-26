@@ -670,6 +670,16 @@ const backendOnline = ref(false)
 const uploading = ref(false)
 const translating = ref(false)
 const advancedEraseBusy = ref(false)
+const remoteDiagnosticsBusy = ref(false)
+const remoteDiagnosticsToken = ref('')
+const remoteDiagnostics = ref({
+  active: false,
+  read_only: true,
+  port: 0,
+  urls: [],
+  expires_at: '',
+  remaining_seconds: 0,
+})
 const selectionEraseModalOpen = ref(false)
 const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
@@ -2246,6 +2256,116 @@ async function loadAppDiagnostics() {
   } catch (error) {
     console.warn('Failed to load app diagnostics.', error)
   }
+}
+
+async function loadRemoteDiagnosticsStatus({ silent = true } = {}) {
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/remote-diagnostics'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取局域网诊断状态失败')
+    }
+    remoteDiagnostics.value = {
+      active: false,
+      read_only: true,
+      port: 0,
+      urls: [],
+      expires_at: '',
+      remaining_seconds: 0,
+      ...(payload.remote_diagnostics || {}),
+    }
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取局域网诊断状态失败'
+    }
+  }
+}
+
+async function startRemoteDiagnostics() {
+  if (remoteDiagnosticsBusy.value) {
+    return
+  }
+  remoteDiagnosticsBusy.value = true
+  errorMessage.value = ''
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/remote-diagnostics/start'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl_minutes: 60 })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '开启局域网诊断失败')
+    }
+    remoteDiagnostics.value = {
+      ...remoteDiagnostics.value,
+      ...(payload.remote_diagnostics || {}),
+    }
+    remoteDiagnosticsToken.value = String(payload?.remote_diagnostics?.token || '')
+    status.value = '只读局域网诊断已开启，有效期 60 分钟。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '开启局域网诊断失败'
+  } finally {
+    remoteDiagnosticsBusy.value = false
+  }
+}
+
+async function stopRemoteDiagnostics() {
+  if (remoteDiagnosticsBusy.value) {
+    return
+  }
+  remoteDiagnosticsBusy.value = true
+  errorMessage.value = ''
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/remote-diagnostics/stop'), {
+      method: 'POST'
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '停止局域网诊断失败')
+    }
+    remoteDiagnostics.value = {
+      active: false,
+      read_only: true,
+      port: 0,
+      urls: [],
+      expires_at: '',
+      remaining_seconds: 0,
+      ...(payload.remote_diagnostics || {}),
+    }
+    remoteDiagnosticsToken.value = ''
+    status.value = '只读局域网诊断已停止。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '停止局域网诊断失败'
+  } finally {
+    remoteDiagnosticsBusy.value = false
+  }
+}
+
+function remoteDiagnosticsConnectionText() {
+  const urls = (remoteDiagnostics.value?.urls || [])
+    .map((url) => String(url || '').trim())
+    .filter(Boolean)
+  const token = String(remoteDiagnosticsToken.value || '').trim()
+  if (!urls.length || !token) {
+    return ''
+  }
+  return [
+    'Solar Manga Translator 只读远程诊断',
+    ...urls.map((url, index) => `URL ${index + 1}: ${url}`),
+    `Token: ${token}`,
+    '认证方式: Authorization: Bearer <Token>',
+    `有效期至: ${remoteDiagnostics.value.expires_at || '约 60 分钟后'}`,
+  ].join('\n')
+}
+
+async function copyRemoteDiagnosticsConnection() {
+  const connectionText = remoteDiagnosticsConnectionText()
+  if (!connectionText) {
+    errorMessage.value = '当前没有可复制的连接信息，请开启或刷新诊断访问。'
+    return
+  }
+  await copyText(connectionText, '局域网诊断连接信息已复制，可直接发送给 Codex。')
 }
 
 async function loadPersistedAppSettings() {
@@ -8801,6 +8921,7 @@ function closeV2HistoryModal() {
 
 function openV2Settings() {
   v2SettingsOpen.value = true
+  void loadRemoteDiagnosticsStatus()
 }
 
 function closeV2Settings() {
@@ -10275,6 +10396,7 @@ onMounted(() => {
   void (async () => {
     await loadAppRuntime()
     await loadAppDiagnostics()
+    await loadRemoteDiagnosticsStatus()
     checkBackendStatus()
     await Promise.all([
       loadFonts(),
@@ -12759,6 +12881,81 @@ watch(
             <div v-if="appRuntimeFontRootLabel" class="v2-readonly-field">
               <span>字体目录</span>
               <strong :title="appRuntimeFontRootLabel">{{ appRuntimeFontRootLabel }}</strong>
+            </div>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>局域网远程诊断</strong>
+              <span>{{ remoteDiagnostics.active ? '只读访问已开启' : '默认关闭' }}</span>
+            </header>
+
+            <p class="v2-settings-inline-note">
+              临时允许同一局域网内的 Codex 读取脱敏日志、项目状态、原图、结果图和处理中的调试图。
+              不会开放项目修改、删除、命令执行或任意文件读取。
+            </p>
+            <p class="v2-settings-inline-note is-error">
+              连接令牌等同于临时读取权限；只发给可信对象。Windows 首次开启时可能需要允许防火墙访问专用网络。
+            </p>
+
+            <div class="v2-readonly-field">
+              <span>服务状态</span>
+              <strong>{{ remoteDiagnostics.active ? '运行中（60 分钟内自动关闭）' : '已关闭' }}</strong>
+            </div>
+            <div v-if="remoteDiagnostics.active" class="v2-readonly-field">
+              <span>局域网地址</span>
+              <strong :title="remoteDiagnostics.urls?.join('\n')">
+                {{ remoteDiagnostics.urls?.join('、') || `请用 Windows 局域网 IP:${remoteDiagnostics.port}` }}
+              </strong>
+            </div>
+            <div v-if="remoteDiagnostics.active" class="v2-readonly-field">
+              <span>访问令牌</span>
+              <strong :title="remoteDiagnosticsToken || '令牌只在开启或刷新时显示'">
+                {{ remoteDiagnosticsToken || '请点击“刷新访问令牌”' }}
+              </strong>
+            </div>
+            <div v-if="remoteDiagnostics.active && remoteDiagnostics.expires_at" class="v2-readonly-field">
+              <span>自动失效时间</span>
+              <strong>{{ remoteDiagnostics.expires_at }}</strong>
+            </div>
+
+            <div class="v2-inline-actions">
+              <button
+                v-if="!remoteDiagnostics.active"
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteDiagnosticsBusy"
+                @click="startRemoteDiagnostics"
+              >
+                {{ remoteDiagnosticsBusy ? '正在开启…' : '开启 60 分钟' }}
+              </button>
+              <button
+                v-else
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteDiagnosticsBusy"
+                @click="startRemoteDiagnostics"
+              >
+                刷新访问令牌
+              </button>
+              <button
+                v-if="remoteDiagnostics.active"
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteDiagnosticsBusy || !remoteDiagnosticsConnectionText()"
+                @click="copyRemoteDiagnosticsConnection"
+              >
+                复制给 Codex
+              </button>
+              <button
+                v-if="remoteDiagnostics.active"
+                type="button"
+                class="v2-ghost-button"
+                :disabled="remoteDiagnosticsBusy"
+                @click="stopRemoteDiagnostics"
+              >
+                立即停止
+              </button>
             </div>
           </section>
 

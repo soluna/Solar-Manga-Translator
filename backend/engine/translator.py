@@ -1417,6 +1417,7 @@ class TranslatorEngine:
             "provider": config["advanced_erase_provider"],
             "api_url": config["advanced_erase_base_url"],
             "model": config["advanced_erase_model"],
+            "prompt": ADVANCED_IMAGE_ERASE_PROMPT,
             "changed_ratio": debug_changed_ratio,
             "raw_changed_ratio": raw_changed_ratio,
             "traditional_backup": str(backup_path),

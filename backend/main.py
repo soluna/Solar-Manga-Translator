@@ -14,6 +14,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -27,6 +28,7 @@ from inference_backend import UpstreamInferenceBackend
 from translation_provider import UpstreamTranslationProvider
 from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
+from remote_diagnostics import RemoteDiagnosticsManager
 from runtime_paths import AppPaths, resolve_app_paths
 from logging_config import configure_rotating_file_logging
 from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
@@ -615,6 +617,18 @@ def build_runtime_diagnostics() -> dict[str, Any]:
     }
 
 
+class RemoteDiagnosticsStartPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ttl_minutes: int = Field(default=60, ge=5, le=120)
+
+
+remote_diagnostics_manager = RemoteDiagnosticsManager(
+    paths=APP_PATHS,
+    runtime_provider=build_runtime_diagnostics,
+)
+
+
 def build_local_lama_model_payload() -> dict[str, Any]:
     model_path = APP_PATHS.models_dir / "inpainting" / LOCAL_LAMA_MODEL_FILENAME
     partial_path = model_path.with_suffix(f"{model_path.suffix}.part")
@@ -671,6 +685,26 @@ async def get_app_runtime(request: Request):
 @app.get("/api/app/diagnostics")
 async def get_app_diagnostics():
     return {"diagnostics": build_runtime_diagnostics()}
+
+
+@app.get("/api/app/remote-diagnostics")
+async def get_remote_diagnostics():
+    return {"remote_diagnostics": remote_diagnostics_manager.status()}
+
+
+@app.post("/api/app/remote-diagnostics/start")
+async def start_remote_diagnostics(payload: RemoteDiagnosticsStartPayload | None = None):
+    ttl_minutes = payload.ttl_minutes if payload is not None else 60
+    try:
+        status = remote_diagnostics_manager.start(ttl_seconds=ttl_minutes * 60)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"remote_diagnostics": status}
+
+
+@app.post("/api/app/remote-diagnostics/stop")
+async def stop_remote_diagnostics():
+    return {"remote_diagnostics": remote_diagnostics_manager.stop()}
 
 
 @app.get("/api/app/diagnostics/export")

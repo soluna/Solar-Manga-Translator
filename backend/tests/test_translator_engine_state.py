@@ -877,6 +877,14 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 project_id=project_id,
                 page_ids=["page-1.png"],
             )
+            bundled_font_dir = root / "fonts" / "system"
+            custom_font_dir = root / "fonts" / "custom"
+            bundled_font_dir.mkdir(parents=True)
+            custom_font_dir.mkdir(parents=True)
+            (bundled_font_dir / "SourceHanSansSC-Bold.otf").write_bytes(b"system-font")
+            (custom_font_dir / "NotoSansSC-Bold.otf").write_bytes(b"project-font")
+            engine.bundled_font_dirs = [bundled_font_dir]
+            engine.custom_font_dirs = [custom_font_dir]
             config = {
                 "translator": "none",
                 "target_lang": "ENG",

@@ -6,6 +6,7 @@ import {
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolvePageEntryCoverUrl,
+  resolvePageListCoverWorkflowStage,
   resolveReviewRegionTranslation,
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
@@ -140,6 +141,51 @@ assert.equal(
     finalThumbUrl: '/translated-thumb.png',
   }, 'translated'),
   '/translated-thumb.png',
+)
+
+assert.equal(
+  resolvePageEntryCoverUrl({
+    sourceThumbUrl: '/source-thumb.png',
+    blankThumbUrl: '/blank-thumb-being-generated.png',
+    previewThumbUrl: '/preview-thumb-being-generated.png',
+    finalThumbUrl: '/final-thumb-being-rebuilt.png',
+  }, 'detecting'),
+  '/source-thumb.png',
+  '识别过程中，页面列表应继续显示稳定的源图缩略图',
+)
+assert.equal(
+  resolvePageEntryCoverUrl({
+    sourceThumbUrl: '/source-thumb.png',
+    blankThumbUrl: '/blank-thumb.png',
+    previewThumbUrl: '/preview-thumb-being-generated.png',
+    finalThumbUrl: '/final-thumb-being-rebuilt.png',
+  }, 'translating'),
+  '/source-thumb.png',
+  '翻译过程中，页面列表应继续显示稳定的源图缩略图',
+)
+assert.equal(
+  resolvePageListCoverWorkflowStage({
+    workflowStage: 'idle',
+    translating: true,
+    activeAction: 'detect',
+  }),
+  'detecting',
+)
+assert.equal(
+  resolvePageListCoverWorkflowStage({
+    workflowStage: 'detected',
+    translating: true,
+    activeAction: 'resume-translate',
+  }),
+  'translating',
+)
+assert.equal(
+  resolvePageListCoverWorkflowStage({
+    workflowStage: 'translated',
+    translating: false,
+    activeAction: 'translate',
+  }),
+  'translated',
 )
 
 console.log('Review workspace state tests passed.')

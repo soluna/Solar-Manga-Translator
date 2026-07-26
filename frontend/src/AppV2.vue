@@ -19,6 +19,7 @@ import {
   mergeRegionCount,
   normalizeSessionSourceImages,
   resolvePageEntryCoverUrl,
+  resolvePageListCoverWorkflowStage,
   resolveReviewRegionTranslation,
   resolveSelectedReviewPage,
   shouldRefreshBaseImageForTaskAction,
@@ -1624,6 +1625,13 @@ const activeTaskPhaseProgressLabel = computed(() => {
   }
   return canCancelTask.value ? '可随时停止' : ''
 })
+const pageListCoverWorkflowStage = computed(() => {
+  return resolvePageListCoverWorkflowStage({
+    workflowStage: workflowStage.value,
+    translating: translating.value,
+    activeAction: activeAction.value,
+  })
+})
 const v2SettingsOpen = computed({
   get() {
     return v2View.value === 'review' ? Boolean(reviewWorkspacePrefs.value.show_settings_panel) : v2SettingsModalOpen.value
@@ -1736,7 +1744,7 @@ const v2PageEntries = computed(() => {
 
   return order.map((key) => {
     const entry = mapped.get(key)
-    const fallback = resolvePageEntryCoverUrl(entry, workflowStage.value)
+    const fallback = resolvePageEntryCoverUrl(entry, pageListCoverWorkflowStage.value)
     const status = entry?.finalUrl
       ? '已完成'
       : entry?.reviewReady
@@ -2884,9 +2892,44 @@ function getV2PageCover(page, index = 0) {
   return String(page?.coverUrl || '').trim() || getV2PlaceholderThumb(index)
 }
 
-function handleV2ImageError(event, index = 0) {
+function handleV2ImageLoad(event) {
+  const target = event?.target
+  if (!target?.dataset) {
+    return
+  }
+  if (target.dataset.v2RetryTimer) {
+    window.clearTimeout(Number(target.dataset.v2RetryTimer))
+  }
+  delete target.dataset.v2RetryAttempt
+  delete target.dataset.v2RetryTimer
+}
+
+function handleV2ImageError(event, index = 0, fallbackUrl = '') {
   const target = event?.target
   if (!target || typeof target.src !== 'string') {
+    return
+  }
+  const stableFallback = String(fallbackUrl || '').trim()
+  const retryAttempt = Math.max(0, Number(target.dataset?.v2RetryAttempt || 0))
+  if (stableFallback && retryAttempt < 8) {
+    const nextAttempt = retryAttempt + 1
+    const retryDelay = Math.min(5000, 120 * (2 ** Math.min(nextAttempt - 1, 5)))
+    target.dataset.v2RetryAttempt = String(nextAttempt)
+    if (target.dataset.v2RetryTimer) {
+      window.clearTimeout(Number(target.dataset.v2RetryTimer))
+    }
+    const timer = window.setTimeout(() => {
+      delete target.dataset.v2RetryTimer
+      if (!target.isConnected) {
+        return
+      }
+      target.src = withUrlQueryParam(
+        stableFallback,
+        'retry',
+        `${Date.now()}-${nextAttempt}`,
+      )
+    }, retryDelay)
+    target.dataset.v2RetryTimer = String(timer)
     return
   }
   const fallback = getV2PlaceholderThumb(index)
@@ -10945,13 +10988,14 @@ watch(
                 :alt="page.name"
                 loading="lazy"
                 decoding="async"
-                @error="handleV2ImageError($event, index)"
+                @load="handleV2ImageLoad"
+                @error="handleV2ImageError($event, index, page.sourceThumbUrl || page.sourceUrl)"
               />
               <span class="v2-page-card-number">P{{ page.pageNumber }}</span>
             </div>
             <div class="v2-page-card-body">
               <div class="v2-page-card-head">
-                <strong>{{ page.name }}</strong>
+                <strong :title="page.name">{{ page.name }}</strong>
                 <span class="v2-page-status">{{ page.status }}</span>
               </div>
               <div class="v2-page-card-meta">
@@ -11131,7 +11175,8 @@ watch(
                   :alt="page.name"
                   loading="lazy"
                   decoding="async"
-                  @error="handleV2ImageError($event, index)"
+                  @load="handleV2ImageLoad"
+                  @error="handleV2ImageError($event, index, page.sourceThumbUrl || page.sourceUrl)"
                 />
                 <div class="v2-page-rail-copy">
                   <strong>{{ page.pageNumber }}</strong>
@@ -12388,7 +12433,12 @@ watch(
             class="v2-history-card"
           >
             <div class="v2-history-card-cover">
-              <img :src="getV2ProjectCover(project, index)" :alt="project.title" @error="handleV2ImageError($event, index)" />
+              <img
+                :src="getV2ProjectCover(project, index)"
+                :alt="project.title"
+                @load="handleV2ImageLoad"
+                @error="handleV2ImageError($event, index, project.cover_image)"
+              />
             </div>
 
             <div class="v2-history-card-body">

@@ -17,6 +17,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib import error as urllib_error
 
 import cv2
 import numpy as np
@@ -5711,6 +5712,34 @@ print(json.dumps({
         self.assertGreaterEqual(width * height, client.MIN_PIXELS)
         self.assertEqual(prepared_source.shape[:2], (height, width))
 
+    def test_seedream_auth_error_explains_configuration_in_natural_language(self) -> None:
+        client = SeedreamImageCleanupClient(api_key="invalid", model="wrong-model")
+        source = np.full((1440, 2560, 3), 255, dtype=np.uint8)
+        error_body = BytesIO(json.dumps({
+            "error": {
+                "code": "AuthenticationError",
+                "message": "The API key or AK/SK in the request is missing or invalid.",
+                "type": "Unauthorized",
+            }
+        }).encode("utf-8"))
+        http_error = urllib_error.HTTPError(
+            client.api_url,
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=error_body,
+        )
+
+        with mock.patch("engine.image_cleanup.urllib_request.urlopen", side_effect=http_error):
+            with self.assertRaises(RuntimeError) as captured:
+                client._remove_text_sync(source, None, "remove text")
+
+        message = str(captured.exception)
+        self.assertIn("认证失败", message)
+        self.assertIn("API Key", message)
+        self.assertIn("模型名称", message)
+        self.assertNotIn('{"error"', message)
+
     def test_advanced_erase_region_mask_limits_full_page_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -5734,6 +5763,79 @@ print(json.dumps({
             self.assertLess(changed_ratio, engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
             self.assertTrue(np.array_equal(composite[10, 10], source[10, 10]))
             self.assertEqual(int(composite[40, 30, 0]), 120)
+
+    def test_advanced_erase_final_mask_does_not_replace_entire_allowed_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            raw_diff_mask = np.zeros((120, 120), dtype=np.uint8)
+            raw_diff_mask[52:68, 56:64] = 255
+            allowed_mask = np.zeros((120, 120), dtype=np.uint8)
+            allowed_mask[16:104, 20:100] = 255
+
+            final_mask = engine._advanced_erase_final_mask(raw_diff_mask, allowed_mask)
+
+            self.assertGreater(int(final_mask[60, 60]), 0)
+            self.assertEqual(int(final_mask[24, 28]), 0)
+            self.assertLessEqual(
+                int(cv2.countNonZero(final_mask)),
+                int(cv2.countNonZero(raw_diff_mask)) * 2,
+            )
+
+    def test_advanced_erase_model_and_region_masks_use_their_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            model_mask = np.zeros((120, 120), dtype=np.uint8)
+            model_mask[8:112, 8:112] = 255
+            region_mask = np.zeros((120, 120), dtype=np.uint8)
+            region_mask[44:76, 48:72] = 255
+
+            selected, mode = engine._select_advanced_erase_allowed_mask(model_mask, region_mask)
+
+            self.assertIsNotNone(selected)
+            assert selected is not None
+            self.assertEqual(mode, "model_region_intersection")
+            self.assertGreater(int(selected[60, 60]), 0)
+            self.assertEqual(int(selected[20, 20]), 0)
+
+    def test_advanced_erase_safe_mask_preserves_color_art_and_monochrome_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+
+            color_source = np.full((240, 240, 3), [236, 190, 142], dtype=np.uint8)
+            color_source[42:102, 36:96] = [82, 146, 218]
+            color_source[112:126, 114:126] = 12
+            color_edited = color_source.copy()
+            color_edited[42:102, 36:96] = 255
+            color_edited[112:126, 114:126] = [236, 190, 142]
+            color_allowed = np.zeros((240, 240), dtype=np.uint8)
+            color_allowed[24:152, 20:154] = 255
+
+            color_mask = engine._build_advanced_erase_safe_change_mask(
+                color_source,
+                color_edited,
+                color_allowed,
+            )
+
+            self.assertGreater(int(color_mask[118, 120]), 0)
+            self.assertEqual(int(color_mask[72, 62]), 0)
+
+            mono_source = np.full((240, 240, 3), 255, dtype=np.uint8)
+            cv2.rectangle(mono_source, (34, 32), (206, 208), (0, 0, 0), 3)
+            mono_source[112:128, 112:128] = 0
+            mono_edited = mono_source.copy()
+            cv2.rectangle(mono_edited, (34, 32), (206, 208), (255, 255, 255), 3)
+            mono_edited[112:128, 112:128] = 255
+            mono_allowed = np.zeros((240, 240), dtype=np.uint8)
+            mono_allowed[20:220, 20:220] = 255
+
+            mono_mask = engine._build_advanced_erase_safe_change_mask(
+                mono_source,
+                mono_edited,
+                mono_allowed,
+            )
+
+            self.assertGreater(int(mono_mask[120, 120]), 0)
+            self.assertEqual(int(mono_mask[32, 80]), 0)
 
     def test_advanced_erase_region_mask_uses_clean_result_without_source_bleed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

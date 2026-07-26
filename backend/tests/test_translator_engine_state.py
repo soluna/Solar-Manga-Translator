@@ -5712,6 +5712,20 @@ print(json.dumps({
         self.assertGreaterEqual(width * height, client.MIN_PIXELS)
         self.assertEqual(prepared_source.shape[:2], (height, width))
 
+    def test_advanced_erase_prompt_is_direct_and_covers_embedded_text(self) -> None:
+        prompt = translator_module.ADVANCED_IMAGE_ERASE_PROMPT
+        normalized = " ".join(prompt.lower().split())
+
+        self.assertLess(len(prompt), 900)
+        self.assertIn("speech", normalized)
+        self.assertIn("borderless", normalized)
+        self.assertIn("sound effects", normalized)
+        self.assertIn("diagonal", normalized)
+        self.assertIn("reconstruct", normalized)
+        self.assertIn("do not create", normalized)
+        self.assertIn("new speech bubble", normalized)
+        self.assertIn("preserve", normalized)
+
     def test_seedream_auth_error_explains_configuration_in_natural_language(self) -> None:
         client = SeedreamImageCleanupClient(api_key="invalid", model="wrong-model")
         source = np.full((1440, 2560, 3), 255, dtype=np.uint8)
@@ -5781,19 +5795,17 @@ print(json.dumps({
                 int(cv2.countNonZero(raw_diff_mask)) * 2,
             )
 
-    def test_advanced_erase_model_and_region_masks_use_their_overlap(self) -> None:
+    def test_advanced_erase_uses_detected_text_regions_as_allowed_mask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
-            model_mask = np.zeros((120, 120), dtype=np.uint8)
-            model_mask[8:112, 8:112] = 255
             region_mask = np.zeros((120, 120), dtype=np.uint8)
             region_mask[44:76, 48:72] = 255
 
-            selected, mode = engine._select_advanced_erase_allowed_mask(model_mask, region_mask)
+            selected, mode = engine._select_advanced_erase_allowed_mask(region_mask)
 
             self.assertIsNotNone(selected)
             assert selected is not None
-            self.assertEqual(mode, "model_region_intersection")
+            self.assertEqual(mode, "detected_text_regions")
             self.assertGreater(int(selected[60, 60]), 0)
             self.assertEqual(int(selected[20, 20]), 0)
 
@@ -5836,6 +5848,168 @@ print(json.dumps({
 
             self.assertGreater(int(mono_mask[120, 120]), 0)
             self.assertEqual(int(mono_mask[32, 80]), 0)
+
+    def test_advanced_erase_safe_mask_removes_diagonal_text_without_accepting_new_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            height = width = 220
+            yy, xx = np.indices((height, width))
+            background = np.stack(
+                [
+                    154 + (xx % 17),
+                    176 + (yy % 19),
+                    198 + ((xx + yy) % 13),
+                ],
+                axis=2,
+            ).astype(np.uint8)
+            source = background.copy()
+            cv2.line(source, (24, 34), (196, 34), (28, 28, 28), 3)
+
+            text_mask = np.zeros((height, width), dtype=np.uint8)
+            for offset in (0, 18, 36):
+                cv2.line(text_mask, (76 + offset, 72), (56 + offset, 118), 255, 5)
+                cv2.line(text_mask, (62 + offset, 94), (82 + offset, 94), 255, 4)
+            source[text_mask > 0] = [24, 24, 30]
+
+            edited = source.copy()
+            edited[text_mask > 0] = background[text_mask > 0]
+            edited[32:37, 82:138] = background[32:37, 82:138]
+            cv2.rectangle(edited, (42, 58), (152, 138), (18, 18, 18), 3)
+
+            allowed = np.zeros((height, width), dtype=np.uint8)
+            allowed[24:150, 34:166] = 255
+            safe_mask = engine._build_advanced_erase_safe_change_mask(source, edited, allowed)
+
+            self.assertGreater(int(safe_mask[90, 68]), 0)
+            self.assertEqual(int(safe_mask[34, 100]), 0)
+            self.assertEqual(int(safe_mask[58, 48]), 0)
+
+    def test_advanced_erase_page_makes_one_cleanup_request_without_white_postfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+
+            source = np.full((100, 100, 3), [232, 218, 196], dtype=np.uint8)
+            source[42:58, 46:54] = [20, 20, 24]
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+
+            allowed = np.zeros((100, 100), dtype=np.uint8)
+            allowed[30:70, 34:66] = 255
+            observed_prompts: list[str] = []
+
+            class FakeClient:
+                async def remove_text(self, source_rgb, _guide_rgb=None, prompt="", **_kwargs):
+                    observed_prompts.append(prompt)
+                    edited = source_rgb.copy()
+                    edited[42:58, 46:54] = [232, 218, 196]
+                    return edited
+
+            engine._build_advanced_erase_allowed_mask = lambda *_args, **_kwargs: (allowed, 1)
+            engine._apply_page_artifact_event = lambda *_args, **_kwargs: None
+            engine.persist_project_state = lambda *_args, **_kwargs: None
+            engine.build_client_session_payload = lambda *_args, **_kwargs: {}
+
+            with mock.patch.object(translator_module, "create_image_cleanup_client", return_value=FakeClient()):
+                result = asyncio.run(engine.advanced_erase_page(
+                    project_id="project-a",
+                    session=session,
+                    page_id="page-1.png",
+                    raw_config={
+                        "advanced_erase_provider": "volcengine-ark",
+                        "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
+                        "advanced_erase_model": "custom-seedream-model",
+                        "advanced_erase_api_key": "secret",
+                    },
+                ))
+
+            self.assertEqual(result["advanced_erase"]["action"], "erase")
+            self.assertEqual(observed_prompts, [translator_module.ADVANCED_IMAGE_ERASE_PROMPT])
+            self.assertFalse(hasattr(engine, "_clean_advanced_erase_white_container_residue"))
+            output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(output[50, 50], [232, 218, 196]))
+
+    def test_repeated_advanced_erase_continues_from_previous_cleaned_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+
+            background = np.full((120, 120, 3), [214, 184, 146], dtype=np.uint8)
+            source = background.copy()
+            source[34:48, 32:42] = [18, 18, 22]
+            source[70:86, 76:86] = [18, 18, 22]
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+
+            allowed = np.zeros((120, 120), dtype=np.uint8)
+            allowed[24:96, 20:98] = 255
+            observed_inputs: list[np.ndarray] = []
+
+            class FakeClient:
+                async def remove_text(self, source_rgb, _guide_rgb=None, prompt="", **_kwargs):
+                    observed_inputs.append(source_rgb.copy())
+                    edited = source_rgb.copy()
+                    if len(observed_inputs) == 1:
+                        edited[34:48, 32:42] = background[34:48, 32:42]
+                    else:
+                        edited[70:86, 76:86] = background[70:86, 76:86]
+                    return edited
+
+            engine._build_advanced_erase_allowed_mask = lambda *_args, **_kwargs: (allowed, 2)
+            engine._apply_page_artifact_event = lambda *_args, **_kwargs: None
+            engine.persist_project_state = lambda *_args, **_kwargs: None
+            engine.build_client_session_payload = lambda *_args, **_kwargs: {}
+            raw_config = {
+                "advanced_erase_provider": "volcengine-ark",
+                "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
+                "advanced_erase_model": "custom-seedream-model",
+                "advanced_erase_api_key": "secret",
+            }
+
+            with mock.patch.object(translator_module, "create_image_cleanup_client", return_value=FakeClient()):
+                asyncio.run(engine.advanced_erase_page(
+                    "project-a",
+                    session,
+                    "page-1.png",
+                    raw_config,
+                ))
+                asyncio.run(engine.advanced_erase_page(
+                    "project-a",
+                    session,
+                    "page-1.png",
+                    raw_config,
+                ))
+
+            self.assertEqual(len(observed_inputs), 2)
+            self.assertTrue(np.array_equal(observed_inputs[1][40, 36], background[40, 36]))
+            self.assertTrue(np.array_equal(observed_inputs[1][78, 80], [18, 18, 22]))
+            output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(output[40, 36], background[40, 36]))
+            self.assertTrue(np.array_equal(output[78, 80], background[78, 80]))
 
     def test_advanced_erase_region_mask_uses_clean_result_without_source_bleed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6146,90 +6320,6 @@ print(json.dumps({
             mask[:, :] = 255
 
             self.assertTrue(engine._advanced_erase_allowed_mask_is_overbroad(mask))
-
-    def test_advanced_erase_model_container_mask_extracts_segmentation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.make_engine(Path(tmp))
-            source = np.full((240, 240, 3), 128, dtype=np.uint8)
-            marker = np.zeros((240, 240, 3), dtype=np.uint8)
-            marker[20:220, 20:220] = 18
-            cv2.ellipse(marker, (78, 84), (28, 42), 0, 0, 360, (0, 255, 0), -1)
-            frame = np.array([[132, 76], [186, 70], [196, 142], [126, 152], [118, 112]], dtype=np.int32)
-            cv2.fillPoly(marker, [frame], (0, 255, 0))
-
-            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
-
-            self.assertIsNotNone(mask)
-            assert mask is not None
-            self.assertGreaterEqual(count, 2)
-            self.assertGreater(int(mask[84, 78]), 0)
-            self.assertGreater(int(mask[120, 150]), 0)
-            self.assertEqual(int(mask[10, 10]), 0)
-
-    def test_advanced_erase_model_container_mask_accepts_legacy_white_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.make_engine(Path(tmp))
-            source = np.full((160, 160, 3), 96, dtype=np.uint8)
-            marker = np.zeros((160, 160, 3), dtype=np.uint8)
-            cv2.rectangle(marker, (52, 42), (108, 118), (255, 255, 255), -1)
-
-            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
-
-            self.assertIsNotNone(mask)
-            assert mask is not None
-            self.assertEqual(count, 1)
-            self.assertGreater(int(mask[72, 80]), 0)
-            self.assertEqual(int(mask[12, 12]), 0)
-
-    def test_advanced_erase_model_container_mask_handles_dark_containers(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.make_engine(Path(tmp))
-            source = np.full((200, 200, 3), 180, dtype=np.uint8)
-            cv2.rectangle(source, (66, 54), (134, 146), (8, 8, 8), -1)
-            cv2.rectangle(source, (66, 54), (134, 146), (245, 245, 245), 2)
-            marker = np.zeros((200, 200, 3), dtype=np.uint8)
-            cv2.rectangle(marker, (66, 54), (134, 146), (0, 255, 0), -1)
-
-            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
-
-            self.assertIsNotNone(mask)
-            assert mask is not None
-            self.assertEqual(count, 1)
-            self.assertGreater(int(mask[88, 90]), 0)
-
-    def test_advanced_erase_model_container_mask_rejects_full_page_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.make_engine(Path(tmp))
-            source = np.full((100, 100, 3), 128, dtype=np.uint8)
-            marker = np.full((100, 100, 3), 255, dtype=np.uint8)
-
-            mask, count = engine._build_advanced_erase_model_container_mask(source, marker)
-
-            self.assertIsNone(mask)
-            self.assertEqual(count, 0)
-
-    def test_advanced_erase_white_container_residue_is_cleaned_selectively(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.make_engine(Path(tmp))
-            source = np.full((180, 180, 3), 120, dtype=np.uint8)
-            cv2.ellipse(source, (58, 72), (30, 46), 0, 0, 360, (255, 255, 255), -1)
-            cv2.ellipse(source, (58, 72), (30, 46), 0, 0, 360, (0, 0, 0), 2)
-            source[62:70, 50:66] = 0
-            texture_frame = np.array([[104, 48], [150, 42], [158, 126], [102, 132]], dtype=np.int32)
-            cv2.fillPoly(source, [texture_frame], (132, 132, 132))
-
-            composite = source.copy()
-            composite[62:70, 50:66] = 210
-            cv2.fillPoly(composite, [texture_frame], (164, 164, 164))
-            mask = np.zeros((180, 180), dtype=np.uint8)
-            cv2.ellipse(mask, (58, 72), (30, 46), 0, 0, 360, 255, -1)
-            cv2.fillPoly(mask, [texture_frame], 255)
-
-            cleaned = engine._clean_advanced_erase_white_container_residue(source, composite, mask)
-
-            self.assertGreater(int(cleaned[66, 58, 0]), 240)
-            self.assertLess(int(cleaned[72, 28, 0]), 32)
-            self.assertEqual(int(cleaned[86, 130, 0]), 164)
 
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

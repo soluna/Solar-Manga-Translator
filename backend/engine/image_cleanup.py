@@ -16,50 +16,31 @@ from PIL import Image
 SEEDREAM_IMAGE_API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 DEFAULT_IMAGE_CLEANUP_PROMPT = "去除覆盖在图片上的文字"
 ADVANCED_IMAGE_ERASE_PROMPT = """
-You are editing a manga/comic page.
-Remove every visible text mark from the image, including speech-bubble text,
-captions, sound effects, decorative lettering, handwriting, stylized text, and
-text embedded in backgrounds. Reconstruct the background naturally where text
-was removed. Preserve all non-text artwork, line art, panels, characters,
-objects, tones, colors, and composition unchanged. If a sound effect or
-decorative lettering sits inside a frame, speech balloon, caption box, border,
-outline, tail, or any hand-drawn container, remove only the lettering and keep
-that surrounding container exactly. Inside white speech balloons or caption
-areas, leave a clean continuous white fill with no faint ghost text, smudges, or
-partial strokes. Inside black, dark, colored, transparent, or patterned text
-containers, leave a clean continuous matching fill with no faint ghost text,
-smudges, or partial strokes. Do not translate, add text, redraw non-text
-content, crop, rotate, or change the page layout. Return only the cleaned image.
+Remove all visible text from this manga/comic page.
+
+Remove dialogue and captions inside existing speech bubbles or boxes, borderless
+text printed directly over artwork, sound effects, handwriting, and decorative
+lettering. Text may be horizontal, vertical, diagonal, curved, small, large,
+outlined, or stylized.
+
+Where text is removed, reconstruct the hidden background naturally from the
+surrounding artwork, colors, textures, tones, and line art. Do not replace an
+illustrated or colored area with flat white.
+
+Preserve all non-text artwork and every existing speech-bubble outline, caption
+box, panel border, character, object, and page layout. Do not create any new
+speech bubble, caption box, rectangle, border, text, symbol, or decoration.
+Do not translate, crop, rotate, or resize. Return only the cleaned image.
 """.strip()
 ADVANCED_IMAGE_SELECTION_ERASE_PROMPT = """
-Edit this manga page. The white blank area is outside the user's selected
-regions and should stay blank. Inside the visible selected regions, remove only
-text strokes, letters, handwriting, and sound-effect characters. Keep speech
-bubbles, caption boxes, sound-effect frames, tails, borders, panels, characters,
-background art, tones, and layout unchanged. Fill removed text naturally with
-the surrounding background. Do not translate, add text, crop, rotate, or resize.
-Return only the cleaned image.
+Only edit the visible user-selected parts of this manga page; the white area
+outside them is a selection mask and must stay white. Remove all text in the
+visible parts, including borderless, diagonal, curved, handwritten, stylized,
+and sound-effect text. Reconstruct the hidden background naturally. Preserve
+all non-text artwork and every existing outline or border. Do not create a new
+speech bubble, caption box, rectangle, border, text, symbol, or decoration.
+Do not translate, crop, rotate, or resize. Return only the cleaned image.
 """.strip()
-ADVANCED_IMAGE_CONTAINER_MASK_PROMPT = """
-Create a segmentation mask image for this manga/comic page. Do not edit the
-manga artwork. Keep exactly the same canvas, orientation, and aspect ratio as
-the input. Use pure black (#000000) for every pixel outside text containers.
-Use pure chroma green (#00FF00) to fill the complete interior of every speech
-balloon, thought bubble, caption box, narration box, rectangular dialogue box,
-and decorative sound-effect text container that contains text. This includes
-white, black, dark, colored, transparent, textured, and patterned containers.
-For irregular hand-drawn sound-effect containers, fill the whole irregular
-container interior, including jagged edges, tails, spikes, and border-adjacent
-interior. If uncertain, include a small margin just inside and immediately
-around the container border. Do not include characters, faces, hair, hands,
-clothing, bodies, panel borders, background texture, blank page margins, or
-non-text artwork. Do not draw outlines, labels, numbers, gradients, gray
-shading, anti-aliased artwork, or the original manga image. Return only a
-binary-looking mask: black background with solid chroma-green filled blobs for
-text containers.
-""".strip()
-
-
 class GeminiImageCleanupClient:
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key

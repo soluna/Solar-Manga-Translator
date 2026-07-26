@@ -1,7 +1,7 @@
 const PROJECT_ID = 'zero-text-regions-e2e-fixture'
 const PAGE_ID = '0001.png'
 const PROJECT_TITLE = 'Zero Text Regions E2E Fixture'
-const PAGE_NAME = 'Zero Region Page'
+const PAGE_NAME = '微信图片_20260725215741_101_3.png'
 
 const emptyOverrides = () => ({
   translation_region_overrides: {},
@@ -161,6 +161,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
 
   return {
     project,
+    pageName: PAGE_NAME,
     sessionPayload,
     routeResponses,
     downloadFilename,

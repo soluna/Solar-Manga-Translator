@@ -326,6 +326,62 @@ async function assertZeroTextRegionsWorkspace(page, fixture, routeHits) {
   await assertText(pageCard, '已完成', '零文本框页面没有显示翻译完成状态')
   await assertText(pageCard, '已生成结果', '零文本框页面没有显示最终页面产物')
 
+  const pageCardTitle = pageCard.locator('.v2-page-card-head strong')
+  const pageCardStatus = pageCard.locator('.v2-page-status')
+  const pageCardRegressionFailures = []
+  const [titleBox, statusBox, titleLayout, titleTooltip] = await Promise.all([
+    pageCardTitle.boundingBox(),
+    pageCardStatus.boundingBox(),
+    pageCardTitle.evaluate((element) => {
+      const style = window.getComputedStyle(element)
+      return {
+        overflow: style.overflow,
+        textOverflow: style.textOverflow,
+        whiteSpace: style.whiteSpace,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }
+    }),
+    pageCardTitle.getAttribute('title'),
+  ])
+  if (!titleBox || !statusBox || titleBox.x + titleBox.width > statusBox.x) {
+    pageCardRegressionFailures.push('长页面名称与状态标签发生重叠')
+  }
+  if (
+    titleLayout.overflow !== 'hidden'
+    || titleLayout.textOverflow !== 'ellipsis'
+    || titleLayout.whiteSpace !== 'nowrap'
+    || titleLayout.scrollWidth <= titleLayout.clientWidth
+  ) {
+    pageCardRegressionFailures.push(`长页面名称没有在卡片内截断：${JSON.stringify(titleLayout)}`)
+  }
+  if (titleTooltip !== fixture.pageName) {
+    pageCardRegressionFailures.push(`长页面名称缺少完整 tooltip：${titleTooltip || '<empty>'}`)
+  }
+
+  const pageCardImage = pageCard.locator('.v2-page-card-media img')
+  await pageCardImage.evaluate((image) => {
+    image.src = 'data:image/png;base64,AAAA'
+  })
+  const imageHandle = await pageCardImage.elementHandle()
+  try {
+    await page.waitForFunction(
+      (image) => image.naturalWidth > 1 && !image.currentSrc.startsWith('data:'),
+      imageHandle,
+      { timeout: 3000 },
+    )
+  } catch (_error) {
+    const imageState = await pageCardImage.evaluate((image) => ({
+      src: image.currentSrc,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+    }))
+    pageCardRegressionFailures.push(`缩略图请求失败后没有恢复：${JSON.stringify(imageState)}`)
+  }
+  if (pageCardRegressionFailures.length) {
+    throw new Error(pageCardRegressionFailures.join('\n'))
+  }
+
   await pageCard.click()
   await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
   await page.locator('.v2-review-toolbar').waitFor({ state: 'visible', timeout: 20000 })

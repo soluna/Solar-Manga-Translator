@@ -191,9 +191,12 @@ class SeedreamImageCleanupClient:
                 raw_body = response.read().decode("utf-8")
         except urllib_error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Seedream 图像编辑请求失败: HTTP {exc.code} {detail}") from exc
+            raise RuntimeError(self._format_http_error(exc.code, detail)) from exc
         except urllib_error.URLError as exc:
-            raise RuntimeError(f"Seedream 图像编辑请求失败: {exc.reason}") from exc
+            raise RuntimeError(
+                "无法连接 Seedream 图像编辑服务。请检查网络和接口地址，稍后重试；"
+                "如果持续失败，请确认火山方舟服务所在地域与接口地址一致。"
+            ) from exc
 
         try:
             response_payload = json.loads(raw_body)
@@ -204,6 +207,67 @@ class SeedreamImageCleanupClient:
         if image is None:
             raise RuntimeError("Seedream 图像编辑没有返回可用图片。")
         return image
+
+    def _format_http_error(self, status_code: int, detail: str) -> str:
+        provider_code = ""
+        provider_message = ""
+        request_id = ""
+        try:
+            payload = json.loads(detail or "{}")
+            error_payload = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error_payload, dict):
+                provider_code = str(error_payload.get("code") or "").strip()
+                provider_message = str(error_payload.get("message") or "").strip()
+                request_id = str(
+                    error_payload.get("request_id")
+                    or error_payload.get("requestId")
+                    or ""
+                ).strip()
+            if not request_id and isinstance(payload, dict):
+                request_id = str(payload.get("request_id") or payload.get("requestId") or "").strip()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provider_message = ""
+
+        if not request_id and provider_message:
+            marker = "request id:"
+            marker_index = provider_message.lower().find(marker)
+            if marker_index >= 0:
+                request_id = provider_message[marker_index + len(marker):].strip().split()[0]
+
+        model_hint = f"当前模型名称为“{self.model}”。" if self.model else ""
+        if status_code == 401:
+            message = (
+                "Seedream 认证失败（HTTP 401）。请检查高级擦除 API Key 是否正确、未过期，"
+                "并确认接口地址、模型名称或接入点与这个 Key 属于同一火山方舟账号且已经开通权限。"
+                f"{model_hint}"
+            )
+        elif status_code == 403:
+            message = (
+                "Seedream 拒绝了这次请求（HTTP 403）。API Key 已被识别，但当前账号可能没有该模型或接入点的调用权限。"
+                f"请在火山方舟控制台检查授权和可用地域。{model_hint}"
+            )
+        elif status_code in {400, 404}:
+            message = (
+                f"Seedream 请求配置不正确（HTTP {status_code}）。请检查模型名称或推理接入点是否存在，"
+                f"以及高级擦除接口地址是否填写正确。{model_hint}"
+            )
+        elif status_code == 429:
+            message = (
+                "Seedream 请求过于频繁或额度不足（HTTP 429）。请稍后重试，并在火山方舟控制台检查配额和余额。"
+            )
+        elif status_code >= 500:
+            message = f"Seedream 服务暂时异常（HTTP {status_code}）。你的配置不一定有问题，请稍后重试。"
+        else:
+            message = (
+                f"Seedream 图像编辑请求失败（HTTP {status_code}）。请检查接口地址、模型名称和账号权限后重试。"
+                f"{model_hint}"
+            )
+
+        if provider_code and provider_code not in {"AuthenticationError", "Unauthorized"}:
+            message += f" 服务错误码：{provider_code}。"
+        if request_id:
+            message += f" 请求 ID：{request_id}。"
+        return message
 
     def _extract_image(self, payload: dict[str, Any]) -> np.ndarray | None:
         for item in payload.get("data") or []:

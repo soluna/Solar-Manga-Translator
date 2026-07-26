@@ -1419,7 +1419,12 @@ class TranslatorEngine:
         )
         if allowed_mask is not None:
             cv2.imwrite(str(allowed_mask_path), allowed_mask)
-        debug_mask = self._advanced_erase_final_mask(raw_diff_mask, allowed_mask)
+        debug_mask = self._build_advanced_erase_safe_change_mask(
+            source_rgb,
+            edited_debug_rgb,
+            allowed_mask,
+            raw_change_mask=raw_diff_mask,
+        )
         debug_changed_ratio = float(cv2.countNonZero(debug_mask)) / float(debug_mask.size or 1)
         cv2.imwrite(str(mask_path), debug_mask)
         metadata = {
@@ -8701,6 +8706,8 @@ class TranslatorEngine:
         self,
         base_rgb: np.ndarray,
         selection_mask: np.ndarray,
+        *,
+        fill_enclosures: bool = True,
     ) -> np.ndarray:
         selection = self._normalize_advanced_erase_mask(selection_mask, base_rgb.shape)
         if not np.any(selection):
@@ -8735,7 +8742,11 @@ class TranslatorEngine:
 
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         closed = cv2.morphologyEx(filtered, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-        filled = self._fill_selection_erase_small_enclosures(closed, selection)
+        filled = (
+            self._fill_selection_erase_small_enclosures(closed, selection)
+            if fill_enclosures
+            else np.zeros_like(closed)
+        )
         text_mask = cv2.bitwise_or(closed, filled)
 
         min_side = max(1, min(base_rgb.shape[:2]))
@@ -9193,16 +9204,16 @@ class TranslatorEngine:
         region_mask: np.ndarray | None,
     ) -> tuple[np.ndarray | None, str]:
         if model_mask is not None and region_mask is not None:
-            combined = cv2.bitwise_or(
+            intersection = cv2.bitwise_and(
                 self._normalize_advanced_erase_mask(model_mask, model_mask.shape),
                 self._normalize_advanced_erase_mask(region_mask, model_mask.shape),
             )
-            if not self._advanced_erase_allowed_mask_is_overbroad(combined):
-                return combined, "model_container_region"
-        if model_mask is not None and not self._advanced_erase_allowed_mask_is_overbroad(model_mask):
-            return model_mask, "model_container"
+            if np.any(intersection) and not self._advanced_erase_allowed_mask_is_overbroad(intersection):
+                return intersection, "model_region_intersection"
         if region_mask is not None and not self._advanced_erase_allowed_mask_is_overbroad(region_mask):
             return region_mask, "region_replace"
+        if model_mask is not None and not self._advanced_erase_allowed_mask_is_overbroad(model_mask):
+            return model_mask, "model_container"
         return None, "diff_only"
 
     def _clean_advanced_erase_white_container_residue(
@@ -9541,7 +9552,43 @@ class TranslatorEngine:
         if allowed_mask is None:
             return raw_diff_mask
         allowed_mask = self._normalize_advanced_erase_mask(allowed_mask, raw_diff_mask.shape)
-        return allowed_mask
+        return cv2.bitwise_and(raw_diff_mask, allowed_mask)
+
+    def _build_advanced_erase_safe_change_mask(
+        self,
+        source_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+        allowed_mask: np.ndarray | None,
+        *,
+        raw_change_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        raw_mask = (
+            self._normalize_advanced_erase_mask(raw_change_mask, source_rgb.shape)
+            if raw_change_mask is not None
+            else self._build_advanced_erase_change_mask(source_rgb, edited_rgb)
+        )
+        clipped_mask = self._advanced_erase_final_mask(raw_mask, allowed_mask)
+        if allowed_mask is None or not np.any(clipped_mask):
+            return clipped_mask
+
+        allowed = self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
+        text_mask = self._build_selection_erase_text_mask(
+            source_rgb,
+            allowed,
+            fill_enclosures=False,
+        )
+        if not np.any(text_mask):
+            return clipped_mask
+
+        min_side = max(1, min(source_rgb.shape[:2]))
+        neighborhood_size = max(5, min(25, int(round(min_side * 0.009)) | 1))
+        neighborhood_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (neighborhood_size, neighborhood_size),
+        )
+        text_neighborhood = cv2.dilate(text_mask, neighborhood_kernel, iterations=1)
+        safe_mask = cv2.bitwise_and(clipped_mask, text_neighborhood)
+        return safe_mask if np.any(safe_mask) else clipped_mask
 
     def _threshold_advanced_erase_diff(self, diff: np.ndarray, threshold: int) -> np.ndarray:
         _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)

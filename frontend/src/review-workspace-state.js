@@ -87,12 +87,24 @@ export function resolveReviewRegionTranslation({
 }
 
 export function resolvePageEntryCoverUrl(entry = {}, workflowStage = '') {
+  const normalizedStage = String(workflowStage || '').trim().toLowerCase()
+  if (normalizedStage === 'detecting' || normalizedStage === 'translating') {
+    return String(
+      entry?.sourceThumbUrl
+      || entry?.sourceUrl
+      || entry?.blankThumbUrl
+      || entry?.blankUrl
+      || entry?.previewThumbUrl
+      || entry?.previewUrl
+      || ''
+    )
+  }
+
   const finalUrl = String(entry?.finalThumbUrl || entry?.finalUrl || '').trim()
   if (finalUrl) {
     return finalUrl
   }
 
-  const normalizedStage = String(workflowStage || '').trim().toLowerCase()
   if (normalizedStage === 'detected') {
     return String(
       entry?.blankThumbUrl
@@ -112,6 +124,19 @@ export function resolvePageEntryCoverUrl(entry = {}, workflowStage = '') {
     || entry?.blankUrl
     || ''
   )
+}
+
+export function resolvePageListCoverWorkflowStage({
+  workflowStage = '',
+  translating = false,
+  activeAction = '',
+} = {}) {
+  if (!translating) {
+    return String(workflowStage || '')
+  }
+  return String(activeAction || '').trim().toLowerCase() === 'detect'
+    ? 'detecting'
+    : 'translating'
 }
 
 export function resolveSelectedReviewPage({

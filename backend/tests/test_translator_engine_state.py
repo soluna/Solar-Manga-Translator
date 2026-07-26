@@ -5765,6 +5765,9 @@ print(json.dumps({
         self.assertIn("do not create", normalized)
         self.assertIn("new speech bubble", normalized)
         self.assertIn("preserve", normalized)
+        self.assertIn("clearly visible", normalized)
+        self.assertIn("never infer", normalized)
+        self.assertIn("flat white", normalized)
 
     def test_seedream_auth_error_explains_configuration_in_natural_language(self) -> None:
         client = SeedreamImageCleanupClient(api_key="invalid", model="wrong-model")
@@ -5969,6 +5972,104 @@ print(json.dumps({
             self.assertGreater(int(safe_mask[120, 120]), 0)
             self.assertEqual(int(safe_mask[92, 120]), 0)
             self.assertEqual(int(safe_mask[120, 106]), 0)
+
+    def test_advanced_erase_safe_mask_rejects_new_white_container_over_embedded_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            height = width = 240
+            yy, xx = np.indices((height, width))
+            background = np.stack(
+                [
+                    138 + (xx % 23),
+                    166 + (yy % 19),
+                    192 + ((xx + yy) % 17),
+                ],
+                axis=2,
+            ).astype(np.uint8)
+            source = background.copy()
+            for x in (88, 104, 120, 136, 152):
+                cv2.line(source, (x, 82), (x, 158), (24, 24, 30), 6)
+                cv2.line(source, (x - 6, 98), (x + 6, 98), (24, 24, 30), 5)
+                cv2.line(source, (x - 6, 126), (x + 6, 126), (24, 24, 30), 5)
+
+            edited = source.copy()
+            edited[68:174, 72:168] = [234, 234, 234]
+            allowed = np.zeros((height, width), dtype=np.uint8)
+            allowed[60:182, 64:176] = 255
+
+            safe_mask = engine._build_advanced_erase_safe_change_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertEqual(int(safe_mask[120, 120]), 0)
+            self.assertEqual(int(cv2.countNonZero(safe_mask[74:168, 78:162])), 0)
+
+    def test_advanced_erase_safe_mask_allows_text_removal_inside_existing_white_bubble(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), [158, 184, 208], dtype=np.uint8)
+            cv2.ellipse(source, (120, 120), (42, 62), 0, 0, 360, (252, 252, 252), -1)
+            cv2.ellipse(source, (120, 120), (42, 62), 0, 0, 360, (24, 24, 30), 3)
+            for y in (92, 112, 132, 152):
+                cv2.line(source, (112, y), (128, y), (24, 24, 30), 5)
+
+            edited = source.copy()
+            for y in (92, 112, 132, 152):
+                cv2.line(edited, (112, y), (128, y), (252, 252, 252), 5)
+            allowed = np.zeros((240, 240), dtype=np.uint8)
+            allowed[74:166, 92:148] = 255
+
+            safe_mask = engine._build_advanced_erase_safe_change_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertGreater(int(safe_mask[112, 120]), 0)
+            self.assertGreater(int(safe_mask[152, 120]), 0)
+
+    def test_advanced_erase_bright_container_guard_preserves_existing_bubble_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), [156, 182, 208], dtype=np.uint8)
+            cv2.ellipse(source, (120, 120), (36, 54), 0, 0, 360, (252, 252, 252), -1)
+            source[108:132, 116:124] = [24, 24, 30]
+
+            edited = source.copy()
+            edited[62:178, 78:162] = [250, 250, 250]
+            allowed = np.zeros((240, 240), dtype=np.uint8)
+            allowed[58:182, 74:166] = 255
+
+            protected = engine._build_advanced_erase_novel_bright_container_protection_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertGreater(int(protected[70, 86]), 0)
+            self.assertEqual(int(protected[120, 120]), 0)
+
+    def test_advanced_erase_bright_container_guard_does_not_treat_white_page_as_artwork_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), 255, dtype=np.uint8)
+            source[42:198, 42:198] = [112, 138, 166]
+            source[88:154, 112:128] = [24, 24, 30]
+
+            edited = source.copy()
+            edited[70:176, 76:164] = [244, 244, 244]
+            allowed = np.zeros((240, 240), dtype=np.uint8)
+            allowed[62:184, 68:172] = 255
+
+            protected = engine._build_advanced_erase_novel_bright_container_protection_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertGreater(int(protected[120, 120]), 0)
 
     def test_advanced_erase_page_makes_one_cleanup_request_without_white_postfill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

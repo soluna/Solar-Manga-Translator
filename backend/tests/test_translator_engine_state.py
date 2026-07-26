@@ -5714,6 +5714,24 @@ print(json.dumps({
             self.assertTrue(np.array_equal(composite[5, 5], source[5, 5]))
             self.assertGreater(int(composite[38, 36, 0]), 200)
 
+    def test_advanced_erase_composite_never_feathers_outside_the_safe_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((100, 100, 3), [24, 48, 72], dtype=np.uint8)
+            edited = np.full((100, 100, 3), [232, 216, 184], dtype=np.uint8)
+            safe_mask = np.zeros((100, 100), dtype=np.uint8)
+            safe_mask[30:70, 30:70] = 255
+
+            composite, _mask, _changed_ratio = engine._composite_advanced_erase_result(
+                source,
+                edited,
+                change_mask=safe_mask,
+            )
+
+            self.assertTrue(np.array_equal(composite[29, 50], source[29, 50]))
+            self.assertTrue(np.array_equal(composite[50, 29], source[50, 29]))
+            self.assertTrue(np.array_equal(composite[50, 50], edited[50, 50]))
+
     def test_advanced_erase_rejects_full_page_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -5906,6 +5924,52 @@ print(json.dumps({
             self.assertEqual(int(safe_mask[34, 100]), 0)
             self.assertEqual(int(safe_mask[58, 48]), 0)
 
+    def test_advanced_erase_safe_mask_rejects_a_shifted_panel_border(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), 255, dtype=np.uint8)
+            source[48:62, 104:136] = [24, 24, 28]
+            cv2.line(source, (18, 80), (222, 80), (24, 24, 28), 3)
+
+            edited = source.copy()
+            edited[48:62, 104:136] = 255
+            cv2.line(edited, (18, 80), (222, 80), (255, 255, 255), 3)
+            cv2.line(edited, (18, 72), (222, 72), (24, 24, 28), 3)
+
+            allowed = np.zeros((240, 240), dtype=np.uint8)
+            allowed[34:94, 10:230] = 255
+            safe_mask = engine._build_advanced_erase_safe_change_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertGreater(int(safe_mask[54, 120]), 0)
+            self.assertEqual(int(safe_mask[72, 120]), 0)
+            self.assertEqual(int(safe_mask[80, 120]), 0)
+
+    def test_advanced_erase_safe_mask_rejects_a_new_enclosing_outline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((240, 240, 3), [184, 196, 208], dtype=np.uint8)
+            source[96:144, 114:126] = [22, 24, 28]
+
+            edited = source.copy()
+            edited[96:144, 114:126] = [184, 196, 208]
+            cv2.ellipse(edited, (120, 120), (14, 28), 0, 0, 360, (22, 24, 28), 3)
+
+            allowed = np.zeros((240, 240), dtype=np.uint8)
+            allowed[80:160, 92:148] = 255
+            safe_mask = engine._build_advanced_erase_safe_change_mask(
+                source,
+                edited,
+                allowed,
+            )
+
+            self.assertGreater(int(safe_mask[120, 120]), 0)
+            self.assertEqual(int(safe_mask[92, 120]), 0)
+            self.assertEqual(int(safe_mask[120, 106]), 0)
+
     def test_advanced_erase_page_makes_one_cleanup_request_without_white_postfill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5988,7 +6052,8 @@ print(json.dumps({
             Image.fromarray(source).save(cache_dir / "inpainted.png")
 
             allowed = np.zeros((120, 120), dtype=np.uint8)
-            allowed[24:96, 20:98] = 255
+            allowed[24:56, 20:54] = 255
+            allowed[62:96, 66:98] = 255
             observed_inputs: list[np.ndarray] = []
 
             class FakeClient:
@@ -6283,7 +6348,7 @@ print(json.dumps({
             self.assertTrue(np.array_equal(output[20, 60], base[20, 60]))
             self.assertFalse(np.array_equal(output[60, 60], base[60, 60]))
 
-    def test_advanced_erase_allowed_mask_expands_to_white_bubble(self) -> None:
+    def test_advanced_erase_allowed_mask_stays_close_to_text_inside_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
             source = np.full((240, 240, 3), 128, dtype=np.uint8)
@@ -6296,11 +6361,11 @@ print(json.dumps({
 
             mask = engine._build_advanced_erase_region_container_mask(source, region)
 
-            self.assertGreater(int(mask[80, 120]), 0)
+            self.assertEqual(int(mask[80, 120]), 0)
             self.assertGreater(int(mask[116, 120]), 0)
             self.assertEqual(int(mask[5, 5]), 0)
 
-    def test_advanced_erase_allowed_mask_expands_to_line_art_container(self) -> None:
+    def test_advanced_erase_allowed_mask_stays_close_to_decorative_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
             source = np.full((240, 240, 3), 112, dtype=np.uint8)
@@ -6314,8 +6379,9 @@ print(json.dumps({
 
             mask = engine._build_advanced_erase_region_container_mask(source, region)
 
-            self.assertGreater(int(mask[68, 100]), 0)
-            self.assertGreater(int(mask[130, 144]), 0)
+            self.assertEqual(int(mask[68, 100]), 0)
+            self.assertEqual(int(mask[130, 144]), 0)
+            self.assertGreater(int(mask[98, 120]), 0)
             self.assertEqual(int(mask[8, 8]), 0)
 
     def test_advanced_erase_line_art_container_requires_decorative_style(self) -> None:
@@ -6339,9 +6405,20 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
             mask = np.zeros((100, 100), dtype=np.uint8)
-            mask[:, :] = 255
+            mask[:27, :] = 255
 
             self.assertTrue(engine._advanced_erase_allowed_mask_is_overbroad(mask))
+
+    def test_advanced_erase_never_falls_back_to_an_unbounded_page_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            overbroad_mask = np.full((100, 100), 255, dtype=np.uint8)
+            raw_diff_mask = np.full((100, 100), 255, dtype=np.uint8)
+
+            with self.assertRaisesRegex(RuntimeError, "文字区域.*过大"):
+                engine._select_advanced_erase_allowed_mask(overbroad_mask)
+            with self.assertRaisesRegex(RuntimeError, "受约束的文字区域"):
+                engine._advanced_erase_final_mask(raw_diff_mask, None)
 
     def test_advanced_erase_traditional_backup_is_written_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6604,11 +6681,67 @@ print(json.dumps({
             self.assertEqual(len(metadata_outputs), 1)
             metadata = json.loads(metadata_outputs[0].read_text(encoding="utf-8"))
             self.assertTrue(metadata["rejected"])
-            self.assertGreater(metadata["changed_ratio"], engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
+            self.assertEqual(metadata["changed_ratio"], 0.0)
+            self.assertGreater(metadata["raw_changed_ratio"], engine.ADVANCED_ERASE_MAX_CHANGED_RATIO)
+            self.assertEqual(metadata["mask_mode"], "rejected_region_constraint")
+            self.assertIn("没有找到可约束的文字区域", metadata["error"])
             self.assertEqual(Path(metadata["input_image"]).name, input_images[0].name)
             self.assertEqual(Path(metadata["seedream_output"]).name, seedream_outputs[0].name)
             self.assertEqual(Path(metadata["diff_mask"]).name, diff_outputs[0].name)
             self.assertEqual(Path(metadata["final_mask"]).name, mask_outputs[0].name)
+
+    def test_advanced_erase_overbroad_region_rejection_saves_allowed_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            Image.new("RGB", (80, 80), (255, 255, 255)).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+
+            class FakeClient:
+                async def remove_text(self, *_args, **_kwargs):
+                    return np.full((80, 80, 3), 120, dtype=np.uint8)
+
+            overbroad_mask = np.full((80, 80), 255, dtype=np.uint8)
+            engine._build_advanced_erase_allowed_mask = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: (overbroad_mask, 1)
+            )
+            original_factory = translator_module.create_image_cleanup_client
+            translator_module.create_image_cleanup_client = lambda **_kwargs: FakeClient()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "文字区域异常过大"):
+                    asyncio.run(engine.advanced_erase_page(
+                        project_id="project-a",
+                        session=session,
+                        page_id="page-1.png",
+                        raw_config={
+                            "advanced_erase_provider": "volcengine-ark",
+                            "advanced_erase_base_url": "https://ark.example.com/api/v3/images/generations",
+                            "advanced_erase_model": "custom-seedream-model",
+                            "advanced_erase_api_key": "secret",
+                        },
+                    ))
+            finally:
+                translator_module.create_image_cleanup_client = original_factory
+
+            attempt_dir = engine._advanced_erase_attempt_dir(
+                engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            )
+            allowed_outputs = list(attempt_dir.glob("*.allowed.png"))
+            metadata_outputs = list(attempt_dir.glob("*.json"))
+            self.assertEqual(len(allowed_outputs), 1)
+            self.assertEqual(len(metadata_outputs), 1)
+            metadata = json.loads(metadata_outputs[0].read_text(encoding="utf-8"))
+            self.assertTrue(metadata["rejected"])
+            self.assertEqual(Path(metadata["allowed_mask"]).name, allowed_outputs[0].name)
 
 
 if __name__ == "__main__":

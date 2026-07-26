@@ -141,7 +141,7 @@ class TranslatorEngine:
     IMAGE_CLEANUP_TIMEOUT_SECONDS = 120
     IMAGE_CLEANUP_MAX_EDGE = 1280
     ADVANCED_ERASE_MAX_CHANGED_RATIO = 0.42
-    ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO = 0.62
+    ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO = 0.24
     ADVANCED_ERASE_DEFAULT_PROVIDER = "volcengine-ark"
     ADVANCED_ERASE_DEFAULT_MODEL = "doubao-seedream-5-0-lite-260128"
     ADVANCED_ERASE_MIN_TIMEOUT_SECONDS = 30
@@ -1397,9 +1397,45 @@ class TranslatorEngine:
             page_id,
             session,
         )
-        allowed_mask, mask_mode = self._select_advanced_erase_allowed_mask(region_allowed_mask)
-        if allowed_mask is not None:
-            cv2.imwrite(str(allowed_mask_path), allowed_mask)
+        if region_allowed_mask is not None:
+            cv2.imwrite(str(allowed_mask_path), region_allowed_mask)
+        try:
+            allowed_mask, mask_mode = self._select_advanced_erase_allowed_mask(region_allowed_mask)
+        except RuntimeError as exc:
+            empty_mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+            cv2.imwrite(str(mask_path), empty_mask)
+            self._write_json_file(metadata_path, {
+                "attempt_id": attempt_id,
+                "created_at": self._now_iso(),
+                "page_id": page_id,
+                "source_path": str(source_path),
+                "erase_input_path": str(erase_input_path),
+                "provider": config["advanced_erase_provider"],
+                "api_url": config["advanced_erase_base_url"],
+                "model": config["advanced_erase_model"],
+                "prompt": ADVANCED_IMAGE_ERASE_PROMPT,
+                "changed_ratio": 0.0,
+                "raw_changed_ratio": raw_changed_ratio,
+                "traditional_backup": str(backup_path),
+                "input_image": str(input_path),
+                "seedream_output": str(seedream_output_path),
+                "diff_mask": str(diff_mask_path),
+                "allowed_mask": (
+                    str(allowed_mask_path)
+                    if region_allowed_mask is not None
+                    else ""
+                ),
+                "final_mask": str(mask_path),
+                "allowed_region_count": allowed_region_count,
+                "mask_mode": "rejected_region_constraint",
+                "rejected": True,
+                "error": str(exc),
+            })
+            raise RuntimeError(
+                f"{exc} 调试文件已保存到: {attempt_dir}；"
+                f"输入图: {input_path.name}；AI 返回图: {seedream_output_path.name}；"
+                f"原始差异 mask: {diff_mask_path.name}；最终 mask: {mask_path.name}。"
+            ) from exc
         debug_mask = self._build_advanced_erase_safe_change_mask(
             source_rgb,
             edited_debug_rgb,
@@ -1424,7 +1460,7 @@ class TranslatorEngine:
             "input_image": str(input_path),
             "seedream_output": str(seedream_output_path),
             "diff_mask": str(diff_mask_path),
-            "allowed_mask": str(allowed_mask_path) if allowed_mask is not None else "",
+            "allowed_mask": str(allowed_mask_path),
             "final_mask": str(mask_path),
             "allowed_region_count": allowed_region_count,
             "mask_mode": mask_mode,
@@ -1434,11 +1470,7 @@ class TranslatorEngine:
                 source_rgb,
                 edited_debug_rgb,
                 change_mask=debug_mask,
-                max_changed_ratio=(
-                    self.ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO
-                    if allowed_mask is not None
-                    else self.ADVANCED_ERASE_MAX_CHANGED_RATIO
-                ),
+                max_changed_ratio=self.ADVANCED_ERASE_MAX_REGION_REPLACE_RATIO,
             )
         except RuntimeError as exc:
             self._write_json_file(metadata_path, {
@@ -9087,20 +9119,16 @@ class TranslatorEngine:
             return None, 0
 
         allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        conservative_allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        fallback_allowed = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
         allowed_region_count = 0
         for region in regions:
             if bool(getattr(region, "skip_translation", False)) or bool(getattr(region, "disabled_region", False)):
                 continue
-            region_mask, conservative_mask, fallback_mask = self._build_advanced_erase_region_container_masks(
+            region_mask = self._build_advanced_erase_region_container_mask(
                 source_rgb,
                 region,
             )
             if np.any(region_mask):
                 allowed = cv2.bitwise_or(allowed, region_mask)
-                conservative_allowed = cv2.bitwise_or(conservative_allowed, conservative_mask)
-                fallback_allowed = cv2.bitwise_or(fallback_allowed, fallback_mask)
                 allowed_region_count += 1
 
         if not np.any(allowed):
@@ -9108,94 +9136,32 @@ class TranslatorEngine:
 
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         allowed = cv2.morphologyEx(allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-        conservative_allowed = cv2.morphologyEx(conservative_allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-        fallback_allowed = cv2.morphologyEx(fallback_allowed, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-        if self._advanced_erase_allowed_mask_is_overbroad(allowed):
-            allowed = conservative_allowed
-        if self._advanced_erase_allowed_mask_is_overbroad(allowed):
-            allowed = fallback_allowed
         return allowed, allowed_region_count
 
     def _select_advanced_erase_allowed_mask(
         self,
         region_mask: np.ndarray | None,
-    ) -> tuple[np.ndarray | None, str]:
-        if region_mask is not None and not self._advanced_erase_allowed_mask_is_overbroad(region_mask):
-            return region_mask, "detected_text_regions"
-        return None, "diff_only"
+    ) -> tuple[np.ndarray, str]:
+        if region_mask is None or not np.any(region_mask):
+            raise RuntimeError(
+                "高级擦除没有找到可约束的文字区域，请先完成文字识别，"
+                "或手动补充漏识别的文字框后重试。"
+            )
+        if self._advanced_erase_allowed_mask_is_overbroad(region_mask):
+            raise RuntimeError(
+                "高级擦除识别到的文字区域异常过大，为避免改坏整页已停止。"
+                "请检查文字框，删除覆盖大面积画面的错误框后重试。"
+            )
+        return region_mask, "detected_text_regions"
 
     def _build_advanced_erase_region_container_mask(self, source_rgb: np.ndarray, region: Any) -> np.ndarray:
-        region_mask, _conservative_mask, _fallback_mask = self._build_advanced_erase_region_container_masks(
-            source_rgb,
-            region,
-        )
-        return region_mask
-
-    def _build_advanced_erase_region_container_masks(
-        self,
-        source_rgb: np.ndarray,
-        region: Any,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        fallback_mask = self._build_region_mask(
+        return self._build_region_mask(
             region,
             source_rgb.shape,
             dilation_scale=0.42,
             dilation_min=8,
             dilation_max=64,
         )
-        bright_container = self._detect_bright_text_container_mask(source_rgb, region)
-
-        region_mask = fallback_mask
-        if bright_container is not None and np.any(bright_container):
-            region_mask = cv2.bitwise_or(region_mask, bright_container)
-        conservative_mask = region_mask.copy()
-        fallback_area = max(int(cv2.countNonZero(fallback_mask)), 1)
-        bright_area = int(cv2.countNonZero(bright_container)) if bright_container is not None else 0
-        line_container = None
-        if bright_area < fallback_area * 2 and self._region_allows_line_art_container(region):
-            line_container = self._detect_line_art_text_container_mask(source_rgb, region)
-        if line_container is not None and np.any(line_container):
-            region_mask = cv2.bitwise_or(region_mask, line_container)
-        if not self._advanced_erase_region_mask_is_plausible(region_mask, fallback_mask, source_rgb.shape):
-            region_mask = conservative_mask
-        if not self._advanced_erase_region_mask_is_plausible(region_mask, fallback_mask, source_rgb.shape):
-            region_mask = fallback_mask
-        return region_mask, conservative_mask, fallback_mask
-
-    def _region_allows_line_art_container(self, region: Any) -> bool:
-        style_values = {
-            str(getattr(region, "font_style", "") or "").strip().lower(),
-            str(getattr(region, "auto_font_style", "") or "").strip().lower(),
-            str(getattr(region, "override_font_style", "") or "").strip().lower(),
-        }
-        return bool(style_values.intersection({"sfx", "handwritten", "cartoon"}))
-
-    def _advanced_erase_region_mask_is_plausible(
-        self,
-        mask: np.ndarray,
-        fallback_mask: np.ndarray,
-        image_shape: tuple[int, ...],
-    ) -> bool:
-        mask = self._normalize_advanced_erase_mask(mask, image_shape)
-        area = int(cv2.countNonZero(mask))
-        if area <= 0:
-            return False
-        page_area = max(mask.shape[0] * mask.shape[1], 1)
-        if area > int(page_area * 0.20):
-            return False
-        fallback_area = max(int(cv2.countNonZero(fallback_mask)), 1)
-        if area > max(fallback_area * 80, int(page_area * 0.04)):
-            return False
-        component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        for label in range(1, component_count):
-            comp_area = int(stats[label, cv2.CC_STAT_AREA])
-            comp_width = int(stats[label, cv2.CC_STAT_WIDTH])
-            comp_height = int(stats[label, cv2.CC_STAT_HEIGHT])
-            if comp_area > int(page_area * 0.18):
-                return False
-            if comp_width > int(mask.shape[1] * 0.72) or comp_height > int(mask.shape[0] * 0.72):
-                return False
-        return True
 
     def _advanced_erase_allowed_mask_is_overbroad(self, mask: np.ndarray) -> bool:
         mask = self._normalize_advanced_erase_mask(mask, mask.shape)
@@ -9218,180 +9184,6 @@ class TranslatorEngine:
                 return True
         return False
 
-    def _detect_bright_text_container_mask(self, source_rgb: np.ndarray, region: Any) -> np.ndarray | None:
-        gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
-        roi_info = self._advanced_erase_region_roi(source_rgb.shape, region, pad_scale=2.2, min_pad=28)
-        if roi_info is None:
-            return None
-        roi_x1, roi_y1, roi_x2, roi_y2, local_bbox = roi_info
-        roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
-        if roi.size == 0:
-            return None
-
-        bright = cv2.inRange(roi, 214, 255)
-        kernel_size = max(5, min(23, int(round(min(roi.shape[:2]) * 0.035)) | 1))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-        local_x1, local_y1, local_x2, local_y2 = local_bbox
-        core = np.zeros(roi.shape[:2], dtype=np.uint8)
-        cv2.rectangle(core, (local_x1, local_y1), (local_x2, local_y2), 255, -1)
-        core_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        core = cv2.dilate(core, core_kernel, iterations=1)
-        core_area = max(int(cv2.countNonZero(core)), 1)
-        text_area = max((local_x2 - local_x1) * (local_y2 - local_y1), 1)
-
-        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(bright, connectivity=8)
-        best_label = 0
-        best_score = 0.0
-        roi_area = max(roi.shape[0] * roi.shape[1], 1)
-        for label in range(1, component_count):
-            area = int(stats[label, cv2.CC_STAT_AREA])
-            if area < max(64, int(text_area * 1.15)):
-                continue
-            if area > int(roi_area * 0.94):
-                continue
-            component = (labels == label).astype(np.uint8) * 255
-            overlap = int(cv2.countNonZero(cv2.bitwise_and(component, core)))
-            if overlap < max(8, int(core_area * 0.025)):
-                continue
-            x = int(stats[label, cv2.CC_STAT_LEFT])
-            y = int(stats[label, cv2.CC_STAT_TOP])
-            w = int(stats[label, cv2.CC_STAT_WIDTH])
-            h = int(stats[label, cv2.CC_STAT_HEIGHT])
-            if w < max(4, int((local_x2 - local_x1) * 0.7)) or h < max(4, int((local_y2 - local_y1) * 0.7)):
-                continue
-            score = float(overlap) * 4.0 + float(area)
-            if score > best_score:
-                best_label = label
-                best_score = score
-
-        if best_label <= 0:
-            return None
-
-        component = (labels == best_label).astype(np.uint8) * 255
-        component = self._fill_binary_mask_holes(component)
-        outline_pad = max(3, min(13, int(round(min(roi.shape[:2]) * 0.015)) | 1))
-        outline_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (outline_pad, outline_pad))
-        component = cv2.dilate(component, outline_kernel, iterations=1)
-        mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        mask[roi_y1:roi_y2, roi_x1:roi_x2] = component
-        return mask
-
-    def _detect_line_art_text_container_mask(self, source_rgb: np.ndarray, region: Any) -> np.ndarray | None:
-        gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
-        roi_info = self._advanced_erase_region_roi(source_rgb.shape, region, pad_scale=1.8, min_pad=36)
-        if roi_info is None:
-            return None
-        roi_x1, roi_y1, roi_x2, roi_y2, local_bbox = roi_info
-        roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
-        if roi.size == 0:
-            return None
-
-        blurred = cv2.GaussianBlur(roi, (3, 3), 0)
-        edges = cv2.Canny(blurred, 42, 138)
-        bright_strokes = cv2.inRange(roi, 226, 255)
-        dark_strokes = cv2.inRange(roi, 0, 36)
-        line_mask = cv2.bitwise_or(edges, cv2.bitwise_or(bright_strokes, dark_strokes))
-        local_x1, local_y1, local_x2, local_y2 = local_bbox
-        text_w = max(local_x2 - local_x1, 1)
-        text_h = max(local_y2 - local_y1, 1)
-        text_area = text_w * text_h
-        close_size = max(7, min(37, int(round(max(text_w, text_h) * 0.28)) | 1))
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_size, close_size))
-        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
-        line_mask = cv2.dilate(line_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
-
-        contours, _hierarchy = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-
-        core = np.zeros(roi.shape[:2], dtype=np.uint8)
-        cv2.rectangle(core, (local_x1, local_y1), (local_x2, local_y2), 255, -1)
-        text_center_x = (local_x1 + local_x2) // 2
-        text_center_y = (local_y1 + local_y2) // 2
-        best_contour = None
-        best_rect: tuple[int, int, int, int] | None = None
-        best_score = 0.0
-        roi_area = max(roi.shape[0] * roi.shape[1], 1)
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            area = max(int(w * h), 1)
-            if area < max(96, int(text_area * 1.35)):
-                continue
-            if area > int(roi_area * 0.96):
-                continue
-            if w < int(text_w * 0.85) or h < int(text_h * 0.85):
-                continue
-            contour_mask = np.zeros(roi.shape[:2], dtype=np.uint8)
-            cv2.drawContours(contour_mask, [contour], -1, 255, thickness=-1)
-            overlap = int(cv2.countNonZero(cv2.bitwise_and(contour_mask, core)))
-            bbox_overlap = max(0, min(x + w, local_x2) - max(x, local_x1)) * max(
-                0,
-                min(y + h, local_y2) - max(y, local_y1),
-            )
-            contains_text_center = x <= text_center_x <= x + w and y <= text_center_y <= y + h
-            if overlap <= 0 and bbox_overlap <= 0 and not contains_text_center:
-                continue
-            contour_area = max(float(cv2.contourArea(contour)), 1.0)
-            score = float(overlap) * 5.0 + float(bbox_overlap) * 2.0 + contour_area + float(area) * 0.15
-            if contains_text_center:
-                score += float(text_area)
-            if score > best_score:
-                best_contour = contour
-                best_rect = (x, y, w, h)
-                best_score = score
-
-        if best_contour is None or best_rect is None:
-            return None
-
-        component = np.zeros(roi.shape[:2], dtype=np.uint8)
-        cv2.drawContours(component, [best_contour], -1, 255, thickness=-1)
-        x, y, w, h = best_rect
-        cv2.rectangle(component, (x, y), (x + w, y + h), 255, -1)
-        component = self._fill_binary_mask_holes(component)
-        component = cv2.dilate(component, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
-        mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        mask[roi_y1:roi_y2, roi_x1:roi_x2] = component
-        return mask
-
-    def _advanced_erase_region_roi(
-        self,
-        image_shape: tuple[int, ...],
-        region: Any,
-        pad_scale: float,
-        min_pad: int,
-    ) -> tuple[int, int, int, int, tuple[int, int, int, int]] | None:
-        height, width = image_shape[:2]
-        x1, y1, x2, y2 = self._region_bbox(region)
-        x1 = max(0, min(width - 1, x1))
-        x2 = max(0, min(width, x2))
-        y1 = max(0, min(height - 1, y1))
-        y2 = max(0, min(height, y2))
-        if x2 <= x1 or y2 <= y1:
-            return None
-
-        box_w = max(x2 - x1, 1)
-        box_h = max(y2 - y1, 1)
-        font_size = max(float(getattr(region, "font_size", 0) or 0), 12.0)
-        pad_x = int(max(min_pad, box_w * pad_scale, font_size * 2.5))
-        pad_y = int(max(min_pad, box_h * pad_scale, font_size * 2.5))
-        roi_x1 = max(0, x1 - pad_x)
-        roi_y1 = max(0, y1 - pad_y)
-        roi_x2 = min(width, x2 + pad_x)
-        roi_y2 = min(height, y2 + pad_y)
-        return roi_x1, roi_y1, roi_x2, roi_y2, (x1 - roi_x1, y1 - roi_y1, x2 - roi_x1, y2 - roi_y1)
-
-    def _fill_binary_mask_holes(self, mask: np.ndarray) -> np.ndarray:
-        mask = self._normalize_advanced_erase_mask(mask, mask.shape)
-        padded = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
-        flood = padded.copy()
-        flood_mask = np.zeros((flood.shape[0] + 2, flood.shape[1] + 2), dtype=np.uint8)
-        cv2.floodFill(flood, flood_mask, (0, 0), 255)
-        holes = cv2.bitwise_not(flood)
-        filled = cv2.bitwise_or(padded, holes)
-        return filled[1:-1, 1:-1].astype(np.uint8)
-
     def _advanced_erase_final_mask(
         self,
         raw_diff_mask: np.ndarray,
@@ -9399,7 +9191,9 @@ class TranslatorEngine:
     ) -> np.ndarray:
         raw_diff_mask = self._normalize_advanced_erase_mask(raw_diff_mask, raw_diff_mask.shape)
         if allowed_mask is None:
-            return raw_diff_mask
+            raise RuntimeError(
+                "高级擦除缺少受约束的文字区域，为避免改坏整页已停止。"
+            )
         allowed_mask = self._normalize_advanced_erase_mask(allowed_mask, raw_diff_mask.shape)
         return cv2.bitwise_and(raw_diff_mask, allowed_mask)
 
@@ -9407,7 +9201,7 @@ class TranslatorEngine:
         self,
         source_rgb: np.ndarray,
         edited_rgb: np.ndarray,
-        allowed_mask: np.ndarray | None,
+        allowed_mask: np.ndarray,
         *,
         raw_change_mask: np.ndarray | None = None,
     ) -> np.ndarray:
@@ -9420,11 +9214,7 @@ class TranslatorEngine:
         if not np.any(clipped_mask):
             return clipped_mask
 
-        allowed = (
-            self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
-            if allowed_mask is not None
-            else np.full(source_rgb.shape[:2], 255, dtype=np.uint8)
-        )
+        allowed = self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
         text_mask = self._build_selection_erase_text_mask(
             source_rgb,
             allowed,
@@ -9443,44 +9233,122 @@ class TranslatorEngine:
             if np.any(text_changes):
                 safe_mask = text_changes
 
-        protected_lines = self._build_advanced_erase_structure_protection_mask(source_rgb, allowed)
+        protected_lines = self._build_advanced_erase_structure_protection_mask(
+            source_rgb,
+            allowed,
+            edited_rgb=edited_rgb,
+        )
         if np.any(protected_lines):
             safe_mask = cv2.bitwise_and(safe_mask, cv2.bitwise_not(protected_lines))
+        novel_outlines = self._build_advanced_erase_novel_outline_protection_mask(
+            source_rgb,
+            edited_rgb,
+            allowed,
+        )
+        if np.any(novel_outlines):
+            safe_mask = cv2.bitwise_and(safe_mask, cv2.bitwise_not(novel_outlines))
         return safe_mask
+
+    def _build_advanced_erase_novel_outline_protection_mask(
+        self,
+        source_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+        allowed_mask: np.ndarray,
+    ) -> np.ndarray:
+        edited = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
+        allowed = self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
+        source_gray = cv2.cvtColor(source_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+        edited_gray = cv2.cvtColor(edited[:, :, :3], cv2.COLOR_RGB2GRAY)
+        source_edges = cv2.Canny(source_gray, 40, 120)
+        edited_edges = cv2.Canny(edited_gray, 40, 120)
+
+        min_side = max(1, min(source_rgb.shape[:2]))
+        source_guard_size = max(3, min(15, int(round(min_side * 0.006)) | 1))
+        source_guard = cv2.dilate(
+            source_edges,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (source_guard_size, source_guard_size),
+            ),
+            iterations=1,
+        )
+        novel_edges = cv2.bitwise_and(edited_edges, cv2.bitwise_not(source_guard))
+        novel_edges = cv2.bitwise_and(novel_edges, allowed)
+        novel_edges = cv2.morphologyEx(
+            novel_edges,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+
+        contours, _hierarchy = cv2.findContours(
+            novel_edges,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        protected = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        page_area = max(source_rgb.shape[0] * source_rgb.shape[1], 1)
+        minimum_perimeter = max(24.0, float(min_side) * 0.08)
+        minimum_extent = max(8, int(round(min_side * 0.025)))
+        protection_width = max(5, min(17, int(round(min_side * 0.007)) | 1))
+        for contour in contours:
+            perimeter = float(cv2.arcLength(contour, True))
+            area = float(abs(cv2.contourArea(contour)))
+            _x, _y, width, height = cv2.boundingRect(contour)
+            if perimeter < minimum_perimeter:
+                continue
+            if width < minimum_extent or height < minimum_extent:
+                continue
+            if area < max(48.0, float(page_area) * 0.0002):
+                continue
+            cv2.drawContours(
+                protected,
+                [contour],
+                -1,
+                255,
+                thickness=protection_width,
+                lineType=cv2.LINE_AA,
+            )
+        return cv2.bitwise_and(protected, allowed)
 
     def _build_advanced_erase_structure_protection_mask(
         self,
         source_rgb: np.ndarray,
         allowed_mask: np.ndarray,
+        *,
+        edited_rgb: np.ndarray | None = None,
     ) -> np.ndarray:
         allowed = self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
-        gray = cv2.cvtColor(source_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 48, 144)
         longest_side = max(source_rgb.shape[:2])
         minimum_length = max(28, int(round(longest_side * 0.11)))
-        lines = cv2.HoughLinesP(
-            edges,
-            1,
-            np.pi / 180.0,
-            threshold=max(18, int(round(minimum_length * 0.55))),
-            minLineLength=minimum_length,
-            maxLineGap=max(4, int(round(longest_side * 0.004))),
-        )
         protected = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
-        if lines is None:
-            return protected
-
         thickness = max(5, min(13, int(round(min(source_rgb.shape[:2]) * 0.004)) | 1))
-        for raw_line in lines[:, 0]:
-            x1, y1, x2, y2 = [int(value) for value in raw_line]
-            delta_x = abs(x2 - x1)
-            delta_y = abs(y2 - y1)
-            length = max(float(np.hypot(delta_x, delta_y)), 1.0)
-            is_horizontal = delta_y <= max(2, int(round(length * 0.08)))
-            is_vertical = delta_x <= max(2, int(round(length * 0.08)))
-            if not (is_horizontal or is_vertical):
+        candidates = [source_rgb]
+        if edited_rgb is not None:
+            candidates.append(self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb))
+        for candidate_rgb in candidates:
+            gray = cv2.cvtColor(candidate_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+            edges = cv2.Canny(gray, 48, 144)
+            lines = cv2.HoughLinesP(
+                edges,
+                1,
+                np.pi / 180.0,
+                threshold=max(18, int(round(minimum_length * 0.55))),
+                minLineLength=minimum_length,
+                maxLineGap=max(4, int(round(longest_side * 0.004))),
+            )
+            if lines is None:
                 continue
-            cv2.line(protected, (x1, y1), (x2, y2), 255, thickness)
+            for raw_line in lines[:, 0]:
+                x1, y1, x2, y2 = [int(value) for value in raw_line]
+                delta_x = abs(x2 - x1)
+                delta_y = abs(y2 - y1)
+                length = max(float(np.hypot(delta_x, delta_y)), 1.0)
+                is_horizontal = delta_y <= max(2, int(round(length * 0.08)))
+                is_vertical = delta_x <= max(2, int(round(length * 0.08)))
+                if not (is_horizontal or is_vertical):
+                    continue
+                cv2.line(protected, (x1, y1), (x2, y2), 255, thickness)
         return cv2.bitwise_and(protected, allowed)
 
     def _threshold_advanced_erase_diff(self, diff: np.ndarray, threshold: int) -> np.ndarray:
@@ -9512,7 +9380,7 @@ class TranslatorEngine:
         blur_size = max(3, min(17, int(round(min_side * 0.006)) | 1))
         mask = self._normalize_advanced_erase_mask(mask, mask.shape)
         alpha = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-        alpha[mask > 0] = 255
+        alpha = cv2.bitwise_and(alpha, mask)
         alpha[alpha < 4] = 0
         return alpha.astype(np.uint8)
 

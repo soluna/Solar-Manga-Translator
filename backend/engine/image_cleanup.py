@@ -16,21 +16,17 @@ from PIL import Image
 SEEDREAM_IMAGE_API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 DEFAULT_IMAGE_CLEANUP_PROMPT = "去除覆盖在图片上的文字"
 ADVANCED_IMAGE_ERASE_PROMPT = """
-Remove all visible text from this manga/comic page.
+Remove all existing text from this manga/comic page, including text inside
+speech bubbles or boxes, borderless text over artwork, sound effects, and
+horizontal, vertical, diagonal, curved, handwritten, or stylized lettering.
 
-Remove dialogue and captions inside existing speech bubbles or boxes, borderless
-text printed directly over artwork, sound effects, handwriting, and decorative
-lettering. Text may be horizontal, vertical, diagonal, curved, small, large,
-outlined, or stylized.
+Reconstruct only the background hidden by the removed text. Preserve the original
+canvas, artwork, characters, objects, panel borders, existing speech bubbles,
+caption boxes, colors, textures, and layout unchanged.
 
-Where text is removed, reconstruct the hidden background naturally from the
-surrounding artwork, colors, textures, tones, and line art. Do not replace an
-illustrated or colored area with flat white.
-
-Preserve all non-text artwork and every existing speech-bubble outline, caption
-box, panel border, character, object, and page layout. Do not create any new
-speech bubble, caption box, rectangle, border, text, symbol, or decoration.
-Do not translate, crop, rotate, or resize. Return only the cleaned image.
+Do not create a new speech bubble, box, border, text, symbol, or decoration. Do
+not crop, rotate, or resize. Return only the cleaned image at exactly the
+original size.
 """.strip()
 ADVANCED_IMAGE_SELECTION_ERASE_PROMPT = """
 Only edit the visible user-selected parts of this manga page; the white area

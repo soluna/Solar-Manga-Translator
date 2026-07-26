@@ -228,12 +228,6 @@ class TranslatorEngine:
         )
         self.rerender_cache_root.mkdir(parents=True, exist_ok=True)
         self.projects_root.mkdir(parents=True, exist_ok=True)
-        self.active_sessions: dict[str, str] = {}
-        self.active_sessions_lock = threading.Lock()
-        # Page commands mutate project-level override maps and persistence
-        # manifests, so commands for different pages in the same project must
-        # still be serialized with one another.
-        self.project_command_locks: dict[str, asyncio.Lock] = {}
         self.validated_page_base_images: set[tuple[str, int, int]] = set()
         self.validated_page_base_images_lock = threading.Lock()
 
@@ -1169,8 +1163,6 @@ class TranslatorEngine:
             "snapshot_count": len(manifests),
             "glossary_count": len(self._normalize_project_glossary(session.get("project_glossary")).get("entries") or []),
             "archived": bool(session.get("project_archived", False)),
-            "is_busy": self.is_session_busy(project_id),
-            "busy_action": self.get_session_busy_action(project_id),
         }
 
     def _write_project_index(self, summaries: list[dict[str, Any]]) -> None:
@@ -2282,48 +2274,7 @@ class TranslatorEngine:
             )
 
     def list_projects(self) -> list[dict[str, Any]]:
-        items = self.project_workspace.rebuild_project_index()
-        for item in items:
-            project_id = str(item.get("project_id") or "")
-            item["is_busy"] = self.is_session_busy(project_id)
-            item["busy_action"] = self.get_session_busy_action(project_id)
-        return items
-
-    def try_mark_session_busy(self, project_id: str, action: str) -> bool:
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            return False
-        normalized_action = str(action or "translate").strip().lower() or "translate"
-        with self.active_sessions_lock:
-            if normalized_project_id in self.active_sessions:
-                return False
-            self.active_sessions[normalized_project_id] = normalized_action
-        return True
-
-    def mark_session_busy(self, project_id: str, action: str) -> None:
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            return
-        normalized_action = str(action or "translate").strip().lower() or "translate"
-        with self.active_sessions_lock:
-            self.active_sessions[normalized_project_id] = normalized_action
-
-    def clear_session_busy(self, project_id: str) -> None:
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            return
-        with self.active_sessions_lock:
-            self.active_sessions.pop(normalized_project_id, None)
-
-    def is_session_busy(self, project_id: str) -> bool:
-        normalized_project_id = str(project_id or "").strip()
-        with self.active_sessions_lock:
-            return normalized_project_id in self.active_sessions
-
-    def get_session_busy_action(self, project_id: str) -> str:
-        normalized_project_id = str(project_id or "").strip()
-        with self.active_sessions_lock:
-            return self.active_sessions.get(normalized_project_id, "")
+        return self.project_workspace.rebuild_project_index()
 
     def list_project_snapshots(self, project_id: str) -> list[dict[str, Any]]:
         return self._format_project_snapshots(
@@ -2663,8 +2614,6 @@ class TranslatorEngine:
 
     def delete_project(self, project_id: str) -> None:
         normalized_project_id = self._validated_project_id(project_id)
-        if self.is_session_busy(project_id):
-            raise RuntimeError("该项目仍有任务在运行，请等待识别/翻译完成后再删除。")
         project_dir = self._project_dir(normalized_project_id)
         output_dir = self._project_output_dir(normalized_project_id)
         rerender_cache_dir = self._rerender_cache_dir(normalized_project_id)
@@ -5220,67 +5169,65 @@ class TranslatorEngine:
                     session,
                     str(command.get("region_id") or "").strip(),
                 )
-        project_lock = self.project_command_locks.setdefault(project_id, asyncio.Lock())
-        async with project_lock:
-            previous_session = copy.deepcopy(session)
-            rollback_files = {
-                path: path.read_bytes() if path.is_file() else None
-                for path in (
-                    self._project_page_document_path(project_id, page_id),
-                    self._project_manifest_path(project_id),
-                )
-            }
-            try:
-                return await self._apply_page_commands_once(
-                    project_id=project_id,
-                    session=session,
-                    page_id=page_id,
-                    raw_config=raw_config,
-                    commands=commands,
-                    expected_revision=expected_revision,
-                )
-            except BaseException:
-                session.clear()
-                session.update(previous_session)
-                for path, previous_contents in rollback_files.items():
-                    try:
-                        if previous_contents is None:
-                            path.unlink(missing_ok=True)
-                            continue
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        fd, temporary_path = tempfile.mkstemp(
-                            prefix=f".{path.name}.",
-                            suffix=".rollback",
-                            dir=str(path.parent),
-                        )
-                        try:
-                            with os.fdopen(fd, "wb") as handle:
-                                handle.write(previous_contents)
-                                handle.flush()
-                                os.fsync(handle.fileno())
-                            os.replace(temporary_path, path)
-                        finally:
-                            with contextlib.suppress(FileNotFoundError):
-                                os.remove(temporary_path)
-                    except OSError:
-                        logger.exception(
-                            "Failed to restore page-command persistence file. project=%s page=%s path=%s",
-                            project_id,
-                            page_id,
-                            path,
-                        )
+        previous_session = copy.deepcopy(session)
+        rollback_files = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in (
+                self._project_page_document_path(project_id, page_id),
+                self._project_manifest_path(project_id),
+            )
+        }
+        try:
+            return await self._apply_page_commands_once(
+                project_id=project_id,
+                session=session,
+                page_id=page_id,
+                raw_config=raw_config,
+                commands=commands,
+                expected_revision=expected_revision,
+            )
+        except BaseException:
+            session.clear()
+            session.update(previous_session)
+            for path, previous_contents in rollback_files.items():
                 try:
-                    self.project_workspace.garbage_collect_snapshot_blobs(
-                        project_id,
+                    if previous_contents is None:
+                        path.unlink(missing_ok=True)
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    fd, temporary_path = tempfile.mkstemp(
+                        prefix=f".{path.name}.",
+                        suffix=".rollback",
+                        dir=str(path.parent),
                     )
-                    self.project_workspace.rebuild_project_index()
-                except Exception:
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(previous_contents)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.replace(temporary_path, path)
+                    finally:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.remove(temporary_path)
+                except OSError:
                     logger.exception(
-                        "Failed to rebuild project persistence after page-command rollback. project=%s page=%s",
+                        "Failed to restore page-command persistence file. project=%s page=%s path=%s",
                         project_id,
                         page_id,
+                        path,
                     )
-                raise
+            try:
+                self.project_workspace.garbage_collect_snapshot_blobs(
+                    project_id,
+                )
+                self.project_workspace.rebuild_project_index()
+            except Exception:
+                logger.exception(
+                    "Failed to rebuild project persistence after page-command rollback. project=%s page=%s",
+                    project_id,
+                    page_id,
+                )
+            raise
 
     async def _apply_page_commands_once(
         self,

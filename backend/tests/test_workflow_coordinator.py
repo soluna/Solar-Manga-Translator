@@ -2176,15 +2176,6 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(main, "workflow_coordinator", coordinator),
             mock.patch.object(
-                main.translator_engine,
-                "try_mark_session_busy",
-                return_value=True,
-            ),
-            mock.patch.object(
-                main.translator_engine,
-                "clear_session_busy",
-            ) as clear_busy,
-            mock.patch.object(
                 main.task_manager,
                 "start",
                 side_effect=capture_task_start,
@@ -2223,16 +2214,9 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             progress_events,
             [{"event": "status", "message": "adapter running"}],
         )
-        clear_busy.assert_called_once_with("project-a")
 
-    def test_main_rejects_invalid_command_before_busy_or_task_start(self) -> None:
-        with (
-            mock.patch.object(
-                main.translator_engine,
-                "try_mark_session_busy",
-            ) as mark_busy,
-            mock.patch.object(main.task_manager, "start") as start_task,
-        ):
+    def test_main_rejects_invalid_command_before_task_start(self) -> None:
+        with mock.patch.object(main.task_manager, "start") as start_task:
             with self.assertRaises(ValueError):
                 main.start_translation_task(
                     session_id="project-a",
@@ -2242,7 +2226,6 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     target_stored_name="",
                 )
 
-        mark_busy.assert_not_called()
         start_task.assert_not_called()
 
     def test_websocket_revision_aliases_are_compatible_and_conflicts_fail(self) -> None:
@@ -2268,22 +2251,11 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-    def test_main_releases_busy_when_task_registration_fails(self) -> None:
-        with (
-            mock.patch.object(
-                main.translator_engine,
-                "try_mark_session_busy",
-                return_value=True,
-            ),
-            mock.patch.object(
-                main.translator_engine,
-                "clear_session_busy",
-            ) as clear_busy,
-            mock.patch.object(
-                main.task_manager,
-                "start",
-                side_effect=RuntimeError("registration failed"),
-            ),
+    def test_main_propagates_task_registration_failure(self) -> None:
+        with mock.patch.object(
+            main.task_manager,
+            "start",
+            side_effect=RuntimeError("registration failed"),
         ):
             with self.assertRaisesRegex(RuntimeError, "registration failed"):
                 main.start_translation_task(
@@ -2292,8 +2264,6 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     config={},
                     target_stored_name="",
                 )
-
-        clear_busy.assert_called_once_with("project-a")
 
     def test_project_command_is_frozen_and_canonicalizes_supported_actions(self) -> None:
         for action in WORKFLOW_ACTIONS:

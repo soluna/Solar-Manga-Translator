@@ -439,6 +439,55 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["code"], "page_revision_conflict")
         self.assertEqual(response.json()["detail"]["actual_revision"], 4)
 
+    def test_page_command_uses_the_same_project_lease_as_long_running_tasks(self) -> None:
+        project_id = "leased-page-command-api"
+        page_id = "0001.png"
+        main.SESSIONS[project_id] = {"source_images": [{"stored_name": page_id}]}
+        apply_commands = mock.AsyncMock(return_value={"ok": True})
+        try:
+            with (
+                mock.patch.object(main, "API_TOKEN", ""),
+                mock.patch.object(
+                    main.translator_engine,
+                    "apply_page_commands",
+                    new=apply_commands,
+                ),
+                main.task_manager.lease(project_id, "translate"),
+            ):
+                response = self.client.post(
+                    f"/api/pages/{project_id}/{page_id}/commands",
+                    json={"commands": [{"type": "update_translation"}]},
+                )
+        finally:
+            main.SESSIONS.pop(project_id, None)
+
+        self.assertEqual(response.status_code, 409)
+        apply_commands.assert_not_awaited()
+
+    def test_project_list_busy_state_is_decorated_from_task_manager(self) -> None:
+        project_id = "busy-project-view-api"
+        with (
+            mock.patch.object(main, "API_TOKEN", ""),
+            mock.patch.object(
+                main.translator_engine,
+                "list_projects",
+                return_value=[{"project_id": project_id, "title": "Busy"}],
+            ),
+            main.task_manager.lease(project_id, "brush-edit"),
+        ):
+            response = self.client.get("/api/projects")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["projects"][0],
+            {
+                "project_id": project_id,
+                "title": "Busy",
+                "is_busy": True,
+                "busy_action": "brush-edit",
+            },
+        )
+
     def test_legacy_manual_region_mutations_invalidate_the_current_final_artifact(self) -> None:
         image_bytes = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 255, 255)).save(
@@ -692,7 +741,7 @@ class ApiSecurityTests(unittest.TestCase):
 
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(terminal_events[-1]["event"], "cancelled")
-            self.assertFalse(main.translator_engine.is_session_busy(project_id))
+            self.assertFalse(main.task_manager.project_busy_snapshot(project_id)["is_busy"])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -34,6 +35,36 @@ class TaskNotFoundError(KeyError):
 
 class ProjectTaskConflictError(RuntimeError):
     pass
+
+
+class ProjectLease:
+    """Opaque, identity-safe ownership handle for one project's mutations."""
+
+    __slots__ = ("_manager", "_project_id", "_token", "_released")
+
+    def __init__(self, manager: TaskManager, project_id: str, token: str) -> None:
+        self._manager = manager
+        self._project_id = project_id
+        self._token = token
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._manager._release_lease(self._project_id, self._token)
+
+    def __enter__(self) -> ProjectLease:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.release()
+
+    async def __aenter__(self) -> ProjectLease:
+        return self
+
+    async def __aexit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.release()
 
 
 def utc_now_iso() -> str:
@@ -129,6 +160,7 @@ class ManagedTask:
     events: deque[TaskEvent] = field(default_factory=lambda: deque(maxlen=500))
     changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     worker: asyncio.Task[None] | None = None
+    lease: ProjectLease | None = None
 
 
 class TaskManager:
@@ -144,6 +176,37 @@ class TaskManager:
         self._max_retained_tasks = max(10, max_retained_tasks)
         self._tasks: dict[str, ManagedTask] = {}
         self._project_tasks: dict[str, str] = {}
+        self._lease_lock = threading.Lock()
+        self._project_leases: dict[str, tuple[str, str]] = {}
+
+    def lease(self, project_id: str, action: str) -> ProjectLease:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise ValueError("project_id is required")
+        normalized_action = str(action or "project-write").strip().lower() or "project-write"
+        token = uuid.uuid4().hex
+        with self._lease_lock:
+            if normalized_project_id in self._project_leases:
+                raise ProjectTaskConflictError(
+                    f"Project {normalized_project_id} already has an active lease"
+                )
+            self._project_leases[normalized_project_id] = (token, normalized_action)
+        return ProjectLease(self, normalized_project_id, token)
+
+    def project_busy_snapshot(self, project_id: str) -> dict[str, Any]:
+        normalized_project_id = str(project_id or "").strip()
+        with self._lease_lock:
+            record = self._project_leases.get(normalized_project_id)
+        return {
+            "is_busy": record is not None,
+            "busy_action": record[1] if record is not None else "",
+        }
+
+    def _release_lease(self, project_id: str, token: str) -> None:
+        with self._lease_lock:
+            record = self._project_leases.get(project_id)
+            if record is not None and record[0] == token:
+                self._project_leases.pop(project_id, None)
 
     def start(
         self,
@@ -153,29 +216,38 @@ class TaskManager:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        existing_id = self._project_tasks.get(project_id)
-        if existing_id:
-            existing = self._tasks.get(existing_id)
-            if existing and existing.status not in TERMINAL_TASK_STATUSES:
-                raise ProjectTaskConflictError(
-                    f"Project {project_id} already has task {existing_id}"
-                )
-
-        self._prune_completed_tasks()
-        task_id = uuid.uuid4().hex
-        managed = ManagedTask(
-            task_id=task_id,
-            project_id=project_id,
-            action=action,
-            metadata=dict(metadata or {}),
-        )
-        self._tasks[task_id] = managed
-        self._project_tasks[project_id] = task_id
-        managed.worker = asyncio.create_task(
-            self._execute(managed, runner),
-            name=f"project-task-{task_id}",
-        )
-        return task_id
+        normalized_project_id = str(project_id or "").strip()
+        lease = self.lease(normalized_project_id, action)
+        task_id = ""
+        worker_coro = None
+        try:
+            self._prune_completed_tasks()
+            task_id = uuid.uuid4().hex
+            managed = ManagedTask(
+                task_id=task_id,
+                project_id=normalized_project_id,
+                action=action,
+                metadata=dict(metadata or {}),
+                lease=lease,
+            )
+            self._tasks[task_id] = managed
+            self._project_tasks[normalized_project_id] = task_id
+            worker_coro = self._execute(managed, runner)
+            managed.worker = asyncio.create_task(
+                worker_coro,
+                name=f"project-task-{task_id}",
+            )
+            managed.worker.add_done_callback(lambda _worker: lease.release())
+            return task_id
+        except BaseException:
+            if worker_coro is not None:
+                worker_coro.close()
+            if task_id:
+                self._tasks.pop(task_id, None)
+                if self._project_tasks.get(normalized_project_id) == task_id:
+                    self._project_tasks.pop(normalized_project_id, None)
+            lease.release()
+            raise
 
     def snapshot(self, task_id: str, *, include_events: bool = True) -> dict[str, Any]:
         managed = self._require(task_id)
@@ -205,7 +277,11 @@ class TaskManager:
     async def wait(self, task_id: str) -> dict[str, Any]:
         managed = self._require(task_id)
         if managed.worker:
-            await managed.worker
+            try:
+                await managed.worker
+            except asyncio.CancelledError:
+                if managed.status != "cancelled":
+                    raise
         return self.snapshot(task_id)
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
@@ -224,6 +300,11 @@ class TaskManager:
         )
         if managed.worker:
             managed.worker.cancel()
+            await asyncio.sleep(0)
+            if managed.worker.cancelled() and managed.status not in TERMINAL_TASK_STATUSES:
+                await self._complete_cancellation(managed)
+            if managed.worker.cancelled() and managed.lease is not None:
+                managed.lease.release()
         return self.snapshot(task_id)
 
     async def subscribe(
@@ -252,6 +333,28 @@ class TaskManager:
                 cursor = max(cursor, int(event.get("sequence") or 0))
                 yield event
 
+    async def _complete_cancellation(self, managed: ManagedTask) -> None:
+        if managed.status == "cancelled":
+            return
+        managed.status = "cancelled"
+        managed.updated_at = utc_now_iso()
+        public_error = {
+            "code": "TASK_CANCELLED",
+            "message": "任务已停止。",
+            "action": "可以调整设置后重新开始。",
+            "retryable": True,
+            "technical_message": "",
+        }
+        await self._publish(
+            managed,
+            {
+                "event": "cancelled",
+                "task_status": "cancelled",
+                "message": public_error["message"],
+                "error": public_error,
+            },
+        )
+
     async def _execute(self, managed: ManagedTask, runner: TaskRunner) -> None:
         managed.status = "running"
         managed.updated_at = utc_now_iso()
@@ -268,24 +371,7 @@ class TaskManager:
         try:
             result = await runner(lambda event: self._publish(managed, event))
         except asyncio.CancelledError:
-            managed.status = "cancelled"
-            managed.updated_at = utc_now_iso()
-            public_error = {
-                "code": "TASK_CANCELLED",
-                "message": "任务已停止。",
-                "action": "可以调整设置后重新开始。",
-                "retryable": True,
-                "technical_message": "",
-            }
-            await self._publish(
-                managed,
-                {
-                    "event": "cancelled",
-                    "task_status": "cancelled",
-                    "message": public_error["message"],
-                    "error": public_error,
-                },
-            )
+            await self._complete_cancellation(managed)
         except Exception as exc:
             managed.status = "failed"
             managed.updated_at = utc_now_iso()
@@ -317,8 +403,12 @@ class TaskManager:
                 },
             )
         finally:
-            async with managed.changed:
-                managed.changed.notify_all()
+            try:
+                async with managed.changed:
+                    managed.changed.notify_all()
+            finally:
+                if managed.lease is not None:
+                    managed.lease.release()
 
     async def _publish(self, managed: ManagedTask, event: TaskEvent) -> None:
         managed.sequence += 1

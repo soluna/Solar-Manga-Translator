@@ -91,13 +91,7 @@ class WorkflowContractTests(unittest.TestCase):
 
         for rejected_action in rejected_actions:
             with self.subTest(action=repr(rejected_action)):
-                with (
-                    mock.patch.object(
-                        main.translator_engine,
-                        "try_mark_session_busy",
-                    ) as mark_busy,
-                    mock.patch.object(main.task_manager, "start") as start_task,
-                ):
+                with mock.patch.object(main.task_manager, "start") as start_task:
                     with self.assertRaises(UnsupportedWorkflowActionError):
                         main.start_translation_task(
                             session_id="contract-test-project",
@@ -107,7 +101,6 @@ class WorkflowContractTests(unittest.TestCase):
                             target_stored_name="",
                         )
 
-                    mark_busy.assert_not_called()
                     start_task.assert_not_called()
 
 

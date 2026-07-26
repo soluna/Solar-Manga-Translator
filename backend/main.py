@@ -370,13 +370,51 @@ def get_or_restore_session(project_id: str) -> dict[str, Any]:
     return session
 
 
+def decorate_project_busy_state(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload.get("project"), dict):
+        return payload
+    project = dict(payload.get("project") or {})
+    project.update(task_manager.project_busy_snapshot(project_id))
+    return {**payload, "project": project}
+
+
+def build_client_project_view(project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+    return decorate_project_busy_state(
+        project_id,
+        translator_engine.build_client_session_payload(project_id, session),
+    )
+
+
+def list_project_views() -> list[dict[str, Any]]:
+    return [
+        {
+            **project,
+            **task_manager.project_busy_snapshot(str(project.get("project_id") or "")),
+        }
+        for project in translator_engine.list_projects()
+    ]
+
+
 workflow_preparation_adapter = TranslatorEngineWorkflowAdapter(translator_engine)
 workflow_coordinator = WorkflowCoordinator(
     project_loader=get_or_restore_session,
-    project_view_builder=translator_engine.build_client_session_payload,
+    project_view_builder=build_client_project_view,
     project_workspace=translator_engine.project_workspace,
     preparation_adapter=workflow_preparation_adapter,
 )
+
+
+@contextlib.contextmanager
+def project_write_lease(project_id: str, action: str):
+    try:
+        lease = task_manager.lease(project_id, action)
+    except ProjectTaskConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="该项目已有任务在运行，请等待当前任务完成。",
+        ) from exc
+    with lease:
+        yield lease
 
 
 def preserve_single_upload_name(temp_path: Path, target_dir: Path, filename: str) -> str:
@@ -735,7 +773,7 @@ async def get_font_file(source: str, font_name: str):
 
 @app.get("/api/projects")
 async def list_projects():
-    return {"projects": translator_engine.list_projects()}
+    return {"projects": list_project_views()}
 
 
 @app.patch("/api/projects/{project_id}")
@@ -743,36 +781,43 @@ async def update_project(project_id: str, payload: dict[str, Any] | None = None)
     session = get_or_restore_session(project_id)
 
     payload = payload or {}
-    summary = translator_engine.update_project_metadata(
-        project_id=project_id,
-        session=session,
-        title=payload.get("title"),
-        note=payload.get("note"),
-        review_mode=payload.get("review_mode"),
-    )
-    return {"project": summary}
+    with project_write_lease(project_id, "project-metadata"):
+        summary = translator_engine.update_project_metadata(
+            project_id=project_id,
+            session=session,
+            title=payload.get("title"),
+            note=payload.get("note"),
+            review_mode=payload.get("review_mode"),
+        )
+    return {
+        "project": {
+            **summary,
+            **task_manager.project_busy_snapshot(project_id),
+        }
+    }
 
 
 @app.post("/api/projects/{project_id}/restore")
 async def restore_project(project_id: str):
-    if translator_engine.is_session_busy(project_id):
-        session = get_or_restore_session(project_id)
-        return translator_engine.build_client_session_payload(project_id, session)
     try:
-        session = translator_engine.restore_project_session(project_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ProjectStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    SESSIONS[project_id] = session
-    return translator_engine.build_client_session_payload(project_id, session)
+        lease = task_manager.lease(project_id, "project-restore")
+    except ProjectTaskConflictError:
+        session = get_or_restore_session(project_id)
+        return build_client_project_view(project_id, session)
+    with lease:
+        try:
+            session = translator_engine.restore_project_session(project_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProjectStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        SESSIONS[project_id] = session
+    return build_client_project_view(project_id, session)
 
 
 @app.post("/api/projects/{project_id}/base-images")
 async def upload_project_base_images(project_id: str, file: UploadFile = File(...)):
     session = get_or_restore_session(project_id)
-    if translator_engine.is_session_busy(project_id):
-        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再补充无字图。")
 
     filename = Path(file.filename or "upload").name
     if not filename.lower().endswith(ALLOWED_EXTENSIONS):
@@ -781,31 +826,32 @@ async def upload_project_base_images(project_id: str, file: UploadFile = File(..
     upload_token = str(uuid.uuid4())
     file_path = TEMP_UPLOADS_DIR / f"{upload_token}_{filename}"
     extract_dir = TEMP_EXTRACTED_DIR / f"{project_id}_base_{upload_token}"
-    extract_dir.mkdir(exist_ok=True)
 
-    try:
-        await asyncio.to_thread(copy_upload_to_path, file, file_path)
-        if filename.lower().endswith((".zip", ".cbz")):
-            images = await asyncio.to_thread(extract_archive, str(file_path), str(extract_dir))
-        else:
-            images = [preserve_single_upload_name(file_path, extract_dir, filename)]
-        if not images:
-            raise ValueError("文件中没有找到有效的受支持图片。")
-        result = translator_engine.attach_base_images(project_id, session, images)
-    except UploadTooLargeError:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Failed to attach base images. project_id=%s", project_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            file_path.unlink()
-        shutil.rmtree(extract_dir, ignore_errors=True)
+    with project_write_lease(project_id, "base-image-upload"):
+        try:
+            extract_dir.mkdir(exist_ok=True)
+            await asyncio.to_thread(copy_upload_to_path, file, file_path)
+            if filename.lower().endswith((".zip", ".cbz")):
+                images = await asyncio.to_thread(extract_archive, str(file_path), str(extract_dir))
+            else:
+                images = [preserve_single_upload_name(file_path, extract_dir, filename)]
+            if not images:
+                raise ValueError("文件中没有找到有效的受支持图片。")
+            result = translator_engine.attach_base_images(project_id, session, images)
+        except UploadTooLargeError:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Failed to attach base images. project_id=%s", project_id)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                file_path.unlink()
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
     return {
-        **translator_engine.build_client_session_payload(project_id, session),
+        **build_client_project_view(project_id, session),
         "base_image_upload": result,
     }
 
@@ -829,18 +875,17 @@ async def save_project_glossary(project_id: str, payload: dict[str, Any] | None 
     entries = payload.get("entries") or []
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
-    glossary = translator_engine.save_project_glossary(project_id, session, entries)
+    with project_write_lease(project_id, "glossary-save"):
+        glossary = translator_engine.save_project_glossary(project_id, session, entries)
     return {"glossary": glossary}
 
 
 @app.post("/api/projects/{project_id}/glossary/extract")
 async def extract_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(project_id)
-    if translator_engine.is_session_busy(project_id):
-        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再提取专有名词。")
-
-    config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
-    glossary = await translator_engine.extract_project_glossary(project_id, session, config, force=True)
+    with project_write_lease(project_id, "glossary-extract"):
+        config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
+        glossary = await translator_engine.extract_project_glossary(project_id, session, config, force=True)
     return {
         "glossary": glossary,
         "message": str(glossary.get("extract_message") or ""),
@@ -864,16 +909,14 @@ async def apply_project_glossary(project_id: str, payload: dict[str, Any] | None
     entries = payload.get("entries") or []
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
-    if not translator_engine.try_mark_session_busy(project_id, "glossary"):
-        raise HTTPException(status_code=409, detail="该项目当前有任务在运行，请稍后再应用专有名词。")
     try:
-        return await translator_engine.apply_project_glossary(project_id, session, entries)
+        with project_write_lease(project_id, "glossary"):
+            result = await translator_engine.apply_project_glossary(project_id, session, entries)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        translator_engine.clear_session_busy(project_id)
+    return decorate_project_busy_state(project_id, result)
 
 
 @app.get("/api/projects/{project_id}/snapshots")
@@ -883,26 +926,28 @@ async def list_project_snapshots(project_id: str):
 
 @app.post("/api/projects/{project_id}/snapshots/{snapshot_id}/restore")
 async def restore_project_snapshot(project_id: str, snapshot_id: str):
-    try:
-        restored_project_id, session = translator_engine.restore_snapshot_as_project(project_id, snapshot_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ProjectStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    with project_write_lease(project_id, "snapshot-restore"):
+        try:
+            restored_project_id, session = translator_engine.restore_snapshot_as_project(project_id, snapshot_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProjectStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     SESSIONS[restored_project_id] = session
-    return translator_engine.build_client_session_payload(restored_project_id, session)
+    return build_client_project_view(restored_project_id, session)
 
 
 @app.post("/api/projects/{project_id}/snapshots/{snapshot_id}/pin")
 async def pin_project_snapshot(project_id: str, snapshot_id: str, payload: dict[str, Any] | None = None):
     payload = payload or {}
     try:
-        snapshots = translator_engine.set_snapshot_pinned(
-            project_id=project_id,
-            snapshot_id=snapshot_id,
-            pinned=bool(payload.get("pinned", True)),
-        )
+        with project_write_lease(project_id, "snapshot-pin"):
+            snapshots = translator_engine.set_snapshot_pinned(
+                project_id=project_id,
+                snapshot_id=snapshot_id,
+                pinned=bool(payload.get("pinned", True)),
+            )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ProjectStateError as exc:
@@ -915,7 +960,8 @@ async def pin_project_snapshot(project_id: str, snapshot_id: str, payload: dict[
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
     try:
-        translator_engine.delete_project(project_id)
+        with project_write_lease(project_id, "project-delete"):
+            translator_engine.delete_project(project_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     SESSIONS.pop(project_id, None)
@@ -927,12 +973,14 @@ async def inspect_style_regions(session_id: str, payload: dict[str, Any] | None 
     session = get_or_restore_session(session_id)
     payload = payload or {}
 
-    return await translator_engine.inspect_style_regions(
-        session_id=session_id,
-        session=session,
-        raw_config=payload.get("config", {}),
-        target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
-    )
+    with project_write_lease(session_id, "style-inspection"):
+        result = await translator_engine.inspect_style_regions(
+            session_id=session_id,
+            session=session,
+            raw_config=payload.get("config", {}),
+            target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
+        )
+    return decorate_project_busy_state(session_id, result)
 
 
 @app.post("/api/review-regions/{session_id}")
@@ -940,12 +988,14 @@ async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None
     session = get_or_restore_session(session_id)
     payload = payload or {}
 
-    return await translator_engine.inspect_translation_regions(
-        session_id=session_id,
-        session=session,
-        raw_config=payload.get("config", {}),
-        target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
-    )
+    with project_write_lease(session_id, "review-inspection"):
+        result = await translator_engine.inspect_translation_regions(
+            session_id=session_id,
+            session=session,
+            raw_config=payload.get("config", {}),
+            target_stored_name=str(payload.get("target_stored_name") or "").strip() or None,
+        )
+    return decorate_project_busy_state(session_id, result)
 
 
 @app.post("/api/manual-regions/{session_id}")
@@ -960,13 +1010,14 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             region_id = str(payload.get("region_id") or "").strip()
             if not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要删除的补漏框 ID。")
-            result = await translator_engine.apply_page_commands(
-                project_id=session_id,
-                session=session,
-                page_id=str(payload.get("stored_name") or "").strip(),
-                raw_config=payload.get("config", {}),
-                commands=[{"type": "delete_manual_region", "region_id": region_id}],
-            )
+            with project_write_lease(session_id, "page-edit"):
+                result = await translator_engine.apply_page_commands(
+                    project_id=session_id,
+                    session=session,
+                    page_id=str(payload.get("stored_name") or "").strip(),
+                    raw_config=payload.get("config", {}),
+                    commands=[{"type": "delete_manual_region", "region_id": region_id}],
+                )
             return {
                 "ok": True,
                 "action": "delete",
@@ -981,13 +1032,14 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
                 raise HTTPException(status_code=400, detail="缺少目标页面信息。")
             if not isinstance(region_ids, list) or len(region_ids) < 2:
                 raise HTTPException(status_code=400, detail="至少需要选择两个文本框才能合并。")
-            result = await translator_engine.apply_page_commands(
-                project_id=session_id,
-                session=session,
-                page_id=stored_name,
-                raw_config=payload.get("config", {}),
-                commands=[{"type": "merge_regions", "region_ids": region_ids}],
-            )
+            with project_write_lease(session_id, "page-edit"):
+                result = await translator_engine.apply_page_commands(
+                    project_id=session_id,
+                    session=session,
+                    page_id=stored_name,
+                    raw_config=payload.get("config", {}),
+                    commands=[{"type": "merge_regions", "region_ids": region_ids}],
+                )
             return {
                 "ok": True,
                 "action": "merge",
@@ -1000,13 +1052,14 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             region_id = str(payload.get("region_id") or "").strip()
             if not stored_name or not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要识别的页面或手动框信息。")
-            result = await translator_engine.apply_page_commands(
-                project_id=session_id,
-                session=session,
-                page_id=stored_name,
-                raw_config=payload.get("config", {}),
-                commands=[{"type": "recognize_manual_region", "region_id": region_id}],
-            )
+            with project_write_lease(session_id, "page-edit"):
+                result = await translator_engine.apply_page_commands(
+                    project_id=session_id,
+                    session=session,
+                    page_id=stored_name,
+                    raw_config=payload.get("config", {}),
+                    commands=[{"type": "recognize_manual_region", "region_id": region_id}],
+                )
             region = result["recognized_region_payload"]
             recognition_ok = str(region.get("recognition_status") or "") == "ready"
             return {
@@ -1025,13 +1078,14 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
         if not stored_name:
             raise HTTPException(status_code=400, detail="缺少目标页面信息。")
 
-        result = await translator_engine.apply_page_commands(
-            project_id=session_id,
-            session=session,
-            page_id=stored_name,
-            raw_config=payload.get("config", {}),
-            commands=[{"type": "create_region", "bbox": payload.get("bbox")}],
-        )
+        with project_write_lease(session_id, "page-edit"):
+            result = await translator_engine.apply_page_commands(
+                project_id=session_id,
+                session=session,
+                page_id=stored_name,
+                raw_config=payload.get("config", {}),
+                commands=[{"type": "create_region", "bbox": payload.get("bbox")}],
+            )
         return {
             "ok": True,
             "action": "create",
@@ -1176,14 +1230,15 @@ async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, 
     payload = payload or {}
 
     try:
-        result = await translator_engine.apply_page_commands(
-            project_id=session_id,
-            session=session,
-            page_id=page_id,
-            raw_config=payload.get("config", {}),
-            commands=payload.get("commands") or [],
-            expected_revision=payload.get("expected_revision"),
-        )
+        with project_write_lease(session_id, "page-edit"):
+            result = await translator_engine.apply_page_commands(
+                project_id=session_id,
+                session=session,
+                page_id=page_id,
+                raw_config=payload.get("config", {}),
+                commands=payload.get("commands") or [],
+                expected_revision=payload.get("expected_revision"),
+            )
     except PageDocumentRevisionConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -1202,7 +1257,7 @@ async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, 
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return result
+    return decorate_project_busy_state(session_id, result)
 
 
 @app.post("/api/pages/{session_id}/{page_id}/advanced-erase")
@@ -1211,29 +1266,24 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
     payload = payload or {}
     action = str(payload.get("action") or "erase").strip().lower() or "erase"
 
-    if not translator_engine.try_mark_session_busy(session_id, "advanced-erase"):
-        raise HTTPException(status_code=409, detail="该项目已有任务在运行，请等待当前任务完成。")
-
     try:
-        result = await translator_engine.advanced_erase_page(
-            project_id=session_id,
-            session=session,
-            page_id=page_id,
-            raw_config=payload.get("config", {}),
-            action=action,
-            selections=payload.get("selections"),
-            local_mask_mode=payload.get("local_mask_mode") or payload.get("mask_mode"),
-        )
+        with project_write_lease(session_id, "advanced-erase"):
+            result = await translator_engine.advanced_erase_page(
+                project_id=session_id,
+                session=session,
+                page_id=page_id,
+                raw_config=payload.get("config", {}),
+                action=action,
+                selections=payload.get("selections"),
+                local_mask_mode=payload.get("local_mask_mode") or payload.get("mask_mode"),
+            )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        translator_engine.clear_session_busy(session_id)
-
-    return result
+    return decorate_project_busy_state(session_id, result)
 
 
 @app.post("/api/pages/{session_id}/{page_id}/brush-edit")
@@ -1241,27 +1291,22 @@ async def brush_edit_page(session_id: str, page_id: str, payload: dict[str, Any]
     session = get_or_restore_session(session_id)
     payload = payload or {}
 
-    if not translator_engine.try_mark_session_busy(session_id, "brush-edit"):
-        raise HTTPException(status_code=409, detail="该项目已有任务在运行，请等待当前任务完成。")
-
     try:
-        result = await asyncio.to_thread(
-            translator_engine.brush_edit_page,
-            session_id,
-            session,
-            page_id,
-            payload.get("operations"),
-        )
+        with project_write_lease(session_id, "brush-edit"):
+            result = await asyncio.to_thread(
+                translator_engine.brush_edit_page,
+                session_id,
+                session,
+                page_id,
+                payload.get("operations"),
+            )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        translator_engine.clear_session_busy(session_id)
-
-    return result
+    return decorate_project_busy_state(session_id, result)
 
 
 @app.post("/api/upload")
@@ -1276,6 +1321,7 @@ async def upload_comic(
     extract_dir = TEMP_EXTRACTED_DIR / session_id
     extract_dir.mkdir(exist_ok=True)
     file_path: Path | None = None
+    project_lease = task_manager.lease(session_id, "project-import")
 
     try:
         folder_uploads = [upload for upload in (files or []) if upload is not None]
@@ -1339,12 +1385,13 @@ async def upload_comic(
         shutil.rmtree(OUTPUT_DIR / session_id, ignore_errors=True)
         raise
     finally:
+        project_lease.release()
         if file_path is not None:
             with contextlib.suppress(FileNotFoundError):
                 file_path.unlink()
         shutil.rmtree(extract_dir, ignore_errors=True)
 
-    return translator_engine.build_client_session_payload(session_id, SESSIONS[session_id])
+    return build_client_project_view(session_id, SESSIONS[session_id])
 
 
 @app.get("/api/download/{session_id}")
@@ -1405,34 +1452,25 @@ def start_translation_task(
         target_stored_name=target_stored_name,
         expected_page_revision=expected_page_revision,
     )
-    if not translator_engine.try_mark_session_busy(session_id, command.action):
-        raise ProjectTaskConflictError("Project already has an active task")
 
     async def run_task(publish):
-        try:
-            completed_payload = await workflow_coordinator.execute(
-                command,
-                progress=publish,
-            )
-            logger.info(
-                "Translation task completed. session_id=%s action=%s",
-                session_id,
-                command.action,
-            )
-            return completed_payload
-        finally:
-            translator_engine.clear_session_busy(session_id)
-
-    try:
-        return task_manager.start(
+        completed_payload = await workflow_coordinator.execute(
+            command,
+            progress=publish,
+        )
+        logger.info(
+            "Translation task completed. session_id=%s action=%s",
             session_id,
             command.action,
-            run_task,
-            metadata={"target_stored_name": command.target_stored_name or ""},
         )
-    except Exception:
-        translator_engine.clear_session_busy(session_id)
-        raise
+        return completed_payload
+
+    return task_manager.start(
+        session_id,
+        command.action,
+        run_task,
+        metadata={"target_stored_name": command.target_stored_name or ""},
+    )
 
 
 def project_command_page_revision(payload: dict[str, Any]) -> int | None:

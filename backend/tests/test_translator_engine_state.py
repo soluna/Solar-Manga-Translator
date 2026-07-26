@@ -513,17 +513,22 @@ class TranslatorEngineStateTests(unittest.TestCase):
 
         return rendering
 
-    def test_busy_mark_is_atomic(self) -> None:
+    def test_engine_does_not_own_project_busy_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
 
-            self.assertTrue(engine.try_mark_session_busy("project-a", "translate"))
-            self.assertFalse(engine.try_mark_session_busy("project-a", "rerender"))
-            self.assertTrue(engine.is_session_busy("project-a"))
-
-            engine.clear_session_busy("project-a")
-            self.assertFalse(engine.is_session_busy("project-a"))
-            self.assertTrue(engine.try_mark_session_busy("project-a", "rerender"))
+            for name in (
+                "active_sessions",
+                "active_sessions_lock",
+                "project_command_locks",
+                "try_mark_session_busy",
+                "mark_session_busy",
+                "clear_session_busy",
+                "is_session_busy",
+                "get_session_busy_action",
+            ):
+                with self.subTest(name=name):
+                    self.assertFalse(hasattr(engine, name))
 
     def test_engine_command_places_general_options_after_local_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

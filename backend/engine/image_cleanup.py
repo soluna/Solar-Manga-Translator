@@ -24,6 +24,10 @@ Reconstruct only the background hidden by the removed text. Preserve the origina
 canvas, artwork, characters, objects, panel borders, existing speech bubbles,
 caption boxes, colors, textures, and layout unchanged.
 
+Treat text as borderless unless a complete enclosing speech bubble or box is
+clearly visible in the input. Never infer a container, and never replace artwork
+with a flat white area.
+
 Do not create a new speech bubble, box, border, text, symbol, or decoration. Do
 not crop, rotate, or resize. Return only the cleaned image at exactly the
 original size.

@@ -9247,7 +9247,77 @@ class TranslatorEngine:
         )
         if np.any(novel_outlines):
             safe_mask = cv2.bitwise_and(safe_mask, cv2.bitwise_not(novel_outlines))
+        novel_bright_containers = self._build_advanced_erase_novel_bright_container_protection_mask(
+            source_rgb,
+            edited_rgb,
+            allowed,
+        )
+        if np.any(novel_bright_containers):
+            safe_mask = cv2.bitwise_and(
+                safe_mask,
+                cv2.bitwise_not(novel_bright_containers),
+            )
         return safe_mask
+
+    def _build_advanced_erase_novel_bright_container_protection_mask(
+        self,
+        source_rgb: np.ndarray,
+        edited_rgb: np.ndarray,
+        allowed_mask: np.ndarray,
+    ) -> np.ndarray:
+        edited = self._normalize_advanced_erase_edited_image(source_rgb, edited_rgb)
+        allowed = self._normalize_advanced_erase_mask(allowed_mask, source_rgb.shape)
+        source_hsv = cv2.cvtColor(source_rgb[:, :, :3], cv2.COLOR_RGB2HSV)
+        edited_hsv = cv2.cvtColor(edited[:, :, :3], cv2.COLOR_RGB2HSV)
+        source_bright = cv2.inRange(source_hsv, (0, 0, 230), (179, 32, 255))
+        edited_bright = cv2.inRange(edited_hsv, (0, 0, 230), (179, 32, 255))
+        edited_bright = cv2.bitwise_and(edited_bright, allowed)
+
+        min_side = max(1, min(source_rgb.shape[:2]))
+        support_close_size = max(17, min(41, int(round(min_side * 0.012)) | 1))
+        source_bright_support = cv2.morphologyEx(
+            source_bright,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (support_close_size, support_close_size),
+            ),
+            iterations=1,
+        )
+        source_bright_support = cv2.dilate(
+            source_bright_support,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        )
+        source_bright_support = cv2.bitwise_and(source_bright_support, allowed)
+
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            edited_bright,
+            connectivity=8,
+        )
+        protected = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        page_area = max(source_rgb.shape[0] * source_rgb.shape[1], 1)
+        minimum_area = max(64, int(round(page_area * 0.0004)))
+        minimum_extent = max(8, int(round(min_side * 0.025)))
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if area < minimum_area or width < minimum_extent or height < minimum_extent:
+                continue
+            extent_area = max(width * height, 1)
+            if float(area) / float(extent_area) < 0.58:
+                continue
+            component = labels == label
+            source_support_ratio = float(
+                np.count_nonzero(source_bright_support[component])
+            ) / float(area)
+            if source_support_ratio < 0.38:
+                protected[component] = 255
+                continue
+            unsupported = np.logical_and(component, source_bright_support == 0)
+            protected[unsupported] = 255
+        return protected
 
     def _build_advanced_erase_novel_outline_protection_mask(
         self,

@@ -459,6 +459,7 @@ class TranslatorProviderIntegrationTests(unittest.TestCase):
                 "openai_model": "model",
                 "api_key": "super-secret-token",
                 "target_lang": "CHS",
+                "use_gpu": False,
             })
 
             validation = asyncio.run(engine.validate_user_config(config))

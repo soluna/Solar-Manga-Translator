@@ -437,6 +437,15 @@ class TranslatorEngineStateTests(unittest.TestCase):
             "style_region_overrides": {},
             "artifact_state": artifact_state.model_dump(mode="json"),
         }
+
+        async def render_zero_region_page(*args, **kwargs) -> None:
+            source_path = Path(kwargs.get("source_path") or args[0])
+            output_path = Path(kwargs.get("output_path") or args[1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(source_path) as source_image:
+                source_image.convert("RGB").save(output_path)
+
+        engine._render_cached_page = render_zero_region_page  # type: ignore[method-assign]
         engine.initialize_project(project_id, session, title="Zero regions")
         return engine, session
 

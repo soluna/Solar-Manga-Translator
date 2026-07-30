@@ -49,3 +49,15 @@ Compatibility removal condition: the task starter's ignored legacy `session` inp
 **Project Glossary Candidate**:
 A source-language clue supported by high-confidence OCR evidence such as an explicit self-introduction or honorific. A candidate highlights evidence inside the broad LLM extraction context but does not define the final word boundary and is not an accepted glossary entry until the model supplies a translation.
 _Avoid_: Automatically generated glossary translation
+
+**Remote Task Node**:
+An explicitly enabled, token-protected LAN service that persists across application restarts and executes trusted diagnostic, CUDA, and command tasks on the host computer. It is separate from the short-lived Read-only Diagnostics Service.
+_Avoid_: Remote diagnostics when the capability can mutate files or start processes
+
+**Remote Task Bundle**:
+An isolated uploaded file or safely extracted archive used as a Remote Task working directory. A bundle is input material, not a project or a Page Artifact.
+_Avoid_: Project upload when the files exist only for remote testing
+
+**Remote Task**:
+A persisted, cancellable unit of host work with a status, log, exit result, and downloadable artifacts. Remote Tasks run serially so GPU workloads do not compete for device memory.
+_Avoid_: Project Command, which changes the canonical manga workflow

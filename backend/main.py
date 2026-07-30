@@ -29,6 +29,7 @@ from translation_provider import UpstreamTranslationProvider
 from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
 from remote_diagnostics import RemoteDiagnosticsManager
+from remote_execution import RemoteExecutionManager
 from runtime_paths import AppPaths, resolve_app_paths
 from logging_config import configure_rotating_file_logging
 from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
@@ -627,6 +628,25 @@ remote_diagnostics_manager = RemoteDiagnosticsManager(
     paths=APP_PATHS,
     runtime_provider=build_runtime_diagnostics,
 )
+remote_execution_manager = RemoteExecutionManager(
+    paths=APP_PATHS,
+    runtime_provider=build_runtime_diagnostics,
+    max_upload_bytes=MAX_UPLOAD_BYTES,
+)
+
+
+@app.on_event("startup")
+async def start_persistent_remote_execution() -> None:
+    try:
+        remote_execution_manager.start_if_enabled()
+    except RuntimeError:
+        logger.exception("Persistent remote execution node failed to start.")
+
+
+@app.on_event("shutdown")
+async def shutdown_remote_services() -> None:
+    remote_diagnostics_manager.stop()
+    remote_execution_manager.shutdown()
 
 
 def build_local_lama_model_payload() -> dict[str, Any]:
@@ -705,6 +725,34 @@ async def start_remote_diagnostics(payload: RemoteDiagnosticsStartPayload | None
 @app.post("/api/app/remote-diagnostics/stop")
 async def stop_remote_diagnostics():
     return {"remote_diagnostics": remote_diagnostics_manager.stop()}
+
+
+@app.get("/api/app/remote-execution")
+async def get_remote_execution():
+    return {"remote_execution": remote_execution_manager.status()}
+
+
+@app.post("/api/app/remote-execution/enable")
+async def enable_remote_execution():
+    try:
+        status = remote_execution_manager.enable()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"remote_execution": status}
+
+
+@app.post("/api/app/remote-execution/rotate-token")
+async def rotate_remote_execution_token():
+    try:
+        status = remote_execution_manager.rotate_token()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"remote_execution": status}
+
+
+@app.post("/api/app/remote-execution/disable")
+async def disable_remote_execution():
+    return {"remote_execution": remote_execution_manager.disable()}
 
 
 @app.get("/api/app/diagnostics/export")

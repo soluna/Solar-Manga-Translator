@@ -195,6 +195,35 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertTrue(allowed.json()["remote_diagnostics"]["read_only"])
         start_mock.assert_called_once_with(ttl_seconds=3600)
 
+    def test_remote_execution_controls_are_local_api_protected(self) -> None:
+        enabled_status = {
+            "enabled": True,
+            "active": True,
+            "persistent": True,
+            "port": 8800,
+            "urls": ["http://192.168.1.20:8800"],
+            "token": "persistent-test-token",
+            "tasks": ["runtime-diagnostics", "cuda-smoke-test", "command"],
+        }
+        with (
+            mock.patch.object(main, "API_TOKEN", "local-secret"),
+            mock.patch.object(
+                main.remote_execution_manager,
+                "enable",
+                return_value=enabled_status,
+            ) as enable_mock,
+        ):
+            denied = self.client.post("/api/app/remote-execution/enable")
+            allowed = self.client.post(
+                "/api/app/remote-execution/enable",
+                headers={"Authorization": "Bearer local-secret"},
+            )
+
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertTrue(allowed.json()["remote_execution"]["persistent"])
+        enable_mock.assert_called_once_with()
+
     def test_cors_preflight_is_not_blocked_by_bearer_token(self) -> None:
         with mock.patch.object(main, "API_TOKEN", "local-secret"):
             response = self.client.options(

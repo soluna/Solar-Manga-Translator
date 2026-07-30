@@ -680,6 +680,17 @@ const remoteDiagnostics = ref({
   expires_at: '',
   remaining_seconds: 0,
 })
+const remoteExecutionBusy = ref(false)
+const remoteExecution = ref({
+  enabled: false,
+  active: false,
+  persistent: true,
+  port: 0,
+  urls: [],
+  token: '',
+  tasks: [],
+  worker_root: '',
+})
 const selectionEraseModalOpen = ref(false)
 const selectionEraseAction = ref('selection')
 const selectionEraseRects = ref([])
@@ -2366,6 +2377,108 @@ async function copyRemoteDiagnosticsConnection() {
     return
   }
   await copyText(connectionText, '局域网诊断连接信息已复制，可直接发送给 Codex。')
+}
+
+function normalizeRemoteExecution(payload = {}) {
+  return {
+    enabled: false,
+    active: false,
+    persistent: true,
+    port: 0,
+    urls: [],
+    token: '',
+    tasks: [],
+    worker_root: '',
+    ...(payload || {}),
+  }
+}
+
+async function loadRemoteExecutionStatus({ silent = true } = {}) {
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/remote-execution'))
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取远程任务节点状态失败')
+    }
+    remoteExecution.value = normalizeRemoteExecution(payload.remote_execution)
+  } catch (error) {
+    if (!silent) {
+      errorMessage.value = error instanceof Error ? error.message : '读取远程任务节点状态失败'
+    }
+  }
+}
+
+async function updateRemoteExecution(endpoint, successMessage, fallbackMessage) {
+  if (remoteExecutionBusy.value) {
+    return
+  }
+  remoteExecutionBusy.value = true
+  errorMessage.value = ''
+  try {
+    const response = await apiFetch(toApiUrl(endpoint), { method: 'POST' })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || fallbackMessage)
+    }
+    remoteExecution.value = normalizeRemoteExecution(payload.remote_execution)
+    status.value = successMessage
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : fallbackMessage
+  } finally {
+    remoteExecutionBusy.value = false
+  }
+}
+
+async function enableRemoteExecution() {
+  await updateRemoteExecution(
+    '/api/app/remote-execution/enable',
+    '远程任务节点已启用；以后启动应用时会自动恢复。',
+    '启用远程任务节点失败',
+  )
+}
+
+async function rotateRemoteExecutionToken() {
+  await updateRemoteExecution(
+    '/api/app/remote-execution/rotate-token',
+    '远程任务访问令牌已更换。',
+    '更换远程任务令牌失败',
+  )
+}
+
+async function disableRemoteExecution() {
+  await updateRemoteExecution(
+    '/api/app/remote-execution/disable',
+    '远程任务节点已关闭，应用重启后也不会自动开启。',
+    '关闭远程任务节点失败',
+  )
+}
+
+function remoteExecutionConnectionText() {
+  const urls = (remoteExecution.value?.urls || [])
+    .map((url) => String(url || '').trim())
+    .filter(Boolean)
+  const token = String(remoteExecution.value?.token || '').trim()
+  if (!urls.length || !token) {
+    return ''
+  }
+  return [
+    'Solar Manga Translator 持久远程任务节点',
+    ...urls.map((url, index) => `URL ${index + 1}: ${url}`),
+    `Token: ${token}`,
+    '认证方式: Authorization: Bearer <Token>',
+    `任务能力: ${(remoteExecution.value?.tasks || []).join(', ')}`,
+    '支持上传测试包、执行 CUDA/诊断/命令任务、读取实时日志、下载结果和停止任务。',
+    '自动启动: 已开启（只需保持 Solar Manga Translator 正在运行）',
+  ].join('\n')
+}
+
+async function copyRemoteExecutionConnection() {
+  const connectionText = remoteExecutionConnectionText()
+  if (!connectionText) {
+    errorMessage.value = '任务节点尚未运行，请先启用后再复制连接信息。'
+    return
+  }
+  await copyText(connectionText, '远程任务节点连接信息已复制，可直接发送给 Codex。')
 }
 
 async function loadPersistedAppSettings() {
@@ -8922,6 +9035,7 @@ function closeV2HistoryModal() {
 function openV2Settings() {
   v2SettingsOpen.value = true
   void loadRemoteDiagnosticsStatus()
+  void loadRemoteExecutionStatus()
 }
 
 function closeV2Settings() {
@@ -10397,6 +10511,7 @@ onMounted(() => {
     await loadAppRuntime()
     await loadAppDiagnostics()
     await loadRemoteDiagnosticsStatus()
+    await loadRemoteExecutionStatus()
     checkBackendStatus()
     await Promise.all([
       loadFonts(),
@@ -12955,6 +13070,83 @@ watch(
                 @click="stopRemoteDiagnostics"
               >
                 立即停止
+              </button>
+            </div>
+          </section>
+
+          <section class="v2-settings-group">
+            <header>
+              <strong>持久远程任务节点</strong>
+              <span>{{ remoteExecution.active ? '可远程执行任务' : (remoteExecution.enabled ? '等待自动恢复' : '未启用') }}</span>
+            </header>
+
+            <p class="v2-settings-inline-note">
+              启用一次后会记住令牌，并在每次启动 Solar Manga Translator 时自动恢复。Codex 可上传测试包、
+              执行 CUDA 检查和测试命令、持续读取日志、下载结果以及停止任务，不需要你反复在 Windows 上操作。
+            </p>
+            <p class="v2-settings-inline-note is-error">
+              该令牌具备在本机执行程序的权限，只发给你信任的 Codex 任务。Windows 首次启用时可能需要允许防火墙访问专用网络。
+            </p>
+
+            <div class="v2-readonly-field">
+              <span>自动启动</span>
+              <strong>{{ remoteExecution.enabled ? '已开启' : '已关闭' }}</strong>
+            </div>
+            <div class="v2-readonly-field">
+              <span>服务状态</span>
+              <strong>{{ remoteExecution.active ? '运行中' : (remoteExecution.enabled ? '本次启动失败或尚未恢复' : '已关闭') }}</strong>
+            </div>
+            <div v-if="remoteExecution.active" class="v2-readonly-field">
+              <span>局域网地址</span>
+              <strong :title="remoteExecution.urls?.join('\n')">
+                {{ remoteExecution.urls?.join('、') || `请用 Windows 局域网 IP:${remoteExecution.port}` }}
+              </strong>
+            </div>
+            <div v-if="remoteExecution.enabled" class="v2-readonly-field">
+              <span>固定访问令牌</span>
+              <strong :title="remoteExecution.token">{{ remoteExecution.token }}</strong>
+            </div>
+            <div v-if="remoteExecution.worker_root" class="v2-readonly-field">
+              <span>任务与结果目录</span>
+              <strong :title="remoteExecution.worker_root">{{ remoteExecution.worker_root }}</strong>
+            </div>
+
+            <div class="v2-inline-actions">
+              <button
+                v-if="!remoteExecution.enabled || !remoteExecution.active"
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteExecutionBusy"
+                @click="enableRemoteExecution"
+              >
+                {{ remoteExecutionBusy ? '正在启用…' : (remoteExecution.enabled ? '立即重试启动' : '启用并自动启动') }}
+              </button>
+              <button
+                v-if="remoteExecution.active"
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteExecutionBusy || !remoteExecutionConnectionText()"
+                @click="copyRemoteExecutionConnection"
+              >
+                复制给 Codex
+              </button>
+              <button
+                v-if="remoteExecution.enabled"
+                type="button"
+                class="v2-secondary-button"
+                :disabled="remoteExecutionBusy"
+                @click="rotateRemoteExecutionToken"
+              >
+                更换令牌
+              </button>
+              <button
+                v-if="remoteExecution.enabled"
+                type="button"
+                class="v2-ghost-button"
+                :disabled="remoteExecutionBusy"
+                @click="disableRemoteExecution"
+              >
+                关闭并取消自动启动
               </button>
             </div>
           </section>

@@ -1300,6 +1300,7 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         action: str = "erase",
         selections: Any = None,
+        selection_strokes: Any = None,
         local_mask_mode: Any = None,
         attempt_id: Any = None,
     ) -> dict[str, Any]:
@@ -1322,6 +1323,7 @@ class TranslatorEngine:
                 page_id=page_id,
                 config=config,
                 selections=selections,
+                selection_strokes=selection_strokes,
                 local_mask_mode=local_mask_mode,
             )
         if normalized_action in {
@@ -1345,13 +1347,13 @@ class TranslatorEngine:
             )
 
         if config.get("advanced_erase_provider") != self.ADVANCED_ERASE_DEFAULT_PROVIDER:
-            raise ValueError("高级擦除第一版仅支持火山引擎 Ark / Seedream。")
+            raise ValueError("在线擦除目前仅支持火山引擎 Ark / Seedream。")
         if not str(config.get("advanced_erase_api_key") or "").strip():
-            raise ValueError("缺少高级擦除 API Key，请先在高级擦除 API 配置里填写。")
+            raise ValueError("缺少在线擦除 API Key，请先在在线擦除 API 配置里填写。")
         if not str(config.get("advanced_erase_model") or "").strip():
-            raise ValueError("缺少高级擦除模型名称。")
+            raise ValueError("缺少在线擦除模型名称。")
         if not str(config.get("advanced_erase_base_url") or "").strip():
-            raise ValueError("缺少高级擦除接口地址。")
+            raise ValueError("缺少在线擦除接口地址。")
 
         if normalized_action in {"selection", "selection-erase", "selected"}:
             return await self._advanced_selection_erase_page(
@@ -1360,6 +1362,7 @@ class TranslatorEngine:
                 page_id=page_id,
                 config=config,
                 selections=selections,
+                selection_strokes=selection_strokes,
             )
 
         source_path = self.get_page_source_image_path(project_id, session, page_id)
@@ -1376,7 +1379,7 @@ class TranslatorEngine:
 
         source_bgr = cv2.imread(str(erase_input_path), cv2.IMREAD_COLOR)
         if source_bgr is None:
-            raise RuntimeError(f"无法读取高级擦除输入图: {erase_input_path}")
+            raise RuntimeError(f"无法读取在线擦除输入图: {erase_input_path}")
         source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
 
         client = create_image_cleanup_client(
@@ -1766,6 +1769,62 @@ class TranslatorEngine:
             ).astype(np.uint8)
         return edited
 
+    async def suggest_erase_selection(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        raw_point: Any,
+        raw_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not any(
+            str(image.get("stored_name") or "") == page_id
+            for image in (session.get("source_images") or [])
+        ):
+            raise FileNotFoundError("目标页面不存在，请刷新后重试。")
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图：{source_path}")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        self._ensure_vendor_import_path()
+        regions = self._load_cached_regions(
+            page_cache_dir,
+            allow_plain_region_fallback=True,
+        )
+
+        try:
+            return self._suggest_erase_selection_rect(
+                source_rgb,
+                raw_point,
+                regions=regions,
+                allow_nearby=False,
+            )
+        except ValueError:
+            pass
+
+        config = self.normalize_user_config(raw_config)
+        device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
+        try:
+            detector_result = await self.inference_backend.detect_text_mask(
+                source_rgb,
+                model_dir=self.model_dir,
+                device=device,
+                detection_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "点击位置附近没有已识别文字，本地文字检测也暂时不可用；"
+                "请改用框选或画笔标记。"
+            ) from exc
+        return self._suggest_erase_selection_rect(
+            source_rgb,
+            raw_point,
+            regions=regions,
+            detector_result=detector_result,
+        )
+
     async def _advanced_selection_erase_page(
         self,
         *,
@@ -1774,6 +1833,7 @@ class TranslatorEngine:
         page_id: str,
         config: dict[str, Any],
         selections: Any,
+        selection_strokes: Any = None,
     ) -> dict[str, Any]:
         source_path = self.get_page_source_image_path(project_id, session, page_id)
         page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
@@ -1787,9 +1847,15 @@ class TranslatorEngine:
             raise RuntimeError(f"无法读取当前空页: {base_path}")
         base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
         rects = self._normalize_selection_erase_rects(selections, base_rgb.shape)
-        if not rects:
-            raise ValueError("请至少框选一个要擦除的区域。")
-        selection_mask = self._build_selection_erase_mask(rects, base_rgb.shape)
+        normalized_strokes = self._normalize_selection_erase_strokes(selection_strokes, base_rgb.shape)
+        selection_mask = self._build_selection_erase_mask(
+            rects,
+            base_rgb.shape,
+            strokes=selection_strokes,
+        )
+        if not np.any(selection_mask):
+            raise ValueError("请至少添加一个点击选区、框选区域或画笔标记。")
+        selection_count = len(rects) + len(normalized_strokes)
         selection_input_rgb = self._build_selection_erase_input_image(base_rgb, selection_mask)
 
         client = create_image_cleanup_client(
@@ -1802,7 +1868,7 @@ class TranslatorEngine:
         print(
             "[DEBUG] Selection erase request "
             f"file={source_path.name} provider={config['advanced_erase_provider']} "
-            f"model={config['advanced_erase_model']} selections={len(rects)} "
+            f"model={config['advanced_erase_model']} selections={selection_count} "
             f"size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
         )
 
@@ -1866,7 +1932,8 @@ class TranslatorEngine:
                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                 for x1, y1, x2, y2 in rects
             ],
-            "selection_count": len(rects),
+            "selection_count": selection_count,
+            "selection_stroke_count": len(normalized_strokes),
             "selection_ratio": float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1),
             "changed_ratio": changed_ratio,
             "traditional_backup": str(backup_path),
@@ -1896,7 +1963,7 @@ class TranslatorEngine:
                 "provider": config["advanced_erase_provider"],
                 "model": config["advanced_erase_model"],
                 "changed_ratio": changed_ratio,
-                "selection_count": len(rects),
+                "selection_count": selection_count,
             },
         )
         self._apply_page_artifact_event(
@@ -1921,7 +1988,8 @@ class TranslatorEngine:
                 "page_id": page_id,
                 "attempt_id": attempt_id,
                 "changed_ratio": changed_ratio,
-                "selection_count": len(rects),
+                "selection_count": selection_count,
+                "selection_stroke_count": len(normalized_strokes),
             },
         }
 
@@ -1980,11 +2048,11 @@ class TranslatorEngine:
         )
         erase_ratio = float(cv2.countNonZero(erase_mask)) / float(erase_mask.size or 1)
         if erase_ratio <= 0:
-            raise ValueError("当前页没有找到可安全擦除的文字区域，请改用“本地选区擦除”补充。")
+            raise ValueError("当前页没有找到可安全擦除的文字区域，请切换到“指定区域”，用点击、框选或画笔补充。")
         if erase_ratio > self.LOCAL_ADVANCED_ERASE_MAX_MASK_RATIO:
             raise RuntimeError(
-                "自动生成的文字范围过大，为避免损坏原画，本地高级擦除已停止。"
-                "请改用“本地选区擦除”分区域处理。"
+                "自动生成的文字范围过大，为避免损坏原画，本地擦除已停止。"
+                "请切换到“指定区域”分区域处理。"
             )
 
         print(
@@ -2006,7 +2074,7 @@ class TranslatorEngine:
         except Exception as exc:
             model_path = self.model_dir / "inpainting" / "lama_large_512px.ckpt"
             raise RuntimeError(
-                "本地高级擦除失败。首次使用会自动下载 Manga LaMa Large 模型；"
+                "本地擦除失败。首次使用会自动下载 Manga LaMa Large 模型；"
                 "如果下载很慢，也可以手动下载模型文件后放到 "
                 f"{model_path}。详情：{exc}"
             ) from exc
@@ -2234,7 +2302,7 @@ class TranslatorEngine:
         mask = self._normalize_advanced_erase_mask(erase_mask, source_rgb.shape)
         selector = mask > 0
         if not np.any(selector):
-            raise RuntimeError("本地高级擦除没有生成可检查的文字范围。")
+            raise RuntimeError("本地擦除没有生成可检查的文字范围。")
 
         diff_rgb = cv2.absdiff(source_rgb[:, :, :3], candidate[:, :, :3])
         max_diff = np.max(diff_rgb, axis=2)
@@ -2242,7 +2310,7 @@ class TranslatorEngine:
         if changed_fraction < 0.01:
             raise RuntimeError(
                 "本地模型没有实际修改文字区域，已拒绝这个候选。"
-                "请改用“本地选区擦除”重试。"
+                "请切换到“指定区域”重试。"
             )
 
         gray_candidate = cv2.cvtColor(candidate[:, :, :3], cv2.COLOR_RGB2GRAY)
@@ -2328,7 +2396,7 @@ class TranslatorEngine:
             str(metadata.get("mode") or "") != "local_advanced_preview"
             or str(metadata.get("page_id") or "") != page_id
         ):
-            raise FileNotFoundError("本地高级擦除候选不存在或已失效，请重新生成。")
+            raise FileNotFoundError("本地擦除候选不存在或已失效，请重新生成。")
         if normalized_kind == "source":
             return self.get_page_source_image_path(project_id, session, page_id)
 
@@ -2340,10 +2408,10 @@ class TranslatorEngine:
         }
         filename = filenames.get(normalized_kind)
         if not filename:
-            raise ValueError("不支持的本地高级擦除预览类型。")
+            raise ValueError("不支持的本地擦除预览类型。")
         path = attempt_dir / filename
         if not path.is_file():
-            raise FileNotFoundError("本地高级擦除预览图片不存在，请重新生成。")
+            raise FileNotFoundError("本地擦除预览图片不存在，请重新生成。")
         return path
 
     def _apply_local_advanced_erase_preview(
@@ -2363,14 +2431,14 @@ class TranslatorEngine:
             str(metadata.get("mode") or "") != "local_advanced_preview"
             or str(metadata.get("page_id") or "") != page_id
         ):
-            raise FileNotFoundError("本地高级擦除候选不存在或已失效，请重新生成。")
+            raise FileNotFoundError("本地擦除候选不存在或已失效，请重新生成。")
         if bool(metadata.get("discarded")):
-            raise ValueError("这个本地高级擦除候选已经放弃，请重新生成。")
+            raise ValueError("这个本地擦除候选已经放弃，请重新生成。")
 
         candidate_path = attempt_dir / f"{normalized_attempt_id}.local-advanced-candidate.png"
         candidate_bgr = cv2.imread(str(candidate_path), cv2.IMREAD_COLOR)
         if candidate_bgr is None:
-            raise FileNotFoundError("本地高级擦除候选图片不存在，请重新生成。")
+            raise FileNotFoundError("本地擦除候选图片不存在，请重新生成。")
         inpainted_path = page_cache_dir / "inpainted.png"
         current_blank_bgr = cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR)
         if current_blank_bgr is None:
@@ -2382,7 +2450,7 @@ class TranslatorEngine:
         ):
             raise ValueError(
                 "生成候选后当前空页已发生变化。为避免覆盖较新的编辑，"
-                "请重新运行“本地高级擦除”并确认新候选。"
+                "请重新运行“本地擦除”并确认新候选。"
             )
 
         backup_path = self._ensure_advanced_erase_traditional_backup(page_cache_dir)
@@ -2442,7 +2510,7 @@ class TranslatorEngine:
     def _normalize_local_advanced_erase_attempt_id(self, raw_value: Any) -> str:
         value = str(raw_value or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{8,128}", value):
-            raise ValueError("本地高级擦除候选编号无效，请重新生成。")
+            raise ValueError("本地擦除候选编号无效，请重新生成。")
         return value
 
     def _image_pixel_sha256(self, image: np.ndarray) -> str:
@@ -2457,6 +2525,7 @@ class TranslatorEngine:
         page_id: str,
         config: dict[str, Any],
         selections: Any,
+        selection_strokes: Any = None,
         local_mask_mode: Any = None,
     ) -> dict[str, Any]:
         source_path = self.get_page_source_image_path(project_id, session, page_id)
@@ -2471,9 +2540,15 @@ class TranslatorEngine:
             raise RuntimeError(f"无法读取当前空页: {base_path}")
         base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
         rects = self._normalize_selection_erase_rects(selections, base_rgb.shape)
-        if not rects:
-            raise ValueError("请至少框选一个要擦除的区域。")
-        selection_mask = self._build_selection_erase_mask(rects, base_rgb.shape)
+        normalized_strokes = self._normalize_selection_erase_strokes(selection_strokes, base_rgb.shape)
+        selection_mask = self._build_selection_erase_mask(
+            rects,
+            base_rgb.shape,
+            strokes=selection_strokes,
+        )
+        if not np.any(selection_mask):
+            raise ValueError("请至少添加一个点击选区、框选区域或画笔标记。")
+        selection_count = len(rects) + len(normalized_strokes)
         mask_mode = self._normalize_local_model_erase_mask_mode(local_mask_mode)
         erase_mask = selection_mask
         resolved_mask_mode = mask_mode
@@ -2500,7 +2575,7 @@ class TranslatorEngine:
         device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
         print(
             "[DEBUG] Local model erase request "
-            f"file={source_path.name} model=lama_large device={device} selections={len(rects)} "
+            f"file={source_path.name} model=lama_large device={device} selections={selection_count} "
             f"mask_mode={resolved_mask_mode} size={base_rgb.shape[1]}x{base_rgb.shape[0]}"
         )
 
@@ -2523,7 +2598,8 @@ class TranslatorEngine:
                 "device": device,
                 "mask_mode": mask_mode,
                 "resolved_mask_mode": resolved_mask_mode,
-                "selection_count": len(rects),
+                "selection_count": selection_count,
+                "selection_stroke_count": len(normalized_strokes),
                 "selection_mask": str(selection_mask_path),
                 "erase_mask": str(erase_mask_path),
                 "traditional_backup": str(backup_path),
@@ -2558,7 +2634,8 @@ class TranslatorEngine:
                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                 for x1, y1, x2, y2 in rects
             ],
-            "selection_count": len(rects),
+            "selection_count": selection_count,
+            "selection_stroke_count": len(normalized_strokes),
             "selection_ratio": float(cv2.countNonZero(selection_mask)) / float(selection_mask.size or 1),
             "erase_ratio": changed_ratio,
             "changed_ratio": changed_ratio,
@@ -2584,7 +2661,7 @@ class TranslatorEngine:
                 "device": device,
                 "mask_mode": resolved_mask_mode,
                 "changed_ratio": changed_ratio,
-                "selection_count": len(rects),
+                "selection_count": selection_count,
             },
         )
         self._apply_page_artifact_event(
@@ -2609,7 +2686,8 @@ class TranslatorEngine:
                 "page_id": page_id,
                 "attempt_id": attempt_id,
                 "changed_ratio": changed_ratio,
-                "selection_count": len(rects),
+                "selection_count": selection_count,
+                "selection_stroke_count": len(normalized_strokes),
                 "model": "lama_large",
                 "device": device,
                 "mask_mode": resolved_mask_mode,
@@ -9064,10 +9142,10 @@ class TranslatorEngine:
         )
         changed_ratio = float(cv2.countNonZero(mask)) / float(mask.size or 1)
         if changed_ratio <= 0:
-            raise RuntimeError("高级擦除没有检测到可替换的文字区域。")
+            raise RuntimeError("在线擦除没有检测到可替换的文字区域。")
         if changed_ratio > ratio_limit:
             raise RuntimeError(
-                "高级擦除返回图与原图差异过大，已拒绝覆盖空页。"
+                "在线擦除返回图与原图差异过大，已拒绝覆盖空页。"
                 "请重试，或换一张图/更保守的提示后再试。"
             )
 
@@ -9128,16 +9206,179 @@ class TranslatorEngine:
             rects.append((left, top, right, bottom))
         return rects
 
+    def _suggest_erase_selection_rect(
+        self,
+        source_rgb: np.ndarray,
+        raw_point: Any,
+        *,
+        regions: list[Any],
+        detector_result: dict[str, Any] | None = None,
+        allow_nearby: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(raw_point, dict):
+            raise ValueError("点击位置无效，请重新点击文字。")
+        height, width = source_rgb.shape[:2]
+        try:
+            point_x = float(raw_point.get("x"))
+            point_y = float(raw_point.get("y"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("点击位置无效，请重新点击文字。") from exc
+        if not (0 <= point_x <= 1 and 0 <= point_y <= 1):
+            raise ValueError("点击位置超出图片范围，请重新点击文字。")
+
+        pixel_point = (point_x * width, point_y * height)
+        candidates: list[dict[str, Any]] = []
+        for line in (detector_result or {}).get("textlines") or []:
+            if not isinstance(line, dict):
+                continue
+            try:
+                points = np.asarray(line.get("points"), dtype=np.float32).reshape(-1, 2)
+                confidence = float(line.get("probability", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if points.shape[0] < 3 or confidence < 0.4:
+                continue
+            distance = float(cv2.pointPolygonTest(points, pixel_point, True))
+            x, y, box_width, box_height = cv2.boundingRect(points.astype(np.int32))
+            candidates.append({
+                "bbox": (x, y, x + box_width, y + box_height),
+                "confidence": confidence,
+                "distance": distance,
+                "source": "detector",
+                "contains": distance >= 0,
+            })
+
+        for region in regions:
+            if isinstance(region, Mapping):
+                skip_translation = bool(region.get("skip_translation", False))
+                disabled_region = bool(region.get("disabled_region", False))
+                raw_bbox = region.get("xyxy") or region.get("bbox") or [0, 0, 0, 0]
+            else:
+                skip_translation = bool(getattr(region, "skip_translation", False))
+                disabled_region = bool(getattr(region, "disabled_region", False))
+                raw_bbox = getattr(region, "xyxy", [0, 0, 0, 0])
+            if skip_translation or disabled_region:
+                continue
+            try:
+                x1, y1, x2, y2 = [int(value) for value in raw_bbox]
+            except (TypeError, ValueError):
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            dx = max(x1 - pixel_point[0], 0, pixel_point[0] - x2)
+            dy = max(y1 - pixel_point[1], 0, pixel_point[1] - y2)
+            contains = x1 <= pixel_point[0] <= x2 and y1 <= pixel_point[1] <= y2
+            candidates.append({
+                "bbox": (x1, y1, x2, y2),
+                "confidence": 0.78,
+                "distance": 0.0 if contains else -float(np.hypot(dx, dy)),
+                "source": "region",
+                "contains": contains,
+            })
+
+        max_distance = max(width, height) * 0.06
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate["contains"]
+            or (allow_nearby and abs(candidate["distance"]) <= max_distance)
+        ]
+        if not eligible:
+            raise ValueError("点击位置附近没有检测到文字，请改用框选或画笔标记。")
+        selected = max(
+            eligible,
+            key=lambda candidate: (
+                int(candidate["contains"]),
+                int(candidate["source"] == "detector"),
+                candidate["confidence"],
+                candidate["distance"],
+            ),
+        )
+        x1, y1, x2, y2 = selected["bbox"]
+        padding = max(
+            4,
+            min(
+                int(round(max(x2 - x1, y2 - y1) * 0.22)),
+                int(round(min(width, height) * 0.03)),
+            ),
+        )
+        x1 = max(0, x1 - padding)
+        y1 = max(0, y1 - padding)
+        x2 = min(width, x2 + padding)
+        y2 = min(height, y2 + padding)
+        return {
+            "x": x1 / float(width),
+            "y": y1 / float(height),
+            "width": (x2 - x1) / float(width),
+            "height": (y2 - y1) / float(height),
+            "source": selected["source"],
+            "confidence": selected["confidence"],
+        }
+
     def _build_selection_erase_mask(
         self,
         rects: list[tuple[int, int, int, int]],
         image_shape: tuple[int, ...],
+        *,
+        strokes: Any = None,
     ) -> np.ndarray:
         height, width = image_shape[:2]
         mask = np.zeros((height, width), dtype=np.uint8)
         for x1, y1, x2, y2 in rects:
             mask[y1:y2, x1:x2] = 255
+        for diameter, points in self._normalize_selection_erase_strokes(strokes, image_shape):
+            radius = max(1, diameter // 2)
+            if len(points) == 1:
+                cv2.circle(mask, points[0], radius, 255, thickness=-1, lineType=cv2.LINE_8)
+                continue
+            for start, end in zip(points, points[1:]):
+                cv2.line(mask, start, end, 255, thickness=diameter, lineType=cv2.LINE_8)
+            cv2.circle(mask, points[0], radius, 255, thickness=-1, lineType=cv2.LINE_8)
+            cv2.circle(mask, points[-1], radius, 255, thickness=-1, lineType=cv2.LINE_8)
         return mask
+
+    def _normalize_selection_erase_strokes(
+        self,
+        raw_strokes: Any,
+        image_shape: tuple[int, ...],
+    ) -> list[tuple[int, list[tuple[int, int]]]]:
+        if not isinstance(raw_strokes, list):
+            return []
+        height, width = image_shape[:2]
+        min_side = max(1, min(height, width))
+        strokes: list[tuple[int, list[tuple[int, int]]]] = []
+        for raw_stroke in raw_strokes[:256]:
+            if not isinstance(raw_stroke, dict) or not isinstance(raw_stroke.get("points"), list):
+                continue
+            try:
+                raw_size = float(raw_stroke.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(raw_size) or raw_size <= 0:
+                continue
+            diameter = raw_size * min_side if raw_size <= 1.05 else raw_size
+            diameter = max(1, min(int(round(diameter)), max(1, min_side // 4)))
+            points: list[tuple[int, int]] = []
+            for raw_point in raw_stroke["points"][:4096]:
+                if not isinstance(raw_point, dict):
+                    continue
+                try:
+                    point_x = float(raw_point.get("x"))
+                    point_y = float(raw_point.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(point_x) or not np.isfinite(point_y):
+                    continue
+                if -0.05 <= point_x <= 1.05 and -0.05 <= point_y <= 1.05:
+                    point_x *= width
+                    point_y *= height
+                points.append((
+                    max(0, min(width - 1, int(round(point_x)))),
+                    max(0, min(height - 1, int(round(point_y)))),
+                ))
+            if points:
+                strokes.append((diameter, points))
+        return strokes
 
     def _build_selection_erase_input_image(
         self,
@@ -9625,7 +9866,7 @@ class TranslatorEngine:
         if normalized.ndim == 3:
             normalized = cv2.cvtColor(normalized[:, :, :3], cv2.COLOR_RGB2GRAY)
         if normalized.ndim != 2:
-            raise RuntimeError("高级擦除差异 mask 格式异常。")
+            raise RuntimeError("在线擦除差异 mask 格式异常。")
         target_shape = image_shape[:2]
         if normalized.shape[:2] != target_shape:
             normalized = cv2.resize(
@@ -9646,7 +9887,7 @@ class TranslatorEngine:
         if normalized.ndim == 2:
             normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2RGB)
         if normalized.ndim != 3:
-            raise RuntimeError("高级擦除返回图片格式异常。")
+            raise RuntimeError("在线擦除返回图片格式异常。")
         if normalized.shape[2] > 3:
             normalized = normalized[:, :, :3]
         if normalized.dtype != np.uint8:
@@ -9669,7 +9910,7 @@ class TranslatorEngine:
                 interpolation=cv2.INTER_LINEAR,
             )
         if source_rgb.ndim != 3 or edited_rgb.ndim != 3:
-            raise RuntimeError("高级擦除输入图片格式异常。")
+            raise RuntimeError("在线擦除输入图片格式异常。")
 
         diff_rgb = cv2.absdiff(source_rgb[:, :, :3], edited_rgb[:, :, :3])
         gray_diff = cv2.cvtColor(diff_rgb, cv2.COLOR_RGB2GRAY)
@@ -9741,12 +9982,12 @@ class TranslatorEngine:
     ) -> tuple[np.ndarray, str]:
         if region_mask is None or not np.any(region_mask):
             raise RuntimeError(
-                "高级擦除没有找到可约束的文字区域，请先完成文字识别，"
+                "在线擦除没有找到可约束的文字区域，请先完成文字识别，"
                 "或手动补充漏识别的文字框后重试。"
             )
         if self._advanced_erase_allowed_mask_is_overbroad(region_mask):
             raise RuntimeError(
-                "高级擦除识别到的文字区域异常过大，为避免改坏整页已停止。"
+                "在线擦除识别到的文字区域异常过大，为避免改坏整页已停止。"
                 "请检查文字框，删除覆盖大面积画面的错误框后重试。"
             )
         return region_mask, "detected_text_regions"
@@ -9789,7 +10030,7 @@ class TranslatorEngine:
         raw_diff_mask = self._normalize_advanced_erase_mask(raw_diff_mask, raw_diff_mask.shape)
         if allowed_mask is None:
             raise RuntimeError(
-                "高级擦除缺少受约束的文字区域，为避免改坏整页已停止。"
+                "在线擦除缺少受约束的文字区域，为避免改坏整页已停止。"
             )
         allowed_mask = self._normalize_advanced_erase_mask(allowed_mask, raw_diff_mask.shape)
         return cv2.bitwise_and(raw_diff_mask, allowed_mask)

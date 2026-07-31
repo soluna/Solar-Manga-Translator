@@ -41,6 +41,7 @@ import {
   shouldConfirmBatchTranslation,
   workflowStageLabelMap
 } from './workflow-state.js'
+import { buildEraseExecution } from './erase-workflow.js'
 
 const desktopBridge = typeof window !== 'undefined' && window.mangaDesktop && typeof window.mangaDesktop === 'object'
   ? window.mangaDesktop
@@ -692,9 +693,16 @@ const remoteExecution = ref({
   worker_root: '',
 })
 const selectionEraseModalOpen = ref(false)
-const selectionEraseAction = ref('selection')
+const eraseWorkflowProvider = ref('local')
+const eraseWorkflowScope = ref('full')
+const eraseSelectionTool = ref('click')
 const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
+const eraseSelectionStrokes = ref([])
+const eraseSelectionActiveStroke = ref(null)
+const eraseBrushSize = ref(32)
+const eraseSelectionSuggestBusy = ref(false)
+const eraseSelectionSuggestError = ref('')
 const selectionEraseImageSize = ref({ width: 0, height: 0 })
 const selectionEraseViewport = ref({ mode: 'fit', zoom: 1 })
 const localAdvancedPreviewOpen = ref(false)
@@ -991,10 +999,25 @@ const canRunAdvancedErase = computed(
     && !localAdvancedPreviewOpen.value
   )
 )
-const selectionEraseIsLocal = computed(() => selectionEraseAction.value === 'local-selection')
-const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地选区擦除' : '高级擦除'))
-const selectionEraseModalTitle = computed(() => (selectionEraseIsLocal.value ? '本地选区擦除' : '选区擦除'))
-const selectionEraseConfirmLabel = computed(() => (selectionEraseIsLocal.value ? '确认选区擦除' : '确认擦除'))
+const selectionEraseIsLocal = computed(() => eraseWorkflowProvider.value === 'local')
+const selectionEraseModalKicker = computed(() => (
+  selectionEraseIsLocal.value ? 'Manga LaMa · 本机运行' : 'Seedream · 在线处理'
+))
+const selectionEraseModalTitle = computed(() => (
+  selectionEraseIsLocal.value ? '本地擦除' : '在线擦除'
+))
+const eraseSelectionMarkCount = computed(() => (
+  selectionEraseRects.value.length + eraseSelectionStrokes.value.length
+))
+const selectionEraseConfirmLabel = computed(() => {
+  if (advancedEraseBusy.value) {
+    return '擦除中…'
+  }
+  if (eraseWorkflowScope.value === 'full') {
+    return selectionEraseIsLocal.value ? '生成本地候选' : '开始在线擦除'
+  }
+  return selectionEraseIsLocal.value ? '开始本地擦除' : '开始在线擦除'
+})
 const localModelStatusLabel = computed(() => {
   if (localModelInfoLoading.value) {
     return '正在读取模型状态…'
@@ -1325,7 +1348,19 @@ const selectedEditPageMainImageUrl = computed(() => {
     page.stored_name
   )
 })
-const selectionEraseImageUrl = computed(() => selectedEditPageMainImageUrl.value)
+const selectionEraseImageUrl = computed(() => {
+  const page = selectedEditPage.value
+  if (!page) {
+    return ''
+  }
+  if (eraseWorkflowScope.value === 'full') {
+    return getReviewPageImageUrl(
+      page.source_image_url || page.image_url || page.base_image_url || '',
+      page.stored_name
+    )
+  }
+  return selectedEditPageMainImageUrl.value
+})
 const brushEditBlankImageUrl = computed(() => selectedEditPageMainImageUrl.value)
 const brushEditSourceImageUrl = computed(() => {
   const page = selectedEditPage.value
@@ -8502,7 +8537,7 @@ async function clearStoredAdvancedEraseApiKey() {
   config.value.advanced_erase_api_key = ''
   saveStoredConfig(config.value)
   await persistAppSettings(normalizeStoredConfig(config.value), ['advanced_erase_api_key'])
-  status.value = '已清除本机保存的高级擦除 API Key。'
+  status.value = '已清除本机保存的在线擦除 API Key。'
 }
 
 function clearTranslatorApiKey() {
@@ -9303,30 +9338,32 @@ function runV2RetranslateAction() {
 
 function getAdvancedEraseConfigError() {
   if (config.value.advanced_erase_provider !== 'volcengine-ark') {
-    return '高级擦除第一版仅支持火山引擎 Ark / Seedream。'
+    return '在线擦除目前仅支持火山引擎 Ark / Seedream。'
   }
   if (
     !configuredSecrets.value.advanced_erase_api_key
     && !String(config.value.advanced_erase_api_key || '').trim()
   ) {
-    return '请先在“高级擦除 API”里填写火山引擎 Ark API Key。'
+    return '请先在“在线擦除 API”里填写火山引擎 Ark API Key。'
   }
   if (!String(config.value.advanced_erase_base_url || '').trim()) {
-    return '请先填写高级擦除接口地址。'
+    return '请先填写在线擦除接口地址。'
   }
   if (!String(config.value.advanced_erase_model || '').trim()) {
-    return '请先填写高级擦除模型名称。'
+    return '请先填写在线擦除模型名称。'
   }
   return ''
 }
 
-function makeSelectionEraseRect(startX, startY, endX, endY) {
+function makeSelectionEraseRect(startX, startY, endX, endY, source = 'box') {
   const x1 = clampValue(Math.min(startX, endX), 0, 1)
   const y1 = clampValue(Math.min(startY, endY), 0, 1)
   const x2 = clampValue(Math.max(startX, endX), 0, 1)
   const y2 = clampValue(Math.max(startY, endY), 0, 1)
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    source,
     x: x1,
     y: y1,
     width: Math.max(0, x2 - x1),
@@ -9450,18 +9487,18 @@ function isRemoteAdvancedEraseAction(action) {
 function getAdvancedEraseActionLabel(action) {
   const normalized = String(action || '').trim().toLowerCase()
   if (normalized === 'restore') {
-    return '恢复传统空页'
+    return '恢复擦除前空页'
   }
   if (normalized === 'selection') {
-    return '选区擦除'
+    return '在线擦除（选区）'
   }
   if (normalized === 'local-selection') {
-    return '本地选区擦除'
+    return '本地擦除（选区）'
   }
   if (normalized === 'local-advanced-preview' || normalized === 'local-advanced-apply') {
-    return '本地高级擦除'
+    return '本地擦除'
   }
-  return '高级擦除'
+  return '在线擦除'
 }
 
 async function loadLocalModelInfo() {
@@ -9481,25 +9518,23 @@ async function loadLocalModelInfo() {
   }
 }
 
-function openSelectionEraseModal(action = 'selection') {
+function openEraseWorkspace(provider = 'local', options = {}) {
   if (!canRunAdvancedErase.value) {
     return
   }
-  const normalizedAction = String(action || 'selection').trim().toLowerCase()
-  if (isRemoteAdvancedEraseAction(normalizedAction)) {
-    const configError = getAdvancedEraseConfigError()
-    if (configError) {
-      errorMessage.value = configError
-      status.value = '选区擦除未启动。'
-      return
-    }
-  }
-  selectionEraseAction.value = normalizedAction === 'local-selection' ? 'local-selection' : 'selection'
+  eraseWorkflowProvider.value = provider === 'online' ? 'online' : 'local'
+  eraseWorkflowScope.value = options.scope === 'selection' ? 'selection' : 'full'
+  eraseSelectionTool.value = 'click'
   selectionEraseRects.value = []
   selectionEraseDraft.value = null
+  eraseSelectionStrokes.value = []
+  eraseSelectionActiveStroke.value = null
+  eraseSelectionSuggestBusy.value = false
+  eraseSelectionSuggestError.value = ''
+  eraseBrushSize.value = 32
   selectionEraseImageSize.value = { width: 0, height: 0 }
   selectionEraseViewport.value = { mode: 'fit', zoom: 1 }
-  if (selectionEraseAction.value === 'local-selection') {
+  if (eraseWorkflowProvider.value === 'local') {
     localModelEraseMaskMode.value = 'text'
     void loadLocalModelInfo()
   }
@@ -9509,10 +9544,17 @@ function openSelectionEraseModal(action = 'selection') {
 function closeSelectionEraseModal() {
   selectionEraseModalOpen.value = false
   selectionEraseDraft.value = null
+  eraseSelectionActiveStroke.value = null
+  eraseSelectionSuggestError.value = ''
 }
 
 function beginSelectionEraseDraw(event) {
-  if (!selectionEraseModalOpen.value || advancedEraseBusy.value) {
+  if (
+    !selectionEraseModalOpen.value
+    || eraseWorkflowScope.value !== 'selection'
+    || eraseSelectionTool.value === 'click'
+    || advancedEraseBusy.value
+  ) {
     return
   }
   const point = getSelectionErasePoint(event)
@@ -9521,6 +9563,20 @@ function beginSelectionEraseDraw(event) {
   }
   event.preventDefault()
   event.currentTarget?.setPointerCapture?.(event.pointerId)
+  if (eraseSelectionTool.value === 'brush') {
+    const minSide = Math.max(1, Math.min(
+      selectionEraseImageSize.value.width || 1,
+      selectionEraseImageSize.value.height || 1
+    ))
+    eraseSelectionActiveStroke.value = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: Date.now(),
+      pointerId: event.pointerId,
+      size: clampValue(eraseBrushSize.value / minSide, 0.001, 0.25),
+      points: [point]
+    }
+    return
+  }
   selectionEraseDraft.value = {
     pointerId: event.pointerId,
     startX: point.x,
@@ -9530,6 +9586,22 @@ function beginSelectionEraseDraw(event) {
 }
 
 function updateSelectionEraseDraw(event) {
+  const stroke = eraseSelectionActiveStroke.value
+  if (stroke?.pointerId === event.pointerId) {
+    const point = getSelectionErasePoint(event)
+    if (!point) {
+      return
+    }
+    const previous = stroke.points[stroke.points.length - 1]
+    if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) >= 0.001) {
+      eraseSelectionActiveStroke.value = {
+        ...stroke,
+        pointerId: event.pointerId,
+        points: [...stroke.points, point]
+      }
+    }
+    return
+  }
   const draft = selectionEraseDraft.value
   if (!draft || draft.pointerId !== event.pointerId) {
     return
@@ -9545,6 +9617,16 @@ function updateSelectionEraseDraw(event) {
 }
 
 function finishSelectionEraseDraw(event) {
+  const stroke = eraseSelectionActiveStroke.value
+  if (stroke && (stroke.pointerId == null || stroke.pointerId === event.pointerId)) {
+    event.currentTarget?.releasePointerCapture?.(event.pointerId)
+    const { pointerId: _pointerId, ...completedStroke } = stroke
+    if (completedStroke.points.length) {
+      eraseSelectionStrokes.value = [...eraseSelectionStrokes.value, completedStroke]
+    }
+    eraseSelectionActiveStroke.value = null
+    return
+  }
   const draft = selectionEraseDraft.value
   if (!draft || draft.pointerId !== event.pointerId) {
     return
@@ -9558,8 +9640,68 @@ function finishSelectionEraseDraw(event) {
 }
 
 function cancelSelectionEraseDraw(event) {
+  if (eraseSelectionActiveStroke.value?.pointerId === event.pointerId) {
+    eraseSelectionActiveStroke.value = null
+  }
   if (selectionEraseDraft.value?.pointerId === event.pointerId) {
     selectionEraseDraft.value = null
+  }
+}
+
+function getEraseStrokePoints(stroke) {
+  return (stroke?.points || []).map((point) => `${point.x * 100},${point.y * 100}`).join(' ')
+}
+
+function removeEraseSelectionStroke(strokeId) {
+  eraseSelectionStrokes.value = eraseSelectionStrokes.value.filter((stroke) => stroke.id !== strokeId)
+}
+
+async function suggestEraseSelectionAtPoint(event) {
+  if (
+    eraseWorkflowScope.value !== 'selection'
+    || eraseSelectionTool.value !== 'click'
+    || eraseSelectionSuggestBusy.value
+    || advancedEraseBusy.value
+  ) {
+    return
+  }
+  const point = getSelectionErasePoint(event)
+  const page = selectedEditPage.value
+  if (!point || !sessionId.value || !page) {
+    return
+  }
+  eraseSelectionSuggestBusy.value = true
+  eraseSelectionSuggestError.value = ''
+  try {
+    const response = await apiFetch(
+      toApiUrl(`/api/pages/${sessionId.value}/${page.stored_name}/advanced-erase/suggest-selection`),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ point, config: { use_gpu: Boolean(buildRuntimeConfig().use_gpu) } })
+      }
+    )
+    const payload = await readApiJson(response, '自动选中文字失败')
+    if (!response.ok) {
+      throw new Error(payload.detail || '自动选中文字失败')
+    }
+    const suggestion = payload.selection || {}
+    const rect = makeSelectionEraseRect(
+      suggestion.x,
+      suggestion.y,
+      Number(suggestion.x || 0) + Number(suggestion.width || 0),
+      Number(suggestion.y || 0) + Number(suggestion.height || 0),
+      'click'
+    )
+    if (rect.width <= 0 || rect.height <= 0) {
+      throw new Error('系统没有返回有效的文字范围，请改用框选或画笔。')
+    }
+    rect.confidence = Number(suggestion.confidence || 0)
+    selectionEraseRects.value = [...selectionEraseRects.value, rect]
+  } catch (error) {
+    eraseSelectionSuggestError.value = error instanceof Error ? error.message : '自动选中文字失败'
+  } finally {
+    eraseSelectionSuggestBusy.value = false
   }
 }
 
@@ -9569,29 +9711,64 @@ function removeSelectionEraseRect(rectId) {
 
 function clearSelectionEraseRects() {
   selectionEraseRects.value = []
+  eraseSelectionStrokes.value = []
   selectionEraseDraft.value = null
+  eraseSelectionActiveStroke.value = null
 }
 
 function undoSelectionEraseRect() {
-  if (!selectionEraseRects.value.length || advancedEraseBusy.value) {
+  if (!eraseSelectionMarkCount.value || advancedEraseBusy.value) {
     return
   }
-  selectionEraseRects.value = selectionEraseRects.value.slice(0, -1)
+  const lastRect = selectionEraseRects.value[selectionEraseRects.value.length - 1]
+  const lastStroke = eraseSelectionStrokes.value[eraseSelectionStrokes.value.length - 1]
+  if (Number(lastStroke?.createdAt || 0) > Number(lastRect?.createdAt || 0)) {
+    eraseSelectionStrokes.value = eraseSelectionStrokes.value.slice(0, -1)
+  } else {
+    selectionEraseRects.value = selectionEraseRects.value.slice(0, -1)
+  }
   selectionEraseDraft.value = null
+  eraseSelectionActiveStroke.value = null
 }
 
-async function confirmSelectionErase() {
-  const selections = selectionEraseRects.value
-    .filter((rect) => rect.width > 0 && rect.height > 0)
-    .map(({ x, y, width, height }) => ({ x, y, width, height }))
-  if (!selections.length) {
-    errorMessage.value = '请先框选要擦除的区域。'
+async function restoreFromEraseWorkspace() {
+  if (advancedEraseBusy.value) {
     return
   }
   closeSelectionEraseModal()
-  await runV2AdvancedEraseAction(selectionEraseAction.value, {
-    selections,
-    localMaskMode: localModelEraseMaskMode.value
+  await runV2AdvancedEraseAction('restore')
+}
+
+async function confirmEraseWorkflow() {
+  let execution
+  try {
+    execution = buildEraseExecution({
+      provider: eraseWorkflowProvider.value,
+      scope: eraseWorkflowScope.value,
+      selections: selectionEraseRects.value,
+      selectionStrokes: eraseSelectionStrokes.value,
+      localMaskMode: localModelEraseMaskMode.value
+    })
+  } catch (error) {
+    eraseSelectionSuggestError.value = error instanceof Error ? error.message : '请先标记擦除范围。'
+    return
+  }
+  if (execution.requiresOnlineConfig) {
+    const configError = getAdvancedEraseConfigError()
+    if (configError) {
+      eraseSelectionSuggestError.value = configError
+      return
+    }
+  }
+  closeSelectionEraseModal()
+  if (execution.opensPreview) {
+    await startLocalAdvancedErase()
+    return
+  }
+  await runV2AdvancedEraseAction(execution.action, {
+    selections: execution.selections,
+    selectionStrokes: execution.selectionStrokes,
+    localMaskMode: execution.localMaskMode
   })
 }
 
@@ -9983,7 +10160,7 @@ function normalizeLocalAdvancedPreview(payload, pageId) {
   const preview = advancedErase.preview || {}
   const attemptId = String(advancedErase.attempt_id || '').trim()
   if (!attemptId || !preview.candidate_url) {
-    throw new Error('后端没有返回可预览的本地高级擦除结果。')
+    throw new Error('后端没有返回可预览的本地擦除结果。')
   }
   const resolvePreviewUrl = (value) => {
     const url = toApiUrl(String(value || ''))
@@ -10023,7 +10200,7 @@ async function startLocalAdvancedErase() {
   localAdvancedPreview.value = null
   localAdvancedPreviewShowMask.value = false
   const pageId = page.stored_name
-  status.value = '正在分析文字区域并生成本地高级擦除候选；首次使用会下载并校验约 195 MB 模型…'
+  status.value = '正在分析文字区域并生成本地擦除候选；首次使用会下载并校验约 195 MB 模型…'
   void loadLocalModelInfo()
 
   try {
@@ -10043,21 +10220,21 @@ async function startLocalAdvancedErase() {
       const message = fetchError instanceof Error ? fetchError.message : ''
       throw new Error(
         message.toLowerCase().includes('failed to fetch')
-          ? '本地高级擦除连接中断：后端可能正在下载或加载模型，也可能因显存不足被系统终止。请确认后端仍在运行后重试；候选尚未应用，当前空页不会变化。'
-          : (message || '本地高级擦除请求连接中断，当前空页不会变化。')
+          ? '本地擦除连接中断：后端可能正在下载或加载模型，也可能因显存不足被系统终止。请确认后端仍在运行后重试；候选尚未应用，当前空页不会变化。'
+          : (message || '本地擦除请求连接中断，当前空页不会变化。')
       )
     }
-    const payload = await readApiJson(response, '本地高级擦除候选生成失败')
+    const payload = await readApiJson(response, '本地擦除候选生成失败')
     if (!response.ok) {
-      throw new Error(payload.detail || '本地高级擦除候选生成失败')
+      throw new Error(payload.detail || '本地擦除候选生成失败')
     }
     localAdvancedPreview.value = normalizeLocalAdvancedPreview(payload, pageId)
     localAdvancedPreviewOpen.value = true
-    status.value = '本地高级擦除候选已生成；确认前不会覆盖当前空页。'
+    status.value = '本地擦除候选已生成；确认前不会覆盖当前空页。'
     return true
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '本地高级擦除候选生成失败'
-    status.value = '本地高级擦除未应用，当前空页保持不变。'
+    errorMessage.value = error instanceof Error ? error.message : '本地擦除候选生成失败'
+    status.value = '本地擦除未应用，当前空页保持不变。'
     return false
   } finally {
     advancedEraseBusy.value = false
@@ -10071,7 +10248,7 @@ function discardLocalAdvancedPreview() {
   localAdvancedPreviewOpen.value = false
   localAdvancedPreview.value = null
   localAdvancedPreviewShowMask.value = false
-  status.value = '已放弃本地高级擦除候选，当前空页保持不变。'
+  status.value = '已放弃本地擦除候选，当前空页保持不变。'
 }
 
 function continueWithLocalSelectionErase() {
@@ -10081,7 +10258,7 @@ function continueWithLocalSelectionErase() {
   localAdvancedPreviewOpen.value = false
   localAdvancedPreview.value = null
   localAdvancedPreviewShowMask.value = false
-  openSelectionEraseModal('local-selection')
+  openEraseWorkspace('local', { scope: 'selection' })
 }
 
 async function applyLocalAdvancedPreview() {
@@ -10098,7 +10275,7 @@ async function applyLocalAdvancedPreview() {
   localAdvancedApplying.value = true
   advancedEraseBusy.value = true
   errorMessage.value = ''
-  status.value = '正在应用本地高级擦除候选并刷新空页与框页…'
+  status.value = '正在应用本地擦除候选并刷新空页与框页…'
   try {
     let response
     try {
@@ -10120,13 +10297,13 @@ async function applyLocalAdvancedPreview() {
       const message = fetchError instanceof Error ? fetchError.message : ''
       throw new Error(
         message.toLowerCase().includes('failed to fetch')
-          ? '应用候选时连接中断。请先确认后端仍在运行，再重新打开本地高级擦除生成候选；系统不会在无法确认结果时擅自覆盖当前空页。'
-          : (message || '应用本地高级擦除候选时连接中断。')
+          ? '应用候选时连接中断。请先确认后端仍在运行，再重新打开本地擦除生成候选；系统不会在无法确认结果时擅自覆盖当前空页。'
+          : (message || '应用本地擦除候选时连接中断。')
       )
     }
-    const payload = await readApiJson(response, '应用本地高级擦除候选失败')
+    const payload = await readApiJson(response, '应用本地擦除候选失败')
     if (!response.ok) {
-      throw new Error(payload.detail || '应用本地高级擦除候选失败')
+      throw new Error(payload.detail || '应用本地擦除候选失败')
     }
 
     markPageImageUpdated(preview.pageId, Date.now(), { base: true })
@@ -10138,11 +10315,11 @@ async function applyLocalAdvancedPreview() {
     preloadReviewImagesAroundPage(preview.pageId)
     scheduleCanvasLayoutRefresh()
     void loadProjectHistory({ silent: true })
-    status.value = '本地高级擦除已应用，空页与框页已刷新。'
+    status.value = '本地擦除已应用，空页与框页已刷新。'
     return true
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '应用本地高级擦除候选失败'
-    status.value = '本地高级擦除应用失败，当前空页保持不变。'
+    errorMessage.value = error instanceof Error ? error.message : '应用本地擦除候选失败'
+    status.value = '本地擦除应用失败，当前空页保持不变。'
     return false
   } finally {
     localAdvancedApplying.value = false
@@ -10161,7 +10338,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     const configError = getAdvancedEraseConfigError()
     if (configError) {
       errorMessage.value = configError
-      status.value = '高级擦除未启动。'
+      status.value = '在线擦除未启动。'
       return false
     }
   }
@@ -10171,12 +10348,12 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
   errorMessage.value = ''
   const pageId = page.stored_name
   status.value = normalizedAction === 'restore'
-    ? '正在恢复传统空页…'
+    ? '正在恢复擦除前空页…'
     : normalizedAction === 'selection'
-      ? '正在进行选区擦除，等待 Seedream 返回图片…'
+      ? '正在进行在线选区擦除，等待 Seedream 返回图片…'
       : normalizedAction === 'local-selection'
       ? '正在准备本地 LaMa 模型并合并本页选区；首次使用会下载并校验模型，可能需要几分钟…'
-      : '正在进行高级擦除，等待 Seedream 返回图片…'
+      : '正在进行在线擦除，等待 Seedream 返回图片…'
 
   try {
     const requestBody = {
@@ -10185,6 +10362,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     }
     if (['selection', 'local-selection'].includes(normalizedAction)) {
       requestBody.selections = Array.isArray(options.selections) ? options.selections : []
+      requestBody.selection_strokes = Array.isArray(options.selectionStrokes) ? options.selectionStrokes : []
     }
     if (normalizedAction === 'local-selection') {
       requestBody.local_mask_mode = options.localMaskMode === 'selection' ? 'selection' : 'text'
@@ -10218,22 +10396,22 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
     scheduleCanvasLayoutRefresh()
     void loadProjectHistory({ silent: true })
     status.value = normalizedAction === 'restore'
-      ? '已恢复传统空页。'
+      ? '已恢复擦除前空页。'
       : normalizedAction === 'selection'
-        ? '选区擦除完成，空页与框页已刷新。'
+        ? '在线选区擦除完成，空页与框页已刷新。'
         : normalizedAction === 'local-selection'
-        ? '本地选区擦除完成，空页与框页已刷新。'
-        : '高级擦除完成，空页与框页已刷新。'
+        ? '本地擦除完成，空页与框页已刷新。'
+        : '在线擦除完成，空页与框页已刷新。'
     return true
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : `${getAdvancedEraseActionLabel(normalizedAction)}失败`
     status.value = normalizedAction === 'restore'
-      ? '恢复传统空页失败。'
+      ? '恢复擦除前空页失败。'
       : normalizedAction === 'selection'
-        ? '选区擦除失败。'
+        ? '在线选区擦除失败。'
         : normalizedAction === 'local-selection'
-        ? '本地选区擦除失败。'
-        : '高级擦除失败。'
+        ? '本地擦除失败。'
+        : '在线擦除失败。'
     return false
   } finally {
     advancedEraseBusy.value = false
@@ -11499,48 +11677,18 @@ watch(
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
-                  title="使用本地 Manga LaMa Large 自动擦除当前页文字；预览确认后才会应用"
-                  @click="startLocalAdvancedErase"
+                  title="使用 Seedream 在线擦除，可在工作台内选择全图或选区"
+                  @click="openEraseWorkspace('online')"
                 >
-                  本地高级擦除（推荐）
+                  在线擦除
                 </button>
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
-                  title="用 Seedream 对当前页做高级擦除，生成新的空页"
-                  @click="runV2AdvancedEraseAction('erase')"
+                  title="使用本地 Manga LaMa 擦除，可在工作台内选择全图或选区"
+                  @click="openEraseWorkspace('local')"
                 >
-                  高级擦除
-                </button>
-                <button
-                  type="button"
-                  :disabled="!canRunAdvancedErase"
-                  @click="openSelectionEraseModal"
-                >
-                  选区擦除
-                </button>
-                <button
-                  type="button"
-                  :disabled="!canRunAdvancedErase"
-                  @click="openBrushEditModal"
-                >
-                  画笔擦除
-                </button>
-                <button
-                  type="button"
-                  :disabled="!canRunAdvancedErase"
-                  title="使用本地 LaMa 模型擦除选区；首次使用会自动下载模型"
-                  @click="openSelectionEraseModal('local-selection')"
-                >
-                  本地选区擦除
-                </button>
-                <button
-                  type="button"
-                  :disabled="!canRunAdvancedErase"
-                  title="恢复高级擦除前的传统空页"
-                  @click="runV2AdvancedEraseAction('restore')"
-                >
-                  恢复传统空页
+                  本地擦除
                 </button>
               </div>
             </div>
@@ -12302,7 +12450,7 @@ watch(
         <header class="v2-modal-head">
           <div>
             <p class="v2-section-kicker">Manga LaMa Large · 当前页</p>
-            <h2 class="v2-section-title">本地高级擦除预览</h2>
+            <h2 class="v2-section-title">本地擦除预览</h2>
           </div>
           <div class="v2-modal-head-actions">
             <label class="v2-local-advanced-mask-toggle">
@@ -12312,7 +12460,7 @@ watch(
             <button
               type="button"
               class="v2-icon-button"
-              aria-label="放弃并关闭本地高级擦除预览"
+              aria-label="放弃并关闭本地擦除预览"
               :disabled="localAdvancedApplying"
               @click="discardLocalAdvancedPreview"
             >
@@ -12355,7 +12503,7 @@ watch(
               <a :href="localAdvancedPreview.sourceUrl" target="_blank" rel="noopener">100% 查看</a>
             </figcaption>
             <div class="v2-local-advanced-image">
-              <img :src="localAdvancedPreview.sourceUrl" alt="本地高级擦除原图" />
+              <img :src="localAdvancedPreview.sourceUrl" alt="本地擦除原图" />
             </div>
           </figure>
           <figure>
@@ -12364,7 +12512,7 @@ watch(
               <a :href="localAdvancedPreview.currentUrl" target="_blank" rel="noopener">100% 查看</a>
             </figcaption>
             <div class="v2-local-advanced-image">
-              <img :src="localAdvancedPreview.currentUrl" alt="本地高级擦除前的当前空页" />
+              <img :src="localAdvancedPreview.currentUrl" alt="本地擦除前的当前空页" />
             </div>
           </figure>
           <figure>
@@ -12373,7 +12521,7 @@ watch(
               <a :href="localAdvancedPreview.candidateUrl" target="_blank" rel="noopener">100% 查看</a>
             </figcaption>
             <div class="v2-local-advanced-image">
-              <img :src="localAdvancedPreview.candidateUrl" alt="本地高级擦除新空页候选" />
+              <img :src="localAdvancedPreview.candidateUrl" alt="本地擦除新空页候选" />
               <img
                 v-if="localAdvancedPreviewShowMask"
                 class="v2-local-advanced-mask-overlay"
@@ -12414,29 +12562,119 @@ watch(
     </div>
 
     <div v-if="selectionEraseModalOpen" class="v2-overlay" @click.self="closeSelectionEraseModal">
-      <section class="v2-modal v2-selection-erase-modal">
+      <section class="v2-modal v2-selection-erase-modal v2-erase-workspace-modal">
         <header class="v2-modal-head">
           <div>
             <p class="v2-section-kicker">{{ selectionEraseModalKicker }}</p>
             <h2 class="v2-section-title">{{ selectionEraseModalTitle }}</h2>
           </div>
           <div class="v2-modal-head-actions">
-            <div class="v2-erase-zoom-controls" role="group" aria-label="选区画布缩放">
+            <div v-if="eraseWorkflowScope === 'selection'" class="v2-erase-zoom-controls" role="group" aria-label="选区画布缩放">
               <button type="button" aria-label="缩小" title="缩小（-）" @click="adjustEraseViewportZoom('selection', -1)">−</button>
               <button type="button" @click="setEraseViewportPreset('selection', 'fit')">适应</button>
-              <button type="button" @click="setEraseViewportPreset('selection', 'actual')">100%</button>
+              <button type="button" title="重置为 100%" @click="setEraseViewportPreset('selection', 'actual')">
+                {{ selectionEraseViewport.mode === 'custom' ? getEraseViewportLabel('selection') : '100%' }}
+              </button>
               <button type="button" aria-label="放大" title="放大（+）" @click="adjustEraseViewportZoom('selection', 1)">＋</button>
-              <span>{{ getEraseViewportLabel('selection') }}</span>
             </div>
             <button type="button" class="v2-icon-button" :aria-label="`关闭${selectionEraseModalTitle}`" @click="closeSelectionEraseModal">✕</button>
           </div>
         </header>
-        <div class="v2-selection-erase-layout">
+
+        <div class="v2-erase-workflow-scope" role="group" aria-label="擦除范围">
+          <button
+            type="button"
+            :class="{ active: eraseWorkflowScope === 'full' }"
+            :aria-pressed="eraseWorkflowScope === 'full'"
+            @click="eraseWorkflowScope = 'full'"
+          >
+            <span>整页处理</span>
+            <small>{{ selectionEraseIsLocal ? '自动识别当前页全部文字' : '由 Seedream 理解并处理整页' }}</small>
+          </button>
+          <button
+            type="button"
+            :class="{ active: eraseWorkflowScope === 'selection' }"
+            :aria-pressed="eraseWorkflowScope === 'selection'"
+            @click="eraseWorkflowScope = 'selection'"
+          >
+            <span>指定区域</span>
+            <small>点击、框选和画笔可以混合使用</small>
+          </button>
+        </div>
+
+        <div v-if="eraseWorkflowScope === 'full'" class="v2-erase-full-layout">
+          <figure class="v2-erase-full-preview">
+            <img
+              v-if="selectionEraseImageUrl"
+              :src="selectionEraseImageUrl"
+              alt="当前待擦除页面"
+              @load="handleSelectionEraseImageLoad"
+            />
+          </figure>
+          <aside class="v2-erase-full-copy">
+            <span class="v2-erase-workflow-step">范围 01</span>
+            <h3>处理当前整页</h3>
+            <p v-if="selectionEraseIsLocal">
+              本地文字检测器会找到对白、无框文字与拟声词，再由 Manga LaMa 仅重绘文字 mask；结果会先进入三图对比预览，不会直接覆盖空页。
+            </p>
+            <p v-else>
+              将当前页交给 Seedream 清除对白、无框文字与拟声词，并尽量自然补全背景。在线整页处理会直接更新当前空页。
+            </p>
+            <div v-if="selectionEraseIsLocal" class="v2-local-model-status v2-erase-full-model-status">
+              <strong>{{ localModelInfo?.downloaded ? '本地模型已就绪' : '本地模型准备' }}</strong>
+              <span>{{ localModelStatusLabel }}</span>
+            </div>
+            <p v-else-if="getAdvancedEraseConfigError()" class="v2-erase-inline-warning">
+              {{ getAdvancedEraseConfigError() }}
+            </p>
+          </aside>
+        </div>
+
+        <div v-else class="v2-selection-erase-layout">
           <div :class="['v2-selection-erase-stage-wrap', selectionEraseViewport.mode === 'custom' ? 'is-custom-zoom' : '']">
+            <div class="v2-erase-selection-tools" role="group" aria-label="选择工具">
+              <button
+                type="button"
+                :class="{ active: eraseSelectionTool === 'click' }"
+                :aria-pressed="eraseSelectionTool === 'click'"
+                @click="eraseSelectionTool = 'click'"
+              >
+                <strong>点击选中</strong>
+                <small>自动扩展文字范围</small>
+              </button>
+              <button
+                type="button"
+                :class="{ active: eraseSelectionTool === 'box' }"
+                :aria-pressed="eraseSelectionTool === 'box'"
+                @click="eraseSelectionTool = 'box'"
+              >
+                <strong>框选</strong>
+                <small>拖拽矩形区域</small>
+              </button>
+              <button
+                type="button"
+                :class="{ active: eraseSelectionTool === 'brush' }"
+                :aria-pressed="eraseSelectionTool === 'brush'"
+                @click="eraseSelectionTool = 'brush'"
+              >
+                <strong>画笔</strong>
+                <small>涂抹补充 mask</small>
+              </button>
+              <label v-if="eraseSelectionTool === 'brush'" class="v2-erase-brush-size">
+                <span>笔刷 {{ eraseBrushSize }} px</span>
+                <input v-model.number="eraseBrushSize" type="range" min="4" max="200" step="2" />
+              </label>
+            </div>
             <div
               ref="selectionEraseStageRef"
-              :class="['v2-selection-erase-stage', selectionEraseViewport.mode === 'custom' ? 'is-custom-zoom' : '']"
+              :class="[
+                'v2-selection-erase-stage',
+                `is-${eraseSelectionTool}`,
+                eraseSelectionSuggestBusy ? 'is-suggesting' : '',
+                selectionEraseViewport.mode === 'custom' ? 'is-custom-zoom' : ''
+              ]"
               :style="getEraseViewportStageStyle('selection')"
+              @click="suggestEraseSelectionAtPoint"
               @pointerdown="beginSelectionEraseDraw"
               @pointermove="updateSelectionEraseDraw"
               @pointerup="finishSelectionEraseDraw"
@@ -12449,12 +12687,42 @@ watch(
                 draggable="false"
                 @load="handleSelectionEraseImageLoad"
               />
+              <svg class="v2-erase-stroke-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                <polyline
+                  v-for="stroke in eraseSelectionStrokes.filter((item) => item.points.length > 1)"
+                  :key="stroke.id"
+                  :points="getEraseStrokePoints(stroke)"
+                  :stroke-width="stroke.size * 100"
+                />
+                <circle
+                  v-for="stroke in eraseSelectionStrokes.filter((item) => item.points.length === 1)"
+                  :key="`${stroke.id}-point`"
+                  :cx="stroke.points[0].x * 100"
+                  :cy="stroke.points[0].y * 100"
+                  :r="stroke.size * 50"
+                />
+                <polyline
+                  v-if="eraseSelectionActiveStroke && eraseSelectionActiveStroke.points.length > 1"
+                  :points="getEraseStrokePoints(eraseSelectionActiveStroke)"
+                  :stroke-width="eraseSelectionActiveStroke.size * 100"
+                  class="is-active"
+                />
+                <circle
+                  v-if="eraseSelectionActiveStroke && eraseSelectionActiveStroke.points.length === 1"
+                  :cx="eraseSelectionActiveStroke.points[0].x * 100"
+                  :cy="eraseSelectionActiveStroke.points[0].y * 100"
+                  :r="eraseSelectionActiveStroke.size * 50"
+                  class="is-active"
+                />
+              </svg>
               <div
                 v-for="rect in selectionEraseRects"
                 :key="rect.id"
-                class="v2-selection-erase-rect"
+                :class="['v2-selection-erase-rect', rect.source === 'click' ? 'is-auto' : '']"
                 :style="getSelectionEraseRectStyle(rect)"
-              />
+              >
+                <span v-if="rect.source === 'click'">自动</span>
+              </div>
               <div
                 v-if="selectionEraseDraft"
                 class="v2-selection-erase-rect is-draft"
@@ -12464,8 +12732,15 @@ watch(
           </div>
           <aside class="v2-selection-erase-side">
             <div class="v2-selection-erase-hint">
-              建议一次性框出本页所有要擦的位置，确认后会合并成一张 mask 处理。
+              <strong v-if="eraseSelectionSuggestBusy">正在判断文字范围…</strong>
+              <template v-else-if="eraseSelectionTool === 'click'">直接点击文字；系统会优先命中已有文本框，并在需要时调用本地文字检测。</template>
+              <template v-else-if="eraseSelectionTool === 'box'">在图上拖拽框出区域，可以连续添加多个矩形。</template>
+              <template v-else>在文字上涂抹；画笔会与点击、框选结果合并成一张 mask。</template>
             </div>
+            <p v-if="eraseSelectionSuggestError" class="v2-erase-inline-warning">{{ eraseSelectionSuggestError }}</p>
+            <p v-else-if="!selectionEraseIsLocal && getAdvancedEraseConfigError()" class="v2-erase-inline-warning">
+              {{ getAdvancedEraseConfigError() }}
+            </p>
             <div v-if="selectionEraseIsLocal" class="v2-local-model-panel">
               <div class="v2-local-model-status">
                 <strong>{{ localModelInfo?.downloaded ? 'LaMa 模型已就绪' : 'LaMa 模型准备' }}</strong>
@@ -12501,34 +12776,51 @@ watch(
               </div>
             </div>
             <div class="v2-selection-erase-count">
-              <strong>{{ selectionEraseRects.length }}</strong>
-              <span>个选区</span>
+              <strong>{{ eraseSelectionMarkCount }}</strong>
+              <span>个范围标记</span>
             </div>
-            <div v-if="selectionEraseRects.length" class="v2-selection-erase-list">
+            <div v-if="eraseSelectionMarkCount" class="v2-selection-erase-list">
               <button
                 v-for="(rect, index) in selectionEraseRects"
                 :key="rect.id"
                 type="button"
                 @click="removeSelectionEraseRect(rect.id)"
               >
-                <span>选区 {{ index + 1 }}</span>
+                <span>{{ rect.source === 'click' ? '自动选区' : '框选' }} {{ index + 1 }}</span>
                 <small>{{ Math.round(rect.width * 100) }}% × {{ Math.round(rect.height * 100) }}%</small>
               </button>
+              <button
+                v-for="(stroke, index) in eraseSelectionStrokes"
+                :key="stroke.id"
+                type="button"
+                @click="removeEraseSelectionStroke(stroke.id)"
+              >
+                <span>画笔 {{ index + 1 }}</span>
+                <small>{{ stroke.points.length }} 个采样点</small>
+              </button>
             </div>
-            <div v-else class="v2-selection-erase-empty">在图上拖拽创建选区</div>
+            <div v-else class="v2-selection-erase-empty">从点击选中、框选或画笔开始</div>
           </aside>
         </div>
         <footer class="v2-selection-erase-actions">
-          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="undoSelectionEraseRect">
+          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy" @click="restoreFromEraseWorkspace">
+            恢复擦除前空页
+          </button>
+          <button v-if="eraseWorkflowScope === 'selection'" type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !eraseSelectionMarkCount" @click="undoSelectionEraseRect">
             撤销
           </button>
-          <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="clearSelectionEraseRects">
+          <button v-if="eraseWorkflowScope === 'selection'" type="button" class="v2-ghost-button" :disabled="advancedEraseBusy || !eraseSelectionMarkCount" @click="clearSelectionEraseRects">
             清空
           </button>
           <button type="button" class="v2-ghost-button" :disabled="advancedEraseBusy" @click="closeSelectionEraseModal">
             取消
           </button>
-          <button type="button" class="v2-primary-button" :disabled="advancedEraseBusy || !selectionEraseRects.length" @click="confirmSelectionErase">
+          <button
+            type="button"
+            class="v2-primary-button"
+            :disabled="advancedEraseBusy || eraseSelectionSuggestBusy || (eraseWorkflowScope === 'selection' && !eraseSelectionMarkCount)"
+            @click="confirmEraseWorkflow"
+          >
             {{ selectionEraseConfirmLabel }}
           </button>
         </footer>
@@ -13693,8 +13985,8 @@ watch(
 
           <section class="v2-settings-group">
             <header>
-              <strong>高级擦除 API</strong>
-              <span>单页高级擦除专用配置</span>
+              <strong>在线擦除 API</strong>
+              <span>Seedream 在线擦除专用配置</span>
             </header>
 
             <label class="v2-field">
@@ -13753,7 +14045,7 @@ watch(
             </label>
 
             <label class="v2-field">
-              <span>选区擦除 Prompt</span>
+              <span>在线选区擦除 Prompt</span>
               <textarea
                 v-model="config.advanced_erase_selection_prompt"
                 class="v2-prompt-textarea"
@@ -13768,7 +14060,7 @@ watch(
                 class="v2-ghost-button"
                 @click="clearAdvancedEraseApiKey"
               >
-                清除高级擦除密钥
+                清除在线擦除密钥
               </button>
               <button
                 type="button"

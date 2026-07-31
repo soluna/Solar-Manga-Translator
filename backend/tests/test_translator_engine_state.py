@@ -6241,6 +6241,88 @@ print(json.dumps({
             self.assertTrue(np.array_equal(selected_input[5, 5], [255, 255, 255]))
             self.assertTrue(np.array_equal(selected_input[25, 15], base[25, 15]))
 
+    def test_selection_erase_mask_combines_rectangles_and_brush_strokes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            image_shape = (100, 200, 3)
+            rects = engine._normalize_selection_erase_rects(
+                [{"x": 0.05, "y": 0.1, "width": 0.1, "height": 0.2}],
+                image_shape,
+            )
+
+            mask = engine._build_selection_erase_mask(
+                rects,
+                image_shape,
+                strokes=[{
+                    "size": 0.1,
+                    "points": [
+                        {"x": 0.25, "y": 0.2},
+                        {"x": 0.5, "y": 0.5},
+                    ],
+                }],
+            )
+
+            self.assertEqual(int(mask[15, 15]), 255)
+            self.assertEqual(int(mask[20, 50]), 255)
+            self.assertEqual(int(mask[50, 100]), 255)
+            self.assertEqual(int(mask[90, 180]), 0)
+
+    def test_click_erase_selection_expands_detected_text_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((100, 200, 3), 255, dtype=np.uint8)
+
+            suggestion = engine._suggest_erase_selection_rect(
+                source,
+                {"x": 0.5, "y": 0.4},
+                regions=[],
+                detector_result={
+                    "textlines": [{
+                        "points": [[82, 28], [118, 28], [118, 52], [82, 52]],
+                        "probability": 0.93,
+                    }],
+                },
+            )
+
+            self.assertEqual(suggestion["source"], "detector")
+            self.assertAlmostEqual(suggestion["confidence"], 0.93)
+            self.assertLess(suggestion["x"], 0.41)
+            self.assertLess(suggestion["y"], 0.28)
+            self.assertGreater(suggestion["x"] + suggestion["width"], 0.59)
+            self.assertGreater(suggestion["y"] + suggestion["height"], 0.52)
+
+    def test_click_erase_selection_uses_plain_cached_text_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((100, 200, 3), 255, dtype=np.uint8)
+
+            suggestion = engine._suggest_erase_selection_rect(
+                source,
+                {"x": 0.5, "y": 0.4},
+                regions=[{
+                    "xyxy": [80, 30, 120, 50],
+                    "skip_translation": False,
+                    "disabled_region": False,
+                }],
+            )
+
+            self.assertEqual(suggestion["source"], "region")
+            self.assertLess(suggestion["x"], 0.4)
+            self.assertGreater(suggestion["x"] + suggestion["width"], 0.6)
+
+    def test_click_erase_selection_does_not_snap_to_nearby_region_before_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            source = np.full((100, 200, 3), 255, dtype=np.uint8)
+
+            with self.assertRaisesRegex(ValueError, "附近没有检测到文字"):
+                engine._suggest_erase_selection_rect(
+                    source,
+                    {"x": 0.63, "y": 0.4},
+                    regions=[{"xyxy": [80, 30, 120, 50]}],
+                    allow_nearby=False,
+                )
+
     def test_selection_erase_composite_keeps_pixels_outside_rects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))
@@ -6386,13 +6468,21 @@ print(json.dumps({
                 raw_config={},
                 action="local-selection",
                 selections=[{"x": 0.125, "y": 0.25, "width": 0.25, "height": 0.25}],
+                selection_strokes=[{
+                    "size": 0.1,
+                    "points": [{"x": 0.75, "y": 0.75}],
+                }],
+                local_mask_mode="selection",
             ))
 
             self.assertEqual(result["advanced_erase"]["action"], "local-selection")
             self.assertEqual(result["advanced_erase"]["model"], "lama_large")
             self.assertEqual(result["advanced_erase"]["device"], "cpu")
+            self.assertEqual(result["advanced_erase"]["selection_count"], 2)
+            self.assertEqual(result["advanced_erase"]["selection_stroke_count"], 1)
             self.assertEqual(len(observed_masks), 1)
             self.assertEqual(int(observed_masks[0][25, 15]), 255)
+            self.assertEqual(int(observed_masks[0][60, 60]), 255)
             self.assertEqual(int(observed_masks[0][5, 5]), 0)
             output = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
             self.assertTrue(np.array_equal(output[5, 5], base[5, 5]))

@@ -393,13 +393,57 @@ async function assertZeroTextRegionsWorkspace(page, fixture, routeHits) {
   )
   const eraseMenu = page.locator('.v2-review-toolbar .v2-erase-menu').first()
   await eraseMenu.hover()
-  const localAdvancedEraseButton = eraseMenu
-    .getByRole('button', { name: '本地高级擦除（推荐）', exact: true })
-  await localAdvancedEraseButton.waitFor({ state: 'visible', timeout: 20000 })
-  await eraseMenu
-    .getByRole('button', { name: '本地选区擦除', exact: true })
-    .waitFor({ state: 'visible', timeout: 20000 })
-  await localAdvancedEraseButton.click()
+  const eraseMenuButtons = eraseMenu.locator('.v2-erase-menu-popover button')
+  await waitForLocatorCount(eraseMenuButtons, 2, '擦除入口没有收束为在线与本地两个动作')
+  await eraseMenu.getByRole('button', { name: '在线擦除', exact: true }).waitFor({ state: 'visible', timeout: 20000 })
+  const localEraseButton = eraseMenu.getByRole('button', { name: '本地擦除', exact: true })
+  await localEraseButton.waitFor({ state: 'visible', timeout: 20000 })
+  await localEraseButton.click()
+
+  const eraseWorkspace = page.locator('.v2-erase-workspace-modal')
+  await eraseWorkspace.waitFor({ state: 'visible', timeout: 20000 })
+  await assertText(eraseWorkspace, '本地擦除', '本地擦除没有进入统一工作区')
+  await eraseWorkspace.getByRole('button', { name: /整页处理/ }).waitFor({ state: 'visible', timeout: 20000 })
+  await eraseWorkspace.getByRole('button', { name: /指定区域/ }).click()
+  for (const toolName of ['点击选中', '框选', '画笔']) {
+    await eraseWorkspace.getByRole('button', { name: new RegExp(`^${toolName}`) }).waitFor({ state: 'visible', timeout: 20000 })
+  }
+
+  const selectionStage = eraseWorkspace.locator('.v2-selection-erase-stage')
+  await selectionStage.waitFor({ state: 'visible', timeout: 20000 })
+  const selectionStageBox = await selectionStage.boundingBox()
+  if (!selectionStageBox) {
+    throw new Error('统一擦除工作区没有可操作的图片画布')
+  }
+  await selectionStage.click({
+    position: {
+      x: selectionStageBox.width * 0.5,
+      y: selectionStageBox.height * 0.48,
+    },
+  })
+  await eraseWorkspace.getByText('自动选区 1', { exact: true }).waitFor({ state: 'visible', timeout: 20000 })
+
+  await eraseWorkspace.getByRole('button', { name: /^画笔/ }).click()
+  await page.mouse.move(
+    selectionStageBox.x + selectionStageBox.width * 0.25,
+    selectionStageBox.y + selectionStageBox.height * 0.28,
+  )
+  await page.mouse.down()
+  await page.mouse.move(
+    selectionStageBox.x + selectionStageBox.width * 0.42,
+    selectionStageBox.y + selectionStageBox.height * 0.34,
+    { steps: 5 },
+  )
+  await page.mouse.up()
+  await assertText(eraseWorkspace.locator('.v2-selection-erase-count'), '2', '点击选中与画笔没有合并为同一擦除 mask')
+  await saveScreenshot(page, 'v2-unified-local-erase-selection.png')
+  await eraseWorkspace.getByRole('button', { name: '取消', exact: true }).click()
+  await eraseWorkspace.waitFor({ state: 'hidden', timeout: 20000 })
+
+  await eraseMenu.hover()
+  await eraseMenu.getByRole('button', { name: '本地擦除', exact: true }).click()
+  await eraseWorkspace.waitFor({ state: 'visible', timeout: 20000 })
+  await eraseWorkspace.getByRole('button', { name: '生成本地候选', exact: true }).click()
   const localAdvancedModal = page.locator('.v2-local-advanced-preview-modal')
   await localAdvancedModal.waitFor({ state: 'visible', timeout: 20000 })
   await assertText(localAdvancedModal, '自动处理 3 个文字区域', '本地高级擦除预览缺少处理区域摘要')

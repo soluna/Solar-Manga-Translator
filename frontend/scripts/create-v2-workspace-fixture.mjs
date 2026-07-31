@@ -36,6 +36,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
   const translatedPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/translated-image`
   const previewPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/preview-image`
   const localAdvancedPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/advanced-erase`
+  const eraseSelectionSuggestPath = `${localAdvancedPath}/suggest-selection`
   const localAdvancedAttemptId = 'fixture-local-advanced-preview'
   const localAdvancedPreviewBase = `${localAdvancedPath}/previews/${localAdvancedAttemptId}`
   const downloadPath = `/api/download/${PROJECT_ID}`
@@ -161,6 +162,16 @@ export function createZeroTextRegionsWorkspaceFixture() {
     [`GET ${blankPath}`]: imageResponse,
     [`GET ${translatedPath}`]: imageResponse,
     [`GET ${previewPath}`]: imageResponse,
+    [`POST ${eraseSelectionSuggestPath}`]: jsonResponse({
+      selection: {
+        x: 0.34,
+        y: 0.42,
+        width: 0.32,
+        height: 0.12,
+        source: 'detector',
+        confidence: 0.96,
+      },
+    }),
     [`POST ${localAdvancedPath}`]: jsonResponse({
       advanced_erase: {
         action: 'local-advanced-preview',
@@ -209,6 +220,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
       `POST /api/projects/${PROJECT_ID}/restore`,
       `GET /api/projects/${PROJECT_ID}/task`,
       `POST /api/review-regions/${PROJECT_ID}`,
+      `POST ${eraseSelectionSuggestPath}`,
       `POST ${localAdvancedPath}`,
       `GET ${downloadPath}`,
     ],

@@ -1359,6 +1359,7 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
                 raw_config=payload.get("config", {}),
                 action=action,
                 selections=payload.get("selections"),
+                selection_strokes=payload.get("selection_strokes"),
                 local_mask_mode=payload.get("local_mask_mode") or payload.get("mask_mode"),
                 attempt_id=payload.get("attempt_id"),
             )
@@ -1369,6 +1370,32 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return decorate_project_busy_state(session_id, result)
+
+
+@app.post("/api/pages/{session_id}/{page_id}/advanced-erase/suggest-selection")
+async def suggest_advanced_erase_selection(
+    session_id: str,
+    page_id: str,
+    payload: dict[str, Any] | None = None,
+):
+    session = get_or_restore_session(session_id)
+    payload = payload or {}
+    try:
+        with project_write_lease(session_id, "advanced-erase-selection-suggest"):
+            selection = await translator_engine.suggest_erase_selection(
+                project_id=session_id,
+                session=session,
+                page_id=page_id,
+                raw_point=payload.get("point"),
+                raw_config=payload.get("config", {}),
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"selection": selection}
 
 
 @app.get("/api/pages/{session_id}/{page_id}/advanced-erase/previews/{attempt_id}/{kind}")

@@ -266,6 +266,35 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "image/png")
 
+    def test_click_erase_selection_returns_backend_suggestion(self) -> None:
+        suggestion = {
+            "x": 0.2,
+            "y": 0.3,
+            "width": 0.1,
+            "height": 0.2,
+            "source": "detector",
+            "confidence": 0.94,
+        }
+        with (
+            mock.patch.object(main, "API_TOKEN", "local-secret"),
+            mock.patch.object(main, "get_or_restore_session", return_value={}),
+            mock.patch.object(
+                main.translator_engine,
+                "suggest_erase_selection",
+                new=mock.AsyncMock(return_value=suggestion),
+                create=True,
+            ) as suggest_mock,
+        ):
+            response = self.client.post(
+                "/api/pages/project-a/page-1.png/advanced-erase/suggest-selection",
+                headers={"Authorization": "Bearer local-secret"},
+                json={"point": {"x": 0.25, "y": 0.4}, "config": {"use_gpu": True}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"selection": suggestion})
+        suggest_mock.assert_awaited_once()
+
     def test_websocket_requires_token_subprotocol(self) -> None:
         with mock.patch.object(main, "API_TOKEN", "local-secret"):
             with self.assertRaises(WebSocketDisconnect):

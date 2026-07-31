@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 import cv2
@@ -154,6 +155,8 @@ class TranslatorEngine:
     PROJECT_GLOSSARY_FALLBACK_PROMPT_CHAR_LIMIT = 16000
     PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS = 120
     LOCAL_MODEL_ERASE_INPAINTING_SIZE = 2048
+    LOCAL_ADVANCED_ERASE_FALLBACK_SIZE = 1280
+    LOCAL_ADVANCED_ERASE_MAX_MASK_RATIO = 0.22
     DOUBAO_ARK_BASE_URL = DOUBAO_ARK_BASE_URL
     DOUBAO_DEFAULT_MODEL = DOUBAO_DEFAULT_MODEL
     DOUBAO_GLOSSARY_FALLBACK_MODEL = DOUBAO_GLOSSARY_FALLBACK_MODEL
@@ -1298,6 +1301,7 @@ class TranslatorEngine:
         action: str = "erase",
         selections: Any = None,
         local_mask_mode: Any = None,
+        attempt_id: Any = None,
     ) -> dict[str, Any]:
         if not any(str(image.get("stored_name") or "") == page_id for image in (session.get("source_images") or [])):
             raise FileNotFoundError("目标页面不存在，请刷新后重试。")
@@ -1319,6 +1323,25 @@ class TranslatorEngine:
                 config=config,
                 selections=selections,
                 local_mask_mode=local_mask_mode,
+            )
+        if normalized_action in {
+            "local-advanced-preview",
+            "local_advanced_preview",
+            "local-advanced",
+            "local_advanced",
+        }:
+            return await self._local_advanced_erase_preview_page(
+                project_id=project_id,
+                session=session,
+                page_id=page_id,
+                config=config,
+            )
+        if normalized_action in {"local-advanced-apply", "local_advanced_apply"}:
+            return self._apply_local_advanced_erase_preview(
+                project_id=project_id,
+                session=session,
+                page_id=page_id,
+                attempt_id=attempt_id,
             )
 
         if config.get("advanced_erase_provider") != self.ADVANCED_ERASE_DEFAULT_PROVIDER:
@@ -1901,6 +1924,530 @@ class TranslatorEngine:
                 "selection_count": len(rects),
             },
         }
+
+    async def _local_advanced_erase_preview_page(
+        self,
+        *,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_path = self.get_page_source_image_path(project_id, session, page_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        if not self._ensure_page_base_image_cache(source_path, page_cache_dir):
+            raise RuntimeError("无法准备当前页空页缓存。")
+
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            raise RuntimeError(f"无法读取原图：{source_path}")
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        current_blank_path = page_cache_dir / "inpainted.png"
+        current_blank_bgr = cv2.imread(str(current_blank_path), cv2.IMREAD_COLOR)
+        if current_blank_bgr is None:
+            raise RuntimeError(f"无法读取当前空页：{current_blank_path}")
+
+        self._ensure_vendor_import_path()
+        regions = self._load_cached_regions(
+            page_cache_dir,
+            allow_plain_region_fallback=True,
+        )
+        device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
+        detector_result: dict[str, Any] = {}
+        detector_fallback_used = False
+        try:
+            detector_result = await self.inference_backend.detect_text_mask(
+                source_rgb,
+                model_dir=self.model_dir,
+                device=device,
+                detection_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
+            )
+        except Exception as exc:
+            detector_fallback_used = True
+            print(
+                "[WARN] Local advanced erase detector fallback "
+                f"file={source_path.name} error={exc}"
+            )
+        (
+            erase_mask,
+            skipped_mask,
+            included_region_count,
+            skipped_region_count,
+        ) = self._build_local_advanced_erase_mask(
+            source_rgb,
+            regions,
+            detector_result=detector_result,
+        )
+        erase_ratio = float(cv2.countNonZero(erase_mask)) / float(erase_mask.size or 1)
+        if erase_ratio <= 0:
+            raise ValueError("当前页没有找到可安全擦除的文字区域，请改用“本地选区擦除”补充。")
+        if erase_ratio > self.LOCAL_ADVANCED_ERASE_MAX_MASK_RATIO:
+            raise RuntimeError(
+                "自动生成的文字范围过大，为避免损坏原画，本地高级擦除已停止。"
+                "请改用“本地选区擦除”分区域处理。"
+            )
+
+        print(
+            "[DEBUG] Local advanced erase preview "
+            f"file={source_path.name} model=lama_large device={device} "
+            f"regions={included_region_count} skipped={skipped_region_count} "
+            f"mask_ratio={erase_ratio:.4f} size={source_rgb.shape[1]}x{source_rgb.shape[0]}"
+        )
+        try:
+            (
+                model_rgb,
+                inpainting_size,
+                fallback_used,
+            ) = await self._run_local_advanced_lama_inpaint(
+                source_rgb,
+                erase_mask,
+                device=device,
+            )
+        except Exception as exc:
+            model_path = self.model_dir / "inpainting" / "lama_large_512px.ckpt"
+            raise RuntimeError(
+                "本地高级擦除失败。首次使用会自动下载 Manga LaMa Large 模型；"
+                "如果下载很慢，也可以手动下载模型文件后放到 "
+                f"{model_path}。详情：{exc}"
+            ) from exc
+
+        model_rgb = self._normalize_advanced_erase_edited_image(source_rgb, model_rgb)
+        candidate_rgb = source_rgb.copy()
+        candidate_rgb[erase_mask > 0] = model_rgb[erase_mask > 0]
+        quality_metrics = self._validate_local_advanced_erase_candidate(
+            source_rgb,
+            candidate_rgb,
+            erase_mask,
+        )
+
+        attempt_id = self._advanced_erase_attempt_id()
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        input_path = attempt_dir / f"{attempt_id}.local-advanced-input.png"
+        current_path = attempt_dir / f"{attempt_id}.local-advanced-current.png"
+        model_path = attempt_dir / f"{attempt_id}.local-advanced-model.png"
+        candidate_path = attempt_dir / f"{attempt_id}.local-advanced-candidate.png"
+        mask_path = attempt_dir / f"{attempt_id}.local-advanced-mask.png"
+        overlay_path = attempt_dir / f"{attempt_id}.local-advanced-overlay.png"
+        metadata_path = attempt_dir / f"{attempt_id}.json"
+        self._save_rgb_image_atomic(input_path, source_rgb)
+        self._save_rgb_image_atomic(
+            current_path,
+            cv2.cvtColor(current_blank_bgr, cv2.COLOR_BGR2RGB),
+        )
+        self._save_rgb_image_atomic(model_path, model_rgb)
+        self._save_rgb_image_atomic(candidate_path, candidate_rgb)
+        cv2.imwrite(str(mask_path), erase_mask)
+        self._save_local_advanced_erase_overlay(
+            overlay_path,
+            erase_mask,
+            skipped_mask,
+        )
+        self._write_json_file(metadata_path, {
+            "attempt_id": attempt_id,
+            "created_at": self._now_iso(),
+            "page_id": page_id,
+            "mode": "local_advanced_preview",
+            "model": "lama_large",
+            "device": device,
+            "detector_fallback_used": detector_fallback_used,
+            "inpainting_size": inpainting_size,
+            "fallback_used": fallback_used,
+            "erase_ratio": erase_ratio,
+            "included_region_count": included_region_count,
+            "skipped_region_count": skipped_region_count,
+            "quality_metrics": quality_metrics,
+            "source_path": str(source_path),
+            "current_blank": str(current_path),
+            "current_blank_sha256": self._image_pixel_sha256(current_blank_bgr),
+            "input_image": str(input_path),
+            "erase_mask": str(mask_path),
+            "mask_overlay": str(overlay_path),
+            "model_output": str(model_path),
+            "candidate_output": str(candidate_path),
+            "applied": False,
+            "discarded": False,
+        })
+
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "advanced_erase": {
+                "action": "local-advanced-preview",
+                "page_id": page_id,
+                "attempt_id": attempt_id,
+                "model": "lama_large",
+                "device": device,
+                "detector_fallback_used": detector_fallback_used,
+                "inpainting_size": inpainting_size,
+                "fallback_used": fallback_used,
+                "erase_ratio": erase_ratio,
+                "included_region_count": included_region_count,
+                "skipped_region_count": skipped_region_count,
+                "preview": self._local_advanced_erase_preview_urls(
+                    project_id,
+                    page_id,
+                    attempt_id,
+                ),
+            },
+        }
+
+    def _build_local_advanced_erase_mask(
+        self,
+        source_rgb: np.ndarray,
+        regions: list[Any],
+        *,
+        detector_result: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, int, int]:
+        erase_mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        skipped_mask = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        accepted_region_scope = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        allowed_scope = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+        included_region_count = 0
+        skipped_region_count = 0
+        for region in regions:
+            if bool(getattr(region, "skip_translation", False)) or bool(
+                getattr(region, "disabled_region", False)
+            ):
+                continue
+            selection = self._build_region_mask(
+                region,
+                source_rgb.shape,
+                dilation_scale=0.18,
+                dilation_min=3,
+                dilation_max=24,
+            )
+            allowed_scope = cv2.bitwise_or(allowed_scope, selection)
+            text_mask = self._build_selection_erase_text_mask(
+                source_rgb,
+                selection,
+                fill_enclosures=True,
+            )
+            selection_area = max(int(cv2.countNonZero(selection)), 1)
+            text_area = int(cv2.countNonZero(text_mask))
+            text_ratio = text_area / float(selection_area)
+            if text_area <= 0 or text_ratio > 0.72:
+                skipped_mask = cv2.bitwise_or(skipped_mask, selection)
+                skipped_region_count += 1
+                continue
+            erase_mask = cv2.bitwise_or(erase_mask, text_mask)
+            accepted_region_scope = cv2.bitwise_or(accepted_region_scope, selection)
+            included_region_count += 1
+
+        detected_mask = self._normalize_local_advanced_detector_mask(
+            (detector_result or {}).get("mask"),
+            source_rgb.shape,
+        )
+        detector_lines = (detector_result or {}).get("textlines")
+        if np.any(detected_mask) and isinstance(detector_lines, list):
+            min_side = max(1, min(source_rgb.shape[:2]))
+            dilate_size = max(3, min(15, int(round(min_side * 0.004)) | 1))
+            dilate_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (dilate_size, dilate_size),
+            )
+            for line in detector_lines:
+                if not isinstance(line, dict):
+                    continue
+                try:
+                    points = np.asarray(line.get("points"), dtype=np.int32).reshape(-1, 2)
+                    probability = float(line.get("probability", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if points.shape[0] < 3:
+                    continue
+                line_scope = np.zeros(source_rgb.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(line_scope, [points], 255)
+                scope_pad = max(3, min(21, int(round(min_side * 0.006)) | 1))
+                scope_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (scope_pad, scope_pad),
+                )
+                line_scope = cv2.dilate(line_scope, scope_kernel, iterations=1)
+                line_mask = cv2.bitwise_and(detected_mask, line_scope)
+                if not np.any(line_mask):
+                    continue
+                line_mask = cv2.dilate(line_mask, dilate_kernel, iterations=1)
+                line_mask = cv2.bitwise_and(line_mask, line_scope)
+                allowed_scope = cv2.bitwise_or(allowed_scope, line_scope)
+                if probability < 0.85:
+                    skipped_mask = cv2.bitwise_or(skipped_mask, line_mask)
+                    skipped_region_count += 1
+                    continue
+
+                overlap = cv2.bitwise_and(line_mask, accepted_region_scope)
+                overlap_ratio = float(cv2.countNonZero(overlap)) / float(
+                    max(cv2.countNonZero(line_mask), 1)
+                )
+                erase_mask = cv2.bitwise_or(erase_mask, line_mask)
+                if overlap_ratio < 0.35:
+                    included_region_count += 1
+                accepted_region_scope = cv2.bitwise_or(accepted_region_scope, line_scope)
+
+        if np.any(erase_mask):
+            close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            erase_mask = cv2.morphologyEx(
+                erase_mask,
+                cv2.MORPH_CLOSE,
+                close_kernel,
+                iterations=1,
+            )
+            protected_lines = self._build_advanced_erase_structure_protection_mask(
+                source_rgb,
+                allowed_scope,
+            )
+            if np.any(protected_lines):
+                erase_mask = cv2.bitwise_and(
+                    erase_mask,
+                    cv2.bitwise_not(protected_lines),
+                )
+        skipped_mask = cv2.bitwise_and(
+            skipped_mask,
+            cv2.bitwise_not(erase_mask),
+        )
+        return erase_mask, skipped_mask, included_region_count, skipped_region_count
+
+    def _normalize_local_advanced_detector_mask(
+        self,
+        raw_mask: Any,
+        image_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        if not isinstance(raw_mask, np.ndarray) or raw_mask.size <= 0:
+            return np.zeros(image_shape[:2], dtype=np.uint8)
+        mask = raw_mask
+        if mask.ndim == 3:
+            mask = cv2.cvtColor(mask[:, :, :3], cv2.COLOR_BGR2GRAY)
+        if mask.shape[:2] != image_shape[:2]:
+            mask = cv2.resize(
+                mask,
+                (image_shape[1], image_shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return np.where(mask >= 96, 255, 0).astype(np.uint8)
+
+    def _validate_local_advanced_erase_candidate(
+        self,
+        source_rgb: np.ndarray,
+        candidate_rgb: np.ndarray,
+        erase_mask: np.ndarray,
+    ) -> dict[str, float]:
+        candidate = self._normalize_advanced_erase_edited_image(source_rgb, candidate_rgb)
+        mask = self._normalize_advanced_erase_mask(erase_mask, source_rgb.shape)
+        selector = mask > 0
+        if not np.any(selector):
+            raise RuntimeError("本地高级擦除没有生成可检查的文字范围。")
+
+        diff_rgb = cv2.absdiff(source_rgb[:, :, :3], candidate[:, :, :3])
+        max_diff = np.max(diff_rgb, axis=2)
+        changed_fraction = float(np.mean(max_diff[selector] > 6))
+        if changed_fraction < 0.01:
+            raise RuntimeError(
+                "本地模型没有实际修改文字区域，已拒绝这个候选。"
+                "请改用“本地选区擦除”重试。"
+            )
+
+        gray_candidate = cv2.cvtColor(candidate[:, :, :3], cv2.COLOR_RGB2GRAY)
+        min_side = max(1, min(source_rgb.shape[:2]))
+        ring_size = max(9, min(41, int(round(min_side * 0.014)) | 1))
+        ring_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (ring_size, ring_size),
+        )
+        ring = cv2.bitwise_and(
+            cv2.dilate(mask, ring_kernel, iterations=1),
+            cv2.bitwise_not(mask),
+        )
+        ring_selector = ring > 0
+        ring_median = (
+            float(np.median(cv2.cvtColor(source_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)[ring_selector]))
+            if np.any(ring_selector)
+            else 127.5
+        )
+        candidate_values = gray_candidate[selector]
+        dark_ratio = float(np.mean(candidate_values <= 18))
+        white_ratio = float(np.mean(candidate_values >= 247))
+        if dark_ratio >= 0.78 and ring_median >= 72:
+            raise RuntimeError(
+                "本地模型在文字区域生成了异常黑块，已拒绝这个候选，当前空页不会改变。"
+            )
+        if white_ratio >= 0.90 and ring_median <= 188:
+            raise RuntimeError(
+                "本地模型在非白色背景上生成了异常白块，已拒绝这个候选，当前空页不会改变。"
+            )
+        return {
+            "changed_fraction": changed_fraction,
+            "dark_ratio": dark_ratio,
+            "white_ratio": white_ratio,
+            "ring_median": ring_median,
+        }
+
+    def _save_local_advanced_erase_overlay(
+        self,
+        path: Path,
+        erase_mask: np.ndarray,
+        skipped_mask: np.ndarray | None = None,
+    ) -> None:
+        overlay = np.zeros((*erase_mask.shape[:2], 4), dtype=np.uint8)
+        overlay[erase_mask > 0] = [72, 74, 248, 156]
+        if skipped_mask is not None:
+            overlay[skipped_mask > 0] = [0, 158, 245, 150]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), overlay)
+
+    def _local_advanced_erase_preview_urls(
+        self,
+        project_id: str,
+        page_id: str,
+        attempt_id: str,
+    ) -> dict[str, str]:
+        base = (
+            f"/api/pages/{project_id}/{page_id}/advanced-erase/"
+            f"previews/{attempt_id}"
+        )
+        return {
+            "source_url": f"{base}/source",
+            "current_url": f"{base}/current",
+            "candidate_url": f"{base}/candidate",
+            "mask_url": f"{base}/mask",
+            "overlay_url": f"{base}/overlay",
+        }
+
+    def get_local_advanced_erase_preview_path(
+        self,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        attempt_id: Any,
+        kind: Any,
+    ) -> Path:
+        normalized_attempt_id = self._normalize_local_advanced_erase_attempt_id(attempt_id)
+        normalized_kind = str(kind or "").strip().lower()
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        metadata = self._read_json_file(attempt_dir / f"{normalized_attempt_id}.json", {})
+        if (
+            str(metadata.get("mode") or "") != "local_advanced_preview"
+            or str(metadata.get("page_id") or "") != page_id
+        ):
+            raise FileNotFoundError("本地高级擦除候选不存在或已失效，请重新生成。")
+        if normalized_kind == "source":
+            return self.get_page_source_image_path(project_id, session, page_id)
+
+        filenames = {
+            "current": f"{normalized_attempt_id}.local-advanced-current.png",
+            "candidate": f"{normalized_attempt_id}.local-advanced-candidate.png",
+            "mask": f"{normalized_attempt_id}.local-advanced-mask.png",
+            "overlay": f"{normalized_attempt_id}.local-advanced-overlay.png",
+        }
+        filename = filenames.get(normalized_kind)
+        if not filename:
+            raise ValueError("不支持的本地高级擦除预览类型。")
+        path = attempt_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError("本地高级擦除预览图片不存在，请重新生成。")
+        return path
+
+    def _apply_local_advanced_erase_preview(
+        self,
+        *,
+        project_id: str,
+        session: dict[str, Any],
+        page_id: str,
+        attempt_id: Any,
+    ) -> dict[str, Any]:
+        normalized_attempt_id = self._normalize_local_advanced_erase_attempt_id(attempt_id)
+        page_cache_dir = self._session_page_cache_dir(session, project_id, page_id)
+        attempt_dir = self._advanced_erase_attempt_dir(page_cache_dir)
+        metadata_path = attempt_dir / f"{normalized_attempt_id}.json"
+        metadata = self._read_json_file(metadata_path, {})
+        if (
+            str(metadata.get("mode") or "") != "local_advanced_preview"
+            or str(metadata.get("page_id") or "") != page_id
+        ):
+            raise FileNotFoundError("本地高级擦除候选不存在或已失效，请重新生成。")
+        if bool(metadata.get("discarded")):
+            raise ValueError("这个本地高级擦除候选已经放弃，请重新生成。")
+
+        candidate_path = attempt_dir / f"{normalized_attempt_id}.local-advanced-candidate.png"
+        candidate_bgr = cv2.imread(str(candidate_path), cv2.IMREAD_COLOR)
+        if candidate_bgr is None:
+            raise FileNotFoundError("本地高级擦除候选图片不存在，请重新生成。")
+        inpainted_path = page_cache_dir / "inpainted.png"
+        current_blank_bgr = cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR)
+        if current_blank_bgr is None:
+            raise FileNotFoundError("当前空页不存在，请刷新页面后重试。")
+        preview_blank_sha256 = str(metadata.get("current_blank_sha256") or "")
+        if (
+            not preview_blank_sha256
+            or self._image_pixel_sha256(current_blank_bgr) != preview_blank_sha256
+        ):
+            raise ValueError(
+                "生成候选后当前空页已发生变化。为避免覆盖较新的编辑，"
+                "请重新运行“本地高级擦除”并确认新候选。"
+            )
+
+        backup_path = self._ensure_advanced_erase_traditional_backup(page_cache_dir)
+        self._save_rgb_image_atomic(
+            inpainted_path,
+            cv2.cvtColor(candidate_bgr, cv2.COLOR_BGR2RGB),
+        )
+        applied_at = self._now_iso()
+        self._write_json_file(metadata_path, {
+            **metadata,
+            "applied": True,
+            "applied_at": applied_at,
+            "traditional_backup": str(backup_path),
+        })
+        self._record_advanced_erase_page_state(
+            session,
+            page_id,
+            {
+                "mode": "local_advanced",
+                "updated_at": applied_at,
+                "attempt_id": normalized_attempt_id,
+                "provider": "local",
+                "model": "lama_large",
+                "device": str(metadata.get("device") or ""),
+                "changed_ratio": float(metadata.get("erase_ratio") or 0),
+                "selection_count": int(metadata.get("included_region_count") or 0),
+            },
+        )
+        self._apply_page_artifact_event(
+            project_id,
+            session,
+            [page_id],
+            PageArtifactEvent.BLANK_EDITED,
+        )
+        self.persist_project_state(
+            project_id,
+            session,
+            snapshot_kind="local_advanced_erase",
+            snapshot_summary=f"本地高级擦除 {self._page_display_name(session, page_id)}",
+            persist_page_documents=True,
+            page_ids=[page_id],
+        )
+        return {
+            **self.build_client_session_payload(project_id, session),
+            "advanced_erase": {
+                "action": "local-advanced-apply",
+                "page_id": page_id,
+                "attempt_id": normalized_attempt_id,
+                "model": "lama_large",
+                "device": str(metadata.get("device") or ""),
+                "erase_ratio": float(metadata.get("erase_ratio") or 0),
+                "included_region_count": int(metadata.get("included_region_count") or 0),
+                "skipped_region_count": int(metadata.get("skipped_region_count") or 0),
+            },
+        }
+
+    def _normalize_local_advanced_erase_attempt_id(self, raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{8,128}", value):
+            raise ValueError("本地高级擦除候选编号无效，请重新生成。")
+        return value
+
+    def _image_pixel_sha256(self, image: np.ndarray) -> str:
+        contiguous = np.ascontiguousarray(image)
+        return hashlib.sha256(contiguous.tobytes()).hexdigest()
 
     async def _local_model_selection_erase_page(
         self,
@@ -8642,6 +9189,56 @@ class TranslatorEngine:
             inpainting_size=self.LOCAL_MODEL_ERASE_INPAINTING_SIZE,
         )
 
+    async def _run_local_advanced_lama_inpaint(
+        self,
+        base_rgb: np.ndarray,
+        selection_mask: np.ndarray,
+        *,
+        device: str,
+    ) -> tuple[np.ndarray, int, bool]:
+        try:
+            result = await self._run_local_lama_inpaint(
+                base_rgb,
+                selection_mask,
+                device=device,
+            )
+            return result, self.LOCAL_MODEL_ERASE_INPAINTING_SIZE, False
+        except Exception as exc:
+            if device != "cuda" or not self._is_cuda_out_of_memory_error(exc):
+                raise
+
+            print(
+                "[WARN] Local advanced erase CUDA memory fallback "
+                f"from={self.LOCAL_MODEL_ERASE_INPAINTING_SIZE} "
+                f"to={self.LOCAL_ADVANCED_ERASE_FALLBACK_SIZE} error={exc}"
+            )
+            self._release_cuda_memory()
+            result = await self.inference_backend.erase_selection(
+                base_rgb,
+                selection_mask,
+                model_dir=self.model_dir,
+                device=device,
+                inpainting_size=self.LOCAL_ADVANCED_ERASE_FALLBACK_SIZE,
+            )
+            return result, self.LOCAL_ADVANCED_ERASE_FALLBACK_SIZE, True
+
+    def _is_cuda_out_of_memory_error(self, exc: BaseException) -> bool:
+        message = str(exc).strip().lower()
+        return (
+            "cuda out of memory" in message
+            or "cuda error: out of memory" in message
+            or ("out of memory" in message and "cuda" in message)
+        )
+
+    def _release_cuda_memory(self) -> None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            print(f"[WARN] Failed to release CUDA cache before retry: {exc}")
+
     async def _ensure_translation_base_image(
         self,
         *,
@@ -9832,7 +10429,12 @@ class TranslatorEngine:
         if vendor_root not in sys.path:
             sys.path.insert(0, vendor_root)
 
-    def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
+    def _load_cached_regions(
+        self,
+        page_cache_dir: Path,
+        *,
+        allow_plain_region_fallback: bool = False,
+    ) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
         try:
             region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
@@ -9850,8 +10452,55 @@ class TranslatorEngine:
             try:
                 regions.append(self._deserialize_text_region(payload))
             except Exception as exc:
+                if allow_plain_region_fallback:
+                    fallback_region = self._plain_cached_region(payload)
+                    if fallback_region is not None:
+                        regions.append(fallback_region)
+                        logger.warning(
+                            "Using plain cached region geometry because the full text-region "
+                            "runtime is unavailable. path=%s index=%s error=%s",
+                            regions_path,
+                            index,
+                            exc,
+                        )
+                        continue
                 print(f"[WARN] Failed to deserialize cached region at {regions_path}#{index}: {exc}")
         return regions
+
+    def _plain_cached_region(self, payload: dict[str, Any]) -> Any | None:
+        lines = payload.get("lines")
+        if not isinstance(lines, list) or not lines:
+            bounding_rect = payload.get("_bounding_rect")
+            if isinstance(bounding_rect, (list, tuple)) and len(bounding_rect) == 4:
+                try:
+                    lines = self._manual_region_lines(
+                        [int(round(float(value))) for value in bounding_rect]
+                    )
+                except (TypeError, ValueError):
+                    lines = []
+            else:
+                lines = []
+
+        points: list[list[int]] = []
+        for line in lines:
+            try:
+                line_points = np.asarray(line, dtype=np.int32).reshape(-1, 2)
+            except Exception:
+                continue
+            points.extend(line_points.tolist())
+        if not points:
+            return None
+
+        point_array = np.asarray(points, dtype=np.int32)
+        x1, y1 = point_array.min(axis=0).tolist()
+        x2, y2 = point_array.max(axis=0).tolist()
+        return SimpleNamespace(
+            lines=lines,
+            xyxy=np.asarray([x1, y1, x2, y2], dtype=np.int32),
+            font_size=payload.get("font_size", -1),
+            skip_translation=bool(payload.get("skip_translation", False)),
+            disabled_region=bool(payload.get("disabled_region", False)),
+        )
 
     def _to_json_compatible(self, value: Any) -> Any:
         if isinstance(value, np.ndarray):

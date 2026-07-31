@@ -35,6 +35,9 @@ export function createZeroTextRegionsWorkspaceFixture() {
   const blankPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/base-image`
   const translatedPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/translated-image`
   const previewPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/preview-image`
+  const localAdvancedPath = `/api/pages/${PROJECT_ID}/${PAGE_ID}/advanced-erase`
+  const localAdvancedAttemptId = 'fixture-local-advanced-preview'
+  const localAdvancedPreviewBase = `${localAdvancedPath}/previews/${localAdvancedAttemptId}`
   const downloadPath = `/api/download/${PROJECT_ID}`
   const pageArtifact = {
     page_id: PAGE_ID,
@@ -139,6 +142,15 @@ export function createZeroTextRegionsWorkspaceFixture() {
     contentType: 'image/svg+xml; charset=utf-8',
     body: imageBody,
   }
+  const maskOverlayResponse = {
+    status: 200,
+    contentType: 'image/svg+xml; charset=utf-8',
+    body: [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="960">',
+      '<rect x="245" y="410" width="150" height="120" rx="18" fill="#f84a48" fill-opacity="0.52"/>',
+      '</svg>',
+    ].join(''),
+  }
   const downloadFilename = `${PROJECT_ID}-translated.zip`
   const routeResponses = {
     [`POST /api/projects/${PROJECT_ID}/restore`]: jsonResponse(sessionPayload),
@@ -149,6 +161,33 @@ export function createZeroTextRegionsWorkspaceFixture() {
     [`GET ${blankPath}`]: imageResponse,
     [`GET ${translatedPath}`]: imageResponse,
     [`GET ${previewPath}`]: imageResponse,
+    [`POST ${localAdvancedPath}`]: jsonResponse({
+      advanced_erase: {
+        action: 'local-advanced-preview',
+        page_id: PAGE_ID,
+        attempt_id: localAdvancedAttemptId,
+        model: 'lama_large',
+        device: 'cuda',
+        detector_fallback_used: false,
+        inpainting_size: 2048,
+        fallback_used: false,
+        erase_ratio: 0.031,
+        included_region_count: 3,
+        skipped_region_count: 1,
+        preview: {
+          source_url: `${localAdvancedPreviewBase}/source`,
+          current_url: `${localAdvancedPreviewBase}/current`,
+          candidate_url: `${localAdvancedPreviewBase}/candidate`,
+          mask_url: `${localAdvancedPreviewBase}/mask`,
+          overlay_url: `${localAdvancedPreviewBase}/overlay`,
+        },
+      },
+    }),
+    [`GET ${localAdvancedPreviewBase}/source`]: imageResponse,
+    [`GET ${localAdvancedPreviewBase}/current`]: imageResponse,
+    [`GET ${localAdvancedPreviewBase}/candidate`]: imageResponse,
+    [`GET ${localAdvancedPreviewBase}/mask`]: maskOverlayResponse,
+    [`GET ${localAdvancedPreviewBase}/overlay`]: maskOverlayResponse,
     [`GET ${downloadPath}`]: {
       status: 200,
       contentType: 'application/zip',
@@ -170,6 +209,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
       `POST /api/projects/${PROJECT_ID}/restore`,
       `GET /api/projects/${PROJECT_ID}/task`,
       `POST /api/review-regions/${PROJECT_ID}`,
+      `POST ${localAdvancedPath}`,
       `GET ${downloadPath}`,
     ],
   }

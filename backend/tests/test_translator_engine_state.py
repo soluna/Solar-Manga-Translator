@@ -6449,6 +6449,486 @@ print(json.dumps({
             self.assertTrue(np.array_equal(output[20, 60], base[20, 60]))
             self.assertFalse(np.array_equal(output[60, 60], base[60, 60]))
 
+    def test_local_advanced_erase_preview_does_not_replace_current_blank_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((120, 120, 3), 238, dtype=np.uint8)
+            source[50:66, 52:70] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            current_blank = np.full((120, 120, 3), 180, dtype=np.uint8)
+            Image.fromarray(current_blank).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[46, 44], [76, 44], [76, 72], [46, 72]]],
+                    "texts": ["文字"],
+                    "font_size": 18,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {"mask": np.zeros(source.shape[:2], dtype=np.uint8), "textlines": []}
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+
+            result = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            self.assertEqual(result["advanced_erase"]["action"], "local-advanced-preview")
+            self.assertEqual(result["advanced_erase"]["model"], "lama_large")
+            self.assertFalse(result["advanced_erase"]["detector_fallback_used"])
+            self.assertGreater(result["advanced_erase"]["erase_ratio"], 0)
+            self.assertTrue(result["advanced_erase"]["preview"]["candidate_url"])
+            unchanged_blank = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(unchanged_blank, current_blank))
+
+            async def failed_detect(_source_rgb, **_kwargs):
+                raise RuntimeError("detector unavailable")
+
+            engine.inference_backend.detect_text_mask = failed_detect
+            fallback = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+            self.assertTrue(fallback["advanced_erase"]["detector_fallback_used"])
+
+    def test_local_advanced_erase_retries_with_smaller_size_after_cuda_oom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((120, 120, 3), 238, dtype=np.uint8)
+            source[50:66, 52:70] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[46, 44], [76, 44], [76, 72], [46, 72]]],
+                    "texts": ["文字"],
+                    "font_size": 18,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {"mask": np.zeros(source.shape[:2], dtype=np.uint8), "textlines": []}
+
+            async def fake_initial_lama(_base_rgb, _erase_mask, *, device):
+                self.assertEqual(device, "cuda")
+                raise RuntimeError("CUDA out of memory")
+
+            retry_sizes: list[int] = []
+
+            async def fake_retry_lama(
+                base_rgb,
+                erase_mask,
+                *,
+                model_dir,
+                device,
+                inpainting_size,
+            ):
+                self.assertEqual(model_dir, engine.model_dir)
+                self.assertEqual(device, "cuda")
+                retry_sizes.append(inpainting_size)
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine.inference_backend.erase_selection = fake_retry_lama
+            engine._select_local_inpainting_device = lambda _use_gpu: "cuda"
+            engine._run_local_lama_inpaint = fake_initial_lama
+
+            result = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            advanced_erase = result["advanced_erase"]
+            self.assertEqual(retry_sizes, [engine.LOCAL_ADVANCED_ERASE_FALLBACK_SIZE])
+            self.assertTrue(advanced_erase["fallback_used"])
+            self.assertEqual(
+                advanced_erase["inpainting_size"],
+                engine.LOCAL_ADVANCED_ERASE_FALLBACK_SIZE,
+            )
+
+    def test_local_advanced_erase_apply_replaces_blank_page_with_preview_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((120, 120, 3), 238, dtype=np.uint8)
+            source[50:66, 52:70] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(np.full((120, 120, 3), 180, dtype=np.uint8)).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[46, 44], [76, 44], [76, 72], [46, 72]]],
+                    "texts": ["文字"],
+                    "font_size": 18,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {"mask": np.zeros(source.shape[:2], dtype=np.uint8), "textlines": []}
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+            preview = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            result = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-apply",
+                attempt_id=preview["advanced_erase"]["attempt_id"],
+            ))
+
+            self.assertEqual(result["advanced_erase"]["action"], "local-advanced-apply")
+            self.assertEqual(
+                session["advanced_erase_pages"]["page-1.png"]["mode"],
+                "local_advanced",
+            )
+            applied = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(applied[0, 0], source[0, 0]))
+            self.assertTrue(np.array_equal(applied[56, 60], [246, 246, 246]))
+
+    def test_local_advanced_erase_rejects_stale_preview_after_blank_page_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((120, 120, 3), 238, dtype=np.uint8)
+            source[50:66, 52:70] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[46, 44], [76, 44], [76, 72], [46, 72]]],
+                    "texts": ["文字"],
+                    "font_size": 18,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {"mask": np.zeros(source.shape[:2], dtype=np.uint8), "textlines": []}
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+            preview = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            newer_blank = np.full((120, 120, 3), 177, dtype=np.uint8)
+            Image.fromarray(newer_blank).save(cache_dir / "inpainted.png")
+            with self.assertRaisesRegex(ValueError, "当前空页已发生变化"):
+                asyncio.run(engine.advanced_erase_page(
+                    project_id="project-a",
+                    session=session,
+                    page_id="page-1.png",
+                    raw_config={},
+                    action="local-advanced-apply",
+                    attempt_id=preview["advanced_erase"]["attempt_id"],
+                ))
+
+            unchanged = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(unchanged, newer_blank))
+
+    def test_local_advanced_erase_includes_high_confidence_detector_only_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((140, 140, 3), 238, dtype=np.uint8)
+            source[36:50, 34:48] = 12
+            source[88:104, 92:108] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[28, 30], [54, 30], [54, 56], [28, 56]]],
+                    "texts": ["对白"],
+                    "font_size": 16,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+            raw_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+            raw_mask[36:50, 34:48] = 255
+            raw_mask[88:104, 92:108] = 255
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {
+                    "mask": raw_mask,
+                    "textlines": [
+                        {
+                            "points": [[28, 30], [54, 30], [54, 56], [28, 56]],
+                            "probability": 0.98,
+                        },
+                        {
+                            "points": [[86, 82], [114, 82], [114, 110], [86, 110]],
+                            "probability": 0.96,
+                        },
+                    ],
+                }
+
+            observed_masks: list[np.ndarray] = []
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                observed_masks.append(erase_mask.copy())
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+
+            result = asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            self.assertEqual(result["advanced_erase"]["included_region_count"], 2)
+            self.assertEqual(len(observed_masks), 1)
+            self.assertEqual(int(observed_masks[0][42, 40]), 255)
+            self.assertEqual(int(observed_masks[0][96, 100]), 255)
+
+    def test_local_advanced_erase_rejects_black_block_on_light_background(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((120, 120, 3), 238, dtype=np.uint8)
+            source[50:66, 52:70] = 12
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            current_blank = np.full((120, 120, 3), 180, dtype=np.uint8)
+            Image.fromarray(current_blank).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[46, 44], [76, 44], [76, 72], [46, 72]]],
+                    "texts": ["文字"],
+                    "font_size": 18,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {"mask": np.zeros(source.shape[:2], dtype=np.uint8), "textlines": []}
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [0, 0, 0]
+                return edited
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+
+            with self.assertRaisesRegex(RuntimeError, "异常黑块"):
+                asyncio.run(engine.advanced_erase_page(
+                    project_id="project-a",
+                    session=session,
+                    page_id="page-1.png",
+                    raw_config={},
+                    action="local-advanced-preview",
+                ))
+
+            unchanged_blank = np.array(Image.open(cache_dir / "inpainted.png").convert("RGB"))
+            self.assertTrue(np.array_equal(unchanged_blank, current_blank))
+
+    def test_local_advanced_erase_protects_long_panel_border_from_detector_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self.make_engine(root)
+            source_dir = root / "source"
+            translated_dir = root / "translated"
+            source_dir.mkdir()
+            translated_dir.mkdir()
+            source = np.full((160, 160, 3), 238, dtype=np.uint8)
+            source[29:32, 10:150] = 8
+            source[66:82, 68:84] = 8
+            Image.fromarray(source).save(source_dir / "page-1.png")
+            session = {
+                "source_dir": str(source_dir),
+                "translated_dir": str(translated_dir),
+                "source_images": [{"name": "page-1.png", "stored_name": "page-1.png"}],
+                "last_config": {},
+            }
+            cache_dir = engine._session_page_cache_dir(session, "project-a", "page-1.png")
+            cache_dir.mkdir(parents=True)
+            Image.fromarray(source).save(cache_dir / "inpainted.png")
+            (cache_dir / "regions.json").write_text(json.dumps([
+                {
+                    "lines": [[[62, 60], [90, 60], [90, 88], [62, 88]]],
+                    "texts": ["对白"],
+                    "font_size": 16,
+                    "angle": 0,
+                    "translation": "",
+                }
+            ]), encoding="utf-8")
+            raw_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+            raw_mask[29:32, 10:150] = 255
+            raw_mask[66:82, 68:84] = 255
+
+            async def fake_detect(_source_rgb, **_kwargs):
+                return {
+                    "mask": raw_mask,
+                    "textlines": [
+                        {
+                            "points": [[8, 24], [152, 24], [152, 37], [8, 37]],
+                            "probability": 0.98,
+                        },
+                        {
+                            "points": [[62, 60], [90, 60], [90, 88], [62, 88]],
+                            "probability": 0.98,
+                        },
+                    ],
+                }
+
+            observed_masks: list[np.ndarray] = []
+
+            async def fake_lama(base_rgb, erase_mask, *, device):
+                observed_masks.append(erase_mask.copy())
+                edited = base_rgb.copy()
+                edited[erase_mask > 0] = [246, 246, 246]
+                return edited
+
+            engine.inference_backend.detect_text_mask = fake_detect
+            engine._select_local_inpainting_device = lambda _use_gpu: "cpu"
+            engine._run_local_lama_inpaint = fake_lama
+
+            asyncio.run(engine.advanced_erase_page(
+                project_id="project-a",
+                session=session,
+                page_id="page-1.png",
+                raw_config={},
+                action="local-advanced-preview",
+            ))
+
+            self.assertEqual(len(observed_masks), 1)
+            self.assertEqual(int(observed_masks[0][30, 80]), 0)
+            self.assertEqual(int(observed_masks[0][74, 76]), 255)
+
     def test_advanced_erase_allowed_mask_stays_close_to_text_inside_white_bubble(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(Path(tmp))

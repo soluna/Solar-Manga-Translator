@@ -697,6 +697,10 @@ const selectionEraseRects = ref([])
 const selectionEraseDraft = ref(null)
 const selectionEraseImageSize = ref({ width: 0, height: 0 })
 const selectionEraseViewport = ref({ mode: 'fit', zoom: 1 })
+const localAdvancedPreviewOpen = ref(false)
+const localAdvancedPreview = ref(null)
+const localAdvancedPreviewShowMask = ref(false)
+const localAdvancedApplying = ref(false)
 const brushEditModalOpen = ref(false)
 const brushEditLoading = ref(false)
 const brushEditSaving = ref(false)
@@ -984,12 +988,13 @@ const canRunAdvancedErase = computed(
     && !translating.value
     && !advancedEraseBusy.value
     && !brushEditSaving.value
+    && !localAdvancedPreviewOpen.value
   )
 )
 const selectionEraseIsLocal = computed(() => selectionEraseAction.value === 'local-selection')
-const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '高级擦除'))
-const selectionEraseModalTitle = computed(() => (selectionEraseIsLocal.value ? '本地模型擦除' : '选区擦除'))
-const selectionEraseConfirmLabel = computed(() => (selectionEraseIsLocal.value ? '确认模型擦除' : '确认擦除'))
+const selectionEraseModalKicker = computed(() => (selectionEraseIsLocal.value ? '本地选区擦除' : '高级擦除'))
+const selectionEraseModalTitle = computed(() => (selectionEraseIsLocal.value ? '本地选区擦除' : '选区擦除'))
+const selectionEraseConfirmLabel = computed(() => (selectionEraseIsLocal.value ? '确认选区擦除' : '确认擦除'))
 const localModelStatusLabel = computed(() => {
   if (localModelInfoLoading.value) {
     return '正在读取模型状态…'
@@ -9451,7 +9456,10 @@ function getAdvancedEraseActionLabel(action) {
     return '选区擦除'
   }
   if (normalized === 'local-selection') {
-    return '本地模型擦除'
+    return '本地选区擦除'
+  }
+  if (normalized === 'local-advanced-preview' || normalized === 'local-advanced-apply') {
+    return '本地高级擦除'
   }
   return '高级擦除'
 }
@@ -9970,6 +9978,178 @@ async function confirmBrushEdit() {
   }
 }
 
+function normalizeLocalAdvancedPreview(payload, pageId) {
+  const advancedErase = payload?.advanced_erase || {}
+  const preview = advancedErase.preview || {}
+  const attemptId = String(advancedErase.attempt_id || '').trim()
+  if (!attemptId || !preview.candidate_url) {
+    throw new Error('后端没有返回可预览的本地高级擦除结果。')
+  }
+  const resolvePreviewUrl = (value) => {
+    const url = toApiUrl(String(value || ''))
+    if (!url) {
+      return ''
+    }
+    return `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(attemptId)}`
+  }
+  return {
+    pageId,
+    attemptId,
+    model: String(advancedErase.model || 'lama_large'),
+    device: String(advancedErase.device || ''),
+    detectorFallbackUsed: Boolean(advancedErase.detector_fallback_used),
+    inpaintingSize: Number(advancedErase.inpainting_size || 0),
+    fallbackUsed: Boolean(advancedErase.fallback_used),
+    eraseRatio: Number(advancedErase.erase_ratio || 0),
+    includedRegionCount: Number(advancedErase.included_region_count || 0),
+    skippedRegionCount: Number(advancedErase.skipped_region_count || 0),
+    sourceUrl: resolvePreviewUrl(preview.source_url),
+    currentUrl: resolvePreviewUrl(preview.current_url),
+    candidateUrl: resolvePreviewUrl(preview.candidate_url),
+    maskUrl: resolvePreviewUrl(preview.mask_url),
+    overlayUrl: resolvePreviewUrl(preview.overlay_url)
+  }
+}
+
+async function startLocalAdvancedErase() {
+  const page = selectedEditPage.value
+  if (!sessionId.value || !page || translating.value || advancedEraseBusy.value) {
+    return false
+  }
+
+  advancedEraseBusy.value = true
+  activeAction.value = 'advanced-erase'
+  errorMessage.value = ''
+  localAdvancedPreview.value = null
+  localAdvancedPreviewShowMask.value = false
+  const pageId = page.stored_name
+  status.value = '正在分析文字区域并生成本地高级擦除候选；首次使用会下载并校验约 195 MB 模型…'
+  void loadLocalModelInfo()
+
+  try {
+    let response
+    try {
+      response = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId}/advanced-erase`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'local-advanced-preview',
+          config: buildRuntimeConfig()
+        })
+      })
+    } catch (fetchError) {
+      const message = fetchError instanceof Error ? fetchError.message : ''
+      throw new Error(
+        message.toLowerCase().includes('failed to fetch')
+          ? '本地高级擦除连接中断：后端可能正在下载或加载模型，也可能因显存不足被系统终止。请确认后端仍在运行后重试；候选尚未应用，当前空页不会变化。'
+          : (message || '本地高级擦除请求连接中断，当前空页不会变化。')
+      )
+    }
+    const payload = await readApiJson(response, '本地高级擦除候选生成失败')
+    if (!response.ok) {
+      throw new Error(payload.detail || '本地高级擦除候选生成失败')
+    }
+    localAdvancedPreview.value = normalizeLocalAdvancedPreview(payload, pageId)
+    localAdvancedPreviewOpen.value = true
+    status.value = '本地高级擦除候选已生成；确认前不会覆盖当前空页。'
+    return true
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '本地高级擦除候选生成失败'
+    status.value = '本地高级擦除未应用，当前空页保持不变。'
+    return false
+  } finally {
+    advancedEraseBusy.value = false
+  }
+}
+
+function discardLocalAdvancedPreview() {
+  if (localAdvancedApplying.value) {
+    return
+  }
+  localAdvancedPreviewOpen.value = false
+  localAdvancedPreview.value = null
+  localAdvancedPreviewShowMask.value = false
+  status.value = '已放弃本地高级擦除候选，当前空页保持不变。'
+}
+
+function continueWithLocalSelectionErase() {
+  if (localAdvancedApplying.value) {
+    return
+  }
+  localAdvancedPreviewOpen.value = false
+  localAdvancedPreview.value = null
+  localAdvancedPreviewShowMask.value = false
+  openSelectionEraseModal('local-selection')
+}
+
+async function applyLocalAdvancedPreview() {
+  const preview = localAdvancedPreview.value
+  if (
+    !sessionId.value
+    || !preview?.attemptId
+    || localAdvancedApplying.value
+    || advancedEraseBusy.value
+  ) {
+    return false
+  }
+
+  localAdvancedApplying.value = true
+  advancedEraseBusy.value = true
+  errorMessage.value = ''
+  status.value = '正在应用本地高级擦除候选并刷新空页与框页…'
+  try {
+    let response
+    try {
+      response = await apiFetch(
+        toApiUrl(`/api/pages/${sessionId.value}/${preview.pageId}/advanced-erase`),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            action: 'local-advanced-apply',
+            attempt_id: preview.attemptId,
+            config: buildRuntimeConfig()
+          })
+        }
+      )
+    } catch (fetchError) {
+      const message = fetchError instanceof Error ? fetchError.message : ''
+      throw new Error(
+        message.toLowerCase().includes('failed to fetch')
+          ? '应用候选时连接中断。请先确认后端仍在运行，再重新打开本地高级擦除生成候选；系统不会在无法确认结果时擅自覆盖当前空页。'
+          : (message || '应用本地高级擦除候选时连接中断。')
+      )
+    }
+    const payload = await readApiJson(response, '应用本地高级擦除候选失败')
+    if (!response.ok) {
+      throw new Error(payload.detail || '应用本地高级擦除候选失败')
+    }
+
+    markPageImageUpdated(preview.pageId, Date.now(), { base: true })
+    applySessionPayload(payload, { refreshTranslatedPageId: preview.pageId })
+    localAdvancedPreviewOpen.value = false
+    localAdvancedPreview.value = null
+    localAdvancedPreviewShowMask.value = false
+    await loadEditInspection({ silent: true })
+    preloadReviewImagesAroundPage(preview.pageId)
+    scheduleCanvasLayoutRefresh()
+    void loadProjectHistory({ silent: true })
+    status.value = '本地高级擦除已应用，空页与框页已刷新。'
+    return true
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '应用本地高级擦除候选失败'
+    status.value = '本地高级擦除应用失败，当前空页保持不变。'
+    return false
+  } finally {
+    localAdvancedApplying.value = false
+    advancedEraseBusy.value = false
+  }
+}
+
 async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
   const page = selectedEditPage.value
   if (!sessionId.value || !page || translating.value || advancedEraseBusy.value) {
@@ -10042,7 +10222,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       : normalizedAction === 'selection'
         ? '选区擦除完成，空页与框页已刷新。'
         : normalizedAction === 'local-selection'
-        ? '本地模型擦除完成，空页与框页已刷新。'
+        ? '本地选区擦除完成，空页与框页已刷新。'
         : '高级擦除完成，空页与框页已刷新。'
     return true
   } catch (error) {
@@ -10052,7 +10232,7 @@ async function runV2AdvancedEraseAction(action = 'erase', options = {}) {
       : normalizedAction === 'selection'
         ? '选区擦除失败。'
         : normalizedAction === 'local-selection'
-        ? '本地模型擦除失败。'
+        ? '本地选区擦除失败。'
         : '高级擦除失败。'
     return false
   } finally {
@@ -11319,6 +11499,14 @@ watch(
                 <button
                   type="button"
                   :disabled="!canRunAdvancedErase"
+                  title="使用本地 Manga LaMa Large 自动擦除当前页文字；预览确认后才会应用"
+                  @click="startLocalAdvancedErase"
+                >
+                  本地高级擦除（推荐）
+                </button>
+                <button
+                  type="button"
+                  :disabled="!canRunAdvancedErase"
                   title="用 Seedream 对当前页做高级擦除，生成新的空页"
                   @click="runV2AdvancedEraseAction('erase')"
                 >
@@ -11344,7 +11532,7 @@ watch(
                   title="使用本地 LaMa 模型擦除选区；首次使用会自动下载模型"
                   @click="openSelectionEraseModal('local-selection')"
                 >
-                  本地模型擦除
+                  本地选区擦除
                 </button>
                 <button
                   type="button"
@@ -12104,6 +12292,126 @@ watch(
     </main>
 
     <div v-if="miniToast" class="v2-mini-toast" role="status">{{ miniToast }}</div>
+
+    <div
+      v-if="localAdvancedPreviewOpen && localAdvancedPreview"
+      class="v2-overlay"
+      @click.self="discardLocalAdvancedPreview"
+    >
+      <section class="v2-modal v2-local-advanced-preview-modal">
+        <header class="v2-modal-head">
+          <div>
+            <p class="v2-section-kicker">Manga LaMa Large · 当前页</p>
+            <h2 class="v2-section-title">本地高级擦除预览</h2>
+          </div>
+          <div class="v2-modal-head-actions">
+            <label class="v2-local-advanced-mask-toggle">
+              <input v-model="localAdvancedPreviewShowMask" type="checkbox" />
+              显示擦除范围
+            </label>
+            <button
+              type="button"
+              class="v2-icon-button"
+              aria-label="放弃并关闭本地高级擦除预览"
+              :disabled="localAdvancedApplying"
+              @click="discardLocalAdvancedPreview"
+            >
+              ✕
+            </button>
+          </div>
+        </header>
+
+        <div class="v2-local-advanced-summary">
+          <span>自动处理 {{ localAdvancedPreview.includedRegionCount }} 个文字区域</span>
+          <span>覆盖画面 {{ (localAdvancedPreview.eraseRatio * 100).toFixed(2) }}%</span>
+          <span>{{ localAdvancedPreview.device === 'cuda' ? 'NVIDIA CUDA' : localAdvancedPreview.device || '本地推理' }}</span>
+          <span v-if="localAdvancedPreview.inpaintingSize && !localAdvancedPreview.fallbackUsed">
+            {{ localAdvancedPreview.inpaintingSize }} 精度
+          </span>
+          <span
+            v-if="localAdvancedPreview.fallbackUsed"
+            class="v2-local-advanced-summary-warning"
+          >
+            显存不足，已自动降级为 {{ localAdvancedPreview.inpaintingSize }}
+          </span>
+          <span
+            v-if="localAdvancedPreview.detectorFallbackUsed"
+            class="v2-local-advanced-summary-warning"
+          >
+            本地文字检测不可用，仅处理已识别文字
+          </span>
+          <span
+            v-if="localAdvancedPreview.skippedRegionCount"
+            class="v2-local-advanced-summary-warning"
+          >
+            {{ localAdvancedPreview.skippedRegionCount }} 个低置信度区域未自动擦除
+          </span>
+        </div>
+
+        <div class="v2-local-advanced-compare">
+          <figure>
+            <figcaption>
+              <strong>原图</strong>
+              <a :href="localAdvancedPreview.sourceUrl" target="_blank" rel="noopener">100% 查看</a>
+            </figcaption>
+            <div class="v2-local-advanced-image">
+              <img :src="localAdvancedPreview.sourceUrl" alt="本地高级擦除原图" />
+            </div>
+          </figure>
+          <figure>
+            <figcaption>
+              <strong>当前空页</strong>
+              <a :href="localAdvancedPreview.currentUrl" target="_blank" rel="noopener">100% 查看</a>
+            </figcaption>
+            <div class="v2-local-advanced-image">
+              <img :src="localAdvancedPreview.currentUrl" alt="本地高级擦除前的当前空页" />
+            </div>
+          </figure>
+          <figure>
+            <figcaption>
+              <strong>新空页候选</strong>
+              <a :href="localAdvancedPreview.candidateUrl" target="_blank" rel="noopener">100% 查看</a>
+            </figcaption>
+            <div class="v2-local-advanced-image">
+              <img :src="localAdvancedPreview.candidateUrl" alt="本地高级擦除新空页候选" />
+              <img
+                v-if="localAdvancedPreviewShowMask"
+                class="v2-local-advanced-mask-overlay"
+                :src="localAdvancedPreview.overlayUrl"
+                alt=""
+              />
+            </div>
+          </figure>
+        </div>
+
+        <footer class="v2-selection-erase-actions">
+          <button
+            type="button"
+            class="v2-ghost-button"
+            :disabled="localAdvancedApplying"
+            @click="continueWithLocalSelectionErase"
+          >
+            继续用本地选区修补
+          </button>
+          <button
+            type="button"
+            class="v2-ghost-button"
+            :disabled="localAdvancedApplying"
+            @click="discardLocalAdvancedPreview"
+          >
+            放弃结果
+          </button>
+          <button
+            type="button"
+            class="v2-primary-button"
+            :disabled="localAdvancedApplying"
+            @click="applyLocalAdvancedPreview"
+          >
+            {{ localAdvancedApplying ? '正在应用…' : '应用新空页' }}
+          </button>
+        </footer>
+      </section>
+    </div>
 
     <div v-if="selectionEraseModalOpen" class="v2-overlay" @click.self="closeSelectionEraseModal">
       <section class="v2-modal v2-selection-erase-modal">

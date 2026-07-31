@@ -9,9 +9,11 @@ import traceback
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest import mock
+
+import numpy as np
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -971,6 +973,64 @@ class InferenceBackendTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(retry.runtime_reused)
             self.assertEqual(attempts, 2)
 
+    async def test_detect_text_mask_adapts_default_detector_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = UpstreamInferenceBackend(root)
+            backend._ensure_vendor_import_path = mock.Mock()  # type: ignore[method-assign]
+            backend.prepare_runtime_patches = mock.Mock(return_value=True)  # type: ignore[method-assign]
+            source = np.full((48, 64, 3), 240, dtype=np.uint8)
+            raw_mask = np.zeros((48, 64), dtype=np.uint8)
+            raw_mask[12:20, 18:30] = 255
+            dispatch_arguments: list[tuple[Any, ...]] = []
+
+            async def fake_dispatch(*args: Any) -> tuple[list[Any], np.ndarray, np.ndarray]:
+                dispatch_arguments.append(args)
+                textline = SimpleNamespace(
+                    pts=np.array([[16, 10], [32, 10], [32, 22], [16, 22]]),
+                    prob=0.93,
+                )
+                return [textline], raw_mask, raw_mask.copy()
+
+            fake_package = ModuleType("manga_translator")
+            fake_package.__path__ = []  # type: ignore[attr-defined]
+            fake_config = ModuleType("manga_translator.config")
+            fake_config.Detector = SimpleNamespace(default="default")
+            fake_detection = ModuleType("manga_translator.detection")
+            fake_detection.dispatch = fake_dispatch
+            fake_utils = ModuleType("manga_translator.utils")
+
+            class FakeModelWrapper:
+                _MODEL_DIR = ""
+
+            fake_utils.ModelWrapper = FakeModelWrapper
+            fake_modules = {
+                "manga_translator": fake_package,
+                "manga_translator.config": fake_config,
+                "manga_translator.detection": fake_detection,
+                "manga_translator.utils": fake_utils,
+            }
+            with mock.patch.dict(sys.modules, fake_modules):
+                result = await backend.detect_text_mask(
+                    source,
+                    model_dir=root / "models",
+                    device="cuda",
+                    detection_size=2048,
+                )
+
+            self.assertEqual(FakeModelWrapper._MODEL_DIR, str(root / "models"))
+            self.assertEqual(len(dispatch_arguments), 1)
+            self.assertEqual(dispatch_arguments[0][0], "default")
+            self.assertIs(dispatch_arguments[0][1], source)
+            self.assertEqual(dispatch_arguments[0][2], 2048)
+            self.assertEqual(dispatch_arguments[0][10], "cuda")
+            self.assertTrue(np.array_equal(result["mask"], raw_mask))
+            self.assertEqual(result["textlines"][0]["probability"], 0.93)
+            self.assertEqual(
+                result["textlines"][0]["points"],
+                [[16, 10], [32, 10], [32, 22], [16, 22]],
+            )
+
     async def test_deterministic_fake_uses_the_same_request_result_interface(self) -> None:
         class FakeInferenceBackend:
             def __init__(self) -> None:
@@ -989,6 +1049,13 @@ class InferenceBackendTests(unittest.IsolatedAsyncioTestCase):
                 **_kwargs: Any,
             ) -> Any:
                 return base_image
+
+            async def detect_text_mask(
+                self,
+                source_image: Any,
+                **_kwargs: Any,
+            ) -> dict[str, Any]:
+                return {"mask": source_image[..., 0] * 0, "textlines": []}
 
             async def recognize_region(
                 self,

@@ -1358,6 +1358,7 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
                 action=action,
                 selections=payload.get("selections"),
                 local_mask_mode=payload.get("local_mask_mode") or payload.get("mask_mode"),
+                attempt_id=payload.get("attempt_id"),
             )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1366,6 +1367,32 @@ async def advanced_erase_page(session_id: str, page_id: str, payload: dict[str, 
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return decorate_project_busy_state(session_id, result)
+
+
+@app.get("/api/pages/{session_id}/{page_id}/advanced-erase/previews/{attempt_id}/{kind}")
+async def get_local_advanced_erase_preview(
+    session_id: str,
+    page_id: str,
+    attempt_id: str,
+    kind: str,
+):
+    session = get_or_restore_session(session_id)
+    try:
+        path = translator_engine.get_local_advanced_erase_preview_path(
+            session_id,
+            session,
+            page_id,
+            attempt_id,
+            kind,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(
+        path=path,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/pages/{session_id}/{page_id}/brush-edit")

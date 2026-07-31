@@ -89,6 +89,15 @@ class InferenceBackend(Protocol):
         inpainting_size: int,
     ) -> Any: ...
 
+    async def detect_text_mask(
+        self,
+        source_image: Any,
+        *,
+        model_dir: Path,
+        device: str,
+        detection_size: int,
+    ) -> dict[str, Any]: ...
+
     async def recognize_region(
         self,
         source_image: Any,
@@ -559,6 +568,50 @@ class UpstreamInferenceBackend:
             device,
             False,
         )
+
+    async def detect_text_mask(
+        self,
+        source_image: Any,
+        *,
+        model_dir: Path,
+        device: str,
+        detection_size: int,
+    ) -> dict[str, Any]:
+        """Detect manga text strokes and return the raw pixel mask plus text lines."""
+        self._ensure_vendor_import_path()
+        self.prepare_runtime_patches()
+        from manga_translator.config import Detector
+        from manga_translator.detection import dispatch as dispatch_detection
+        from manga_translator.utils import ModelWrapper
+
+        ModelWrapper._MODEL_DIR = str(model_dir)
+        textlines, raw_mask, _refined_mask = await dispatch_detection(
+            Detector.default,
+            source_image,
+            detection_size,
+            0.5,
+            0.7,
+            2.3,
+            False,
+            False,
+            False,
+            False,
+            device,
+            False,
+        )
+        serialized_lines: list[dict[str, Any]] = []
+        for textline in textlines or []:
+            points = getattr(textline, "pts", None)
+            if points is None:
+                continue
+            serialized_lines.append({
+                "points": points.tolist(),
+                "probability": float(getattr(textline, "prob", 1.0) or 0),
+            })
+        return {
+            "mask": raw_mask,
+            "textlines": serialized_lines,
+        }
 
     async def recognize_region(
         self,

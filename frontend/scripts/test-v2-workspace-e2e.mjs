@@ -391,6 +391,25 @@ async function assertZeroTextRegionsWorkspace(page, fixture, routeHits) {
     '0',
     '审校工作台没有显示零文本框状态',
   )
+  const eraseMenu = page.locator('.v2-review-toolbar .v2-erase-menu').first()
+  await eraseMenu.hover()
+  const localAdvancedEraseButton = eraseMenu
+    .getByRole('button', { name: '本地高级擦除（推荐）', exact: true })
+  await localAdvancedEraseButton.waitFor({ state: 'visible', timeout: 20000 })
+  await eraseMenu
+    .getByRole('button', { name: '本地选区擦除', exact: true })
+    .waitFor({ state: 'visible', timeout: 20000 })
+  await localAdvancedEraseButton.click()
+  const localAdvancedModal = page.locator('.v2-local-advanced-preview-modal')
+  await localAdvancedModal.waitFor({ state: 'visible', timeout: 20000 })
+  await assertText(localAdvancedModal, '自动处理 3 个文字区域', '本地高级擦除预览缺少处理区域摘要')
+  await assertText(localAdvancedModal, '2048 精度', '本地高级擦除预览缺少实际推理尺寸')
+  await assertText(localAdvancedModal, '1 个低置信度区域未自动擦除', '本地高级擦除预览缺少低置信度提示')
+  await localAdvancedModal.getByRole('checkbox', { name: '显示擦除范围' }).check()
+  await localAdvancedModal.locator('.v2-local-advanced-mask-overlay').waitFor({ state: 'visible', timeout: 20000 })
+  await saveScreenshot(page, 'v2-local-advanced-preview.png')
+  await localAdvancedModal.getByRole('button', { name: '放弃结果', exact: true }).click()
+  await localAdvancedModal.waitFor({ state: 'hidden', timeout: 20000 })
 
   const exportMenu = page.locator('.v2-topbar-actions .v2-export-menu').first()
   const exportTrigger = exportMenu.locator('.v2-dropdown-trigger')

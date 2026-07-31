@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 import cv2
@@ -1947,7 +1948,10 @@ class TranslatorEngine:
             raise RuntimeError(f"无法读取当前空页：{current_blank_path}")
 
         self._ensure_vendor_import_path()
-        regions = self._load_cached_regions(page_cache_dir)
+        regions = self._load_cached_regions(
+            page_cache_dir,
+            allow_plain_region_fallback=True,
+        )
         device = self._select_local_inpainting_device(bool(config.get("use_gpu", True)))
         detector_result: dict[str, Any] = {}
         detector_fallback_used = False
@@ -10425,7 +10429,12 @@ class TranslatorEngine:
         if vendor_root not in sys.path:
             sys.path.insert(0, vendor_root)
 
-    def _load_cached_regions(self, page_cache_dir: Path) -> list[Any]:
+    def _load_cached_regions(
+        self,
+        page_cache_dir: Path,
+        *,
+        allow_plain_region_fallback: bool = False,
+    ) -> list[Any]:
         regions_path = page_cache_dir / "regions.json"
         try:
             region_payloads = json.loads(regions_path.read_text(encoding="utf-8"))
@@ -10443,8 +10452,55 @@ class TranslatorEngine:
             try:
                 regions.append(self._deserialize_text_region(payload))
             except Exception as exc:
+                if allow_plain_region_fallback:
+                    fallback_region = self._plain_cached_region(payload)
+                    if fallback_region is not None:
+                        regions.append(fallback_region)
+                        logger.warning(
+                            "Using plain cached region geometry because the full text-region "
+                            "runtime is unavailable. path=%s index=%s error=%s",
+                            regions_path,
+                            index,
+                            exc,
+                        )
+                        continue
                 print(f"[WARN] Failed to deserialize cached region at {regions_path}#{index}: {exc}")
         return regions
+
+    def _plain_cached_region(self, payload: dict[str, Any]) -> Any | None:
+        lines = payload.get("lines")
+        if not isinstance(lines, list) or not lines:
+            bounding_rect = payload.get("_bounding_rect")
+            if isinstance(bounding_rect, (list, tuple)) and len(bounding_rect) == 4:
+                try:
+                    lines = self._manual_region_lines(
+                        [int(round(float(value))) for value in bounding_rect]
+                    )
+                except (TypeError, ValueError):
+                    lines = []
+            else:
+                lines = []
+
+        points: list[list[int]] = []
+        for line in lines:
+            try:
+                line_points = np.asarray(line, dtype=np.int32).reshape(-1, 2)
+            except Exception:
+                continue
+            points.extend(line_points.tolist())
+        if not points:
+            return None
+
+        point_array = np.asarray(points, dtype=np.int32)
+        x1, y1 = point_array.min(axis=0).tolist()
+        x2, y2 = point_array.max(axis=0).tolist()
+        return SimpleNamespace(
+            lines=lines,
+            xyxy=np.asarray([x1, y1, x2, y2], dtype=np.int32),
+            font_size=payload.get("font_size", -1),
+            skip_translation=bool(payload.get("skip_translation", False)),
+            disabled_region=bool(payload.get("disabled_region", False)),
+        )
 
     def _to_json_compatible(self, value: Any) -> Any:
         if isinstance(value, np.ndarray):

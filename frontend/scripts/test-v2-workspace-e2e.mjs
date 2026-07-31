@@ -405,6 +405,17 @@ async function assertZeroTextRegionsWorkspace(page, fixture, routeHits) {
   await assertText(localAdvancedModal, '自动处理 3 个文字区域', '本地高级擦除预览缺少处理区域摘要')
   await assertText(localAdvancedModal, '2048 精度', '本地高级擦除预览缺少实际推理尺寸')
   await assertText(localAdvancedModal, '1 个低置信度区域未自动擦除', '本地高级擦除预览缺少低置信度提示')
+  const localAdvancedImages = localAdvancedModal.locator('.v2-local-advanced-image > img:first-child')
+  await waitForLocatorCount(localAdvancedImages, 3, '本地高级擦除预览缺少三张对比图')
+  for (let index = 0; index < 3; index += 1) {
+    const image = localAdvancedImages.nth(index)
+    const imageHandle = await image.elementHandle()
+    await page.waitForFunction(
+      (element) => element.complete && element.naturalWidth > 0,
+      imageHandle,
+      { timeout: 20000 },
+    )
+  }
   await localAdvancedModal.getByRole('checkbox', { name: '显示擦除范围' }).check()
   await localAdvancedModal.locator('.v2-local-advanced-mask-overlay').waitFor({ state: 'visible', timeout: 20000 })
   await saveScreenshot(page, 'v2-local-advanced-preview.png')

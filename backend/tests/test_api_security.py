@@ -244,6 +244,28 @@ class ApiSecurityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_local_advanced_erase_preview_images_are_readable_without_url_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            preview_path = Path(tmp) / "candidate.png"
+            Image.new("RGB", (8, 8), (255, 255, 255)).save(preview_path)
+
+            with (
+                mock.patch.object(main, "API_TOKEN", "local-secret"),
+                mock.patch.object(main, "get_or_restore_session", return_value={}),
+                mock.patch.object(
+                    main.translator_engine,
+                    "get_local_advanced_erase_preview_path",
+                    return_value=preview_path,
+                ),
+            ):
+                response = self.client.get(
+                    "/api/pages/project-a/page-1.png/advanced-erase/previews/"
+                    "attempt-a/candidate"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/png")
+
     def test_websocket_requires_token_subprotocol(self) -> None:
         with mock.patch.object(main, "API_TOKEN", "local-secret"):
             with self.assertRaises(WebSocketDisconnect):

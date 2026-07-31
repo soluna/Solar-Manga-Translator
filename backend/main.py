@@ -169,6 +169,8 @@ def is_public_read_path(path: str, method: str) -> bool:
     if path.startswith(("/output/", "/api/fonts/file/", "/api/download/")):
         return True
     if path.startswith("/api/pages/"):
+        if "/advanced-erase/previews/" in path:
+            return True
         return path.endswith(("/base-image", "/source-image", "/preview-image", "/translated-image"))
     return False
 

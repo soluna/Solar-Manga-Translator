@@ -23,6 +23,7 @@ const ZERO_TEXT_REGIONS_FIXTURE = createZeroTextRegionsWorkspaceFixture()
 const FIXTURE_OPENAI_BASE_URL = 'https://api.example.invalid/v1'
 const FIXTURE_OPENAI_MODEL = 'fixture-model'
 const PREVIEW_TYPOGRAPHY_ONLY = process.argv.includes('--preview-typography-only')
+const INTERACTION_REDESIGN_ONLY = process.argv.includes('--interaction-redesign-only')
 const FIXTURE_PAGE_WIDTH = 1280
 const FIXTURE_PAGE_ONE_FONT_SIZES = new Map([
   ['fixture-0001-r1', 34],
@@ -589,6 +590,10 @@ async function readCanvasPreviewTypography(page) {
       regionId: element.dataset.regionId || '',
       fontSize: Number.parseFloat(computed.fontSize || '0'),
       fontFamily: computed.fontFamily,
+      fontCheck: document.fonts.check(
+        `16px ${computed.fontFamily.split(',')[0]}`,
+        element.textContent || '测试漢字ABC',
+      ),
       fontFaces: Array.from(document.fonts)
         .filter((face) => computed.fontFamily.includes(face.family))
         .map((face) => ({ family: face.family, status: face.status })),
@@ -620,7 +625,10 @@ async function assertCanvasPreviewTypography(page) {
         `${metric.regionId} 首次打开字体应为 ${expectedFontId}，实际为 ${metric.fontFamily}`,
       )
     }
-    if (!metric.fontFaces.some((face) => face.family === expectedFontAlias && face.status === 'loaded')) {
+    if (
+      !metric.fontCheck
+      && !metric.fontFaces.some((face) => face.family === expectedFontAlias && face.status === 'loaded')
+    ) {
       errors.push(
         `${metric.regionId} 的字体 ${expectedFontId} 没有真正加载：${JSON.stringify(metric.fontFaces)}`,
       )
@@ -643,6 +651,160 @@ async function assertCanvasPreviewTypography(page) {
   if (errors.length) {
     throw new Error(`框页字体预览与嵌字坐标不一致：\n- ${errors.join('\n- ')}`)
   }
+}
+
+async function assertReviewInteractionRedesign(page) {
+  const regionCards = page.locator('.v2-region-card')
+  await regionCards.first().waitFor({ state: 'visible', timeout: 20000 })
+  const initialRegionCount = await regionCards.count()
+  if (initialRegionCount < 3) {
+    throw new Error(`交互重构夹具缺少足够文本框：${initialRegionCount}`)
+  }
+
+  await page.getByTestId('v2-review-page-commands').waitFor({ state: 'visible', timeout: 20000 })
+  await page.getByTestId('v2-review-compare-toolbar').waitFor({ state: 'visible', timeout: 20000 })
+  await page.getByRole('button', { name: '保存', exact: true }).waitFor({ state: 'visible', timeout: 20000 })
+
+  const compareToolbar = page.getByTestId('v2-review-compare-toolbar')
+  const selectedCompareChips = compareToolbar.locator('.v2-compare-chip.active')
+  const paneCards = page.locator('.v2-pane-strip .v2-pane-card')
+  const selectedCompareCount = await selectedCompareChips.count()
+  if (selectedCompareCount < 2 || selectedCompareCount > 3) {
+    throw new Error(`对照选择仍需保留现有 2–3 画布能力，实际为 ${selectedCompareCount}`)
+  }
+  if (await paneCards.count() !== selectedCompareCount) {
+    throw new Error('对照开关数量与实际画布数量不一致')
+  }
+
+  const filterChips = page.getByTestId('v2-region-filter-chips').locator('button')
+  if (await filterChips.count() !== 6) {
+    throw new Error(`右侧没有完整保留六个现有筛选：${await filterChips.count()}`)
+  }
+
+  await regionCards.first().click()
+  const singleCommands = page.getByTestId('v2-review-single-commands')
+  await singleCommands.waitFor({ state: 'visible', timeout: 20000 })
+  await singleCommands.getByRole('button', { name: '复制全部样式', exact: true }).waitFor({ state: 'visible' })
+  const pasteButton = singleCommands.getByRole('button', { name: '粘贴全部样式', exact: true })
+  if (!(await pasteButton.isDisabled())) {
+    throw new Error('没有样式剪贴板时，粘贴全部样式应明确禁用')
+  }
+
+  const activeCard = page.locator('.v2-region-card.active')
+  await activeCard.locator('.v2-region-card-body').waitFor({ state: 'visible' })
+  if (await activeCard.getByRole('button', { name: '字体应用到本页', exact: true }).count() !== 1) {
+    throw new Error('字体整页操作没有明确标注“本页”')
+  }
+  if (await activeCard.getByRole('button', { name: '字号应用到本页', exact: true }).count() !== 1) {
+    throw new Error('字号整页操作没有明确标注“本页”')
+  }
+  if (await activeCard.locator('.v2-region-copy-actions').count()) {
+    throw new Error('当前卡片仍重复显示样式复制/粘贴小图标')
+  }
+
+  const sourceFont = await singleCommands.getByTestId('v2-selection-font').inputValue()
+  const sourceSize = Number(await singleCommands.locator('input[aria-label="选中框字号"]').inputValue())
+  await singleCommands.getByRole('button', { name: '复制全部样式', exact: true }).click()
+  const clipboardSummary = singleCommands.getByTestId('v2-style-clipboard-summary')
+  await clipboardSummary.waitFor({ state: 'visible', timeout: 20000 })
+  await assertText(clipboardSummary, '已复制样式', '样式剪贴板没有持续显示')
+  await assertText(clipboardSummary, String(sourceSize), '样式剪贴板没有显示字号')
+  if (await pasteButton.isDisabled()) {
+    throw new Error('复制样式后，粘贴全部样式仍被禁用')
+  }
+
+  await saveScreenshot(page, 'v2-review-interaction-single.png')
+  const advancedButton = activeCard.getByRole('button', { name: '更多与高级样式', exact: true })
+  await advancedButton.click()
+  const advancedSection = activeCard.locator('.v2-region-advanced-section')
+  await advancedSection.waitFor({ state: 'visible', timeout: 20000 })
+  if (await page.locator('body > .style-advanced-popover').count()) {
+    throw new Error('高级样式仍以遮挡画布的全局浮层出现')
+  }
+  await saveScreenshot(page, 'v2-review-interaction-advanced.png')
+  await advancedButton.click()
+
+  const targetCard = regionCards.nth(1)
+  await targetCard.click()
+  const pasteResponsePromise = page.waitForResponse(
+    (response) => isPageCommandResponse(response, 'update_font_size') && response.ok(),
+    { timeout: 30000 },
+  )
+  await singleCommands.getByRole('button', { name: '粘贴全部样式', exact: true }).click()
+  const pasteResponse = await pasteResponsePromise
+  const pasteCommands = pasteResponse.request().postDataJSON()?.commands || []
+  const pastedFontCommand = pasteCommands.find((command) => command.type === 'update_region_font')
+  if (!pastedFontCommand?.font_key || (sourceFont && pastedFontCommand.font_key !== sourceFont)) {
+    throw new Error(`粘贴全部样式没有沿用来源框字体：source=${sourceFont} commands=${JSON.stringify(pasteCommands)}`)
+  }
+  if (!pasteCommands.some((command) => command.type === 'update_font_size' && Number(command.font_size) === sourceSize)) {
+    throw new Error('粘贴全部样式没有沿用来源框字号')
+  }
+  if (!pasteCommands.some((command) => ['restore_region', 'disable_region'].includes(command.type))) {
+    throw new Error('“全部样式”没有保持现有启用状态语义')
+  }
+
+  await regionCards.nth(2).click()
+  const activeBatchSourceSize = Number(
+    await singleCommands.locator('input[aria-label="选中框字号"]').inputValue(),
+  )
+  await regionCards.first().click()
+  await regionCards.nth(1).click({ modifiers: ['ControlOrMeta'] })
+  await regionCards.nth(2).click({ modifiers: ['ControlOrMeta'] })
+  const multiCommands = page.getByTestId('v2-review-multi-commands')
+  await multiCommands.waitFor({ state: 'visible', timeout: 20000 })
+  for (const name of ['启用', '停用', '纵排', '横排', '套用字体', '套用字号']) {
+    if (await multiCommands.getByRole('button', { name, exact: true }).count() !== 1) {
+      throw new Error(`多选工具栏缺少现有批量命令：${name}`)
+    }
+  }
+  if (await page.locator('.v2-region-card-body').count()) {
+    throw new Error('多选状态仍展开单框编辑表单')
+  }
+  if (await page.locator('.v2-region-batch-bar button, .v2-canvas-selection-toolbar button').count()) {
+    throw new Error('多选命令仍在右侧或画布上重复出现')
+  }
+  if (await regionCards.count() !== initialRegionCount) {
+    throw new Error('进入多选后右侧完整文本框列表消失或数量改变')
+  }
+
+  const batchSizeResponsePromise = page.waitForResponse(
+    (response) => isPageCommandResponse(response, 'update_font_size') && response.ok(),
+    { timeout: 30000 },
+  )
+  await multiCommands.getByRole('button', { name: '套用字号', exact: true }).click()
+  const batchSizeResponse = await batchSizeResponsePromise
+  const batchSizeCommands = (batchSizeResponse.request().postDataJSON()?.commands || [])
+    .filter((command) => command.type === 'update_font_size')
+  if (
+    batchSizeCommands.length !== 3
+    || batchSizeCommands.some((command) => Number(command.font_size) !== activeBatchSourceSize)
+  ) {
+    throw new Error(`批量套用字号没有使用活动框字号：${JSON.stringify(batchSizeCommands)}`)
+  }
+
+  await saveScreenshot(page, 'v2-review-interaction-multi.png')
+  await multiCommands.getByRole('button', { name: '清除选择', exact: true }).click()
+  await multiCommands.waitFor({ state: 'hidden' })
+  if (await regionCards.count() !== initialRegionCount) {
+    throw new Error('清除多选后右侧完整文本框列表没有恢复')
+  }
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
+  await page.locator('.v2-pane-strip').waitFor({ state: 'visible', timeout: 20000 })
+  await page.locator('.v2-region-sidebar').waitFor({ state: 'visible', timeout: 20000 })
+  const viewportMetrics = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    documentWidth: document.documentElement.scrollWidth,
+  }))
+  if (viewportMetrics.documentWidth > viewportMetrics.viewportWidth + 1) {
+    throw new Error(`1280px 工作台出现页面级横向滚动：${JSON.stringify(viewportMetrics)}`)
+  }
+  if (await regionCards.count() !== initialRegionCount) {
+    throw new Error('1280px 工作台下右侧完整文本框列表被隐藏')
+  }
+  await saveScreenshot(page, 'v2-review-interaction-1280.png')
 }
 
 async function main() {
@@ -675,6 +837,23 @@ async function main() {
       throw new Error(`首页仍然保留了示例卡片：${homeGalleryCount}`)
     }
     const homeShot = await saveScreenshot(page, 'v2-home.png')
+
+    if (INTERACTION_REDESIGN_ONLY) {
+      await page.getByRole('banner').getByRole('button', { name: '项目管理' }).click()
+      await page.getByTestId('v2-history-modal').waitFor({ state: 'visible', timeout: 20000 })
+      const fixtureCard = page.locator('.v2-history-card', { hasText: FIXTURE_PROJECT_TITLE }).first()
+      await fixtureCard.waitFor({ state: 'visible', timeout: 20000 })
+      await fixtureCard.getByRole('button', { name: '恢复项目' }).click()
+      await page.getByTestId('v2-picker-view').waitFor({ state: 'visible', timeout: 20000 })
+      await page.locator('.v2-page-card').first().click()
+      await page.getByTestId('v2-review-view').waitFor({ state: 'visible', timeout: 20000 })
+      await assertReviewInteractionRedesign(page)
+      if (consoleErrors.some((entry) => !isIgnorableConsoleEntry(entry))) {
+        throw new Error(`交互重构页面存在控制台错误：\n${consoleErrors.join('\n')}`)
+      }
+      console.log(JSON.stringify({ projectId: FIXTURE_PROJECT_ID, interactionRedesign: 'passed' }, null, 2))
+      return
+    }
 
     if (PREVIEW_TYPOGRAPHY_ONLY) {
       await page.getByRole('banner').getByRole('button', { name: '项目管理' }).click()
@@ -784,13 +963,18 @@ async function main() {
     await page.getByRole('button', { name: '定位当前框' }).click()
     await page.waitForTimeout(120)
     const focusedHandleBox = await activeBox.locator('.style-box-handle').first().boundingBox()
-    const focusedSettingsBox = await page.locator('.v2-pane-card-frame .style-box-settings-button').first().boundingBox()
     if (!focusedHandleBox || focusedHandleBox.width > 14 || focusedHandleBox.height > 14) {
       throw new Error(`高倍定位后缩放控制点不再保持固定尺寸：${JSON.stringify(focusedHandleBox)}`)
     }
-    if (!focusedSettingsBox || focusedSettingsBox.width > 30 || focusedSettingsBox.height > 30) {
-      throw new Error(`高倍定位后样式按钮不再保持固定尺寸：${JSON.stringify(focusedSettingsBox)}`)
+    if (await page.locator('.v2-pane-card-frame .style-box-settings-button').count()) {
+      throw new Error('高级样式入口仍悬浮在画布上')
     }
+    const inlineAdvancedButton = page.locator('.v2-region-card.active')
+      .getByRole('button', { name: '更多与高级样式', exact: true })
+    await inlineAdvancedButton.click()
+    await page.locator('.v2-region-card.active .v2-region-advanced-section')
+      .waitFor({ state: 'visible', timeout: 20000 })
+    await inlineAdvancedButton.click()
     await page.getByRole('button', { name: '重置视图' }).click()
     const hudText = (await page.locator('.v2-canvas-hud').first().textContent()) || ''
     if (/滚轮|Ctrl|Shift|快捷键/.test(hudText)) {

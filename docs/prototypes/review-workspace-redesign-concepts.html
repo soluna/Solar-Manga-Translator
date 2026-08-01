@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>审校工作台新版原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef2f7;
+      --panel: #ffffff;
+      --soft: #f7f9fc;
+      --soft-blue: #eef5ff;
+      --text: #172033;
+      --muted: #6d788c;
+      --line: #dbe2ec;
+      --line-soft: #e8edf4;
+      --blue: #2764e7;
+      --blue-dark: #1748b6;
+      --green: #159b72;
+      --amber: #d9880b;
+      --red: #d94b55;
+      --shadow: 0 16px 42px rgba(24, 40, 72, .10);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body { min-width: 1180px; }
+
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+
+    .concept {
+      display: none;
+      width: 100vw;
+      height: 100vh;
+      min-height: 760px;
+      background: var(--bg);
+    }
+
+    body[data-screen="single"] #single,
+    body[data-screen="multi"] #multi { display: grid; grid-template-rows: 68px 58px minmax(0, 1fr); }
+
+    .appbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, .96);
+      z-index: 5;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-right: 4px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--blue);
+      color: white;
+      font-size: 14px;
+      font-weight: 850;
+      box-shadow: 0 7px 18px rgba(39, 100, 231, .24);
+    }
+
+    .brand-copy { display: grid; line-height: 1.05; }
+    .brand-copy small { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+    .brand-copy strong { margin-top: 4px; font-size: 16px; }
+
+    .project-meta {
+      display: grid;
+      min-width: 210px;
+      line-height: 1.2;
+    }
+
+    .project-meta strong { font-size: 15px; }
+    .project-meta span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .bar-spacer { flex: 1; }
+
+    .autosave {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: #456276;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .autosave::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(21, 155, 114, .10);
+    }
+
+    .btn {
+      height: 36px;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: white;
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .btn.primary { border-color: var(--blue); background: var(--blue); color: white; }
+    .btn.soft { background: var(--soft); }
+    .btn.text { border-color: transparent; background: transparent; color: var(--muted); }
+
+    .formatbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(250, 251, 253, .98);
+      z-index: 4;
+    }
+
+    .tool-label { margin-left: 8px; color: var(--muted); font-size: 11px; font-weight: 800; }
+
+    .control {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: white;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .control.font { min-width: 142px; justify-content: space-between; }
+    .control.size { padding: 0 5px; }
+    .control.size span { min-width: 34px; text-align: center; }
+    .control.size b { width: 24px; text-align: center; color: var(--muted); font-size: 16px; }
+    .control.active { border-color: #9ab9ff; background: var(--soft-blue); color: var(--blue-dark); }
+    .control.good { color: var(--green); }
+
+    .clipboard-chip {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      margin-left: 6px;
+      padding: 7px 10px;
+      border-radius: 9px;
+      background: #edf8f4;
+      color: #236d5a;
+      font-size: 11px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .clipboard-chip strong { color: #155e4a; }
+    .format-spacer { flex: 1; }
+
+    .toolbar-divider {
+      width: 1px;
+      height: 24px;
+      margin: 0 4px;
+      background: var(--line);
+    }
+
+    .page-command-group,
+    .selection-command-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .page-command-group .btn,
+    .selection-command-group .btn { height: 34px; padding: 0 10px; }
+
+    .page-command-group .icon-btn { width: 34px; padding: 0; }
+
+    .workspace {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 84px minmax(560px, 1fr) 390px;
+    }
+
+    .page-rail {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px 10px;
+      border-right: 1px solid var(--line);
+      background: #f9fbfd;
+    }
+
+    .rail-title { display: flex; align-items: center; justify-content: space-between; padding: 0 2px 2px; }
+    .rail-title strong { font-size: 11px; }
+    .rail-title span { color: var(--muted); font-size: 10px; }
+
+    .thumb {
+      position: relative;
+      height: 120px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: white;
+    }
+
+    .thumb.active { border: 2px solid var(--blue); box-shadow: 0 6px 15px rgba(39, 100, 231, .12); }
+    .thumb img { position: absolute; width: 440px; left: -192px; top: -69px; opacity: .72; }
+    .thumb-index { position: absolute; left: 7px; bottom: 7px; padding: 3px 6px; border-radius: 6px; background: rgba(20, 32, 52, .78); color: white; font-size: 10px; font-weight: 800; }
+    .stage {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      background: #edf1f6;
+    }
+
+    .stage-head {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.82);
+    }
+
+    .view-tabs { display: flex; gap: 4px; }
+    .view-tabs span { padding: 7px 11px; border-radius: 8px; color: var(--muted); font-size: 11px; font-weight: 800; }
+    .view-tabs span.active { background: white; color: var(--blue-dark); box-shadow: 0 1px 0 rgba(18, 35, 64, .08); }
+    .zoom { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 750; }
+
+    .canvas-area {
+      position: absolute;
+      inset: 46px 0 0;
+      display: grid;
+      place-items: center;
+      padding: 24px 32px;
+      background-image: radial-gradient(circle at 1px 1px, rgba(80, 98, 126, .12) 1px, transparent 0);
+      background-size: 18px 18px;
+    }
+
+    .canvas-area.compare-area {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      place-items: stretch;
+      padding: 14px;
+    }
+
+    .compare-pane {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 34px minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255,255,255,.72);
+      box-shadow: 0 8px 24px rgba(24,40,72,.06);
+    }
+
+    .compare-pane-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .compare-pane-head strong { color: var(--text); font-size: 11px; }
+    .compare-page-wrap { min-height: 0; display: grid; place-items: center; overflow: hidden; padding: 10px; }
+    .compare-pane .manga-page { width: min(360px, 94%); height: min(700px, 96%); }
+    .compare-pane.result-pane .manga-page .source-shot { left: -112px; top: -204px; transform: scale(1); }
+    .compare-pane.frame-pane .manga-page .source-shot { left: -616px; top: -204px; transform: scale(1); }
+
+    .manga-page {
+      position: relative;
+      width: min(640px, 82%);
+      height: min(780px, 91%);
+      overflow: hidden;
+      border: 1px solid #d7dce4;
+      border-radius: 4px;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+
+    .manga-page .source-shot {
+      position: absolute;
+      width: 1440px;
+      max-width: none;
+      left: -626px;
+      top: -225px;
+      transform: scale(1.22);
+      transform-origin: top left;
+      filter: saturate(.72) contrast(.96);
+      opacity: .94;
+    }
+
+    .region {
+      position: absolute;
+      display: grid;
+      place-items: center;
+      border: 2px solid rgba(39, 100, 231, .82);
+      background: rgba(235, 243, 255, .34);
+      color: #24324a;
+      font-size: 11px;
+      font-weight: 750;
+      writing-mode: vertical-rl;
+      box-shadow: 0 0 0 1px rgba(255,255,255,.92);
+    }
+
+    .region.selected { border-color: var(--blue); box-shadow: 0 0 0 2px white, 0 0 0 4px rgba(39,100,231,.22); }
+    .region.selected::before {
+      content: attr(data-label);
+      position: absolute;
+      left: -3px;
+      top: -29px;
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: #17233a;
+      color: white;
+      font-size: 10px;
+      font-weight: 800;
+      writing-mode: horizontal-tb;
+      white-space: nowrap;
+    }
+
+    .handle { position: absolute; width: 9px; height: 9px; border: 2px solid white; border-radius: 50%; background: var(--blue); }
+    .handle.tl { left: -6px; top: -6px; }
+    .handle.tr { right: -6px; top: -6px; }
+    .handle.bl { left: -6px; bottom: -6px; }
+    .handle.br { right: -6px; bottom: -6px; }
+
+    .inspector {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      border-left: 1px solid var(--line);
+      background: white;
+    }
+
+    .panel-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 10px; border-bottom: 1px solid var(--line-soft); }
+    .panel-tabs span { padding: 9px 8px; border-radius: 8px; color: var(--muted); text-align: center; font-size: 12px; font-weight: 800; }
+    .panel-tabs span.active { background: var(--soft-blue); color: var(--blue-dark); }
+
+    .selection-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .selection-head div { display: grid; gap: 3px; }
+    .selection-head strong { font-size: 15px; }
+    .selection-head small { color: var(--muted); font-size: 11px; }
+    .nav-pair { display: flex !important; grid-auto-flow: column; gap: 5px !important; }
+    .nav-pair span { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
+
+    .panel-scroll { min-height: 0; overflow: hidden; padding: 16px; }
+    .section { margin-bottom: 16px; }
+    .eyebrow { margin-bottom: 7px; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .08em; }
+    .source-text { margin: 0; padding: 10px 12px; border-radius: 9px; background: var(--soft); color: #536175; font-size: 12px; line-height: 1.55; }
+    .textarea { min-height: 92px; padding: 11px 12px; border: 1px solid #a9c1f8; border-radius: 10px; background: white; color: var(--text); font-size: 14px; line-height: 1.55; box-shadow: 0 0 0 3px rgba(39,100,231,.08); }
+
+    .field-grid { display: grid; grid-template-columns: minmax(0, 1fr) 102px; gap: 8px; }
+    .field { display: grid; gap: 6px; }
+    .field label { color: var(--muted); font-size: 10px; font-weight: 800; }
+    .field-value { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: white; font-size: 12px; font-weight: 700; }
+    .field-value.mixed { color: #785ca8; background: #faf7ff; }
+
+    .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 9px; padding: 4px; border-radius: 9px; background: var(--soft); }
+    .segmented span { padding: 7px; border-radius: 7px; color: var(--muted); text-align: center; font-size: 11px; font-weight: 800; }
+    .segmented span.active { background: white; color: var(--blue-dark); box-shadow: 0 2px 8px rgba(33, 52, 84, .08); }
+
+    .accordion { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--line-soft); font-size: 12px; font-weight: 800; }
+    .accordion span { color: var(--muted); font-size: 11px; font-weight: 700; }
+
+    .panel-foot { padding: 12px 16px; border-top: 1px solid var(--line); background: #fbfcfe; color: var(--muted); font-size: 11px; }
+    .panel-foot strong { color: var(--text); }
+
+    .list-inspector { grid-template-rows: auto minmax(0, 1fr) auto; }
+    .list-toolbar { padding: 12px 12px 10px; border-bottom: 1px solid var(--line); background: white; }
+    .list-toolbar-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .list-title { display: flex; align-items: baseline; gap: 8px; }
+    .list-title strong { font-size: 15px; }
+    .list-title span { color: var(--muted); font-size: 11px; font-weight: 750; }
+    .list-nav { display: flex; gap: 5px; }
+    .list-nav span { min-width: 30px; height: 28px; display: grid; place-items: center; padding: 0 7px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; font-weight: 750; }
+    .list-search { width: 100%; height: 34px; margin-top: 10px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); color: var(--muted); font-size: 11px; outline: 0; }
+    .list-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .list-filters span { padding: 6px 8px; border-radius: 8px; background: var(--soft); color: var(--muted); font-size: 10px; font-weight: 750; }
+    .list-filters span.active { background: var(--soft-blue); color: var(--blue-dark); }
+
+    .region-list-scroll { min-height: 0; overflow: hidden; padding: 7px 10px 12px; background: #f8fafc; }
+    .region-card { margin: 6px 0; padding: 10px 11px; border: 1px solid transparent; border-radius: 10px; background: white; box-shadow: 0 1px 0 rgba(20, 34, 56, .04); }
+    .region-card.active { border-color: #8eb2ff; background: white; box-shadow: 0 8px 22px rgba(39, 100, 231, .10); }
+    .region-card.checked { border-color: #b5cbfb; background: #f6f9ff; }
+    .region-card.source { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(39,100,231,.10); }
+    .region-card-head { display: flex; align-items: center; gap: 8px; }
+    .region-card-head strong { font-size: 13px; }
+    .region-card-head .style-tag { padding: 4px 6px; border-radius: 7px; background: #fff4dc; color: #a16207; font-size: 9px; font-weight: 850; }
+    .region-card-head .row-spacer { flex: 1; }
+    .region-card-head .state { color: var(--blue-dark); font-size: 9px; font-weight: 800; }
+    .region-card-summary { display: grid; gap: 3px; margin-top: 7px; }
+    .region-card-summary p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 1.35; }
+    .region-card-summary p:first-child { color: var(--muted); }
+    .region-card-summary p:last-child { color: var(--text); font-weight: 650; }
+    .region-card-editor { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+    .region-card-editor .textarea { min-height: 78px; font-size: 13px; }
+    .region-card-editor .field-grid { margin-top: 10px; }
+    .region-card-editor .field-value { min-height: 34px; }
+    .inline-behaviors { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+    .inline-behaviors span { color: var(--muted); font-size: 10px; font-weight: 750; }
+    .inline-behaviors strong { color: var(--blue-dark); font-size: 10px; }
+    .field label { display: flex; align-items: center; justify-content: space-between; }
+    .field label b { color: var(--blue-dark); font-size: 9px; font-weight: 800; }
+    .check-mark { width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid #9bb7f4; border-radius: 7px; background: white; color: var(--blue); font-size: 10px; font-weight: 900; }
+    .checked .check-mark { border-color: var(--blue); background: var(--blue); color: white; }
+    .batch-list-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding: 8px 9px; border-radius: 9px; background: var(--soft-blue); color: var(--blue-dark); font-size: 10px; font-weight: 800; }
+    .batch-list-banner span:last-child { color: var(--muted); }
+
+    .stage-status {
+      position: absolute;
+      left: 18px;
+      bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 9px;
+      background: rgba(255,255,255,.92);
+      box-shadow: 0 7px 18px rgba(28, 43, 68, .10);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .stage-status b { color: var(--green); }
+  </style>
+</head>
+<body>
+  <section id="single" class="concept">
+    <header class="appbar">
+      <div class="brand"><div class="brand-mark">S</div><div class="brand-copy"><small>SOLAR</small><strong>审校工作台</strong></div></div>
+      <button class="btn text">返回项目</button>
+      <div class="project-meta"><strong>Canvas E2E Fixture</strong><span>第 1 / 24 页 · 3 个文本框</span></div>
+      <div class="bar-spacer"></div>
+      <div class="autosave">已保存 23:42</div>
+      <button class="btn">专有名词库</button>
+      <button class="btn">导出</button>
+      <button class="btn primary">保存</button>
+    </header>
+
+    <div class="formatbar">
+      <div class="page-command-group"><button class="btn icon-btn">‹</button><button class="btn icon-btn">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn">↶</button><button class="btn icon-btn">↷</button></div>
+      <span class="toolbar-divider"></span>
+      <div class="selection-command-group"><span class="tool-label">选中 #12</span><div class="control font">思源黑体 <span>展开</span></div><div class="control size"><b>−</b><span>34</span><b>＋</b></div><div class="control active">纵排</div></div>
+      <div class="format-spacer"></div>
+      <div class="clipboard-chip"><strong>已复制样式</strong> 黑体 / 34 / 纵排 / 已启用</div>
+      <button class="btn">复制全部样式</button><button class="btn">粘贴全部样式</button>
+    </div>
+
+    <main class="workspace">
+      <aside class="page-rail">
+        <div class="rail-title"><strong>页面</strong><span>1/24</span></div>
+        <div class="thumb active"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">1</span></div>
+        <div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">2</span></div>
+        <div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">3</span></div>
+      </aside>
+      <section class="stage">
+        <div class="stage-head"><div class="view-tabs"><span class="active">✓ 嵌后</span><span>原图</span><span>空页</span><span class="active">✓ 框页</span></div><div class="zoom"><span>2 个视图</span><strong>100%</strong><span>重置视图</span></div></div>
+        <div class="canvas-area compare-area">
+          <div class="compare-pane result-pane"><div class="compare-pane-head"><strong>嵌后</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="嵌后结果"></div></div></div>
+          <div class="compare-pane frame-pane"><div class="compare-pane-head"><strong>框页</strong><span>适合 · 100% · 定位</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="框页编辑"><div class="region selected" data-label="#12 · 210 × 310" style="left: 17%; top: 12%; width: 18%; height: 37%;">真的挺窄的。<i class="handle tl"></i><i class="handle tr"></i><i class="handle bl"></i><i class="handle br"></i></div><div class="region" style="right: 13%; top: 10%; width: 16%; height: 28%;">感谢搭乘。</div><div class="region" style="right: 17%; top: 52%; width: 14%; height: 25%;">SPIRITS COMICS</div></div></div></div>
+        </div>
+        <div class="stage-status"><b>当前框 #12</b><span>嵌后与框页联动画布</span></div>
+      </section>
+      <aside class="inspector list-inspector">
+        <div class="list-toolbar">
+          <div class="list-toolbar-top"><div class="list-title"><strong>文本框</strong><span>12 / 18</span></div><div class="list-nav"><span>上一框</span><span>下一框</span></div></div>
+          <input class="list-search" value="搜索原文、译文或编号" readonly aria-label="搜索文本框">
+          <div class="list-filters"><span class="active">全部</span><span>手动框</span><span>保留原文</span><span>未翻译</span><span>字体覆盖</span><span>需留意</span></div>
+        </div>
+        <div class="region-list-scroll">
+          <article class="region-card"><div class="region-card-head"><strong>#10</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">已启用 · 纵排</span></div><div class="region-card-summary"><p>今日は少し遅くなりました。</p><p>今天稍微晚了一些。</p></div></article>
+          <article class="region-card"><div class="region-card-head"><strong>#11</strong><span class="style-tag">宋体 / 明体</span><span class="row-spacer"></span><span class="state">已启用 · 纵排</span></div><div class="region-card-summary"><p>次の駅で降りましょう。</p><p>我们在下一站下车吧。</p></div></article>
+          <article class="region-card active"><div class="region-card-head"><strong>#12</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">当前框 · 已保存</span></div><div class="region-card-summary"><p>けっこう狭いですね。</p><p>真的挺窄的。</p></div><div class="region-card-editor"><div class="eyebrow">译文</div><div class="textarea">真的挺窄的。</div><div class="field-grid"><div class="field"><label><span>字体</span><b>应用到本页</b></label><div class="field-value">思源黑体 <span>展开</span></div></div><div class="field"><label><span>字号</span><b>应用到本页</b></label><div class="field-value"><span>34</span><span>− ＋</span></div></div></div><div class="inline-behaviors"><span>☐ 保留原文　·　已启用　·　纵排</span><strong>更多与高级样式</strong></div></div></article>
+          <article class="region-card"><div class="region-card-head"><strong>#13</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">已启用 · 横排</span></div><div class="region-card-summary"><p>SPIRITS COMICS</p><p>SPIRITS COMICS</p></div></article>
+          <article class="region-card"><div class="region-card-head"><strong>#14</strong><span class="style-tag">手写</span><span class="row-spacer"></span><span class="state">需留意</span></div><div class="region-card-summary"><p>聞こえますか？</p><p>听得见吗？</p></div></article>
+        </div>
+        <div class="panel-foot">所有文本框始终在同一列表；当前框只在原位置<strong>就地展开</strong></div>
+      </aside>
+    </main>
+  </section>
+
+  <section id="multi" class="concept">
+    <header class="appbar">
+      <div class="brand"><div class="brand-mark">S</div><div class="brand-copy"><small>SOLAR</small><strong>审校工作台</strong></div></div>
+      <button class="btn text">返回项目</button>
+      <div class="project-meta"><strong>Canvas E2E Fixture</strong><span>第 7 / 24 页 · 18 个文本框</span></div>
+      <div class="bar-spacer"></div>
+      <div class="autosave">已保存 23:46</div>
+      <button class="btn">专有名词库</button><button class="btn">导出</button><button class="btn primary">保存</button>
+    </header>
+    <div class="formatbar">
+      <div class="page-command-group"><button class="btn icon-btn">‹</button><button class="btn icon-btn">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn">↶</button><button class="btn icon-btn">↷</button></div>
+      <span class="toolbar-divider"></span>
+      <div class="selection-command-group"><span class="tool-label">已选 5 个 · 活动框 #3</span><button class="btn">启用</button><button class="btn">停用</button><button class="btn">纵排</button><button class="btn">横排</button><button class="btn">套用字体</button><button class="btn">套用字号</button><button class="btn soft">清除选择</button></div>
+    </div>
+    <main class="workspace">
+      <aside class="page-rail"><div class="rail-title"><strong>页面</strong><span>7/24</span></div><div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">6</span></div><div class="thumb active"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">7</span></div><div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">8</span></div></aside>
+      <section class="stage">
+        <div class="stage-head"><div class="view-tabs"><span class="active">✓ 嵌后</span><span>原图</span><span>空页</span><span class="active">✓ 框页</span></div><div class="zoom"><span>2 个视图</span><strong>100%</strong><span>重置视图</span></div></div>
+        <div class="canvas-area compare-area">
+          <div class="compare-pane result-pane"><div class="compare-pane-head"><strong>嵌后</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="嵌后结果"></div></div></div>
+          <div class="compare-pane frame-pane"><div class="compare-pane-head"><strong>框页</strong><span>活动框 #3 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="框页多选"><div class="region selected" data-label="#3 · 活动框" style="left: 12%; top: 11%; width: 16%; height: 29%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#5" style="left: 42%; top: 14%; width: 16%; height: 34%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#7" style="right: 10%; top: 12%; width: 15%; height: 27%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#9" style="left: 20%; top: 54%; width: 17%; height: 29%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#11" style="right: 22%; top: 56%; width: 16%; height: 27%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div></div></div></div>
+        </div>
+        <div class="stage-status"><b>5 个框已选</b><span>字体与字号来源：活动框 #3</span></div>
+      </section>
+      <aside class="inspector list-inspector">
+        <div class="list-toolbar"><div class="list-toolbar-top"><div class="list-title"><strong>文本框</strong><span>18 个</span></div><div class="list-nav"><span>清除选择</span></div></div><input class="list-search" value="搜索原文、译文或编号" readonly aria-label="搜索文本框"><div class="list-filters"><span class="active">全部</span><span>手动框</span><span>保留原文</span><span>未翻译</span><span>字体覆盖</span><span>需留意</span></div><div class="batch-list-banner"><span>已选择 5 个框</span><span>活动框 #3 是字体、字号来源</span></div></div>
+        <div class="region-list-scroll">
+          <article class="region-card checked source"><div class="region-card-head"><span class="check-mark">✓</span><strong>#3</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">活动框 · 来源</span></div><div class="region-card-summary"><p>おはようございます。</p><p>早上好。　· 纵排 · 34</p></div></article>
+          <article class="region-card"><div class="region-card-head"><span class="check-mark"></span><strong>#4</strong><span class="style-tag">宋体 / 明体</span><span class="row-spacer"></span><span class="state">横排 · 28</span></div><div class="region-card-summary"><p>駅に着きました。</p><p>已经到站了。</p></div></article>
+          <article class="region-card checked"><div class="region-card-head"><span class="check-mark">✓</span><strong>#5</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">纵排 · 30</span></div><div class="region-card-summary"><p>本日はご乗車いただき…</p><p>感谢今天搭乘本线路。</p></div></article>
+          <article class="region-card checked"><div class="region-card-head"><span class="check-mark">✓</span><strong>#7</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">纵排 · 34</span></div><div class="region-card-summary"><p>次の停車駅です。</p><p>下一站即将停车。</p></div></article>
+          <article class="region-card checked"><div class="region-card-head"><span class="check-mark">✓</span><strong>#9</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">纵排 · 32</span></div><div class="region-card-summary"><p>少し狭いですね。</p><p>这里有点窄。</p></div></article>
+          <article class="region-card checked"><div class="region-card-head"><span class="check-mark">✓</span><strong>#11</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">纵排 · 34</span></div><div class="region-card-summary"><p>またお会いしましょう。</p><p>我们下次再见。</p></div></article>
+          <article class="region-card"><div class="region-card-head"><span class="check-mark"></span><strong>#12</strong><span class="style-tag">手写</span><span class="row-spacer"></span><span class="state">需留意</span></div><div class="region-card-summary"><p>聞こえますか？</p><p>听得见吗？</p></div></article>
+        </div>
+        <div class="panel-foot">列表持续可翻找；批量区只保留<strong>当前已有的六项命令</strong></div>
+      </aside>
+    </main>
+  </section>
+
+  <script>
+    const screen = new URLSearchParams(location.search).get('screen') || 'single';
+    document.body.dataset.screen = ['single', 'multi'].includes(screen) ? screen : 'single';
+  </script>
+</body>
+</html>

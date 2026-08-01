@@ -137,6 +137,14 @@ const reviewComparePaneOptions = [
   { key: 'blank', label: '空页', shortLabel: '空页' },
   { key: 'frame', label: '框页', shortLabel: '框页' }
 ]
+const regionListFilterOptions = [
+  { value: 'all', label: '全部' },
+  { value: 'manual', label: '手动框' },
+  { value: 'keep-original', label: '保留原文' },
+  { value: 'untranslated', label: '未翻译' },
+  { value: 'font-override', label: '字体覆盖' },
+  { value: 'warning', label: '需留意' }
+]
 const defaultReviewComparePaneModes = ['final', 'frame']
 const reviewComparePaneOrder = reviewComparePaneOptions.map((option) => option.key)
 const styleBucketLabelMap = Object.fromEntries(styleBucketOptions.map((option) => [option.value, option.label]))
@@ -1393,6 +1401,20 @@ const selectedEditRegionIndexLabel = computed(() => {
   }
   return `#${selectedEditRegion.value.index + 1}`
 })
+const regionStyleClipboardSummary = computed(() => {
+  const snapshot = regionStyleClipboard.value
+  if (!snapshot) {
+    return ''
+  }
+  const font = getFontById(snapshot.fontKey)
+  const fontLabel = String(font?.label || font?.name || snapshot.fontKey || '默认字体').trim()
+  const directionLabel = snapshot.direction === 'horizontal' ? '横排' : '纵排'
+  const enabledLabel = snapshot.enabled ? '已启用' : '已停用'
+  return `${fontLabel} / ${snapshot.fontSize} / ${directionLabel} / ${enabledLabel}`
+})
+const selectedBatchSourceLabel = computed(() => (
+  selectedEditRegion.value ? `${selectedEditRegionIndexLabel.value} 是字体、字号来源` : '未选择活动框'
+))
 const v2RegionSidebarCompact = computed(() => filteredEditRegions.value.length <= 4)
 const pageRailItems = computed(() => (
   mergedInspectionPages.value.map((page, index) => ({
@@ -11604,31 +11626,12 @@ watch(
 
       <section v-else class="v2-review-view" data-testid="v2-review-view">
         <div class="v2-review-toolbar">
-          <div class="v2-review-toolbar-left v2-review-toolbar-spacer" aria-hidden="true"></div>
-
-          <div class="v2-review-toolbar-center">
-            <div class="v2-compare-selector" role="group" aria-label="审校对比页面">
-              <label
-                v-for="option in reviewComparePaneOptions"
-                :key="option.key"
-                :class="[
-                  'v2-compare-chip',
-                  isReviewComparePaneSelected(option.key) ? 'active' : '',
-                  isReviewComparePaneToggleDisabled(option.key) ? 'disabled' : ''
-                ]"
-              >
-                <input
-                  type="checkbox"
-                  :checked="isReviewComparePaneSelected(option.key)"
-                  :disabled="isReviewComparePaneToggleDisabled(option.key)"
-                  @change="toggleReviewComparePaneMode(option.key)"
-                />
-                <span>{{ option.label }}</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="v2-review-toolbar-right">
+          <div
+            class="v2-review-page-commands"
+            data-testid="v2-review-page-commands"
+            role="group"
+            aria-label="页面操作"
+          >
             <button
               type="button"
               class="v2-icon-button v2-review-tool-button"
@@ -11722,6 +11725,109 @@ watch(
               ↷
             </button>
           </div>
+
+          <span class="v2-review-toolbar-divider" aria-hidden="true"></span>
+
+          <div
+            v-if="selectedEditRegion && !hasCanvasMultiSelection"
+            class="v2-review-selection-commands"
+            data-testid="v2-review-single-commands"
+            role="group"
+            aria-label="当前文本框格式"
+          >
+            <span class="v2-review-selection-label">选中 {{ selectedEditRegionIndexLabel }}</span>
+            <select
+              data-testid="v2-selection-font"
+              aria-label="选中框字体"
+              :value="getRegionFontOverrideId(selectedEditRegion)"
+              @change="updateRegionFontOverride(selectedEditRegion, $event.target.value)"
+            >
+              <option value="">{{ getEffectiveRegionFontLabel(selectedEditRegion) }}</option>
+              <option
+                v-for="font in availableFonts"
+                :key="`toolbar-${selectedEditRegion.id}-${font.id}`"
+                :value="font.id"
+              >
+                {{ getPreviewFontOptionLabel(font) }}
+              </option>
+            </select>
+            <div class="v2-review-font-size-control">
+              <button
+                type="button"
+                aria-label="减小选中框字号"
+                @click="adjustRegionFontSizeV2(selectedEditRegion, -1)"
+              >
+                −
+              </button>
+              <input
+                :value="getRegionFontSize(selectedEditRegion)"
+                type="text"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                aria-label="选中框字号"
+                @input="handleRegionFontSizeInput(selectedEditRegion, $event.target.value)"
+                @keydown.enter.prevent="commitRegionFontSize(selectedEditRegion)"
+                @blur="commitRegionFontSize(selectedEditRegion)"
+              />
+              <button
+                type="button"
+                aria-label="增大选中框字号"
+                @click="adjustRegionFontSizeV2(selectedEditRegion, 1)"
+              >
+                ＋
+              </button>
+            </div>
+            <button
+              type="button"
+              :class="['v2-review-command-button', 'is-active']"
+              @click="toggleRegionDirectionV2(selectedEditRegion)"
+            >
+              {{ isVerticalRegion(selectedEditRegion) ? '纵排' : '横排' }}
+            </button>
+            <span
+              v-if="regionStyleClipboard"
+              class="v2-style-clipboard-summary"
+              data-testid="v2-style-clipboard-summary"
+              title="全部样式包含启用状态"
+            >
+              <strong>已复制样式</strong>
+              <span>{{ regionStyleClipboardSummary }}</span>
+            </span>
+            <button
+              type="button"
+              class="v2-review-command-button"
+              @click="copyRegionStyle(selectedEditRegion)"
+            >
+              复制全部样式
+            </button>
+            <button
+              type="button"
+              class="v2-review-command-button"
+              :disabled="!regionStyleClipboard"
+              :title="regionStyleClipboard ? '全部样式包含启用状态' : '请先复制一个框的样式'"
+              @click="pasteRegionStyle(selectedEditRegion)"
+            >
+              粘贴全部样式
+            </button>
+          </div>
+
+          <div
+            v-else-if="hasCanvasMultiSelection"
+            class="v2-review-selection-commands v2-review-multi-commands"
+            data-testid="v2-review-multi-commands"
+            role="group"
+            aria-label="多选文本框批量操作"
+          >
+            <span class="v2-review-selection-label">已选 {{ selectedCanvasRegionCount }} 个</span>
+            <span class="v2-review-batch-source">{{ selectedBatchSourceLabel }}</span>
+            <button type="button" class="v2-review-command-button" @click="applyBatchRegionEnabled(true)">启用</button>
+            <button type="button" class="v2-review-command-button" @click="applyBatchRegionEnabled(false)">停用</button>
+            <button type="button" class="v2-review-command-button" @click="applyBatchDirection('vertical')">纵排</button>
+            <button type="button" class="v2-review-command-button" @click="applyBatchDirection('horizontal')">横排</button>
+            <button type="button" class="v2-review-command-button" @click="applyBatchFontFromActive">套用字体</button>
+            <button type="button" class="v2-review-command-button" @click="applyBatchFontSizeFromActive">套用字号</button>
+            <button type="button" class="v2-review-command-button is-muted" @click="clearCanvasRegionSelection">清除选择</button>
+          </div>
         </div>
 
         <div class="v2-review-layout">
@@ -11760,6 +11866,31 @@ watch(
           </aside>
 
           <section class="v2-review-stage">
+            <div class="v2-review-compare-toolbar" data-testid="v2-review-compare-toolbar">
+              <div class="v2-compare-selector" role="group" aria-label="审校对比页面">
+                <label
+                  v-for="option in reviewComparePaneOptions"
+                  :key="option.key"
+                  :class="[
+                    'v2-compare-chip',
+                    isReviewComparePaneSelected(option.key) ? 'active' : '',
+                    isReviewComparePaneToggleDisabled(option.key) ? 'disabled' : ''
+                  ]"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="isReviewComparePaneSelected(option.key)"
+                    :disabled="isReviewComparePaneToggleDisabled(option.key)"
+                    @change="toggleReviewComparePaneMode(option.key)"
+                  />
+                  <span>{{ option.label }}</span>
+                </label>
+              </div>
+              <div class="v2-review-compare-summary">
+                <span>{{ selectedReviewComparePanes.length }} 个视图</span>
+                <strong>联动画布</strong>
+              </div>
+            </div>
             <div class="v2-pane-strip" :style="v2ReviewPaneStripStyle">
               <article
                 v-for="pane in selectedReviewComparePanes"
@@ -11904,172 +12035,6 @@ watch(
                             @pointerdown.stop="startCanvasRegionTransform($event, region, selectedEditPage, 'resize', handle)"
                           ></span>
                         </button>
-                        <button
-                          v-if="canDirectManipulateCanvas"
-                          type="button"
-                          :class="['style-box-settings-button', isAdvancedStylePopoverOpen(region, selectedEditPage) ? 'active' : '']"
-                          :style="getStyleRegionSettingsButtonStyle(region, selectedEditPage)"
-                          :aria-label="`打开第 ${region.index + 1} 个文本框样式设置`"
-                          @pointerdown.stop
-                          @click.stop="toggleAdvancedStylePopover(region, selectedEditPage)"
-                        >
-                          ⚙
-                        </button>
-                        <Teleport to="body">
-                          <section
-                            v-if="isAdvancedStylePopoverOpen(region, selectedEditPage)"
-                            class="style-advanced-popover"
-                            :style="getAdvancedStylePopoverStyle(region, selectedEditPage)"
-                            @pointerdown.stop
-                            @click.stop
-                          >
-                            <header class="style-advanced-popover-head">
-                              <strong>#{{ region.index + 1 }} 样式</strong>
-                              <button type="button" class="v2-icon-button" aria-label="关闭样式设置" @click="closeAdvancedStylePopover">✕</button>
-                            </header>
-
-                            <div class="style-advanced-grid">
-                              <label class="v2-field">
-                                <span>旋转</span>
-                                <input
-                                  :value="getRegionRotation(region)"
-                                  type="number"
-                                  min="-180"
-                                  max="180"
-                                  step="1"
-                                  @change="updateRegionAdvancedStyle(region, { rotation: $event.target.value }, '调整旋转')"
-                                />
-                              </label>
-                              <label class="v2-field">
-                                <span>描边强度</span>
-                                <input
-                                  :value="getRegionStrokeStrength(region)"
-                                  type="number"
-                                  min="0"
-                                  :max="maxStrokeStrength"
-                                  step="0.05"
-                                  title="相对字号的描边强度；1 约等于字号的 35%"
-                                  @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
-                                />
-                              </label>
-                              <label class="v2-field">
-                                <span>字距</span>
-                                <input
-                                  :value="getRegionLetterSpacing(region)"
-                                  type="number"
-                                  min="0.5"
-                                  max="2.5"
-                                  step="0.05"
-                                  @change="updateRegionAdvancedStyle(region, { letter_spacing: $event.target.value }, '调整字距')"
-                                />
-                              </label>
-                              <label class="v2-field">
-                                <span>行距</span>
-                                <input
-                                  :value="getRegionLineSpacing(region)"
-                                  type="number"
-                                  min="0.5"
-                                  max="2.5"
-                                  step="0.05"
-                                  @change="updateRegionAdvancedStyle(region, { line_spacing: $event.target.value }, '调整行距')"
-                                />
-                              </label>
-                            </div>
-
-                            <div class="style-stroke-options" role="group" aria-label="描边强度">
-                              <button
-                                v-for="option in strokeStrengthOptions"
-                                :key="`stroke-${region.id}-${option}`"
-                                type="button"
-                                :class="['style-chip-button', getRegionStrokeStrength(region) === option ? 'active' : '']"
-                                @click="updateRegionAdvancedStyle(region, { stroke_width: option }, '调整描边')"
-                              >
-                                {{ option }}
-                              </button>
-                            </div>
-
-                            <div class="style-color-editor">
-                              <span>文字色</span>
-                              <div class="style-color-row">
-                                <button
-                                  v-for="color in styleColorSwatches"
-                                  :key="`fg-${region.id}-${color}`"
-                                  type="button"
-                                  class="style-color-swatch"
-                                  :class="{ active: getRegionTextColorHex(region) === color }"
-                                  :style="{ backgroundColor: color }"
-                                  :aria-label="`文字色 ${color}`"
-                                  @click="updateRegionAdvancedStyle(region, { fg_color: color }, '调整文字色')"
-                                ></button>
-                                <input
-                                  :value="getRegionTextColorHex(region)"
-                                  type="color"
-                                  aria-label="文字色"
-                                  @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
-                                />
-                                <input
-                                  :value="getRegionTextColorHex(region)"
-                                  type="text"
-                                  inputmode="text"
-                                  aria-label="文字色 Hex"
-                                  @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
-                                />
-                              </div>
-                            </div>
-
-                            <div class="style-color-editor">
-                              <span>底/描边色</span>
-                              <div class="style-color-row">
-                                <button
-                                  v-for="color in styleColorSwatches"
-                                  :key="`bg-${region.id}-${color}`"
-                                  type="button"
-                                  class="style-color-swatch"
-                                  :class="{ active: getRegionStrokeColorHex(region) === color }"
-                                  :style="{ backgroundColor: color }"
-                                  :aria-label="`底/描边色 ${color}`"
-                                  @click="updateRegionAdvancedStyle(region, { bg_color: color }, '调整底色')"
-                                ></button>
-                                <button
-                                  type="button"
-                                  class="style-chip-button"
-                                  @click="updateRegionAdvancedStyle(region, { bg_color: '#ffffff' }, '设为白底')"
-                                >
-                                  白
-                                </button>
-                                <button
-                                  type="button"
-                                  class="style-chip-button"
-                                  @click="updateRegionAdvancedStyle(region, { bg_color: '#000000' }, '设为黑底')"
-                                >
-                                  黑
-                                </button>
-                                <input
-                                  :value="getRegionStrokeColorHex(region)"
-                                  type="color"
-                                  aria-label="底/描边色"
-                                  @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
-                                />
-                                <input
-                                  :value="getRegionStrokeColorHex(region)"
-                                  type="text"
-                                  inputmode="text"
-                                  aria-label="底/描边色 Hex"
-                                  @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
-                                />
-                              </div>
-                            </div>
-
-                            <label class="style-preserve-background-toggle v2-inline-checkbox">
-                              <input
-                                type="checkbox"
-                                :checked="shouldPreserveRegionBackground(region)"
-                                @change="updateRegionAdvancedStyle(region, { preserve_background: $event.target.checked }, '切换保留底图')"
-                              />
-                              <span>保留底图</span>
-                            </label>
-                          </section>
-                        </Teleport>
                       </template>
                       <span
                         v-if="canvasMarqueeState?.pageId === selectedEditPage.stored_name"
@@ -12104,18 +12069,6 @@ watch(
                         @click.stop
                       >
                         <span>{{ getCanvasSelectionToolbarText(selectedEditPage) }}</span>
-                        <template v-if="hasCanvasMultiSelection">
-                          <button type="button" @click="applyBatchRegionEnabled(true)">启用</button>
-                          <button type="button" @click="applyBatchRegionEnabled(false)">停用</button>
-                          <button type="button" @click="applyBatchDirection('vertical')">纵排</button>
-                          <button type="button" @click="applyBatchDirection('horizontal')">横排</button>
-                          <button type="button" @click="applyBatchFontFromActive">套用字体</button>
-                          <button type="button" @click="applyBatchFontSizeFromActive">套用字号</button>
-                        </template>
-                        <template v-else>
-                          <button type="button" @click="focusSelectedRegionInViewport(selectedEditPage, 'main')">定位</button>
-                          <button type="button" @click="setCurrentPageViewportPreset('actual', 'main')">100%</button>
-                        </template>
                       </div>
                     </template>
                   </div>
@@ -12128,7 +12081,7 @@ watch(
             </div>
           </section>
 
-          <aside :class="['v2-region-sidebar', v2RegionSidebarCompact ? 'is-compact' : '']">
+          <aside class="v2-region-sidebar">
             <div class="v2-region-sidebar-head">
               <div class="v2-region-sidebar-top">
                 <div class="v2-region-sidebar-label">
@@ -12173,22 +12126,27 @@ watch(
                 v-model="regionListSearch"
                 class="v2-search-input translation-review-input"
                 type="search"
-                placeholder="搜索对白框"
+                placeholder="搜索原文、译文或编号"
               />
-              <select v-model="regionListFilter" class="v2-filter-select">
-                <option value="all">全部</option>
-                <option value="manual">手动框</option>
-                <option value="keep-original">保留原文</option>
-                <option value="untranslated">未翻译</option>
-                <option value="font-override">有字体覆盖</option>
-                <option value="warning">需留意</option>
-              </select>
-              <div v-if="hasCanvasMultiSelection" class="v2-region-batch-bar">
-                <span>{{ selectedCanvasRegionCount }} 个框</span>
-                <button type="button" @click="applyBatchRegionEnabled(true)">启用</button>
-                <button type="button" @click="applyBatchRegionEnabled(false)">停用</button>
-                <button type="button" @click="applyBatchDirection('vertical')">纵排</button>
-                <button type="button" @click="applyBatchDirection('horizontal')">横排</button>
+              <div
+                class="v2-region-filter-chips"
+                data-testid="v2-region-filter-chips"
+                role="group"
+                aria-label="筛选文本框"
+              >
+                <button
+                  v-for="option in regionListFilterOptions"
+                  :key="option.value"
+                  type="button"
+                  :class="['v2-region-filter-chip', regionListFilter === option.value ? 'active' : '']"
+                  @click="regionListFilter = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+              <div v-if="hasCanvasMultiSelection" class="v2-region-selection-summary">
+                <strong>已选择 {{ selectedCanvasRegionCount }} 个框</strong>
+                <span>{{ selectedBatchSourceLabel }}</span>
               </div>
             </div>
 
@@ -12201,12 +12159,23 @@ watch(
                   'style-region-card',
                   'v2-region-card',
                   selectedEditRegionKey === region.id ? 'active' : '',
+                  selectedEditRegionKey === region.id && !hasCanvasMultiSelection ? 'is-expanded' : '',
                   isRegionSelectedOnCanvas(region) ? 'multi-selected' : ''
                 ]"
+                :aria-selected="isRegionSelectedOnCanvas(region)"
                 @click="handleRegionCardClick($event, region)"
               >
                 <header class="v2-region-card-head">
                   <div class="v2-region-card-title">
+                    <input
+                      v-if="hasCanvasMultiSelection"
+                      class="v2-region-selection-checkbox"
+                      type="checkbox"
+                      :checked="isRegionSelectedOnCanvas(region)"
+                      :aria-label="`选择第 ${region.index + 1} 个文本框`"
+                      @click.stop
+                      @change="toggleCanvasRegionSelection(region)"
+                    />
                     <strong>#{{ region.index + 1 }}</strong>
                     <span class="v2-inline-badge style">{{ getResolvedRegionStyleLabel(region) }}</span>
                     <span v-if="hasRegionWarning(region)" class="v2-inline-badge warning">需留意</span>
@@ -12215,60 +12184,6 @@ watch(
 
                   <div class="v2-region-card-actions" @click.stop @mousedown.stop>
                     <div class="v2-region-card-action-primary">
-                      <div v-if="selectedEditRegionKey === region.id" class="v2-region-copy-actions">
-                        <button
-                          type="button"
-                          class="v2-region-mini-button v2-region-icon-action"
-                          title="复制这个框的全部样式"
-                          aria-label="复制这个框的全部样式"
-                          @click.stop="copyRegionStyle(region)"
-                        >
-                          <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <rect x="8" y="4" width="11" height="11" rx="2" />
-                            <path d="M5 9v9a2 2 0 0 0 2 2h9" />
-                            <path d="m11 12 5-5" />
-                            <path d="m15 6 3 3" />
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          class="v2-region-mini-button v2-region-icon-action"
-                          title="粘贴上次复制的全部样式"
-                          aria-label="粘贴上次复制的全部样式"
-                          @click.stop="pasteRegionStyle(region)"
-                        >
-                          <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <path d="M9 5h6l1 2h2v8" />
-                            <path d="M6 7v13h12v-3" />
-                            <path d="M6 7h2" />
-                            <path d="m10 16 7-7" />
-                            <path d="m16 8 3 3" />
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          class="v2-region-mini-button v2-region-icon-action"
-                          title="复制这个文本框"
-                          aria-label="复制这个文本框"
-                          :disabled="translating || isPageCommandPending(selectedEditPage.stored_name)"
-                          @click.stop="duplicateRegion(region)"
-                        >
-                          <svg class="v2-region-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <rect x="8" y="4" width="11" height="13" rx="2" />
-                            <path d="M5 8v11a2 2 0 0 0 2 2h9" />
-                            <path d="M11 9h5" />
-                            <path d="M11 13h4" />
-                          </svg>
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        class="v2-icon-button"
-                        :aria-label="`打开第 ${region.index + 1} 个文本框样式设置`"
-                        @click.stop="toggleAdvancedStylePopover(region, selectedEditPage)"
-                      >
-                        ⚙
-                      </button>
                       <span
                         :class="[
                           'v2-region-commit-icon',
@@ -12283,7 +12198,10 @@ watch(
                       </span>
                     </div>
 
-                    <div class="v2-region-card-toggles">
+                    <div
+                      v-if="selectedEditRegionKey === region.id && !hasCanvasMultiSelection"
+                      class="v2-region-card-toggles"
+                    >
                       <button
                         type="button"
                         :class="['v2-toggle-chip', !isRegionDisabled(region) ? 'active' : '']"
@@ -12299,17 +12217,20 @@ watch(
                         {{ isVerticalRegion(region) ? '纵排' : '横排' }}
                       </button>
                     </div>
+                    <span v-else class="v2-region-card-state">
+                      {{ isRegionDisabled(region) ? '已停用' : '已启用' }} · {{ isVerticalRegion(region) ? '纵排' : '横排' }}
+                    </span>
                   </div>
                 </header>
 
-                <div :class="['v2-region-card-preview', selectedEditRegionKey === region.id ? 'is-expanded' : '']">
+                <div :class="['v2-region-card-preview', selectedEditRegionKey === region.id && !hasCanvasMultiSelection ? 'is-expanded' : '']">
                   <div class="v2-region-card-preview-copy">
                     <p class="v2-region-source">{{ region.source_text || '（没有识别到可用原文）' }}</p>
                     <p class="v2-region-translation">{{ getEditRegionText(region) || '未填写译文' }}</p>
                   </div>
 
                   <label
-                    v-if="selectedEditRegionKey === region.id"
+                    v-if="selectedEditRegionKey === region.id && !hasCanvasMultiSelection"
                     class="v2-inline-checkbox v2-region-preview-toggle"
                   >
                     <input
@@ -12321,7 +12242,7 @@ watch(
                   </label>
                 </div>
 
-                <div v-if="selectedEditRegionKey === region.id" class="v2-region-card-body" @click.stop @mousedown.stop>
+                <div v-if="selectedEditRegionKey === region.id && !hasCanvasMultiSelection" class="v2-region-card-body" @click.stop @mousedown.stop>
                   <label class="v2-field">
                     <span>译文</span>
                     <textarea
@@ -12360,7 +12281,7 @@ watch(
                           :disabled="!canApplyRegionFontToPage(region)"
                           @click="applyRegionFontToPage(region)"
                         >
-                          应用全部
+                          字体应用到本页
                         </button>
                       </div>
                     </div>
@@ -12388,11 +12309,176 @@ watch(
                           :disabled="!canApplyRegionFontSizeToPage(region)"
                           @click="applyRegionFontSizeToPage(region)"
                         >
-                          应用全部
+                          字号应用到本页
                         </button>
                       </div>
                     </div>
                   </div>
+
+                  <div class="v2-region-more-actions">
+                    <button
+                      type="button"
+                      class="v2-secondary-button"
+                      :disabled="translating || isPageCommandPending(selectedEditPage.stored_name)"
+                      @click="duplicateRegion(region)"
+                    >
+                      复制文本框
+                    </button>
+                    <button
+                      type="button"
+                      class="v2-secondary-button v2-region-advanced-toggle"
+                      :aria-expanded="isAdvancedStylePopoverOpen(region, selectedEditPage)"
+                      @click="toggleAdvancedStylePopover(region, selectedEditPage)"
+                    >
+                      更多与高级样式
+                    </button>
+                  </div>
+
+                  <section
+                    v-if="isAdvancedStylePopoverOpen(region, selectedEditPage)"
+                    class="v2-region-advanced-section"
+                  >
+                    <div class="style-advanced-grid">
+                      <label class="v2-field">
+                        <span>旋转</span>
+                        <input
+                          :value="getRegionRotation(region)"
+                          type="number"
+                          min="-180"
+                          max="180"
+                          step="1"
+                          @change="updateRegionAdvancedStyle(region, { rotation: $event.target.value }, '调整旋转')"
+                        />
+                      </label>
+                      <label class="v2-field">
+                        <span>描边强度</span>
+                        <input
+                          :value="getRegionStrokeStrength(region)"
+                          type="number"
+                          min="0"
+                          :max="maxStrokeStrength"
+                          step="0.05"
+                          title="相对字号的描边强度；1 约等于字号的 35%"
+                          @change="updateRegionAdvancedStyle(region, { stroke_width: $event.target.value }, '调整描边')"
+                        />
+                      </label>
+                      <label class="v2-field">
+                        <span>字距</span>
+                        <input
+                          :value="getRegionLetterSpacing(region)"
+                          type="number"
+                          min="0.5"
+                          max="2.5"
+                          step="0.05"
+                          @change="updateRegionAdvancedStyle(region, { letter_spacing: $event.target.value }, '调整字距')"
+                        />
+                      </label>
+                      <label class="v2-field">
+                        <span>行距</span>
+                        <input
+                          :value="getRegionLineSpacing(region)"
+                          type="number"
+                          min="0.5"
+                          max="2.5"
+                          step="0.05"
+                          @change="updateRegionAdvancedStyle(region, { line_spacing: $event.target.value }, '调整行距')"
+                        />
+                      </label>
+                    </div>
+
+                    <div class="style-stroke-options" role="group" aria-label="描边强度">
+                      <button
+                        v-for="option in strokeStrengthOptions"
+                        :key="`inline-stroke-${region.id}-${option}`"
+                        type="button"
+                        :class="['style-chip-button', getRegionStrokeStrength(region) === option ? 'active' : '']"
+                        @click="updateRegionAdvancedStyle(region, { stroke_width: option }, '调整描边')"
+                      >
+                        {{ option }}
+                      </button>
+                    </div>
+
+                    <div class="style-color-editor">
+                      <span>文字色</span>
+                      <div class="style-color-row">
+                        <button
+                          v-for="color in styleColorSwatches"
+                          :key="`inline-fg-${region.id}-${color}`"
+                          type="button"
+                          class="style-color-swatch"
+                          :class="{ active: getRegionTextColorHex(region) === color }"
+                          :style="{ backgroundColor: color }"
+                          :aria-label="`文字色 ${color}`"
+                          @click="updateRegionAdvancedStyle(region, { fg_color: color }, '调整文字色')"
+                        ></button>
+                        <input
+                          :value="getRegionTextColorHex(region)"
+                          type="color"
+                          aria-label="文字色"
+                          @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                        />
+                        <input
+                          :value="getRegionTextColorHex(region)"
+                          type="text"
+                          inputmode="text"
+                          aria-label="文字色 Hex"
+                          @change="updateRegionAdvancedStyle(region, { fg_color: $event.target.value }, '调整文字色')"
+                        />
+                      </div>
+                    </div>
+
+                    <div class="style-color-editor">
+                      <span>底/描边色</span>
+                      <div class="style-color-row">
+                        <button
+                          v-for="color in styleColorSwatches"
+                          :key="`inline-bg-${region.id}-${color}`"
+                          type="button"
+                          class="style-color-swatch"
+                          :class="{ active: getRegionStrokeColorHex(region) === color }"
+                          :style="{ backgroundColor: color }"
+                          :aria-label="`底/描边色 ${color}`"
+                          @click="updateRegionAdvancedStyle(region, { bg_color: color }, '调整底色')"
+                        ></button>
+                        <button
+                          type="button"
+                          class="style-chip-button"
+                          @click="updateRegionAdvancedStyle(region, { bg_color: '#ffffff' }, '设为白底')"
+                        >
+                          白
+                        </button>
+                        <button
+                          type="button"
+                          class="style-chip-button"
+                          @click="updateRegionAdvancedStyle(region, { bg_color: '#000000' }, '设为黑底')"
+                        >
+                          黑
+                        </button>
+                        <input
+                          :value="getRegionStrokeColorHex(region)"
+                          type="color"
+                          aria-label="底/描边色"
+                          @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
+                        />
+                        <input
+                          :value="getRegionStrokeColorHex(region)"
+                          type="text"
+                          inputmode="text"
+                          aria-label="底/描边色 Hex"
+                          @change="updateRegionAdvancedStyle(region, { bg_color: $event.target.value }, '调整底色')"
+                        />
+                      </div>
+                    </div>
+
+                    <label class="style-preserve-background-toggle v2-inline-checkbox">
+                      <input
+                        type="checkbox"
+                        :checked="shouldPreserveRegionBackground(region)"
+                        @change="updateRegionAdvancedStyle(region, { preserve_background: $event.target.checked }, '切换保留底图')"
+                      />
+                      <span>保留底图</span>
+                    </label>
+                  </section>
 
                   <div v-if="isUserAuthoredRegion(region)" class="v2-region-card-footer">
                     <button

@@ -128,14 +128,19 @@
     .btn.text { border-color: transparent; background: transparent; color: var(--muted); }
 
     .formatbar {
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
-      gap: 8px;
+      gap: 14px;
       padding: 0 18px;
       border-bottom: 1px solid var(--line);
       background: rgba(250, 251, 253, .98);
       z-index: 4;
     }
+
+    .formatbar-start { min-width: 0; }
+    .formatbar-center { justify-self: center; }
+    .formatbar-end { min-width: 0; justify-self: end; }
 
     .tool-label { margin-left: 8px; color: var(--muted); font-size: 11px; font-weight: 800; }
 
@@ -193,6 +198,10 @@
       min-width: 0;
     }
 
+    .page-command-group { justify-content: flex-end; }
+    .selection-command-group { overflow-x: auto; scrollbar-width: none; }
+    .selection-command-group::-webkit-scrollbar { display: none; }
+
     .page-command-group .btn,
     .selection-command-group .btn { height: 34px; padding: 0 10px; }
 
@@ -247,9 +256,11 @@
       background: rgba(255,255,255,.82);
     }
 
-    .view-tabs { display: flex; gap: 4px; }
-    .view-tabs span { padding: 7px 11px; border-radius: 8px; color: var(--muted); font-size: 11px; font-weight: 800; }
-    .view-tabs span.active { background: white; color: var(--blue-dark); box-shadow: 0 1px 0 rgba(18, 35, 64, .08); }
+    .view-tabs { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 11px; background: #f3f6fa; }
+    .view-tabs button { min-height: 30px; padding: 0 11px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 800; }
+    .view-tabs button.active { background: white; color: var(--blue-dark); box-shadow: 0 1px 4px rgba(18, 35, 64, .10); }
+    .stage-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 750; }
+    .stage-context strong { color: var(--text); }
     .zoom { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 750; }
 
     .canvas-area {
@@ -263,7 +274,7 @@
     }
 
     .canvas-area.compare-area {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
       place-items: stretch;
       padding: 14px;
@@ -295,8 +306,9 @@
 
     .compare-pane-head strong { color: var(--text); font-size: 11px; }
     .compare-page-wrap { min-height: 0; display: grid; place-items: center; overflow: hidden; padding: 10px; }
-    .compare-pane .manga-page { width: min(360px, 94%); height: min(700px, 96%); }
+    .compare-pane .manga-page { width: min(310px, 94%); height: min(700px, 96%); }
     .compare-pane.result-pane .manga-page .source-shot { left: -112px; top: -204px; transform: scale(1); }
+    .compare-pane.source-pane .manga-page .source-shot { left: -386px; top: -204px; transform: scale(1); }
     .compare-pane.frame-pane .manga-page .source-shot { left: -616px; top: -204px; transform: scale(1); }
 
     .manga-page {
@@ -418,7 +430,7 @@
     .list-filters span { padding: 6px 8px; border-radius: 8px; background: var(--soft); color: var(--muted); font-size: 10px; font-weight: 750; }
     .list-filters span.active { background: var(--soft-blue); color: var(--blue-dark); }
 
-    .region-list-scroll { min-height: 0; overflow: hidden; padding: 7px 10px 12px; background: #f8fafc; }
+    .region-list-scroll { min-height: 0; overflow: auto; padding: 7px 10px 12px; background: #f8fafc; scrollbar-width: thin; }
     .region-card { margin: 6px 0; padding: 10px 11px; border: 1px solid transparent; border-radius: 10px; background: white; box-shadow: 0 1px 0 rgba(20, 34, 56, .04); }
     .region-card.active { border-color: #8eb2ff; background: white; box-shadow: 0 8px 22px rgba(39, 100, 231, .10); }
     .region-card.checked { border-color: #b5cbfb; background: #f6f9ff; }
@@ -428,6 +440,8 @@
     .region-card-head .style-tag { padding: 4px 6px; border-radius: 7px; background: #fff4dc; color: #a16207; font-size: 9px; font-weight: 850; }
     .region-card-head .row-spacer { flex: 1; }
     .region-card-head .state { color: var(--blue-dark); font-size: 9px; font-weight: 800; }
+    .card-state-controls { display: flex; align-items: center; gap: 4px; }
+    .card-state-button { padding: 4px 7px; border: 1px solid #c9d9fb; border-radius: 7px; background: var(--soft-blue); color: var(--blue-dark); font-size: 9px; font-weight: 800; }
     .region-card-summary { display: grid; gap: 3px; margin-top: 7px; }
     .region-card-summary p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 1.35; }
     .region-card-summary p:first-child { color: var(--muted); }
@@ -436,6 +450,111 @@
     .region-card-editor .textarea { min-height: 78px; font-size: 13px; }
     .region-card-editor .field-grid { margin-top: 10px; }
     .region-card-editor .field-value { min-height: 34px; }
+    .style-transfer { display: grid; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+    .card-clipboard { display: none; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; border-radius: 8px; background: #edf8f4; color: #236d5a; font-size: 10px; font-weight: 750; }
+    .card-clipboard.visible { display: flex; }
+    .card-clipboard strong { color: #155e4a; }
+    .compact-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+    .icon-action {
+      position: relative;
+      width: 34px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: #59677a;
+      cursor: pointer;
+    }
+    .icon-action:hover,
+    .icon-action:focus-visible { border-color: #9ab9ff; background: var(--soft-blue); color: var(--blue-dark); outline: 0; }
+    .icon-action svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-action.paste { border-color: #c3d5ff; color: var(--blue-dark); }
+    .icon-action.success { border-color: #a6d8c9; background: #edf8f4; color: #17664f; }
+    .icon-action:disabled { border-color: var(--line); background: #f4f6f9; color: #a4adba; cursor: not-allowed; }
+    .icon-action::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 7px);
+      z-index: 20;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: #17233a;
+      color: white;
+      font-size: 10px;
+      font-weight: 750;
+      line-height: 1;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(3px);
+      transition: opacity .12s ease, transform .12s ease;
+    }
+    .icon-action:hover::after,
+    .icon-action:focus-visible::after { opacity: 1; transform: translateY(0); }
+    .advanced-detail { display: none; gap: 10px; padding: 10px; border: 1px solid #dfe7f3; border-radius: 9px; background: var(--soft); color: var(--muted); font-size: 10px; }
+    .advanced-detail.visible { display: grid; }
+    .advanced-group { display: grid; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0; }
+    .advanced-group:last-child { padding-bottom: 0; border-bottom: 0; }
+    .advanced-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .advanced-group-head strong { color: var(--text); font-size: 10px; }
+    .advanced-group-head span { color: #8491a4; font-size: 9px; }
+    .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .advanced-field { display: grid; gap: 5px; }
+    .advanced-field > span,
+    .advanced-color-label { color: var(--muted); font-size: 9px; font-weight: 800; }
+    .advanced-number,
+    .advanced-hex {
+      min-width: 0;
+      height: 30px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: white;
+      color: var(--text);
+      font: inherit;
+      font-weight: 700;
+      outline: 0;
+    }
+    .advanced-number:focus,
+    .advanced-hex:focus { border-color: #8fb0f8; box-shadow: 0 0 0 2px rgba(39,100,231,.08); }
+    .stroke-presets { display: flex; flex-wrap: wrap; gap: 4px; }
+    .style-chip {
+      min-width: 30px;
+      height: 25px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: white;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .style-chip:hover,
+    .style-chip:focus-visible,
+    .style-chip.active { border-color: #8fb0f8; background: var(--soft-blue); color: var(--blue-dark); outline: 0; }
+    .advanced-color-editor { display: grid; gap: 6px; }
+    .advanced-color-row { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+    .color-swatch {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 2px solid white;
+      border-radius: 7px;
+      box-shadow: 0 0 0 1px var(--line);
+      cursor: pointer;
+    }
+    .color-swatch:hover,
+    .color-swatch:focus-visible,
+    .color-swatch.active { box-shadow: 0 0 0 2px var(--blue); outline: 0; }
+    .advanced-color-picker { width: 27px; height: 26px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: white; cursor: pointer; }
+    .advanced-hex { width: 78px; }
+    .preserve-background-toggle { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 10px; font-weight: 750; }
+    .preserve-background-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--blue); }
     .inline-behaviors { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
     .inline-behaviors span { color: var(--muted); font-size: 10px; font-weight: 750; }
     .inline-behaviors strong { color: var(--blue-dark); font-size: 10px; }
@@ -463,6 +582,33 @@
     }
 
     .stage-status b { color: var(--green); }
+
+    .prototype-switcher {
+      position: fixed;
+      z-index: 20;
+      left: 50%;
+      bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 5px;
+      border: 1px solid rgba(23, 32, 51, .12);
+      border-radius: 12px;
+      background: rgba(23, 32, 51, .92);
+      box-shadow: 0 12px 30px rgba(23, 32, 51, .20);
+      transform: translateX(-50%);
+    }
+
+    .prototype-switcher a {
+      padding: 7px 11px;
+      border-radius: 8px;
+      color: rgba(255,255,255,.72);
+      font-size: 11px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .prototype-switcher a.active { background: white; color: var(--text); }
   </style>
 </head>
 <body>
@@ -479,12 +625,14 @@
     </header>
 
     <div class="formatbar">
-      <div class="page-command-group"><button class="btn icon-btn">‹</button><button class="btn icon-btn">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn">↶</button><button class="btn icon-btn">↷</button></div>
-      <span class="toolbar-divider"></span>
-      <div class="selection-command-group"><span class="tool-label">选中 #12</span><div class="control font">思源黑体 <span>展开</span></div><div class="control size"><b>−</b><span>34</span><b>＋</b></div><div class="control active">纵排</div></div>
-      <div class="format-spacer"></div>
-      <div class="clipboard-chip"><strong>已复制样式</strong> 黑体 / 34 / 纵排 / 已启用</div>
-      <button class="btn">复制全部样式</button><button class="btn">粘贴全部样式</button>
+      <div class="formatbar-start" aria-hidden="true"></div>
+      <div class="formatbar-center view-tabs" role="group" aria-label="审校对比页面">
+        <button class="active" type="button">✓ 嵌后</button>
+        <button class="active" type="button">✓ 原图</button>
+        <button type="button">空页</button>
+        <button class="active" type="button">✓ 框页</button>
+      </div>
+      <div class="formatbar-end page-command-group"><button class="btn icon-btn" aria-label="上一页">‹</button><button class="btn icon-btn" aria-label="下一页">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn" aria-label="撤销">↶</button><button class="btn icon-btn" aria-label="重做">↷</button></div>
     </div>
 
     <main class="workspace">
@@ -495,12 +643,13 @@
         <div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">3</span></div>
       </aside>
       <section class="stage">
-        <div class="stage-head"><div class="view-tabs"><span class="active">✓ 嵌后</span><span>原图</span><span>空页</span><span class="active">✓ 框页</span></div><div class="zoom"><span>2 个视图</span><strong>100%</strong><span>重置视图</span></div></div>
+        <div class="stage-head"><div class="stage-context"><strong>3 个视图</strong><span>联动画布</span></div><div class="zoom"><span>适合</span><strong>100%</strong><span>重置视图</span></div></div>
         <div class="canvas-area compare-area">
           <div class="compare-pane result-pane"><div class="compare-pane-head"><strong>嵌后</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="嵌后结果"></div></div></div>
+          <div class="compare-pane source-pane"><div class="compare-pane-head"><strong>原图</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="原始页面"></div></div></div>
           <div class="compare-pane frame-pane"><div class="compare-pane-head"><strong>框页</strong><span>适合 · 100% · 定位</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="框页编辑"><div class="region selected" data-label="#12 · 210 × 310" style="left: 17%; top: 12%; width: 18%; height: 37%;">真的挺窄的。<i class="handle tl"></i><i class="handle tr"></i><i class="handle bl"></i><i class="handle br"></i></div><div class="region" style="right: 13%; top: 10%; width: 16%; height: 28%;">感谢搭乘。</div><div class="region" style="right: 17%; top: 52%; width: 14%; height: 25%;">SPIRITS COMICS</div></div></div></div>
         </div>
-        <div class="stage-status"><b>当前框 #12</b><span>嵌后与框页联动画布</span></div>
+        <div class="stage-status"><b>当前框 #12</b><span>3 个视图联动画布</span></div>
       </section>
       <aside class="inspector list-inspector">
         <div class="list-toolbar">
@@ -511,7 +660,60 @@
         <div class="region-list-scroll">
           <article class="region-card"><div class="region-card-head"><strong>#10</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">已启用 · 纵排</span></div><div class="region-card-summary"><p>今日は少し遅くなりました。</p><p>今天稍微晚了一些。</p></div></article>
           <article class="region-card"><div class="region-card-head"><strong>#11</strong><span class="style-tag">宋体 / 明体</span><span class="row-spacer"></span><span class="state">已启用 · 纵排</span></div><div class="region-card-summary"><p>次の駅で降りましょう。</p><p>我们在下一站下车吧。</p></div></article>
-          <article class="region-card active"><div class="region-card-head"><strong>#12</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">当前框 · 已保存</span></div><div class="region-card-summary"><p>けっこう狭いですね。</p><p>真的挺窄的。</p></div><div class="region-card-editor"><div class="eyebrow">译文</div><div class="textarea">真的挺窄的。</div><div class="field-grid"><div class="field"><label><span>字体</span><b>应用到本页</b></label><div class="field-value">思源黑体 <span>展开</span></div></div><div class="field"><label><span>字号</span><b>应用到本页</b></label><div class="field-value"><span>34</span><span>− ＋</span></div></div></div><div class="inline-behaviors"><span>☐ 保留原文　·　已启用　·　纵排</span><strong>更多与高级样式</strong></div></div></article>
+          <article class="region-card active" data-region-card>
+            <div class="region-card-head"><strong>#12</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><div class="card-state-controls"><button class="card-state-button" type="button" data-enabled-toggle>已启用</button><button class="card-state-button" type="button" data-direction-toggle>纵排</button></div></div>
+            <div class="region-card-summary"><p>けっこう狭いですね。</p><p>真的挺窄的。</p></div>
+            <div class="region-card-editor">
+              <div class="eyebrow">译文</div>
+              <div class="textarea" contenteditable="true" role="textbox" aria-label="第 12 个文本框译文">真的挺窄的。</div>
+              <div class="field-grid"><div class="field"><label><span>字体</span></label><div class="field-value">思源黑体 <span>展开</span></div></div><div class="field"><label><span>字号</span></label><div class="field-value"><span>34</span><span>− ＋</span></div></div></div>
+              <div class="inline-behaviors"><span>☐ 保留原文　·　当前框就地编辑</span></div>
+              <div class="style-transfer">
+                <div class="card-clipboard" data-clipboard-summary><strong>已复制样式</strong><span data-clipboard-summary-text>黑体 / 34 / 纵排 / 已启用 · 含高级样式</span></div>
+                <div class="advanced-detail" data-advanced-detail>
+                  <section class="advanced-group" aria-labelledby="advanced-geometry-title">
+                    <div class="advanced-group-head"><strong id="advanced-geometry-title">几何与间距</strong><span>即时预览</span></div>
+                    <div class="advanced-grid">
+                      <label class="advanced-field"><span>旋转</span><input class="advanced-number" data-style-field="rotation" type="number" min="-180" max="180" step="1" value="0"></label>
+                      <label class="advanced-field"><span>描边强度</span><input class="advanced-number" data-style-field="stroke_width" type="number" min="0" max="5" step="0.05" value="0.15"></label>
+                      <label class="advanced-field"><span>字距</span><input class="advanced-number" data-style-field="letter_spacing" type="number" min="0.5" max="2.5" step="0.05" value="1"></label>
+                      <label class="advanced-field"><span>行距</span><input class="advanced-number" data-style-field="line_spacing" type="number" min="0.5" max="2.5" step="0.05" value="1"></label>
+                    </div>
+                    <div class="stroke-presets" role="group" aria-label="描边强度快捷值">
+                      <button class="style-chip" type="button" data-stroke-value="0">0</button><button class="style-chip" type="button" data-stroke-value="0.1">0.1</button><button class="style-chip" type="button" data-stroke-value="0.2">0.2</button><button class="style-chip" type="button" data-stroke-value="0.5">0.5</button><button class="style-chip" type="button" data-stroke-value="1">1</button><button class="style-chip" type="button" data-stroke-value="2">2</button><button class="style-chip" type="button" data-stroke-value="3">3</button><button class="style-chip" type="button" data-stroke-value="5">5</button>
+                    </div>
+                  </section>
+                  <section class="advanced-group" aria-labelledby="advanced-color-title">
+                    <div class="advanced-group-head"><strong id="advanced-color-title">颜色与底图</strong><span>跟随完整样式复制</span></div>
+                    <div class="advanced-color-editor">
+                      <span class="advanced-color-label">文字色</span>
+                      <div class="advanced-color-row" data-color-editor="fg_color">
+                        <button class="color-swatch" type="button" style="background:#000000" aria-label="文字色 #000000" data-color-value="#000000"></button><button class="color-swatch" type="button" style="background:#ffffff" aria-label="文字色 #ffffff" data-color-value="#ffffff"></button><button class="color-swatch active" type="button" style="background:#152234" aria-label="文字色 #152234" data-color-value="#152234"></button><button class="color-swatch" type="button" style="background:#ef4444" aria-label="文字色 #ef4444" data-color-value="#ef4444"></button><button class="color-swatch" type="button" style="background:#f59e0b" aria-label="文字色 #f59e0b" data-color-value="#f59e0b"></button><button class="color-swatch" type="button" style="background:#2563eb" aria-label="文字色 #2563eb" data-color-value="#2563eb"></button>
+                        <input class="advanced-color-picker" data-style-color-picker="fg_color" type="color" value="#152234" aria-label="文字色">
+                        <input class="advanced-hex" data-style-field="fg_color" type="text" value="#152234" aria-label="文字色 Hex" maxlength="7">
+                      </div>
+                    </div>
+                    <div class="advanced-color-editor">
+                      <span class="advanced-color-label">底色 / 描边色</span>
+                      <div class="advanced-color-row" data-color-editor="bg_color">
+                        <button class="color-swatch" type="button" style="background:#000000" aria-label="底色 / 描边色 #000000" data-color-value="#000000"></button><button class="color-swatch active" type="button" style="background:#ffffff" aria-label="底色 / 描边色 #ffffff" data-color-value="#ffffff"></button><button class="color-swatch" type="button" style="background:#152234" aria-label="底色 / 描边色 #152234" data-color-value="#152234"></button><button class="color-swatch" type="button" style="background:#ef4444" aria-label="底色 / 描边色 #ef4444" data-color-value="#ef4444"></button><button class="color-swatch" type="button" style="background:#f59e0b" aria-label="底色 / 描边色 #f59e0b" data-color-value="#f59e0b"></button><button class="color-swatch" type="button" style="background:#2563eb" aria-label="底色 / 描边色 #2563eb" data-color-value="#2563eb"></button>
+                        <button class="style-chip" type="button" data-color-value="#ffffff">白</button><button class="style-chip" type="button" data-color-value="#000000">黑</button>
+                        <input class="advanced-color-picker" data-style-color-picker="bg_color" type="color" value="#ffffff" aria-label="底色 / 描边色">
+                        <input class="advanced-hex" data-style-field="bg_color" type="text" value="#ffffff" aria-label="底色 / 描边色 Hex" maxlength="7">
+                      </div>
+                    </div>
+                    <label class="preserve-background-toggle"><input data-style-field="preserve_background" type="checkbox"><span>保留底图</span></label>
+                  </section>
+                </div>
+                <div class="compact-actions" role="group" aria-label="当前文本框操作">
+                  <button class="icon-action" type="button" aria-label="复制全部样式" title="复制全部样式" data-tooltip="复制全部样式" data-copy-style><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 4.5 5 5-9.25 9.25H5.5v-4.75z"></path><path d="m12.5 6.5 5 5"></path></svg></button>
+                  <button class="icon-action paste" type="button" aria-label="粘贴全部样式" title="粘贴全部样式" data-tooltip="粘贴全部样式" data-paste-style disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h6"></path><path d="M9 3h6v4H9z"></path><path d="M7 5H5.5A1.5 1.5 0 0 0 4 6.5v12A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-12A1.5 1.5 0 0 0 18.5 5H17"></path></svg></button>
+                  <button class="icon-action" type="button" aria-label="复制文本框" title="复制文本框" data-tooltip="复制文本框"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="11" height="11" rx="2"></rect><rect x="9" y="9" width="11" height="11" rx="2"></rect></svg></button>
+                  <button class="icon-action" type="button" aria-label="更多与高级样式" title="更多与高级样式" data-tooltip="更多与高级样式" data-advanced-toggle aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10"></path><path d="M18 7h2"></path><circle cx="16" cy="7" r="2"></circle><path d="M4 17h2"></path><path d="M10 17h10"></path><circle cx="8" cy="17" r="2"></circle></svg></button>
+                </div>
+              </div>
+            </div>
+          </article>
           <article class="region-card"><div class="region-card-head"><strong>#13</strong><span class="style-tag">黑体</span><span class="row-spacer"></span><span class="state">已启用 · 横排</span></div><div class="region-card-summary"><p>SPIRITS COMICS</p><p>SPIRITS COMICS</p></div></article>
           <article class="region-card"><div class="region-card-head"><strong>#14</strong><span class="style-tag">手写</span><span class="row-spacer"></span><span class="state">需留意</span></div><div class="region-card-summary"><p>聞こえますか？</p><p>听得见吗？</p></div></article>
         </div>
@@ -530,19 +732,20 @@
       <button class="btn">专有名词库</button><button class="btn">导出</button><button class="btn primary">保存</button>
     </header>
     <div class="formatbar">
-      <div class="page-command-group"><button class="btn icon-btn">‹</button><button class="btn icon-btn">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn">↶</button><button class="btn icon-btn">↷</button></div>
-      <span class="toolbar-divider"></span>
-      <div class="selection-command-group"><span class="tool-label">已选 5 个 · 活动框 #3</span><button class="btn">启用</button><button class="btn">停用</button><button class="btn">纵排</button><button class="btn">横排</button><button class="btn">套用字体</button><button class="btn">套用字号</button><button class="btn soft">清除选择</button></div>
+      <div class="formatbar-start selection-command-group"><span class="tool-label">已选 5 个 · 活动框 #3</span><button class="btn">启用</button><button class="btn">停用</button><button class="btn">纵排</button><button class="btn">横排</button><button class="btn">套用字体</button><button class="btn">套用字号</button><button class="btn soft">清除选择</button></div>
+      <div class="formatbar-center view-tabs" role="group" aria-label="审校对比页面"><button class="active" type="button">✓ 嵌后</button><button class="active" type="button">✓ 原图</button><button type="button">空页</button><button class="active" type="button">✓ 框页</button></div>
+      <div class="formatbar-end page-command-group"><button class="btn icon-btn" aria-label="上一页">‹</button><button class="btn icon-btn" aria-label="下一页">›</button><button class="btn">重新嵌字</button><button class="btn">擦除 ▾</button><button class="btn">重新翻译</button><button class="btn icon-btn" aria-label="撤销">↶</button><button class="btn icon-btn" aria-label="重做">↷</button></div>
     </div>
     <main class="workspace">
       <aside class="page-rail"><div class="rail-title"><strong>页面</strong><span>7/24</span></div><div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">6</span></div><div class="thumb active"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">7</span></div><div class="thumb"><img src="../screenshots/review-workspace.png" alt="漫画页缩略图"><span class="thumb-index">8</span></div></aside>
       <section class="stage">
-        <div class="stage-head"><div class="view-tabs"><span class="active">✓ 嵌后</span><span>原图</span><span>空页</span><span class="active">✓ 框页</span></div><div class="zoom"><span>2 个视图</span><strong>100%</strong><span>重置视图</span></div></div>
+        <div class="stage-head"><div class="stage-context"><strong>3 个视图</strong><span>联动画布</span></div><div class="zoom"><span>适合</span><strong>100%</strong><span>重置视图</span></div></div>
         <div class="canvas-area compare-area">
           <div class="compare-pane result-pane"><div class="compare-pane-head"><strong>嵌后</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="嵌后结果"></div></div></div>
+          <div class="compare-pane source-pane"><div class="compare-pane-head"><strong>原图</strong><span>适合 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="原始页面"></div></div></div>
           <div class="compare-pane frame-pane"><div class="compare-pane-head"><strong>框页</strong><span>活动框 #3 · 100%</span></div><div class="compare-page-wrap"><div class="manga-page"><img class="source-shot" src="../screenshots/review-workspace.png" alt="框页多选"><div class="region selected" data-label="#3 · 活动框" style="left: 12%; top: 11%; width: 16%; height: 29%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#5" style="left: 42%; top: 14%; width: 16%; height: 34%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#7" style="right: 10%; top: 12%; width: 15%; height: 27%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#9" style="left: 20%; top: 54%; width: 17%; height: 29%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div><div class="region selected" data-label="#11" style="right: 22%; top: 56%; width: 16%; height: 27%;">普通对白<i class="handle tl"></i><i class="handle br"></i></div></div></div></div>
         </div>
-        <div class="stage-status"><b>5 个框已选</b><span>字体与字号来源：活动框 #3</span></div>
+        <div class="stage-status"><b>5 个框已选</b><span>3 个视图联动画布 · 字体与字号来源：活动框 #3</span></div>
       </section>
       <aside class="inspector list-inspector">
         <div class="list-toolbar"><div class="list-toolbar-top"><div class="list-title"><strong>文本框</strong><span>18 个</span></div><div class="list-nav"><span>清除选择</span></div></div><input class="list-search" value="搜索原文、译文或编号" readonly aria-label="搜索文本框"><div class="list-filters"><span class="active">全部</span><span>手动框</span><span>保留原文</span><span>未翻译</span><span>字体覆盖</span><span>需留意</span></div><div class="batch-list-banner"><span>已选择 5 个框</span><span>活动框 #3 是字体、字号来源</span></div></div>
@@ -560,9 +763,151 @@
     </main>
   </section>
 
+  <nav class="prototype-switcher" aria-label="原型状态切换">
+    <a href="?screen=single" data-screen-link="single">单框编辑</a>
+    <a href="?screen=multi" data-screen-link="multi">多框批处理</a>
+  </nav>
+
   <script>
     const screen = new URLSearchParams(location.search).get('screen') || 'single';
     document.body.dataset.screen = ['single', 'multi'].includes(screen) ? screen : 'single';
+
+    document.querySelector(`[data-screen-link="${document.body.dataset.screen}"]`)?.classList.add('active');
+
+    document.querySelectorAll('.view-tabs button').forEach((button) => {
+      button.addEventListener('click', () => {
+        const group = button.closest('.view-tabs');
+        const activeButtons = group.querySelectorAll('button.active');
+        if (button.classList.contains('active') && activeButtons.length <= 2) return;
+        button.classList.toggle('active');
+        button.textContent = `${button.classList.contains('active') ? '✓ ' : ''}${button.textContent.replace('✓ ', '')}`;
+      });
+    });
+
+    const clipboardSummary = document.querySelector('[data-clipboard-summary]');
+    const clipboardSummaryText = document.querySelector('[data-clipboard-summary-text]');
+    const copyStyleButton = document.querySelector('[data-copy-style]');
+    const pasteStyleButton = document.querySelector('[data-paste-style]');
+    let copiedStyleSnapshot = null;
+    const setActionHint = (button, hint) => {
+      button?.setAttribute('aria-label', hint);
+      button?.setAttribute('title', hint);
+      if (button) button.dataset.tooltip = hint;
+    };
+    const getStyleField = (name) => document.querySelector(`[data-style-field="${name}"]`);
+    const normalizeHex = (value, fallback = '#000000') => (/^#[0-9a-f]{6}$/i.test(String(value || '').trim()) ? String(value).trim().toLowerCase() : fallback);
+    const updateStrokePresetState = (value) => {
+      document.querySelectorAll('[data-stroke-value]').forEach((button) => {
+        button.classList.toggle('active', Number(button.dataset.strokeValue) === Number(value));
+      });
+    };
+    const setColorEditorValue = (name, rawValue) => {
+      const editor = document.querySelector(`[data-color-editor="${name}"]`);
+      const field = getStyleField(name);
+      const picker = document.querySelector(`[data-style-color-picker="${name}"]`);
+      const fallback = picker?.value || '#000000';
+      const value = normalizeHex(rawValue, fallback);
+      if (field) field.value = value;
+      if (picker) picker.value = value;
+      editor?.querySelectorAll('[data-color-value]').forEach((button) => {
+        const isSwatch = button.classList.contains('color-swatch');
+        button.classList.toggle('active', isSwatch && button.dataset.colorValue.toLowerCase() === value);
+      });
+      return value;
+    };
+    const readAdvancedStyle = () => ({
+      rotation: Number(getStyleField('rotation')?.value || 0),
+      stroke_width: Number(getStyleField('stroke_width')?.value || 0),
+      letter_spacing: Number(getStyleField('letter_spacing')?.value || 1),
+      line_spacing: Number(getStyleField('line_spacing')?.value || 1),
+      fg_color: normalizeHex(getStyleField('fg_color')?.value, '#152234'),
+      bg_color: normalizeHex(getStyleField('bg_color')?.value, '#ffffff'),
+      preserve_background: Boolean(getStyleField('preserve_background')?.checked),
+    });
+    const applyAdvancedStyle = (style) => {
+      ['rotation', 'stroke_width', 'letter_spacing', 'line_spacing'].forEach((name) => {
+        const field = getStyleField(name);
+        if (field && style?.[name] != null) field.value = style[name];
+      });
+      setColorEditorValue('fg_color', style?.fg_color || '#152234');
+      setColorEditorValue('bg_color', style?.bg_color || '#ffffff');
+      const preserveField = getStyleField('preserve_background');
+      if (preserveField) preserveField.checked = Boolean(style?.preserve_background);
+      updateStrokePresetState(style?.stroke_width);
+    };
+    const readStyleSnapshot = () => ({
+      enabled: enabledToggle?.textContent === '已启用',
+      direction: directionToggle?.textContent === '横排' ? '横排' : '纵排',
+      font: '思源黑体',
+      fontSize: 34,
+      advanced: readAdvancedStyle(),
+    });
+
+    document.querySelectorAll('.advanced-number').forEach((input) => {
+      input.addEventListener('change', () => {
+        const min = Number(input.min);
+        const max = Number(input.max);
+        const fallback = Number(input.defaultValue);
+        const value = Number.isFinite(Number(input.value)) ? Number(input.value) : fallback;
+        input.value = String(Math.min(max, Math.max(min, value)));
+        if (input.dataset.styleField === 'stroke_width') updateStrokePresetState(input.value);
+      });
+    });
+    document.querySelectorAll('[data-stroke-value]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const field = getStyleField('stroke_width');
+        if (field) field.value = button.dataset.strokeValue;
+        updateStrokePresetState(button.dataset.strokeValue);
+      });
+    });
+    document.querySelectorAll('[data-color-editor]').forEach((editor) => {
+      const name = editor.dataset.colorEditor;
+      editor.querySelectorAll('[data-color-value]').forEach((button) => {
+        button.addEventListener('click', () => setColorEditorValue(name, button.dataset.colorValue));
+      });
+      editor.querySelector(`[data-style-color-picker="${name}"]`)?.addEventListener('input', (event) => setColorEditorValue(name, event.target.value));
+      editor.querySelector(`[data-style-field="${name}"]`)?.addEventListener('change', (event) => setColorEditorValue(name, event.target.value));
+    });
+    copyStyleButton?.addEventListener('click', () => {
+      copiedStyleSnapshot = readStyleSnapshot();
+      clipboardSummary?.classList.add('visible');
+      pasteStyleButton.disabled = false;
+      copyStyleButton.classList.add('success');
+      if (clipboardSummaryText) clipboardSummaryText.textContent = `${copiedStyleSnapshot.font} / ${copiedStyleSnapshot.fontSize} / ${copiedStyleSnapshot.direction} / ${copiedStyleSnapshot.enabled ? '已启用' : '已停用'} · 含高级样式`;
+      setActionHint(copyStyleButton, '样式已复制');
+    });
+    pasteStyleButton?.addEventListener('click', () => {
+      if (!copiedStyleSnapshot) return;
+      applyAdvancedStyle(copiedStyleSnapshot.advanced);
+      if (enabledToggle) enabledToggle.textContent = copiedStyleSnapshot.enabled ? '已启用' : '已停用';
+      if (directionToggle) directionToggle.textContent = copiedStyleSnapshot.direction;
+      pasteStyleButton.classList.add('success');
+      setActionHint(pasteStyleButton, '已粘贴全部样式');
+      window.setTimeout(() => {
+        pasteStyleButton.classList.remove('success');
+        setActionHint(pasteStyleButton, '粘贴全部样式');
+      }, 1200);
+    });
+
+    const advancedToggle = document.querySelector('[data-advanced-toggle]');
+    const advancedDetail = document.querySelector('[data-advanced-detail]');
+    advancedToggle?.addEventListener('click', () => {
+      const expanded = advancedToggle.getAttribute('aria-expanded') === 'true';
+      advancedToggle.setAttribute('aria-expanded', String(!expanded));
+      advancedDetail?.classList.toggle('visible', !expanded);
+      setActionHint(advancedToggle, expanded ? '更多与高级样式' : '收起高级样式');
+      if (!expanded) window.setTimeout(() => advancedToggle?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 80);
+    });
+
+    const enabledToggle = document.querySelector('[data-enabled-toggle]');
+    enabledToggle?.addEventListener('click', () => {
+      enabledToggle.textContent = enabledToggle.textContent === '已启用' ? '已停用' : '已启用';
+    });
+
+    const directionToggle = document.querySelector('[data-direction-toggle]');
+    directionToggle?.addEventListener('click', () => {
+      directionToggle.textContent = directionToggle.textContent === '纵排' ? '横排' : '纵排';
+    });
   </script>
 </body>
 </html>

@@ -662,10 +662,29 @@ async function assertReviewInteractionRedesign(page) {
   }
 
   await page.getByTestId('v2-review-page-commands').waitFor({ state: 'visible', timeout: 20000 })
-  await page.getByTestId('v2-review-compare-toolbar').waitFor({ state: 'visible', timeout: 20000 })
+  await page.getByTestId('v2-review-toolbar-compare').waitFor({ state: 'visible', timeout: 20000 })
   await page.getByRole('button', { name: '保存', exact: true }).waitFor({ state: 'visible', timeout: 20000 })
 
-  const compareToolbar = page.getByTestId('v2-review-compare-toolbar')
+  const reviewToolbar = page.locator('.v2-review-toolbar')
+  const compareToolbar = page.getByTestId('v2-review-toolbar-compare')
+  const pageCommands = page.getByTestId('v2-review-page-commands')
+  const toolbarBoxes = await Promise.all([
+    reviewToolbar.boundingBox(),
+    compareToolbar.boundingBox(),
+    pageCommands.boundingBox(),
+  ])
+  if (toolbarBoxes.some((box) => !box)) {
+    throw new Error('无法测量审校顶部工具栏布局')
+  }
+  const [reviewToolbarBox, compareToolbarBox, pageCommandsBox] = toolbarBoxes
+  const toolbarCenter = reviewToolbarBox.x + reviewToolbarBox.width / 2
+  const compareCenter = compareToolbarBox.x + compareToolbarBox.width / 2
+  if (Math.abs(toolbarCenter - compareCenter) > 12) {
+    throw new Error('对照开关没有在审校工具栏中居中')
+  }
+  if (pageCommandsBox.x <= compareToolbarBox.x + compareToolbarBox.width) {
+    throw new Error('页面级操作没有收纳到审校工具栏右侧')
+  }
   const selectedCompareChips = compareToolbar.locator('.v2-compare-chip.active')
   const paneCards = page.locator('.v2-pane-strip .v2-pane-card')
   const selectedCompareCount = await selectedCompareChips.count()
@@ -682,33 +701,43 @@ async function assertReviewInteractionRedesign(page) {
   }
 
   await regionCards.first().click()
-  const singleCommands = page.getByTestId('v2-review-single-commands')
-  await singleCommands.waitFor({ state: 'visible', timeout: 20000 })
-  await singleCommands.getByRole('button', { name: '复制全部样式', exact: true }).waitFor({ state: 'visible' })
-  const pasteButton = singleCommands.getByRole('button', { name: '粘贴全部样式', exact: true })
-  if (!(await pasteButton.isDisabled())) {
-    throw new Error('没有样式剪贴板时，粘贴全部样式应明确禁用')
+  if (await page.getByTestId('v2-review-single-commands').count()) {
+    throw new Error('顶部仍显示单框字体、字号或样式操作')
   }
 
   const activeCard = page.locator('.v2-region-card.active')
   await activeCard.locator('.v2-region-card-body').waitFor({ state: 'visible' })
-  if (await activeCard.getByRole('button', { name: '字体应用到本页', exact: true }).count() !== 1) {
-    throw new Error('字体整页操作没有明确标注“本页”')
+  if (await activeCard.getByRole('button', { name: '字体应用到本页', exact: true }).count()) {
+    throw new Error('活动卡片仍包含不需要的“字体应用到本页”')
   }
-  if (await activeCard.getByRole('button', { name: '字号应用到本页', exact: true }).count() !== 1) {
-    throw new Error('字号整页操作没有明确标注“本页”')
+  if (await activeCard.getByRole('button', { name: '字号应用到本页', exact: true }).count()) {
+    throw new Error('活动卡片仍包含不需要的“字号应用到本页”')
   }
-  if (await activeCard.locator('.v2-region-copy-actions').count()) {
-    throw new Error('当前卡片仍重复显示样式复制/粘贴小图标')
+  const compactActions = activeCard.getByTestId('v2-region-compact-actions')
+  await compactActions.waitFor({ state: 'visible', timeout: 20000 })
+  if (await compactActions.getByRole('button').count() !== 4) {
+    throw new Error('活动卡片底部操作没有收纳为同一排四个图标按钮')
+  }
+  for (const name of ['复制全部样式', '粘贴全部样式', '复制文本框', '更多与高级样式']) {
+    const action = compactActions.getByRole('button', { name, exact: true })
+    if (await action.count() !== 1 || (await action.getAttribute('title')) !== name) {
+      throw new Error(`紧凑操作缺少可访问名称或 hover 文案：${name}`)
+    }
   }
 
-  const sourceFont = await singleCommands.getByTestId('v2-selection-font').inputValue()
-  const sourceSize = Number(await singleCommands.locator('input[aria-label="选中框字号"]').inputValue())
-  await singleCommands.getByRole('button', { name: '复制全部样式', exact: true }).click()
-  const clipboardSummary = singleCommands.getByTestId('v2-style-clipboard-summary')
+  const pasteButton = activeCard.getByRole('button', { name: '粘贴全部样式', exact: true })
+  if (!(await pasteButton.isDisabled())) {
+    throw new Error('没有样式剪贴板时，粘贴全部样式应明确禁用')
+  }
+
+  const sourceFont = await activeCard.locator('.v2-region-setting-row select').inputValue()
+  const sourceSize = Number(await activeCard.locator('input[aria-label="字号"]').inputValue())
+  await activeCard.getByRole('button', { name: '复制全部样式', exact: true }).click()
+  const clipboardSummary = activeCard.getByTestId('v2-style-clipboard-summary')
   await clipboardSummary.waitFor({ state: 'visible', timeout: 20000 })
   await assertText(clipboardSummary, '已复制样式', '样式剪贴板没有持续显示')
   await assertText(clipboardSummary, String(sourceSize), '样式剪贴板没有显示字号')
+  await assertText(clipboardSummary, '含高级样式', '样式剪贴板没有说明包含高级样式')
   if (await pasteButton.isDisabled()) {
     throw new Error('复制样式后，粘贴全部样式仍被禁用')
   }
@@ -721,6 +750,45 @@ async function assertReviewInteractionRedesign(page) {
   if (await page.locator('body > .style-advanced-popover').count()) {
     throw new Error('高级样式仍以遮挡画布的全局浮层出现')
   }
+  const advancedGeometryGroup = advancedSection.getByTestId('v2-advanced-geometry-group')
+  const advancedColorGroup = advancedSection.getByTestId('v2-advanced-color-group')
+  await advancedGeometryGroup.waitFor({ state: 'visible', timeout: 20000 })
+  await advancedColorGroup.waitFor({ state: 'visible', timeout: 20000 })
+  await assertText(advancedGeometryGroup, '几何与间距', '高级样式缺少几何与间距分组')
+  await assertText(advancedGeometryGroup, '即时预览', '高级样式没有说明数值项的预览语义')
+  await assertText(advancedColorGroup, '颜色与底图', '高级样式缺少颜色与底图分组')
+  await assertText(advancedColorGroup, '跟随完整样式复制', '颜色与底图没有说明复制语义')
+  for (const name of ['旋转', '描边强度', '字距', '行距']) {
+    if (await advancedGeometryGroup.getByRole('spinbutton', { name, exact: true }).count() !== 1) {
+      throw new Error(`高级样式缺少数值项：${name}`)
+    }
+  }
+  const strokePresets = advancedGeometryGroup.locator('.style-stroke-options button')
+  if (await strokePresets.count() !== 8) {
+    throw new Error(`高级样式没有保留 8 个描边快捷值：${await strokePresets.count()}`)
+  }
+  for (const name of ['文字色 Hex', '底/描边色 Hex']) {
+    if (await advancedColorGroup.getByRole('textbox', { name, exact: true }).count() !== 1) {
+      throw new Error(`高级样式缺少颜色 Hex 输入：${name}`)
+    }
+  }
+  if (await advancedColorGroup.locator('input[type="color"]').count() !== 2) {
+    throw new Error('高级样式没有保留文字色和底/描边色拾色器')
+  }
+  if (await advancedColorGroup.getByRole('checkbox', { name: '保留底图', exact: true }).count() !== 1) {
+    throw new Error('高级样式没有保留底图选项')
+  }
+  const sourceAdvancedStyle = {
+    rotation: Number(await advancedGeometryGroup.getByRole('spinbutton', { name: '旋转', exact: true }).inputValue()),
+    stroke_width: Number(await advancedGeometryGroup.getByRole('spinbutton', { name: '描边强度', exact: true }).inputValue()),
+    letter_spacing: Number(await advancedGeometryGroup.getByRole('spinbutton', { name: '字距', exact: true }).inputValue()),
+    line_spacing: Number(await advancedGeometryGroup.getByRole('spinbutton', { name: '行距', exact: true }).inputValue()),
+    preserve_background: await advancedColorGroup.getByRole('checkbox', { name: '保留底图', exact: true }).isChecked(),
+  }
+  const sourceAdvancedColors = {
+    fg_color: await advancedColorGroup.getByRole('textbox', { name: '文字色 Hex', exact: true }).inputValue(),
+    bg_color: await advancedColorGroup.getByRole('textbox', { name: '底/描边色 Hex', exact: true }).inputValue(),
+  }
   await saveScreenshot(page, 'v2-review-interaction-advanced.png')
   await advancedButton.click()
 
@@ -730,7 +798,7 @@ async function assertReviewInteractionRedesign(page) {
     (response) => isPageCommandResponse(response, 'update_font_size') && response.ok(),
     { timeout: 30000 },
   )
-  await singleCommands.getByRole('button', { name: '粘贴全部样式', exact: true }).click()
+  await activeCard.getByRole('button', { name: '粘贴全部样式', exact: true }).click()
   const pasteResponse = await pasteResponsePromise
   const pasteCommands = pasteResponse.request().postDataJSON()?.commands || []
   const pastedFontCommand = pasteCommands.find((command) => command.type === 'update_region_font')
@@ -743,10 +811,26 @@ async function assertReviewInteractionRedesign(page) {
   if (!pasteCommands.some((command) => ['restore_region', 'disable_region'].includes(command.type))) {
     throw new Error('“全部样式”没有保持现有启用状态语义')
   }
+  const pastedAdvancedStyle = pasteCommands.find((command) => command.type === 'update_region_style')
+  if (!pastedAdvancedStyle) {
+    throw new Error('“全部样式”没有发送高级样式命令')
+  }
+  for (const [key, expected] of Object.entries(sourceAdvancedStyle)) {
+    if (pastedAdvancedStyle[key] !== expected) {
+      throw new Error(`“全部样式”没有沿用高级样式 ${key}：${JSON.stringify(pastedAdvancedStyle)}`)
+    }
+  }
+  for (const [key, sourceHex] of Object.entries(sourceAdvancedColors)) {
+    const normalizedHex = sourceHex.replace('#', '')
+    const expectedTriplet = [0, 2, 4].map((offset) => Number.parseInt(normalizedHex.slice(offset, offset + 2), 16))
+    if (JSON.stringify(pastedAdvancedStyle[key]) !== JSON.stringify(expectedTriplet)) {
+      throw new Error(`“全部样式”没有沿用颜色 ${key}：${JSON.stringify(pastedAdvancedStyle)}`)
+    }
+  }
 
   await regionCards.nth(2).click()
   const activeBatchSourceSize = Number(
-    await singleCommands.locator('input[aria-label="选中框字号"]').inputValue(),
+    await activeCard.locator('input[aria-label="字号"]').inputValue(),
   )
   await regionCards.first().click()
   await regionCards.nth(1).click({ modifiers: ['ControlOrMeta'] })
@@ -805,6 +889,30 @@ async function assertReviewInteractionRedesign(page) {
     throw new Error('1280px 工作台下右侧完整文本框列表被隐藏')
   }
   await saveScreenshot(page, 'v2-review-interaction-1280.png')
+
+  const originalPaneToggle = compareToolbar.getByRole('checkbox', { name: '原图', exact: true })
+  if (!(await originalPaneToggle.isChecked())) {
+    await originalPaneToggle.check()
+  }
+  await regionCards.first().click()
+  const advancedAt1280Button = activeCard.getByRole('button', { name: '更多与高级样式', exact: true })
+  await advancedAt1280Button.click()
+  await activeCard.locator('.v2-region-advanced-section').waitFor({ state: 'visible', timeout: 20000 })
+  const [sidebarBox, compactActionsBox] = await Promise.all([
+    page.locator('.v2-region-sidebar').boundingBox(),
+    activeCard.getByTestId('v2-region-compact-actions').boundingBox(),
+  ])
+  if (
+    !sidebarBox
+    || !compactActionsBox
+    || compactActionsBox.y < sidebarBox.y
+    || compactActionsBox.y + compactActionsBox.height > sidebarBox.y + sidebarBox.height
+  ) {
+    throw new Error('1280px 展开高级样式后，四个紧凑操作没有保持可达')
+  }
+  await page.locator('.v2-mini-toast').waitFor({ state: 'hidden', timeout: 5000 })
+  await saveScreenshot(page, 'v2-review-interaction-1280-advanced.png')
+  await advancedAt1280Button.click()
 }
 
 async function main() {

@@ -11,9 +11,11 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 from bootstrap_command import run_bootstrap_command
+from runtime_paths import configure_runtime_environment, resolve_app_paths
 
 
 PYTORCH_VERSION = "2.12.1"
@@ -604,6 +606,7 @@ def verify_runtime(plan: PytorchRuntimePlan) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_runtime_environment(resolve_app_paths(Path(__file__).resolve().parent))
     parser = argparse.ArgumentParser(description="选择、安装并检查 Solar Manga Translator 的 PyTorch 运行时。")
     parser.add_argument("--install", action="store_true", help="安装与当前硬件匹配的 PyTorch。")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出诊断结果。")

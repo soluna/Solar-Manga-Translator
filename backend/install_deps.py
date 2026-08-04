@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from runtime_paths import configure_runtime_environment, resolve_app_paths
+
 
 ROOT = Path(__file__).resolve().parent
 UPSTREAM_CONFIG_FILE = ROOT / "upstream.json"
@@ -224,6 +226,7 @@ def install_requirements() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_runtime_environment(resolve_app_paths(ROOT))
     parser = argparse.ArgumentParser(
         description="Install and prepare the pinned manga-image-translator dependency."
     )

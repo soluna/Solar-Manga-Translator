@@ -52,6 +52,13 @@ installer.
   `fonts/custom/`, never the developer's local custom fonts.
 - Install, launch, translate a synthetic fixture, close, and uninstall in a
   clean Windows VM.
+- During that run, snapshot `%APPDATA%`, `%LOCALAPPDATA%`, `%TEMP%`, and the
+  user-profile cache root before and after. Confirm Electron, Chromium, Python,
+  model runtimes, pip, and npm create new application-owned files only under
+  `<install directory>/.runtime/`.
+- Seed an old AppData project plus an Electron-only cache directory. Confirm
+  “migrate and keep” preserves the sources, while “migrate and clean” verifies
+  every project and removes only the application-owned legacy directories.
 - On an NVIDIA machine, confirm `runtime_bootstrap.py --json` reports the
   expected CUDA build and supported GPU architecture before translation.
 - On Windows x64 with Python 3.10 and 3.11, confirm the CUDA bootstrap selects

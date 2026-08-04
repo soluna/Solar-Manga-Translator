@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { resolveRuntimeStorageLayout } from '../runtime-paths.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const desktopDir = resolve(__dirname, '..')
@@ -9,6 +11,14 @@ const repoRoot = resolve(desktopDir, '..')
 const backendDir = resolve(repoRoot, 'backend')
 const frontendDir = resolve(repoRoot, 'frontend')
 const args = process.argv.slice(2)
+const runtimeStorage = resolveRuntimeStorageLayout({ projectDir: repoRoot })
+for (const path of new Set([runtimeStorage.rootDir, ...Object.values(runtimeStorage.paths)])) {
+  mkdirSync(path, { recursive: true })
+}
+const packagingEnvironment = {
+  ...process.env,
+  ...runtimeStorage.environment,
+}
 
 function quoteWindowsArg(value) {
   const stringValue = String(value ?? '')
@@ -72,24 +82,24 @@ async function main() {
 
   await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
     cwd: frontendDir,
-    env: process.env,
+    env: packagingEnvironment,
   })
 
   await run(detectPythonRuntimeExecutable(), [resolve(backendDir, 'runtime_bootstrap.py'), '--install'], {
     cwd: backendDir,
-    env: process.env,
+    env: packagingEnvironment,
     windowsCommandWrapper: false,
   })
 
   await run(detectPythonRuntimeExecutable(), [resolve(backendDir, 'install_deps.py'), '--prepare-only'], {
     cwd: backendDir,
-    env: process.env,
+    env: packagingEnvironment,
     windowsCommandWrapper: false,
   })
 
   await run(process.execPath, [resolve(desktopDir, 'scripts', 'stage-runtime.mjs')], {
     cwd: desktopDir,
-    env: process.env,
+    env: packagingEnvironment,
     windowsCommandWrapper: false,
   })
 
@@ -101,7 +111,7 @@ async function main() {
   const electronBuilderCli = resolve(desktopDir, 'node_modules', 'electron-builder', 'cli.js')
   await run(process.execPath, [electronBuilderCli, ...electronBuilderArgs.slice(1)], {
     cwd: desktopDir,
-    env: process.env,
+    env: packagingEnvironment,
     windowsCommandWrapper: false,
   })
 }

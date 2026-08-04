@@ -21,6 +21,9 @@ $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:APP_DATA_DIR)) 
 }
 $browserProfileDir = Join-Path $browserProfileBase "browser-profile"
 $logDir = Join-Path $browserProfileBase "logs"
+$cacheDir = Join-Path $browserProfileBase "cache"
+$tempDir = Join-Path $browserProfileBase "temp"
+$legacyTempDirs = @($env:TEMP, $env:TMP, $env:TMPDIR) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 $backendLogPath = Join-Path $logDir "backend-managed.log"
 $frontendLogPath = Join-Path $logDir "frontend-managed.log"
 $randomBytes = New-Object byte[] 32
@@ -244,10 +247,42 @@ try {
     Write-Host "==================================================="
 
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
     $env:APP_DESKTOP_MODE = "1"
     $env:APP_DATA_DIR = $browserProfileBase
+    $env:APP_MODELS_DIR = Join-Path $browserProfileBase "models"
+    $env:APP_OUTPUT_DIR = Join-Path $browserProfileBase "output"
     $env:APP_LOG_DIR = $logDir
-    $env:APP_FONT_DIR = Join-Path $root "fonts"
+    $env:APP_FONT_DIR = Join-Path $browserProfileBase "fonts"
+    if ([string]::IsNullOrWhiteSpace($env:APP_LEGACY_TEMP_DIRS)) {
+        $env:APP_LEGACY_TEMP_DIRS = $legacyTempDirs -join ';'
+    }
+    $env:APP_CACHE_DIR = $cacheDir
+    $env:APP_TEMP_DIR = $tempDir
+    $env:TEMP = $tempDir
+    $env:TMP = $tempDir
+    $env:TMPDIR = $tempDir
+    $env:XDG_CACHE_HOME = Join-Path $cacheDir "external"
+    $env:HF_HOME = Join-Path $cacheDir "huggingface"
+    $env:HF_HUB_CACHE = Join-Path $env:HF_HOME "hub"
+    $env:HUGGINGFACE_HUB_CACHE = $env:HF_HUB_CACHE
+    $env:HF_ASSETS_CACHE = Join-Path $env:HF_HOME "assets"
+    $env:HF_XET_CACHE = Join-Path $env:HF_HOME "xet"
+    $env:HF_DATASETS_CACHE = Join-Path $env:HF_HOME "datasets"
+    $env:TRANSFORMERS_CACHE = Join-Path $env:HF_HOME "transformers"
+    $env:TORCH_HOME = Join-Path $cacheDir "torch"
+    $env:TORCH_EXTENSIONS_DIR = Join-Path $env:TORCH_HOME "extensions"
+    $env:TORCHINDUCTOR_CACHE_DIR = Join-Path $env:TORCH_HOME "inductor"
+    $env:TRITON_CACHE_DIR = Join-Path $cacheDir "triton"
+    $env:MPLCONFIGDIR = Join-Path $cacheDir "matplotlib"
+    $env:NUMBA_CACHE_DIR = Join-Path $cacheDir "numba"
+    $env:CUDA_CACHE_PATH = Join-Path $cacheDir "cuda"
+    $env:PYTHONPYCACHEPREFIX = Join-Path $cacheDir "python-bytecode"
+    $env:PIP_CACHE_DIR = Join-Path $cacheDir "pip"
+    $env:npm_config_cache = Join-Path $cacheDir "npm"
+    $env:ELECTRON_CACHE = Join-Path $cacheDir "electron-downloads"
+    $env:ELECTRON_BUILDER_CACHE = Join-Path $cacheDir "electron-builder"
     $backendPort = Find-FreeTcpPort -PreferredPort 8000 -HostName "127.0.0.1"
     $backendBaseUrl = "http://127.0.0.1:$backendPort"
     $backendUrl = "$backendBaseUrl/api/status"

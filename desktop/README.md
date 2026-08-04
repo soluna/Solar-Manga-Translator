@@ -63,7 +63,8 @@ Desktop builds use:
 Set `APP_DATA_DIR` before launch to use an explicit location. If an earlier
 build wrote data to `%LOCALAPPDATA%/Solar-Manga-Translator/` or
 `%APPDATA%/Solar-Manga-Translator/`, the backend reports it through the
-existing legacy-data migration flow and can copy it into the current location.
+legacy-data migration flow. The user can either keep the old copy or remove
+only verified application-owned directories after migration.
 
 Expected subdirectories:
 
@@ -74,6 +75,13 @@ Expected subdirectories:
 - `models/`
 - `logs/`
 - `cache/`
+- `temp/`
+- `electron/`
 - `config/`
+
+Electron profiles, Chromium caches and crash dumps, Python temporary files,
+model-framework caches, and source-launcher pip/npm caches are also redirected
+below this root. See `docs/runtime-storage.md` for the complete layout and
+cleanup policy.
 
 Review `docs/release-checklist.md` before publishing any installer.

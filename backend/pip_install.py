@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+from runtime_paths import configure_runtime_environment, resolve_app_paths
 
 
 DEFAULT_INDEXES = (
@@ -55,6 +58,9 @@ def install_with_fallback(arguments: list[str]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_runtime_environment(
+        resolve_app_paths(Path(__file__).resolve().parent),
+    )
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
         raise SystemExit("Usage: pip_install.py <pip install arguments>")

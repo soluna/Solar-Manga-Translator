@@ -7,7 +7,10 @@ import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
-import { resolveApplicationDataDir } from './runtime-paths.mjs'
+import {
+  applyRuntimeStorageLayout,
+  resolveRuntimeStorageLayout,
+} from './runtime-paths.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -22,6 +25,16 @@ let rendererAccessPolicy = null
 function ensureDir(path) {
   mkdirSync(path, { recursive: true })
 }
+
+const runtimeStorage = applyRuntimeStorageLayout(
+  resolveRuntimeStorageLayout({ projectDir: resolveProjectDirectory() }),
+  {
+    app,
+    commandLine: app.commandLine,
+    env: process.env,
+    ensureDirectory: ensureDir,
+  },
+)
 
 function createLogStream(path) {
   ensureDir(dirname(path))
@@ -88,27 +101,28 @@ function resolvePackagedResourcePath(...segments) {
   return join(process.resourcesPath, ...segments)
 }
 
-function resolveProjectDataDir() {
-  const projectDir = app.isPackaged
+function resolveProjectDirectory() {
+  return app.isPackaged
     ? dirname(app.getPath('exe'))
     : repoRoot
-  return resolveApplicationDataDir({ projectDir })
+}
+
+function resolveProjectDataDir() {
+  return runtimeStorage.rootDir
 }
 
 function prepareFontDirectory(userDataDir) {
-  const fontsDir = app.isPackaged
-    ? join(userDataDir, 'fonts')
-    : resolveRepoPath('fonts')
+  const fontsDir = join(userDataDir, 'fonts')
   const systemDir = join(fontsDir, 'system')
   const customDir = join(fontsDir, 'custom')
   ensureDir(systemDir)
   ensureDir(customDir)
 
-  if (app.isPackaged) {
-    const bundledSystemDir = resolvePackagedResourcePath('fonts', 'system')
-    if (existsSync(bundledSystemDir)) {
-      cpSync(bundledSystemDir, systemDir, { recursive: true, force: true })
-    }
+  const bundledSystemDir = app.isPackaged
+    ? resolvePackagedResourcePath('fonts', 'system')
+    : resolveRepoPath('fonts', 'system')
+  if (existsSync(bundledSystemDir)) {
+    cpSync(bundledSystemDir, systemDir, { recursive: true, force: true })
   }
   return fontsDir
 }
@@ -133,10 +147,11 @@ function detectPythonExecutable() {
 }
 
 function resolveBackendLaunch(userDataDir, port, token) {
-  const logsDir = join(userDataDir, 'logs')
+  const logsDir = runtimeStorage.paths.logsDir
   const fontsDir = prepareFontDirectory(userDataDir)
   const env = {
     ...process.env,
+    ...runtimeStorage.environment,
     APP_DESKTOP_MODE: '1',
     APP_VERSION: app.getVersion(),
     APP_DATA_DIR: userDataDir,
@@ -222,6 +237,9 @@ async function startBackend() {
     appVersion: app.getVersion(),
     dataDir: userDataDir,
     logsDir: launch.logsDir,
+    cacheDir: runtimeStorage.paths.cacheDir,
+    tempDir: runtimeStorage.paths.tempDir,
+    electronDir: dirname(runtimeStorage.paths.electronUserDataDir),
     fontsDir: launch.fontsDir,
     font_root: launch.fontsDir,
     backendLogPath: join(launch.logsDir, 'backend.log'),

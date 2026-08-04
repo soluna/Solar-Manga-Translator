@@ -62,9 +62,6 @@ from system_fonts import (
     BUNDLED_DEFAULT_FONT_NAME,
     BUNDLED_PREFERRED_FONT_NAMES,
     FONT_EXTENSIONS,
-    bundled_font_directories,
-    custom_font_directories,
-    ensure_project_font_directories,
     find_default_bundled_font,
 )
 from .image_cleanup import (
@@ -218,9 +215,11 @@ class TranslatorEngine:
         self.output_root = self.project_workspace.output_root
         self.logs_dir = self.project_workspace.logs_dir
         self.config_dir = self.paths.config_dir
-        self.font_root_dir = ensure_project_font_directories(self.base_dir)
-        self.bundled_font_dirs = list(bundled_font_directories(self.base_dir))
-        self.custom_font_dirs = list(custom_font_directories(self.base_dir))
+        self.font_root_dir = self.paths.user_fonts_dir
+        self.bundled_font_dirs = [self.font_root_dir / "system"]
+        self.custom_font_dirs = [self.font_root_dir / "custom"]
+        for font_dir in (*self.bundled_font_dirs, *self.custom_font_dirs):
+            font_dir.mkdir(parents=True, exist_ok=True)
         self.paths.ensure_directories()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.inference_backend = inference_backend or UpstreamInferenceBackend(self.base_dir)
@@ -8100,7 +8099,10 @@ class TranslatorEngine:
             return ""
         font_key = self._canonicalize_font_key(font_key)
         if font_key == self.DEFAULT_FONT_KEY:
-            default_font = find_default_bundled_font(self.base_dir)
+            default_font = find_default_bundled_font(
+                self.base_dir,
+                directories=self.bundled_font_dirs,
+            )
             return str(default_font) if default_font is not None else ""
 
         font_dirs = self._font_directories_by_source()

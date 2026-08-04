@@ -156,6 +156,31 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
 
+    def test_runtime_reports_unified_cache_and_temp_paths_and_opens_data_root(self) -> None:
+        with mock.patch.object(main, "API_TOKEN", ""):
+            runtime_response = self.client.get("/api/app/runtime")
+            with mock.patch.object(
+                main,
+                "open_directory_in_file_manager",
+                return_value="",
+            ) as open_directory:
+                open_response = self.client.post("/api/app/open-data-directory")
+
+        self.assertEqual(runtime_response.status_code, 200)
+        runtime = runtime_response.json()["runtime"]
+        self.assertEqual(runtime["cache_dir"], str(main.APP_PATHS.cache_dir))
+        self.assertEqual(runtime["temp_dir"], str(main.APP_PATHS.temp_dir))
+        self.assertEqual(open_response.status_code, 200)
+        self.assertEqual(
+            open_response.json(),
+            {
+                "ok": True,
+                "path": str(main.APP_PATHS.app_data_dir),
+                "error": "",
+            },
+        )
+        open_directory.assert_called_once_with(main.APP_PATHS.app_data_dir)
+
     def test_remote_diagnostics_controls_are_local_api_protected_and_validate_ttl(self) -> None:
         started_status = {
             "active": True,

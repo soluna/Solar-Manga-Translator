@@ -23,7 +23,9 @@ Writable data lives under:
 `%LOCALAPPDATA%/Solar-Manga-Translator/` or Electron's default
 `%APPDATA%/Solar-Manga-Translator/` location are detected by the in-app
 legacy-data migration flow. Complete that migration before deleting the old
-directory.
+directory. The in-app flow can copy and keep the old data, or copy, verify,
+and clean only directories owned by this application. It also detects old
+Electron/Chromium-only AppData directories that contain no projects.
 
 Subdirectories:
 
@@ -32,9 +34,16 @@ Subdirectories:
 - `models/`
 - `logs/`
 - `cache/`
+- `temp/`
+- `fonts/`
+- `electron/`
 - `config/settings.json`
 
 The selected install directory must be writable because it contains `.runtime/`.
+Electron profiles and caches, Python temporary files, model-framework caches,
+and pip/npm packaging caches are redirected into this tree. Shared legacy
+Hugging Face or Torch caches are not automatically deleted because other
+applications may still use them. See `runtime-storage.md` for details.
 
 ## Build Flow
 
@@ -85,6 +94,11 @@ Before distributing an installer:
 - Install in a clean Windows VM.
 - Confirm the backend listens only on loopback and requires the runtime token.
 - Confirm settings persist while saved API keys are redacted in renderer data.
+- Confirm `%APPDATA%`, `%LOCALAPPDATA%`, `%TEMP%`, and the user-profile cache
+  root receive no new application-owned files during launch and one synthetic
+  translation; all such writes must appear below `<install directory>/.runtime/`.
+- Upgrade from a build with AppData projects and Electron-only cache data;
+  verify both migration choices, project verification, and targeted cleanup.
 - Confirm uninstall leaves or removes user data according to the published
   release note.
 

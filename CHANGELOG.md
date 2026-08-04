@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Moved default projects, output, models, settings, caches, and logs from the
-  operating-system user-data directory into the project's ignored `.runtime/`
-  directory, while preserving `APP_DATA_DIR` overrides and legacy migration.
+- Unified projects, output, models, fonts, settings, Electron profiles, crash
+  dumps, temporary files, and application/runtime caches in the project's
+  ignored `.runtime/` directory. Added verified legacy migration with optional
+  cleanup of application-owned AppData and temporary directories while
+  preserving `APP_DATA_DIR` overrides and old projects.
 - Removed bundled manga/comic assets, design exports, private planning files,
   and non-redistributable fonts from the tracked project.
 - Added three OFL-licensed Source Han Sans SC presets while keeping

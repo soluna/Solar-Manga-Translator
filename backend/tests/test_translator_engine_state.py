@@ -878,10 +878,10 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 project_id=project_id,
                 page_ids=["page-1.png"],
             )
-            bundled_font_dir = root / "fonts" / "system"
-            custom_font_dir = root / "fonts" / "custom"
-            bundled_font_dir.mkdir(parents=True)
-            custom_font_dir.mkdir(parents=True)
+            bundled_font_dir = root / "app-data" / "fonts" / "system"
+            custom_font_dir = root / "app-data" / "fonts" / "custom"
+            bundled_font_dir.mkdir(parents=True, exist_ok=True)
+            custom_font_dir.mkdir(parents=True, exist_ok=True)
             (bundled_font_dir / "SourceHanSansSC-Bold.otf").write_bytes(b"system-font")
             (custom_font_dir / "NotoSansSC-Bold.otf").write_bytes(b"project-font")
             engine.bundled_font_dirs = [bundled_font_dir]
@@ -7158,8 +7158,8 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            bundled_font_dir = root / "fonts" / "system"
-            custom_font_dir = root / "fonts" / "custom"
+            bundled_font_dir = root / "app-data" / "fonts" / "system"
+            custom_font_dir = root / "app-data" / "fonts" / "custom"
             bundled_font_dir.mkdir(parents=True)
             custom_font_dir.mkdir(parents=True)
             (bundled_font_dir / "SourceHanSansSC-Regular-2.otf").write_bytes(b"bundled-font")
@@ -7221,7 +7221,7 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            system_font_dir = root / "fonts" / "system"
+            system_font_dir = root / "app-data" / "fonts" / "system"
             system_font_dir.mkdir(parents=True)
             test_font = system_font_dir / "SourceHanSansSC-Regular-2.otf"
             test_font.write_bytes(b"test-font")
@@ -7239,8 +7239,8 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            bundled_font_dir = root / "fonts" / "system"
-            custom_font_dir = root / "fonts" / "custom"
+            bundled_font_dir = root / "app-data" / "fonts" / "system"
+            custom_font_dir = root / "app-data" / "fonts" / "custom"
             bundled_font_dir.mkdir(parents=True)
             custom_font_dir.mkdir(parents=True)
             (bundled_font_dir / "SourceHanSansSC-Regular-2.otf").write_bytes(b"bundled-font")
@@ -7261,7 +7261,7 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            system_font_dir = root / "fonts" / "system"
+            system_font_dir = root / "app-data" / "fonts" / "system"
             system_font_dir.mkdir(parents=True)
             default_font = system_font_dir / "SourceHanSansSC-Regular-2.otf"
             default_font.write_bytes(b"bundled-font")
@@ -7283,7 +7283,7 @@ print(json.dumps({
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_dir = root / "backend"
-            system_font_dir = root / "fonts" / "system"
+            system_font_dir = root / "app-data" / "fonts" / "system"
             system_font_dir.mkdir(parents=True)
             preset = system_font_dir / "SourceHanSansSC-Medium-2.otf"
             preset.write_bytes(b"bundled-font")

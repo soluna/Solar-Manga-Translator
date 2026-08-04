@@ -192,6 +192,8 @@ const emptyRuntimeInfo = {
   models_dir: '',
   output_dir: '',
   logs_dir: '',
+  cache_dir: '',
+  temp_dir: '',
   settings_path: '',
   settings_exists: false,
   font_root: '',
@@ -1599,6 +1601,10 @@ const canOpenLogDirectory = computed(() => Boolean(
   (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openLogs === 'function')
   || backendOnline.value
 ))
+const canOpenDataDirectory = computed(() => Boolean(backendOnline.value))
+const hasRetainedLegacyData = computed(() => (
+  Number(appRuntime.value?.migration?.summary?.legacy_bytes || 0) > 0
+))
 const canOpenFontLibraryDirectory = computed(() => (
   Boolean(
     (isDesktopRuntime.value && desktopBridge && typeof desktopBridge.openUserFonts === 'function')
@@ -2695,6 +2701,12 @@ async function validateCurrentSettings() {
 }
 
 async function handleLegacyMigration(action) {
+  if (
+    action === 'migrate_clean'
+    && !window.confirm('将先复制旧数据并验证旧项目，再删除确认属于本应用的旧目录。是否继续？')
+  ) {
+    return
+  }
   try {
     const response = await apiFetch(toApiUrl('/api/app/migrate-legacy'), {
       method: 'POST',
@@ -2710,8 +2722,17 @@ async function handleLegacyMigration(action) {
       migration: payload.migration || appRuntime.value.migration
     }
     migrationModalOpen.value = false
-    status.value = action === 'migrate' ? '旧项目数据已迁移到应用数据目录。' : '已跳过旧数据迁移。'
-    if (action === 'migrate') {
+    const cleanup = payload.migration?.cleanup || {}
+    if (action === 'migrate_clean') {
+      status.value = cleanup.status === 'partial'
+        ? '旧项目已迁移，但少量旧目录因占用或权限问题未能清理。'
+        : `旧项目已迁移并清理 ${cleanup.deleted_paths?.length || 0} 个旧目录。`
+    } else if (action === 'migrate') {
+      status.value = '旧项目数据已迁移；原目录按你的选择保留。'
+    } else {
+      status.value = '已跳过旧数据迁移。'
+    }
+    if (action.startsWith('migrate')) {
       await loadProjectHistory({ silent: true })
     }
   } catch (error) {
@@ -8863,6 +8884,26 @@ async function openLogDirectory() {
   }
 }
 
+async function openDataDirectory() {
+  if (!canOpenDataDirectory.value) {
+    errorMessage.value = '请先确认本地后端在线，再打开统一数据目录。'
+    return
+  }
+  try {
+    const response = await apiFetch(toApiUrl('/api/app/open-data-directory'), { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) {
+      throw new Error(result?.detail || '后端未能打开统一数据目录。')
+    }
+    if (!result?.ok) {
+      throw new Error(result?.error || '系统文件管理器未能打开统一数据目录。')
+    }
+    status.value = `已打开统一数据目录：${result.path || appRuntime.value.data_dir}`
+  } catch (error) {
+    errorMessage.value = `打开统一数据目录失败：${error instanceof Error ? error.message : String(error || '')}`
+  }
+}
+
 async function downloadDiagnosticsBundle() {
   try {
     const response = await apiFetch(toApiUrl('/api/app/diagnostics/export'))
@@ -12994,23 +13035,27 @@ watch(
         <header class="v2-modal-head">
           <div>
             <p class="v2-section-kicker">旧数据迁移</p>
-            <h2 class="v2-section-title">检测到旧版项目数据</h2>
+            <h2 class="v2-section-title">检测到旧版数据</h2>
           </div>
           <button type="button" class="v2-icon-button" aria-label="关闭迁移提示" @click="migrationModalOpen = false">✕</button>
         </header>
         <div class="v2-settings-content">
           <section class="v2-settings-group">
             <header>
-              <strong>建议迁移到新的应用数据目录</strong>
-              <span>{{ appRuntime.migration?.target?.app_data || '将迁移到新的用户目录' }}</span>
+              <strong>统一迁移到项目目录</strong>
+              <span>{{ appRuntime.migration?.target?.app_data || '将迁移到项目目录下的 .runtime' }}</span>
             </header>
             <p class="v2-onboarding-copy">
-              旧版历史项目和输出结果目前还在仓库目录里。迁移后，升级和重新安装都不会覆盖你的项目数据。
+              旧版项目、模型或缓存可能仍在 C 盘 AppData、系统临时目录或旧仓库目录。迁移会先复制并验证旧项目，再按你的选择保留或清理确认属于本应用的旧目录。
             </p>
             <div class="v2-inline-actions">
-              <button type="button" class="v2-primary-button" @click="handleLegacyMigration('migrate')">迁移旧数据</button>
+              <button type="button" class="v2-primary-button" @click="handleLegacyMigration('migrate_clean')">迁移并清理旧目录</button>
+              <button type="button" class="v2-secondary-button" @click="handleLegacyMigration('migrate')">仅迁移，保留旧目录</button>
               <button type="button" class="v2-secondary-button" @click="handleLegacyMigration('skip')">暂不迁移</button>
             </div>
+            <p class="v2-settings-inline-note">
+              不会自动删除 Hugging Face、Torch 等可能被其他软件共用的全局缓存；本版本只会停止继续向这些位置写入。
+            </p>
           </section>
         </div>
       </section>
@@ -13485,8 +13530,18 @@ watch(
             </div>
 
             <div v-if="appRuntime.data_dir" class="v2-readonly-field">
-              <span>数据目录</span>
+              <span>统一存储根目录</span>
               <strong :title="appRuntime.data_dir">{{ appRuntime.data_dir }}</strong>
+            </div>
+
+            <div v-if="appRuntime.cache_dir" class="v2-readonly-field">
+              <span>缓存目录</span>
+              <strong :title="appRuntime.cache_dir">{{ appRuntime.cache_dir }}</strong>
+            </div>
+
+            <div v-if="appRuntime.temp_dir" class="v2-readonly-field">
+              <span>临时目录</span>
+              <strong :title="appRuntime.temp_dir">{{ appRuntime.temp_dir }}</strong>
             </div>
 
             <div class="v2-readonly-field">
@@ -13507,6 +13562,22 @@ watch(
               <strong :title="appRuntime.logs_dir">{{ appRuntime.logs_dir }}</strong>
             </div>
             <div class="v2-inline-actions">
+              <button
+                v-if="hasRetainedLegacyData"
+                type="button"
+                class="v2-secondary-button"
+                @click="migrationModalOpen = true"
+              >
+                管理旧版数据
+              </button>
+              <button
+                type="button"
+                class="v2-secondary-button"
+                :disabled="!canOpenDataDirectory"
+                @click="openDataDirectory"
+              >
+                打开统一数据目录
+              </button>
               <button
                 type="button"
                 class="v2-secondary-button"

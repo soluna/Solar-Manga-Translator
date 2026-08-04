@@ -77,15 +77,19 @@ def migrate_legacy_flat_fonts(root: Path, *, system_dir: Path, custom_dir: Path)
             continue
 
 
-def find_default_bundled_font(code_dir: Path) -> Path | None:
-    directories = bundled_font_directories(code_dir)
+def find_default_bundled_font(
+    code_dir: Path,
+    *,
+    directories: tuple[Path, ...] | list[Path] | None = None,
+) -> Path | None:
+    search_directories = tuple(directories or bundled_font_directories(code_dir))
     for name in BUNDLED_PREFERRED_FONT_NAMES:
-        for directory in directories:
+        for directory in search_directories:
             candidate = directory / name
             if candidate.is_file():
                 return candidate.resolve()
 
-    for directory in directories:
+    for directory in search_directories:
         try:
             fallback = next(
                 (

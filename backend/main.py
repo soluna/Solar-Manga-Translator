@@ -11,6 +11,13 @@ import sys
 import uuid
 from urllib.parse import quote
 
+from runtime_paths import AppPaths, configure_runtime_environment, resolve_app_paths
+
+
+BASE_DIR = Path(os.getenv("APP_CODE_DIR") or Path(__file__).resolve().parent).resolve()
+APP_PATHS = resolve_app_paths(BASE_DIR)
+configure_runtime_environment(APP_PATHS)
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -30,7 +37,6 @@ from diagnostics_bundle import build_diagnostics_zip
 from model_manager import build_model_readiness
 from remote_diagnostics import RemoteDiagnosticsManager
 from remote_execution import RemoteExecutionManager
-from runtime_paths import AppPaths, resolve_app_paths
 from logging_config import configure_rotating_file_logging
 from runtime_bootstrap import build_gpu_diagnostics, detect_nvidia_gpus
 from system_fonts import BUNDLED_DEFAULT_FONT_NAME
@@ -54,8 +60,6 @@ app = FastAPI(
     openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
 )
 
-BASE_DIR = Path(os.getenv("APP_CODE_DIR") or Path(__file__).resolve().parent).resolve()
-APP_PATHS = resolve_app_paths(BASE_DIR)
 OUTPUT_DIR = APP_PATHS.output_dir
 TEMP_UPLOADS_DIR = APP_PATHS.cache_uploads_dir
 TEMP_EXTRACTED_DIR = APP_PATHS.cache_extracted_dir
@@ -500,6 +504,8 @@ def build_runtime_payload(request: Request | None = None) -> dict[str, Any]:
         "models_dir": str(APP_PATHS.models_dir),
         "output_dir": str(APP_PATHS.output_dir),
         "logs_dir": str(APP_PATHS.logs_dir),
+        "cache_dir": str(APP_PATHS.cache_dir),
+        "temp_dir": str(APP_PATHS.temp_dir),
         "settings_path": str(APP_PATHS.settings_path),
         "settings_exists": APP_PATHS.settings_path.exists(),
         "font_root": str(FONT_ROOT_DIR),
@@ -616,6 +622,8 @@ def build_runtime_diagnostics() -> dict[str, Any]:
             "models_dir": str(APP_PATHS.models_dir),
             "output_dir": str(APP_PATHS.output_dir),
             "logs_dir": str(APP_PATHS.logs_dir),
+            "cache_dir": str(APP_PATHS.cache_dir),
+            "temp_dir": str(APP_PATHS.temp_dir),
         },
     }
 
@@ -825,6 +833,16 @@ async def open_logs_directory():
     return {
         "ok": not error,
         "path": str(APP_PATHS.logs_dir),
+        "error": error,
+    }
+
+
+@app.post("/api/app/open-data-directory")
+async def open_data_directory():
+    error = open_directory_in_file_manager(APP_PATHS.app_data_dir)
+    return {
+        "ok": not error,
+        "path": str(APP_PATHS.app_data_dir),
         "error": error,
     }
 

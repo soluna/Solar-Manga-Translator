@@ -201,7 +201,12 @@ function Start-CmdWindow {
     $quotedLogPath = '"' + $LogPath + '"'
     Rotate-LogFile -Path $LogPath
     $fullCommand = 'title "' + $safeTitle + '" && echo. >> ' + $quotedLogPath + ' && echo [' + $timestamp + '] Starting ' + $safeTitle + ' >> ' + $quotedLogPath + ' && ' + $Command + ' 1>> ' + $quotedLogPath + ' 2>&1'
-    return Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $fullCommand) -WorkingDirectory $WorkingDirectory -PassThru
+    return Start-Process `
+        -FilePath "cmd.exe" `
+        -ArgumentList @("/d", "/c", $fullCommand) `
+        -WorkingDirectory $WorkingDirectory `
+        -WindowStyle Hidden `
+        -PassThru
 }
 
 function Stop-ProcessTree {

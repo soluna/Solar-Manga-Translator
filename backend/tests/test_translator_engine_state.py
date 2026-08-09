@@ -3538,7 +3538,7 @@ class TranslatorEngineStateTests(unittest.TestCase):
             engine._page_document_region_ids = lambda *_args, **_kwargs: {"known-region"}  # type: ignore[method-assign]
 
             with self.assertRaises(FileNotFoundError):
-                asyncio.run(engine.apply_page_commands(
+                asyncio.run(engine._apply_page_commands_once(
                     project_id="project-a",
                     session=session,
                     page_id="page-1.png",
@@ -3548,12 +3548,13 @@ class TranslatorEngineStateTests(unittest.TestCase):
                         "region_id": "missing-region",
                         "text": "should not persist",
                     }],
+                    persist=False,
                 ))
 
             self.assertNotIn("missing-region", session["translation_region_overrides"])
             self.assertNotIn("missing-region", session["translation_region_layout_overrides"])
 
-    def test_page_command_rollback_preserves_a_concurrently_published_snapshot(
+    def test_page_command_failure_preserves_a_concurrently_published_snapshot(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3562,11 +3563,19 @@ class TranslatorEngineStateTests(unittest.TestCase):
             workspace = engine.project_workspace
             project_id = "concurrent-snapshot-rollback"
             page_id = "001.png"
-            state_document = {
-                "schema_version": 2,
-                "project_id": project_id,
+            session: dict[str, object] = {
+                "source_dir": str(root / "source"),
+                "translated_dir": str(root / "translated"),
+                "rerender_cache_dir": str(root / "cache"),
                 "source_images": [{"name": page_id, "stored_name": page_id}],
+                "translation_region_overrides": {},
+                "translation_region_layout_overrides": {},
+                "last_config": {},
+                "artifact_state": ProjectArtifactState.create(
+                    [page_id]
+                ).model_dump(mode="json"),
             }
+            state_document = engine._serialize_session_state(project_id, session)
             project_manifest = {
                 "project_id": project_id,
                 "title": "Concurrent snapshot rollback",
@@ -3611,12 +3620,6 @@ class TranslatorEngineStateTests(unittest.TestCase):
                 published_snapshots.append(snapshot)
                 raise RuntimeError("synthetic page-command failure")
 
-            session: dict[str, object] = {
-                "source_images": [{"name": page_id, "stored_name": page_id}],
-                "translation_region_overrides": {},
-                "translation_region_layout_overrides": {},
-                "last_config": {},
-            }
             with mock.patch.object(
                 engine,
                 "_apply_page_commands_once",
@@ -4574,11 +4577,58 @@ print(json.dumps({
                         target_stored_name="page-2.png",
                     )
                 )
+                with mock.patch.object(
+                    engine,
+                    "_get_inspection_page_document",
+                    wraps=engine._get_inspection_page_document,
+                ) as load_page_document:
+                    unified_payload = asyncio.run(
+                        engine.inspect_page_regions(
+                            project_id,
+                            session,
+                            {},
+                            target_stored_name="page-2.png",
+                        )
+                    )
 
             self.assertEqual([page["stored_name"] for page in review_payload["pages"]], ["page-2.png"])
             self.assertEqual([page["stored_name"] for page in style_payload["pages"]], ["page-2.png"])
+            self.assertEqual([page["stored_name"] for page in unified_payload["pages"]], ["page-2.png"])
+            self.assertEqual(unified_payload["session_id"], project_id)
+            self.assertEqual(load_page_document.call_count, 1)
+            self.assertIn("style_region_overrides", unified_payload["overrides"])
+            self.assertIn("translation_region_overrides", unified_payload["overrides"])
             self.assertEqual(review_payload["pages"][0]["translated_image_url"], "")
             self.assertEqual(style_payload["pages"][0]["translated_image_url"], "")
+
+    def test_page_replacement_scope_scales_linearly_with_selected_pages(self) -> None:
+        class CountingPageIds(list[str]):
+            yielded = 0
+
+            def __iter__(self):
+                for item in super().__iter__():
+                    self.yielded += 1
+                    yield item
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(Path(tmp))
+            page_ids = CountingPageIds(
+                f"page-{index:04d}.png" for index in range(200)
+            )
+            with mock.patch.object(
+                engine.project_workspace,
+                "read_project_session_document",
+                return_value={"translated_output_map": {}},
+            ):
+                replace_prefixes, _removed = engine._project_head_replacement_scope(
+                    "project-performance",
+                    page_ids=page_ids,
+                    persist_page_documents=True,
+                    current_head={"generation": 1},
+                )
+
+            self.assertEqual(page_ids.yielded, len(page_ids))
+            self.assertEqual(len(replace_prefixes), len(page_ids) * 2)
 
     def test_project_glossary_preview_uses_previous_translation_as_replacement_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

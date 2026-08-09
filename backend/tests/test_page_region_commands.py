@@ -127,6 +127,9 @@ class PageRegionCommandTests(unittest.TestCase):
             self.assertEqual(regions[-1]["origin"], "user")
             self.assertTrue(all(region["origin"] == "automatic" for region in regions[:3]))
             self.assertEqual(regions[-1]["style"]["font_size"], 18)
+            snapshots = engine.project_workspace.read_snapshot_manifests(project_id)
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["kind"], "manual_region_added")
 
     def test_delete_only_user_region_preserves_automatic_regions_and_does_not_resurrect_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -295,24 +298,15 @@ class PageRegionCommandTests(unittest.TestCase):
                 ["auto-1", "auto-2", "auto-3"],
             )
 
-    def test_snapshot_metadata_failure_does_not_undo_the_primary_head_commit(self) -> None:
+    def test_snapshot_failure_warns_without_undoing_the_primary_head_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine, project_id, page_id, session = self.make_project(Path(tmp))
             previous_head = engine.project_workspace.read_project_head(project_id)
-            original_commit = engine.project_workspace.commit_project_head
-            commit_calls = 0
-
-            def fail_snapshot_metadata_commit(*args, **kwargs):
-                nonlocal commit_calls
-                commit_calls += 1
-                if commit_calls == 2:
-                    raise OSError("simulated snapshot metadata failure")
-                return original_commit(*args, **kwargs)
 
             with patch.object(
                 engine.project_workspace,
-                "commit_project_head",
-                side_effect=fail_snapshot_metadata_commit,
+                "create_project_head_snapshot",
+                side_effect=OSError("simulated snapshot metadata failure"),
             ):
                 result = asyncio.run(
                     engine.apply_page_commands(
@@ -327,6 +321,9 @@ class PageRegionCommandTests(unittest.TestCase):
             committed_head = engine.project_workspace.read_project_head(project_id)
             self.assertEqual(committed_head["generation"], previous_head["generation"] + 1)
             self.assertEqual(len(result["document"]["regions"]), 4)
+            self.assertTrue(
+                any("snapshot/retention failed" in warning for warning in result["warnings"])
+            )
 
     def test_page_commands_reject_a_stale_document_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

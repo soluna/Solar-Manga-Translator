@@ -9,6 +9,7 @@ function normalizeIds(ids) {
 export function usePageCommandState() {
   const pageCommandPendingCounts = ref({})
   const regionCommitStates = ref({})
+  const projectCommandQueues = new Map()
 
   const hasPendingPageCommands = computed(() => (
     Object.values(pageCommandPendingCounts.value).some((count) => Number(count || 0) > 0)
@@ -31,6 +32,29 @@ export function usePageCommandState() {
 
   function isPageCommandPending(pageId) {
     return Number(pageCommandPendingCounts.value[String(pageId || '').trim()] || 0) > 0
+  }
+
+  function executePageCommand(projectId, pageId, executor) {
+    const normalizedProjectId = String(projectId || '').trim()
+    const normalizedPageId = String(pageId || '').trim()
+    if (!normalizedProjectId || !normalizedPageId || typeof executor !== 'function') {
+      return Promise.resolve(null)
+    }
+
+    setPageCommandPending(normalizedPageId, 1)
+    const previous = projectCommandQueues.get(normalizedProjectId) || Promise.resolve()
+    let trackedPromise = null
+    trackedPromise = previous
+      .catch(() => {})
+      .then(executor)
+      .finally(() => {
+        setPageCommandPending(normalizedPageId, -1)
+        if (projectCommandQueues.get(normalizedProjectId) === trackedPromise) {
+          projectCommandQueues.delete(normalizedProjectId)
+        }
+      })
+    projectCommandQueues.set(normalizedProjectId, trackedPromise)
+    return trackedPromise
   }
 
   function getCommandRegionIds(commands) {
@@ -118,6 +142,7 @@ export function usePageCommandState() {
     hasPendingPageCommands,
     setPageCommandPending,
     isPageCommandPending,
+    executePageCommand,
     getCommandRegionIds,
     setRegionCommitState,
     clearRegionCommitState,

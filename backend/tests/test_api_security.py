@@ -560,13 +560,14 @@ class ApiSecurityTests(unittest.TestCase):
             actual_revision=4,
             document={"page_id": page_id, "metadata": {"revision": 4}},
         )
+        execute_command = mock.AsyncMock(side_effect=conflict)
         try:
             with (
                 mock.patch.object(main, "API_TOKEN", ""),
                 mock.patch.object(
-                    main.translator_engine,
-                    "apply_page_commands",
-                    new=mock.AsyncMock(side_effect=conflict),
+                    main.workflow_coordinator,
+                    "execute",
+                    new=execute_command,
                 ),
             ):
                 response = self.client.post(
@@ -582,19 +583,23 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "page_revision_conflict")
         self.assertEqual(response.json()["detail"]["actual_revision"], 4)
+        submitted = execute_command.await_args.args[0]
+        self.assertEqual(submitted.action, "page-edit")
+        self.assertEqual(submitted.target_stored_name, page_id)
+        self.assertEqual(submitted.expected_page_revision, 3)
 
     def test_page_command_uses_the_same_project_lease_as_long_running_tasks(self) -> None:
         project_id = "leased-page-command-api"
         page_id = "0001.png"
         main.SESSIONS[project_id] = {"source_images": [{"stored_name": page_id}]}
-        apply_commands = mock.AsyncMock(return_value={"ok": True})
+        execute_command = mock.AsyncMock(return_value={"ok": True})
         try:
             with (
                 mock.patch.object(main, "API_TOKEN", ""),
                 mock.patch.object(
-                    main.translator_engine,
-                    "apply_page_commands",
-                    new=apply_commands,
+                    main.workflow_coordinator,
+                    "execute",
+                    new=execute_command,
                 ),
                 main.task_manager.lease(project_id, "translate"),
             ):
@@ -606,7 +611,7 @@ class ApiSecurityTests(unittest.TestCase):
             main.SESSIONS.pop(project_id, None)
 
         self.assertEqual(response.status_code, 409)
-        apply_commands.assert_not_awaited()
+        execute_command.assert_not_awaited()
 
     def test_project_list_busy_state_is_decorated_from_task_manager(self) -> None:
         project_id = "busy-project-view-api"

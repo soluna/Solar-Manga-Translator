@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,6 +20,59 @@ from task_manager import (
 
 
 class TaskManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_task_and_events_survive_manager_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_dir = Path(tmp) / "tasks"
+            manager = TaskManager(storage_dir=journal_dir)
+
+            async def runner(publish):
+                await publish({"event": "progress", "current": 1, "total": 1})
+                return {"workflow_stage": "translated"}
+
+            task_id = manager.start("project-a", "translate", runner)
+            completed = await manager.wait(task_id)
+            restarted = TaskManager(storage_dir=journal_dir)
+
+            restored = restarted.snapshot(task_id)
+            self.assertEqual(restored["status"], "completed")
+            self.assertEqual(restored["sequence"], completed["sequence"])
+            self.assertEqual(
+                [event["event"] for event in restored["events"]],
+                ["task", "progress", "completed"],
+            )
+            self.assertEqual(
+                restarted.project_snapshot("project-a")["task_id"],
+                task_id,
+            )
+            self.assertFalse(restarted.project_busy_snapshot("project-a")["is_busy"])
+
+    async def test_restart_classifies_an_unfinished_task_as_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_dir = Path(tmp) / "tasks"
+            manager = TaskManager(storage_dir=journal_dir)
+            runner_started = asyncio.Event()
+            release_runner = asyncio.Event()
+
+            async def runner(_publish):
+                runner_started.set()
+                await release_runner.wait()
+
+            task_id = manager.start("project-a", "translate", runner)
+            await runner_started.wait()
+
+            restarted = TaskManager(storage_dir=journal_dir)
+            restored = restarted.snapshot(task_id)
+            self.assertEqual(restored["status"], "interrupted")
+            self.assertEqual(restored["events"][-1]["event"], "interrupted")
+            self.assertEqual(
+                restored["events"][-1]["error"]["code"],
+                "TASK_INTERRUPTED",
+            )
+            self.assertFalse(restarted.project_busy_snapshot("project-a")["is_busy"])
+
+            release_runner.set()
+            await manager.wait(task_id)
+
     async def test_project_lease_blocks_a_same_project_task_until_released(self) -> None:
         manager = TaskManager()
 

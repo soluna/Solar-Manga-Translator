@@ -1201,14 +1201,23 @@ class ProjectWorkspace:
                 working_set.base.page_id,
             )
 
+        snapshot_manifests = self._record_automatic_snapshot(
+            working_set.base.project_id,
+            head,
+            prepared.snapshot_document,
+            warnings,
+        )
         try:
-            self.refresh_project_index_entry(
-                {
-                    field: prepared.project_manifest[field]
-                    for field in self.PROJECT_INDEX_FIELDS
-                    if field in prepared.project_manifest
-                }
-            )
+            project_summary = {
+                field: prepared.project_manifest[field]
+                for field in self.PROJECT_INDEX_FIELDS
+                if field in prepared.project_manifest
+            }
+            if snapshot_manifests is not None:
+                project_summary.update(
+                    self._snapshot_index_summary(snapshot_manifests)
+                )
+            self.refresh_project_index_entry(project_summary)
         except Exception as exc:
             warnings.append(
                 f"Project Head committed but project index projection failed: {exc}"
@@ -1301,50 +1310,12 @@ class ProjectWorkspace:
                 working_set.base.project_id,
             )
 
-        if prepared.snapshot_document is not None:
-            try:
-                self.create_project_head_snapshot(
-                    working_set.base.project_id,
-                    head,
-                    prepared.snapshot_document,
-                )
-            except Exception as exc:
-                warnings.append(
-                    "Project Head committed but automatic snapshot/retention failed "
-                    f"during creation: {exc}"
-                )
-                logger.exception(
-                    "Project Head committed but automatic snapshot/retention failed "
-                    "during creation. project=%s",
-                    working_set.base.project_id,
-                )
-
-            try:
-                self.enforce_snapshot_retention(working_set.base.project_id)
-            except Exception as exc:
-                warnings.append(
-                    "Project Head committed but automatic snapshot/retention failed "
-                    f"during retention: {exc}"
-                )
-                logger.exception(
-                    "Project Head committed but automatic snapshot/retention failed "
-                    "during retention. project=%s",
-                    working_set.base.project_id,
-                )
-
-        snapshot_manifests: list[dict[str, Any]] | None = None
-        try:
-            snapshot_manifests = self.read_snapshot_manifests(
-                working_set.base.project_id
-            )
-        except Exception as exc:
-            warnings.append(
-                f"Project Head committed but snapshot catalog projection failed: {exc}"
-            )
-            logger.exception(
-                "Project Head committed but snapshot catalog projection failed. project=%s",
-                working_set.base.project_id,
-            )
+        snapshot_manifests = self._record_automatic_snapshot(
+            working_set.base.project_id,
+            head,
+            prepared.snapshot_document,
+            warnings,
+        )
 
         if snapshot_manifests is not None:
             try:
@@ -1415,6 +1386,57 @@ class ProjectWorkspace:
             warnings=tuple(warnings),
             runtime_session=dict(prepared.runtime_session),
         )
+
+    def _record_automatic_snapshot(
+        self,
+        project_id: str,
+        head: dict[str, Any],
+        snapshot_document: dict[str, Any] | None,
+        warnings: list[str],
+    ) -> list[dict[str, Any]] | None:
+        """Record best-effort history after Head is already authoritative."""
+        if snapshot_document is not None:
+            try:
+                self.create_project_head_snapshot(
+                    project_id,
+                    head,
+                    snapshot_document,
+                )
+            except Exception as exc:
+                warnings.append(
+                    "Project Head committed but automatic snapshot/retention failed "
+                    f"during creation: {exc}"
+                )
+                logger.exception(
+                    "Project Head committed but automatic snapshot/retention failed "
+                    "during creation. project=%s",
+                    project_id,
+                )
+
+            try:
+                self.enforce_snapshot_retention(project_id)
+            except Exception as exc:
+                warnings.append(
+                    "Project Head committed but automatic snapshot/retention failed "
+                    f"during retention: {exc}"
+                )
+                logger.exception(
+                    "Project Head committed but automatic snapshot/retention failed "
+                    "during retention. project=%s",
+                    project_id,
+                )
+
+        try:
+            return self.read_snapshot_manifests(project_id)
+        except Exception as exc:
+            warnings.append(
+                f"Project Head committed but snapshot catalog projection failed: {exc}"
+            )
+            logger.exception(
+                "Project Head committed but snapshot catalog projection failed. project=%s",
+                project_id,
+            )
+            return None
 
     def write_pending_artifact_set(
         self,
@@ -2294,12 +2316,14 @@ class ProjectWorkspace:
             previous = previous_files.get(logical_path)
             previous_blob_id = str(previous.get("blob") or "").strip().lower() if isinstance(previous, dict) else ""
             previous_blob_path = blobs_dir / previous_blob_id[:2] / previous_blob_id
+            # Filesystems with coarse timestamp precision can produce the same
+            # size/mtime/ctime tuple for different content written in quick
+            # succession. Project Head identity must therefore be content-based.
+            blob_id = self._sha256_file(source)
             if (
                 re.fullmatch(r"[0-9a-f]{64}", previous_blob_id)
                 and previous_blob_path.is_file()
-                and int(previous.get("size") or -1) == source_stat.st_size
-                and int(previous.get("mtime_ns") or -1) == source_stat.st_mtime_ns
-                and int(previous.get("ctime_ns") or -1) == source_stat.st_ctime_ns
+                and previous_blob_id == blob_id
             ):
                 captured[logical_path] = {
                     "blob": previous_blob_id,
@@ -2309,7 +2333,6 @@ class ProjectWorkspace:
                 }
                 continue
 
-            blob_id = self._sha256_file(source)
             size = source_stat.st_size
             blob_path = blobs_dir / blob_id[:2] / blob_id
             if not blob_path.exists():

@@ -28,13 +28,20 @@ class ProjectCommand:
     config: Mapping[str, Any] = field(default_factory=dict)
     target_stored_name: str | None = None
     expected_page_revision: int | None = None
+    page_commands: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         project_id = str(self.project_id or "").strip()
         if not project_id:
             raise ValueError("Project Command requires a project_id")
-        action = require_task_action(self.action)
+        requested_action = str(self.action or "").strip().lower()
+        action = (
+            "page-edit"
+            if requested_action == "page-edit"
+            else require_task_action(requested_action)
+        )
         target_stored_name = str(self.target_stored_name or "").strip() or None
+        raw_page_commands = tuple(self.page_commands or ())
         expected_page_revision = self.expected_page_revision
         if expected_page_revision is not None and (
             isinstance(expected_page_revision, bool)
@@ -42,14 +49,21 @@ class ProjectCommand:
             or expected_page_revision <= 0
         ):
             raise ValueError("expected_page_revision must be a positive integer")
-        if action == "translate-page" and target_stored_name is None:
-            raise ValueError("translate-page requires target_stored_name")
+        if action in {"translate-page", "page-edit"} and target_stored_name is None:
+            raise ValueError(f"{action} requires target_stored_name")
         if action in {"detect", "translate", "resume-translate"} and target_stored_name:
             raise ValueError(f"{action} does not accept target_stored_name")
         if expected_page_revision is not None and target_stored_name is None:
             raise ValueError(
                 "expected_page_revision requires a page-scoped Project Command"
             )
+        if action == "page-edit":
+            if not raw_page_commands:
+                raise ValueError("page-edit requires page_commands")
+            if not all(isinstance(command, Mapping) for command in raw_page_commands):
+                raise ValueError("page_commands must contain mappings")
+        elif raw_page_commands:
+            raise ValueError(f"{action} does not accept page_commands")
         object.__setattr__(self, "project_id", project_id)
         object.__setattr__(self, "action", action)
         object.__setattr__(
@@ -61,6 +75,14 @@ class ProjectCommand:
             self,
             "target_stored_name",
             target_stored_name,
+        )
+        object.__setattr__(
+            self,
+            "page_commands",
+            tuple(
+                MappingProxyType(copy.deepcopy(dict(command)))
+                for command in raw_page_commands
+            ),
         )
 
 __all__ = [

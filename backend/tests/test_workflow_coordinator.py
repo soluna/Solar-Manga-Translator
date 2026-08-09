@@ -247,6 +247,40 @@ class DeterministicRenderPageAdapter:
             execution_extras={"workflow_stage": "stale-adapter-stage"},
         )
 
+    async def prepare_page_commands(self, command, working_set, progress):
+        self.calls += 1
+        self.working_root = working_set.root
+        await progress({"event": "status", "message": "editing page"})
+        state_document = copy.deepcopy(working_set.base.state_document)
+        state_document["translation_region_overrides"] = {"region-1": "译文"}
+        page_document = copy.deepcopy(working_set.base.page_document)
+        page_document["metadata"] = {
+            **dict(page_document.get("metadata") or {}),
+            "revision": working_set.base.page_revision + 1,
+        }
+        runtime_session = ProjectState.load(
+            state_document,
+            expected_project_id=working_set.base.project_id,
+        ).to_runtime_session()
+        return PreparedHeadUpdate(
+            state_document=state_document,
+            project_manifest=dict(working_set.base.project_manifest),
+            page_documents={working_set.base.page_id: page_document},
+            artifact_files={},
+            replace_prefixes=(f"pages/{working_set.base.page_id}/",),
+            remove_logical_paths=set(),
+            runtime_session=runtime_session,
+            execution_extras={
+                "page_id": working_set.base.page_id,
+                "document": page_document,
+                "revision": working_set.base.page_revision + 1,
+                "executed_commands": [
+                    str(page_command.get("type") or "")
+                    for page_command in command.page_commands
+                ],
+            },
+        )
+
 
 class DeterministicProjectCommandAdapter(DeterministicRenderPageAdapter):
     def __init__(self) -> None:
@@ -369,6 +403,48 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         workspace.read_project_head("project-a")["revision_id"],
                     )
                     self.assertEqual(result["workflow_stage"], "translated")
+
+    async def test_page_edit_uses_the_head_bound_coordinator_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, shared_project, first_head = seed_render_page_project(Path(tmp))
+            adapter = DeterministicRenderPageAdapter()
+            coordinator = self.make_render_page_coordinator(
+                workspace,
+                shared_project,
+                adapter,
+            )
+
+            result = await coordinator.execute(
+                ProjectCommand(
+                    project_id="project-a",
+                    action="page-edit",
+                    config={"target_lang": "CHS"},
+                    target_stored_name="001.png",
+                    expected_page_revision=4,
+                    page_commands=(
+                        {
+                            "type": "update_translation",
+                            "region_id": "region-1",
+                            "text": "译文",
+                        },
+                    ),
+                )
+            )
+
+            committed_head = workspace.read_project_head("project-a")
+            self.assertEqual(
+                committed_head["generation"],
+                first_head["generation"] + 1,
+            )
+            self.assertEqual(result["page_id"], "001.png")
+            self.assertEqual(result["session_id"], "project-a")
+            self.assertEqual(result["revision"], 5)
+            self.assertEqual(result["executed_commands"], ["update_translation"])
+            self.assertEqual(result["project_head_generation"], committed_head["generation"])
+            self.assertEqual(
+                shared_project["translation_region_overrides"],
+                {"region-1": "译文"},
+            )
 
     async def test_translate_page_rejects_invalid_stored_revision_without_durable_writes(
         self,
@@ -1948,6 +2024,40 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         target_stored_name=target,
                         expected_page_revision=3,
                     )
+
+    def test_page_edit_is_an_immutable_page_scoped_project_command(self) -> None:
+        command = ProjectCommand(
+            project_id="project-a",
+            action="page-edit",
+            config={"target_lang": "CHS"},
+            target_stored_name="001.png",
+            expected_page_revision=4,
+            page_commands=(
+                {
+                    "type": "update_translation",
+                    "region_id": "region-1",
+                    "text": "译文",
+                },
+            ),
+        )
+
+        self.assertEqual(command.action, "page-edit")
+        self.assertEqual(command.target_stored_name, "001.png")
+        self.assertEqual(command.page_commands[0]["type"], "update_translation")
+        with self.assertRaises(TypeError):
+            command.page_commands[0]["text"] = "mutated"
+
+        for invalid_fields in (
+            {"target_stored_name": None, "page_commands": ({"type": "edit"},)},
+            {"target_stored_name": "001.png", "page_commands": ()},
+        ):
+            with self.subTest(**invalid_fields), self.assertRaises(ValueError):
+                ProjectCommand(
+                    project_id="project-a",
+                    action="page-edit",
+                    config={},
+                    **invalid_fields,
+                )
 
     async def test_production_adapter_only_delegates_head_bound_preparation(
         self,

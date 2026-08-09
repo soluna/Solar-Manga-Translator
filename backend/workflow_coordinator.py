@@ -56,6 +56,13 @@ class WorkflowPreparationAdapter(Protocol):
         progress: ProgressCallback,
     ) -> PreparedHeadUpdate: ...
 
+    async def prepare_page_commands(
+        self,
+        command: ProjectCommand,
+        working_set: PageWorkingSet,
+        progress: ProgressCallback,
+    ) -> PreparedHeadUpdate: ...
+
     async def prepare_project_command(
         self,
         command: ProjectCommand,
@@ -77,6 +84,18 @@ class TranslatorEngineWorkflowAdapter:
         return await self._engine.render_page_working_set(
             working_set=working_set,
             raw_config=dict(command.config),
+            progress_callback=progress,
+        )
+
+    async def prepare_page_commands(
+        self,
+        command: ProjectCommand,
+        working_set: PageWorkingSet,
+        progress: ProgressCallback,
+    ) -> PreparedHeadUpdate:
+        return await self._engine.prepare_page_commands_working_set(
+            command=command,
+            working_set=working_set,
             progress_callback=progress,
         )
 
@@ -123,6 +142,13 @@ class WorkflowCoordinator:
         progress: ProgressCallback = NOOP_PROGRESS,
     ) -> dict[str, Any]:
         project = self._project_loader(command.project_id)
+        if command.action == "page-edit":
+            if self._project_workspace is None or self._preparation_adapter is None:
+                raise RuntimeError(
+                    "PageEdit requires an explicitly assembled ProjectWorkspace "
+                    "and preparation adapter"
+                )
+            return await self._execute_page_commands(command, project, progress)
         if command.action == "rerender" and command.target_stored_name:
             if self._project_workspace is None or self._preparation_adapter is None:
                 raise RuntimeError(
@@ -148,6 +174,64 @@ class WorkflowCoordinator:
             progress,
         )
         return self._build_completion_payload(command.project_id, project, result)
+
+    async def _execute_page_commands(
+        self,
+        command: ProjectCommand,
+        shared_project: dict[str, Any],
+        progress: ProgressCallback,
+    ) -> dict[str, Any]:
+        assert command.target_stored_name is not None
+        assert self._project_workspace is not None
+        assert self._preparation_adapter is not None
+        base = self._project_workspace.read_command_base(
+            command.project_id,
+            command.target_stored_name,
+        )
+        expected_revision = (
+            command.expected_page_revision
+            if command.expected_page_revision is not None
+            else base.page_revision
+        )
+        if expected_revision != base.page_revision:
+            raise PageDocumentRevisionConflict(
+                expected_revision=expected_revision,
+                actual_revision=base.page_revision,
+                document=base.page_document,
+            )
+
+        warnings: list[str] = []
+
+        async def best_effort_progress(event: dict[str, Any]) -> None:
+            try:
+                await progress(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                warning = f"Progress delivery failed after page edit continued: {exc}"
+                if warning not in warnings:
+                    warnings.append(warning)
+
+        with self._project_workspace.materialize_page_working_set(
+            base,
+            legacy_project=shared_project,
+        ) as working_set:
+            prepared = await self._preparation_adapter.prepare_page_commands(
+                command,
+                working_set,
+                best_effort_progress,
+            )
+            committed = self._project_workspace.commit_page_working_set(
+                working_set,
+                prepared,
+            )
+        return self._committed_page_command_outcome(
+            command.project_id,
+            shared_project,
+            prepared,
+            committed,
+            warnings,
+        )
 
     async def _execute_project_command(
         self,
@@ -272,11 +356,10 @@ class WorkflowCoordinator:
             warnings,
         )
 
-    def _committed_outcome(
+    def _reload_committed_project(
         self,
         project_id: str,
         shared_project: dict[str, Any],
-        prepared: PreparedHeadUpdate,
         committed: ProjectHeadCommitResult,
         warnings: list[str],
     ) -> dict[str, Any]:
@@ -303,6 +386,48 @@ class WorkflowCoordinator:
             warnings.append(
                 f"Project Head committed but shared session projection failed: {exc}"
             )
+        return committed_project
+
+    def _committed_page_command_outcome(
+        self,
+        project_id: str,
+        shared_project: dict[str, Any],
+        prepared: PreparedHeadUpdate,
+        committed: ProjectHeadCommitResult,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        self._reload_committed_project(
+            project_id,
+            shared_project,
+            committed,
+            warnings,
+        )
+        return {
+            **prepared.execution_extras,
+            "session_id": project_id,
+            "warnings": [
+                *warnings,
+                *committed.warnings,
+                *list(prepared.execution_extras.get("warnings") or []),
+            ],
+            "project_head_generation": int(committed.head["generation"]),
+            "project_head_revision_id": str(committed.head["revision_id"]),
+        }
+
+    def _committed_outcome(
+        self,
+        project_id: str,
+        shared_project: dict[str, Any],
+        prepared: PreparedHeadUpdate,
+        committed: ProjectHeadCommitResult,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        committed_project = self._reload_committed_project(
+            project_id,
+            shared_project,
+            committed,
+            warnings,
+        )
         result = {
             **prepared.execution_extras,
             "warnings": [

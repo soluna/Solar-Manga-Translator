@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
+import os
 import re
 import threading
+import tempfile
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from workflow_events import enrich_task_event
@@ -17,7 +22,13 @@ TaskEvent = dict[str, Any]
 TaskPublisher = Callable[[TaskEvent], Awaitable[None]]
 TaskRunner = Callable[[TaskPublisher], Awaitable[dict[str, Any] | None]]
 
-TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+PERSISTED_TASK_STATUSES = {
+    "queued",
+    "running",
+    "cancelling",
+    *TERMINAL_TASK_STATUSES,
+}
 WINDOWS_PATH_PATTERN = re.compile(r"(?i)\b[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s]*")
 POSIX_PATH_PATTERN = re.compile(
     r"(?<!https:)(?<!http:)/(?:Users|home|var|tmp|Volumes|opt|private)(?:/[^\s:]+)+"
@@ -163,6 +174,162 @@ class ManagedTask:
     lease: ProjectLease | None = None
 
 
+class _TaskJournal:
+    """Durable task records with append-only event writes on the hot path."""
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, root: Path, logger: logging.Logger) -> None:
+        self.root = Path(root)
+        self.logger = logger
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _validated_task_id(task_id: str) -> str:
+        normalized = str(task_id or "").strip()
+        if re.fullmatch(r"[0-9a-f]{32}", normalized) is None:
+            raise ValueError("task_id is not a canonical UUID hex value")
+        return normalized
+
+    def _task_dir(self, task_id: str) -> Path:
+        return self.root / self._validated_task_id(task_id)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        temp_path = Path(raw_temp_path)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), default=str)
+            os.replace(temp_path, path)
+            if os.name != "nt":
+                path.chmod(0o600)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp_path.unlink()
+
+    @staticmethod
+    def _record(managed: ManagedTask) -> dict[str, Any]:
+        return {
+            "schema_version": _TaskJournal.SCHEMA_VERSION,
+            "task_id": managed.task_id,
+            "project_id": managed.project_id,
+            "action": managed.action,
+            "metadata": dict(managed.metadata),
+            "status": managed.status,
+            "created_at": managed.created_at,
+            "updated_at": managed.updated_at,
+            "sequence": managed.sequence,
+        }
+
+    def save(self, managed: ManagedTask) -> None:
+        self._atomic_write_json(
+            self._task_dir(managed.task_id) / "task.json",
+            self._record(managed),
+        )
+
+    def append_event(self, managed: ManagedTask, event: TaskEvent) -> None:
+        events_path = self._task_dir(managed.task_id) / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            event,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
+        if os.name != "nt":
+            events_path.chmod(0o600)
+        if managed.sequence % 500 == 0:
+            self.replace_events(managed)
+
+    def replace_events(self, managed: ManagedTask) -> None:
+        path = self._task_dir(managed.task_id) / "events.jsonl"
+        fd, raw_temp_path = tempfile.mkstemp(
+            prefix=".events.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        temp_path = Path(raw_temp_path)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for event in managed.events:
+                    handle.write(
+                        json.dumps(
+                            event,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                    )
+                    handle.write("\n")
+            os.replace(temp_path, path)
+            if os.name != "nt":
+                path.chmod(0o600)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp_path.unlink()
+
+    def delete(self, task_id: str) -> None:
+        task_dir = self._task_dir(task_id)
+        for name in ("events.jsonl", "task.json"):
+            (task_dir / name).unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            task_dir.rmdir()
+
+    def load(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for task_dir in sorted(self.root.iterdir()):
+            if not task_dir.is_dir():
+                continue
+            try:
+                task_id = self._validated_task_id(task_dir.name)
+                state = json.loads(
+                    (task_dir / "task.json").read_text(encoding="utf-8")
+                )
+                if not isinstance(state, dict) or state.get("schema_version") != self.SCHEMA_VERSION:
+                    raise ValueError("unsupported task journal schema")
+                if state.get("task_id") != task_id:
+                    raise ValueError("task journal identity mismatch")
+                project_id = str(state.get("project_id") or "").strip()
+                action = str(state.get("action") or "").strip()
+                status = str(state.get("status") or "").strip()
+                metadata = state.get("metadata")
+                if not project_id or not action or status not in PERSISTED_TASK_STATUSES:
+                    raise ValueError("invalid task journal state")
+                if not isinstance(metadata, dict):
+                    raise ValueError("invalid task journal metadata")
+                events: list[TaskEvent] = []
+                events_path = task_dir / "events.jsonl"
+                if events_path.exists():
+                    for raw_line in events_path.read_text(encoding="utf-8").splitlines():
+                        if not raw_line.strip():
+                            continue
+                        event = json.loads(raw_line)
+                        if not isinstance(event, dict) or not isinstance(event.get("sequence"), int):
+                            raise ValueError("invalid task journal event")
+                        events.append(event)
+                records.append({**state, "events": events[-500:]})
+            except Exception as exc:
+                self.logger.error(
+                    "Task journal entry is corrupt and was preserved for diagnostics. path=%s error=%s",
+                    task_dir,
+                    exc,
+                )
+        return records
+
+
 class TaskManager:
     """Own long-running project tasks independently from client connections."""
 
@@ -171,6 +338,7 @@ class TaskManager:
         *,
         logger: logging.Logger | None = None,
         max_retained_tasks: int = 100,
+        storage_dir: Path | None = None,
     ) -> None:
         self._logger = logger or logging.getLogger(__name__)
         self._max_retained_tasks = max(10, max_retained_tasks)
@@ -178,6 +346,70 @@ class TaskManager:
         self._project_tasks: dict[str, str] = {}
         self._lease_lock = threading.Lock()
         self._project_leases: dict[str, tuple[str, str]] = {}
+        self._journal = (
+            _TaskJournal(Path(storage_dir), self._logger)
+            if storage_dir is not None
+            else None
+        )
+        self._restore_persisted_tasks()
+
+    def _restore_persisted_tasks(self) -> None:
+        if self._journal is None:
+            return
+        for record in self._journal.load():
+            events = deque(
+                (dict(event) for event in record.get("events") or []),
+                maxlen=500,
+            )
+            sequence = max(
+                int(record.get("sequence") or 0),
+                max((int(event.get("sequence") or 0) for event in events), default=0),
+            )
+            managed = ManagedTask(
+                task_id=str(record["task_id"]),
+                project_id=str(record["project_id"]),
+                action=str(record["action"]),
+                metadata=dict(record.get("metadata") or {}),
+                status=str(record["status"]),
+                created_at=str(record.get("created_at") or utc_now_iso()),
+                updated_at=str(record.get("updated_at") or utc_now_iso()),
+                sequence=sequence,
+                events=events,
+            )
+            if managed.status not in TERMINAL_TASK_STATUSES:
+                managed.status = "interrupted"
+                managed.updated_at = utc_now_iso()
+                managed.sequence += 1
+                public_error = {
+                    "code": "TASK_INTERRUPTED",
+                    "message": "后端重启，之前的任务已中断。",
+                    "action": "可以从当前项目状态重新开始任务。",
+                    "retryable": True,
+                    "technical_message": "",
+                }
+                interrupted_event = enrich_task_event(
+                    {
+                        "event": "interrupted",
+                        "task_status": "interrupted",
+                        "message": public_error["message"],
+                        "error": public_error,
+                    },
+                    action=managed.action,
+                    metadata=managed.metadata,
+                    task_status=managed.status,
+                )
+                interrupted_event = {
+                    **interrupted_event,
+                    "task_id": managed.task_id,
+                    "sequence": managed.sequence,
+                }
+                managed.events.append(interrupted_event)
+                self._persist_event(managed, interrupted_event)
+            self._tasks[managed.task_id] = managed
+            current_id = self._project_tasks.get(managed.project_id)
+            current = self._tasks.get(current_id or "")
+            if current is None or managed.updated_at >= current.updated_at:
+                self._project_tasks[managed.project_id] = managed.task_id
 
     def lease(self, project_id: str, action: str) -> ProjectLease:
         normalized_project_id = str(project_id or "").strip()
@@ -232,6 +464,7 @@ class TaskManager:
             )
             self._tasks[task_id] = managed
             self._project_tasks[normalized_project_id] = task_id
+            self._persist(managed)
             worker_coro = self._execute(managed, runner)
             managed.worker = asyncio.create_task(
                 worker_coro,
@@ -246,6 +479,8 @@ class TaskManager:
                 self._tasks.pop(task_id, None)
                 if self._project_tasks.get(normalized_project_id) == task_id:
                     self._project_tasks.pop(normalized_project_id, None)
+                if self._journal is not None:
+                    self._journal.delete(task_id)
             lease.release()
             raise
 
@@ -425,8 +660,33 @@ class TaskManager:
             "sequence": managed.sequence,
         }
         managed.events.append(payload)
+        self._persist_event(managed, payload)
         async with managed.changed:
             managed.changed.notify_all()
+
+    def _persist(self, managed: ManagedTask) -> None:
+        if self._journal is None:
+            return
+        try:
+            self._journal.save(managed)
+        except Exception:
+            self._logger.exception(
+                "Could not persist managed task state. task_id=%s",
+                managed.task_id,
+            )
+
+    def _persist_event(self, managed: ManagedTask, event: TaskEvent) -> None:
+        if self._journal is None:
+            return
+        try:
+            self._journal.append_event(managed, event)
+            self._journal.save(managed)
+        except Exception:
+            self._logger.exception(
+                "Could not persist managed task event. task_id=%s sequence=%s",
+                managed.task_id,
+                managed.sequence,
+            )
 
     def _require(self, task_id: str) -> ManagedTask:
         managed = self._tasks.get(task_id)
@@ -448,3 +708,5 @@ class TaskManager:
             self._tasks.pop(managed.task_id, None)
             if self._project_tasks.get(managed.project_id) == managed.task_id:
                 self._project_tasks.pop(managed.project_id, None)
+            if self._journal is not None:
+                self._journal.delete(managed.task_id)

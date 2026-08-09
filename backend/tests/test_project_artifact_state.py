@@ -246,6 +246,9 @@ class ProjectArtifactStateTests(unittest.TestCase):
             payload = engine.build_client_session_payload(project_id, session)
 
             self.assertEqual(payload["artifact_schema_version"], 2)
+            head = engine.project_workspace.read_project_head(project_id)
+            self.assertEqual(payload["project_head_generation"], head["generation"])
+            self.assertEqual(payload["project_head_revision_id"], head["revision_id"])
             page_artifact = payload["page_artifacts"]["0001.png"]
             self.assertTrue(page_artifact["artifacts"]["source"]["ready"])
             self.assertFalse(

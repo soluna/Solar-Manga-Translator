@@ -106,6 +106,14 @@ assert.equal(
 )
 
 assert.equal(
+  deriveTaskEventUpdate(
+    { event: 'interrupted' },
+    { activeAction: 'translate' },
+  ).statusMessage,
+  '后端重启，之前的任务已中断。',
+)
+
+assert.equal(
   deriveTaskPhase({ event: 'task' }),
   null,
 )

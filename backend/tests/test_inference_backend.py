@@ -973,6 +973,95 @@ class InferenceBackendTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(retry.runtime_reused)
             self.assertEqual(attempts, 2)
 
+    async def test_vendor_translation_runtime_is_process_serialized(self) -> None:
+        active_dispatches = 0
+        maximum_active_dispatches = 0
+        observed_environments: list[tuple[str, str, str]] = []
+
+        class FakeTranslatorConfig:
+            def __init__(self, *, translator: str, target_lang: str) -> None:
+                self.translator_gen = SimpleNamespace(
+                    translator=translator,
+                    target_lang=target_lang,
+                )
+
+        async def fake_dispatch(
+            _translator: Any,
+            texts: list[str],
+            **_kwargs: Any,
+        ) -> list[str]:
+            nonlocal active_dispatches, maximum_active_dispatches
+            active_dispatches += 1
+            maximum_active_dispatches = max(
+                maximum_active_dispatches,
+                active_dispatches,
+            )
+            key_before = str(os.environ.get("CUSTOM_OPENAI_API_KEY") or "")
+            await asyncio.sleep(0.02)
+            key_after = str(os.environ.get("CUSTOM_OPENAI_API_KEY") or "")
+            observed_environments.append((texts[0], key_before, key_after))
+            active_dispatches -= 1
+            return [f"translated:{texts[0]}"]
+
+        async def fake_unload(_translator: Any) -> None:
+            await asyncio.sleep(0)
+
+        fake_package = ModuleType("manga_translator")
+        fake_package.__path__ = []  # type: ignore[attr-defined]
+        fake_config = ModuleType("manga_translator.config")
+        fake_config.Translator = {"custom_openai": "custom_openai"}
+        fake_config.TranslatorConfig = FakeTranslatorConfig
+        fake_translators = ModuleType("manga_translator.translators")
+        fake_translators.dispatch = fake_dispatch
+        fake_translators.unload = fake_unload
+        fake_modules = {
+            "manga_translator": fake_package,
+            "manga_translator.config": fake_config,
+            "manga_translator.translators": fake_translators,
+        }
+        first_backend = UpstreamInferenceBackend(BACKEND_DIR)
+        second_backend = UpstreamInferenceBackend(BACKEND_DIR)
+
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch(
+                "backend.inference_backend.importlib.reload",
+                side_effect=lambda module: module,
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"CUSTOM_OPENAI_API_KEY": "original-key"},
+            ),
+        ):
+            first_result, second_result = await asyncio.gather(
+                first_backend.translate_texts(
+                    ["first"],
+                    translator_name="custom_openai",
+                    target_lang="CHS",
+                    device="cpu",
+                    environment={"CUSTOM_OPENAI_API_KEY": "first-key"},
+                ),
+                second_backend.translate_texts(
+                    ["second"],
+                    translator_name="custom_openai",
+                    target_lang="CHS",
+                    device="cpu",
+                    environment={"CUSTOM_OPENAI_API_KEY": "second-key"},
+                ),
+            )
+            self.assertEqual(os.environ["CUSTOM_OPENAI_API_KEY"], "original-key")
+
+        self.assertEqual(first_result, ("translated:first",))
+        self.assertEqual(second_result, ("translated:second",))
+        self.assertEqual(maximum_active_dispatches, 1)
+        self.assertEqual(
+            sorted(observed_environments),
+            [
+                ("first", "first-key", "first-key"),
+                ("second", "second-key", "second-key"),
+            ],
+        )
+
     async def test_detect_text_mask_adapts_default_detector_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

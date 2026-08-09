@@ -1212,7 +1212,7 @@ class ProjectWorkspaceTests(unittest.TestCase):
                     },
                     previous_bundle=bundle,
                 )
-            self.assertEqual(hash_file.call_count, 0)
+            self.assertEqual(hash_file.call_count, 2)
             self.assertEqual(
                 {metadata["blob"] for metadata in reused_bundle["files"].values()},
                 blob_ids,

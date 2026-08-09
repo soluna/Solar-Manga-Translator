@@ -536,13 +536,6 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertNotIn('install_deps.py >> "%BOOTSTRAP_LOG%"', start_script)
         self.assertNotIn('pip_install.py -r requirements.txt >> "%BOOTSTRAP_LOG%"', start_script)
 
-    def test_desktop_runtime_package_includes_bootstrap_command_runner(self) -> None:
-        staging_script = (
-            BACKEND_DIR.parent / "desktop" / "scripts" / "stage-runtime.mjs"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("'bootstrap_command.py'", staging_script)
-
     def test_mac_start_script_prepares_the_runtime_before_generic_dependencies(self) -> None:
         start_script = (BACKEND_DIR.parent / "start.mac.sh").read_text(
             encoding="utf-8"

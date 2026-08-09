@@ -91,6 +91,8 @@ class ProjectCommandPreparationInput(Protocol):
     action: str
     config: Mapping[str, Any]
     target_stored_name: str | None
+    expected_page_revision: int | None
+    page_commands: tuple[Mapping[str, Any], ...]
 
 
 class PageDocumentRevisionConflict(RuntimeError):
@@ -3306,6 +3308,7 @@ class TranslatorEngine:
         return self._build_project_summary(project_id, session)
 
     def build_client_session_payload(self, project_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        project_head = self.project_workspace.read_project_head(project_id)
         artifact_state = self._project_artifact_state(project_id, session)
         page_artifacts = {
             page_id: artifact_state.page_view(page_id).model_dump(mode="json")
@@ -3359,6 +3362,8 @@ class TranslatorEngine:
 
         return {
             "session_id": project_id,
+            "project_head_generation": int((project_head or {}).get("generation") or 0),
+            "project_head_revision_id": str((project_head or {}).get("revision_id") or ""),
             "review_mode": self._session_review_mode(session),
             "total_images": len(source_images),
             "images": source_images,
@@ -5808,65 +5813,62 @@ class TranslatorEngine:
                     session,
                     str(command.get("region_id") or "").strip(),
                 )
-        previous_session = copy.deepcopy(session)
-        rollback_files = {
-            path: path.read_bytes() if path.is_file() else None
-            for path in (
-                self._project_page_document_path(project_id, page_id),
-                self._project_manifest_path(project_id),
-            )
-        }
-        try:
-            return await self._apply_page_commands_once(
-                project_id=project_id,
-                session=session,
-                page_id=page_id,
-                raw_config=raw_config,
-                commands=commands,
-                expected_revision=expected_revision,
-            )
-        except BaseException:
-            session.clear()
-            session.update(previous_session)
-            for path, previous_contents in rollback_files.items():
-                try:
-                    if previous_contents is None:
-                        path.unlink(missing_ok=True)
-                        continue
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    fd, temporary_path = tempfile.mkstemp(
-                        prefix=f".{path.name}.",
-                        suffix=".rollback",
-                        dir=str(path.parent),
-                    )
-                    try:
-                        with os.fdopen(fd, "wb") as handle:
-                            handle.write(previous_contents)
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                        os.replace(temporary_path, path)
-                    finally:
-                        with contextlib.suppress(FileNotFoundError):
-                            os.remove(temporary_path)
-                except OSError:
-                    logger.exception(
-                        "Failed to restore page-command persistence file. project=%s page=%s path=%s",
-                        project_id,
-                        page_id,
-                        path,
-                    )
+        base = self.project_workspace.read_command_base(project_id, page_id)
+        if expected_revision is not None:
             try:
-                self.project_workspace.garbage_collect_snapshot_blobs(
-                    project_id,
+                normalized_expected_revision = int(expected_revision)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("页面版本无效，请刷新后重试。") from exc
+            if normalized_expected_revision != base.page_revision:
+                raise PageDocumentRevisionConflict(
+                    expected_revision=normalized_expected_revision,
+                    actual_revision=base.page_revision,
+                    document=base.page_document,
                 )
-                self.project_workspace.rebuild_project_index()
-            except Exception:
-                logger.exception(
-                    "Failed to rebuild project persistence after page-command rollback. project=%s page=%s",
-                    project_id,
-                    page_id,
-                )
-            raise
+
+        from workflow_events import ProjectCommand
+
+        command = ProjectCommand(
+            project_id=project_id,
+            action="page-edit",
+            config=dict(raw_config or {}),
+            target_stored_name=page_id,
+            expected_page_revision=base.page_revision,
+            page_commands=tuple(commands or ()),
+        )
+        with self.project_workspace.materialize_page_working_set(
+            base,
+            legacy_project=session,
+        ) as working_set:
+            prepared = await self.prepare_page_commands_working_set(
+                command=command,
+                working_set=working_set,
+                progress_callback=lambda _event: asyncio.sleep(0),
+            )
+            committed = self.project_workspace.commit_page_working_set(
+                working_set,
+                prepared,
+            )
+        committed_state = self.project_workspace.read_project_state_from_head(
+            project_id,
+            committed.head,
+        )
+        committed_session = ProjectState.load(
+            committed_state,
+            expected_project_id=project_id,
+        ).to_runtime_session()
+        session.clear()
+        session.update(committed_session)
+        return {
+            **prepared.execution_extras,
+            "session_id": project_id,
+            "warnings": [
+                *committed.warnings,
+                *list(prepared.execution_extras.get("warnings") or []),
+            ],
+            "project_head_generation": int(committed.head["generation"]),
+            "project_head_revision_id": str(committed.head["revision_id"]),
+        }
 
     async def _apply_page_commands_once(
         self,
@@ -5876,6 +5878,9 @@ class TranslatorEngine:
         raw_config: dict[str, Any] | None,
         commands: list[dict[str, Any]],
         expected_revision: int | None = None,
+        *,
+        persist: bool = True,
+        previous_document: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(commands, list) or not commands:
             raise ValueError("至少需要一条页面命令。")
@@ -5896,7 +5901,11 @@ class TranslatorEngine:
                 normalized_expected_revision = int(expected_revision)
             except (TypeError, ValueError) as exc:
                 raise ValueError("页面版本无效，请刷新后重试。") from exc
-            current_document = self.get_page_document(project_id, session, page_id)
+            current_document = (
+                copy.deepcopy(previous_document)
+                if isinstance(previous_document, dict)
+                else self.get_page_document(project_id, session, page_id)
+            )
             actual_revision = int((current_document.get("metadata") or {}).get("revision") or 0)
             if normalized_expected_revision != actual_revision:
                 raise PageDocumentRevisionConflict(
@@ -6203,15 +6212,30 @@ class TranslatorEngine:
                 f"{page_id} 删除手动补漏框",
             ),
         }.get(snapshot_hints[-1] if snapshot_hints else "")
-        self.persist_project_state(
-            project_id,
-            session,
-            snapshot_kind=snapshot_metadata[0] if snapshot_metadata else None,
-            snapshot_summary=snapshot_metadata[1] if snapshot_metadata else "",
-            persist_page_documents=True,
-            page_ids=[page_id],
-        )
-        document = self.get_page_document(project_id, session, page_id)
+        if persist:
+            self.persist_project_state(
+                project_id,
+                session,
+                snapshot_kind=snapshot_metadata[0] if snapshot_metadata else None,
+                snapshot_summary=snapshot_metadata[1] if snapshot_metadata else "",
+                persist_page_documents=True,
+                page_ids=[page_id],
+            )
+            document = self.get_page_document(project_id, session, page_id)
+        else:
+            prepared_documents = self._build_page_documents(
+                project_id,
+                session,
+                page_ids=[page_id],
+                previous_page_documents=(
+                    {page_id: previous_document}
+                    if isinstance(previous_document, dict)
+                    else None
+                ),
+            )
+            document = prepared_documents.get(page_id)
+            if not isinstance(document, dict):
+                raise RuntimeError("页面命令未能准备有效的 Page Document。")
         page_name = self._page_display_name(session, page_id)
         page_artifact = self._project_artifact_state(
             project_id,
@@ -7060,6 +7084,130 @@ class TranslatorEngine:
                 runtime_session,
                 kind=snapshot_kind,
                 summary=snapshot_summary,
+            ),
+        )
+
+    async def prepare_page_commands_working_set(
+        self,
+        *,
+        command: ProjectCommandPreparationInput,
+        working_set: PageWorkingSet,
+        progress_callback: ProgressCallback,
+    ) -> PreparedHeadUpdate:
+        del progress_callback
+        base = working_set.base
+        if base.head is None:
+            if working_set.legacy_runtime_session is None:
+                raise InvalidProjectStateError(
+                    "旧项目缺少可迁移的运行状态，无法执行 Page Command。"
+                )
+            session = copy.deepcopy(working_set.legacy_runtime_session)
+        else:
+            session = ProjectState.load(
+                base.state_document,
+                expected_project_id=base.project_id,
+            ).to_runtime_session()
+        session["source_dir"] = str(working_set.source_dir)
+        session["translated_dir"] = str(working_set.translated_dir)
+        session["rerender_cache_dir"] = str(working_set.cache_dir)
+        session["mask_debug_dir"] = str(working_set.root / "mask-debug")
+
+        result = await self._apply_page_commands_once(
+            project_id=base.project_id,
+            session=session,
+            page_id=base.page_id,
+            raw_config=dict(command.config),
+            commands=[dict(page_command) for page_command in command.page_commands],
+            expected_revision=command.expected_page_revision,
+            persist=False,
+            previous_document=base.page_document,
+        )
+        document = result.get("document")
+        if not isinstance(document, dict):
+            raise RuntimeError("页面命令未能准备有效的 Page Document。")
+
+        runtime_session = copy.deepcopy(session)
+        for field_name in (
+            "source_dir",
+            "translated_dir",
+            "rerender_cache_dir",
+            "mask_debug_dir",
+        ):
+            runtime_session[field_name] = str(
+                base.state_document.get(field_name) or ""
+            )
+        runtime_session["download_path"] = str(
+            base.state_document.get("download_path") or ""
+        )
+        state_document = self._serialize_session_state(
+            base.project_id,
+            runtime_session,
+        )
+        project_summary = self._build_project_summary(
+            base.project_id,
+            runtime_session,
+        )
+        project_summary["region_count"] = sum(
+            len(document.get("regions") or [])
+            if page_id == base.page_id
+            else self._page_document_region_count(base.project_id, page_id)
+            for page_id in (
+                str(image.get("stored_name") or "").strip()
+                for image in runtime_session.get("source_images") or []
+                if isinstance(image, dict)
+            )
+            if page_id
+        )
+        project_manifest = {
+            **project_summary,
+            "source_dir": str(runtime_session.get("source_dir") or ""),
+            "translated_dir": str(runtime_session.get("translated_dir") or ""),
+        }
+        artifact_files = self._project_head_artifact_files(
+            base.project_id,
+            session,
+            page_ids=[base.page_id],
+            bootstrap=base.head is None,
+        )
+        snapshot_metadata = {
+            "manual_region_added": (
+                "manual_region_added",
+                f"{base.page_id} 新增手动补漏框",
+            ),
+            "manual_region_duplicated": (
+                "manual_region_duplicated",
+                f"{base.page_id} 复制文本框",
+            ),
+            "regions_merged": (
+                "regions_merged",
+                f"{base.page_id} 合并文本框",
+            ),
+            "manual_region_deleted": (
+                "manual_region_deleted",
+                f"{base.page_id} 删除手动补漏框",
+            ),
+        }.get(str(result.get("snapshot_hint") or ""))
+        return PreparedHeadUpdate(
+            state_document=state_document,
+            project_manifest=project_manifest,
+            page_documents={base.page_id: document},
+            artifact_files=artifact_files,
+            replace_prefixes=(
+                f"cache/{base.page_id}/",
+                f"pages/{base.page_id}/",
+            ),
+            remove_logical_paths=set(),
+            runtime_session=runtime_session,
+            execution_extras=dict(result),
+            snapshot_document=(
+                self._project_snapshot_document(
+                    base.project_id,
+                    runtime_session,
+                    kind=snapshot_metadata[0],
+                    summary=snapshot_metadata[1],
+                )
+                if snapshot_metadata
+                else None
             ),
         )
 
@@ -8660,6 +8808,72 @@ class TranslatorEngine:
                 "translation_region_skip_overrides": dict(session.get("translation_region_skip_overrides") or {}),
                 "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
                 "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
+            },
+        }
+
+    async def inspect_page_regions(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        target_stored_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the editor's single Page Document projection in one pass."""
+        config = self._normalize_config(raw_config)
+        pages: list[dict[str, Any]] = []
+        target = str(target_stored_name or "").strip()
+
+        for image in session["source_images"]:
+            if target and str(image.get("stored_name") or "") != target:
+                continue
+            try:
+                page_document = self._get_inspection_page_document(
+                    session_id,
+                    session,
+                    image["stored_name"],
+                    config,
+                )
+            except Exception as exc:
+                print(
+                    "[WARN] Failed to build unified inspection page for "
+                    f"{session_id}/{image['stored_name']}: {exc}"
+                )
+                continue
+            pages.append(
+                self._page_document_to_translation_page(
+                    page_document,
+                    str(image.get("name") or image["stored_name"]),
+                )
+            )
+
+        project_head = self.project_workspace.read_project_head(session_id)
+        return {
+            "session_id": session_id,
+            "styles": list(self.STYLE_BUCKETS),
+            "pages": pages,
+            "workflow_stage": self._session_workflow_stage(session),
+            "project_head_generation": int(
+                (project_head or {}).get("generation") or 0
+            ),
+            "project_head_revision_id": str(
+                (project_head or {}).get("revision_id") or ""
+            ),
+            "overrides": {
+                "translation_region_overrides": dict(
+                    session.get("translation_region_overrides") or {}
+                ),
+                "translation_region_skip_overrides": dict(
+                    session.get("translation_region_skip_overrides") or {}
+                ),
+                "translation_region_disabled_overrides": dict(
+                    session.get("translation_region_disabled_overrides") or {}
+                ),
+                "translation_region_layout_overrides": dict(
+                    session.get("translation_region_layout_overrides") or {}
+                ),
+                "style_region_overrides": dict(
+                    session.get("style_region_overrides") or {}
+                ),
             },
         }
 

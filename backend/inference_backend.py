@@ -138,6 +138,7 @@ class InferenceBackend(Protocol):
 ProcessFactory = Callable[..., Awaitable[Any]]
 RuntimePreparer = Callable[[InferenceRequest], bool | None | Awaitable[bool | None]]
 logger = logging.getLogger("manga_translator.inference")
+_VENDOR_TRANSLATION_RUNTIME_LOCK = threading.Lock()
 
 
 class UpstreamInferenceBackend:
@@ -665,33 +666,57 @@ class UpstreamInferenceBackend:
         environment: Mapping[str, str],
     ) -> tuple[str, ...]:
         """Run the fixed upstream translation dispatcher without exposing its modules."""
-        self._ensure_vendor_import_path()
-        self._reload_vendor_translator_modules()
-        from manga_translator.config import Translator, TranslatorConfig
-        from manga_translator.translators import dispatch as dispatch_translation
-        from manga_translator.translators import unload as unload_translator
+        async with self._serialized_vendor_translation_runtime():
+            with self._temporary_environment(environment):
+                self._ensure_vendor_import_path()
+                self._reload_vendor_translator_modules()
+                from manga_translator.config import Translator, TranslatorConfig
+                from manga_translator.translators import dispatch as dispatch_translation
+                from manga_translator.translators import unload as unload_translator
 
-        translator_key = Translator[translator_name]
-        translator_config = TranslatorConfig(
-            translator=translator_key,
-            target_lang=target_lang,
-        )
-        with self._temporary_environment(environment):
-            with contextlib.suppress(Exception):
-                await unload_translator(translator_key)
-            try:
-                translated = await dispatch_translation(
-                    translator_config.translator_gen,
-                    texts,
-                    translator_config=translator_config,
-                    use_mtpe=False,
-                    args=None,
-                    device=device,
+                translator_key = Translator[translator_name]
+                translator_config = TranslatorConfig(
+                    translator=translator_key,
+                    target_lang=target_lang,
                 )
-            finally:
                 with contextlib.suppress(Exception):
                     await unload_translator(translator_key)
+                try:
+                    translated = await dispatch_translation(
+                        translator_config.translator_gen,
+                        texts,
+                        translator_config=translator_config,
+                        use_mtpe=False,
+                        args=None,
+                        device=device,
+                    )
+                finally:
+                    with contextlib.suppress(Exception):
+                        await unload_translator(translator_key)
         return tuple(str(item or "").strip() for item in (translated or ()))
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def _serialized_vendor_translation_runtime():
+        acquired = False
+        while not acquired:
+            acquire_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _VENDOR_TRANSLATION_RUNTIME_LOCK.acquire,
+                    True,
+                    0.1,
+                )
+            )
+            try:
+                acquired = await asyncio.shield(acquire_task)
+            except asyncio.CancelledError:
+                if await acquire_task:
+                    _VENDOR_TRANSLATION_RUNTIME_LOCK.release()
+                raise
+        try:
+            yield
+        finally:
+            _VENDOR_TRANSLATION_RUNTIME_LOCK.release()
 
     def create_text_region(self, **attributes: Any) -> Any:
         """Restore the fixed upstream region object from domain attributes."""
@@ -709,7 +734,9 @@ class UpstreamInferenceBackend:
         self._ensure_vendor_import_path()
         importlib.invalidate_caches()
         for module_name in (
+            "manga_translator.translators.keys",
             "manga_translator.translators.custom_openai",
+            "manga_translator.translators.gemini",
             "manga_translator.translators",
         ):
             module = sys.modules.get(module_name)

@@ -1,7 +1,12 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path'
+import { basename, dirname, extname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  stageBackendRuntimeImage,
+  validateBackendRuntimeImage,
+} from './runtime-image.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const desktopDir = resolve(__dirname, '..')
@@ -30,45 +35,9 @@ const ignoredNames = new Set([
 
 const ignoredExtensions = new Set(['.pyc', '.pyo'])
 
-const backendFiles = [
-  'bootstrap_command.py',
-  'desktop_server.py',
-  'diagnostics_bundle.py',
-  'http_requests.py',
-  'install_deps.py',
-  'logging_config.py',
-  'main.py',
-  'patch_pydensecrf.py',
-  'patched_custom_openai.py',
-  'patched_inpainting_init.py',
-  'patched_manga_translator_init.py',
-  'patched_rendering_init.py',
-  'patched_rerender_cache.py',
-  'patched_text_mask_utils.py',
-  'patched_text_render.py',
-  'patched_utils_init.py',
-  'requirements-upstream.txt',
-  'requirements.txt',
-  'runtime_bootstrap.py',
-  'runtime_paths.py',
-  'system_fonts.py',
-  'upstream.json',
-]
-
-const backendDirs = ['engine', 'utils']
-const upstreamFiles = ['LICENSE']
-const upstreamDirs = ['dict', 'manga_translator']
-
 function ensureCleanDirectory(path) {
   rmSync(path, { recursive: true, force: true })
   mkdirSync(path, { recursive: true })
-}
-
-function assertInside(root, target) {
-  const rel = relative(root, target)
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
-    throw new Error(`Refusing to stage path outside ${root}: ${target}`)
-  }
 }
 
 function requirePath(path, label) {
@@ -114,6 +83,18 @@ function detectPythonRuntimeDir() {
   )
 }
 
+function detectPythonRuntimeExecutable(runtimeDir) {
+  const candidates = process.platform === 'win32'
+    ? [resolve(runtimeDir, 'Scripts', 'python.exe')]
+    : [resolve(runtimeDir, 'bin', 'python'), resolve(runtimeDir, 'bin', 'python3')]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  }
+  throw new Error(`Python runtime 缺少可执行文件: ${runtimeDir}`)
+}
+
 function readPinnedUpstreamCommit() {
   const data = JSON.parse(readFileSync(resolve(backendDir, 'upstream.json'), 'utf8'))
   return data.manga_image_translator.commit
@@ -148,40 +129,7 @@ function validatePreparedUpstream() {
 
 function copyBackendSource() {
   const targetBackend = resolve(stagingRoot, 'backend-source')
-  mkdirSync(targetBackend, { recursive: true })
-
-  for (const file of backendFiles) {
-    const source = resolve(backendDir, file)
-    const target = resolve(targetBackend, file)
-    assertInside(backendDir, source)
-    requirePath(source, `backend file ${file}`)
-    copyPath(source, target)
-  }
-
-  for (const dir of backendDirs) {
-    const source = resolve(backendDir, dir)
-    const target = resolve(targetBackend, dir)
-    assertInside(backendDir, source)
-    requirePath(source, `backend directory ${dir}`)
-    copyPath(source, target)
-  }
-
-  const targetUpstream = resolve(targetBackend, 'manga-image-translator')
-  mkdirSync(targetUpstream, { recursive: true })
-
-  for (const file of upstreamFiles) {
-    const source = resolve(upstreamDir, file)
-    if (existsSync(source)) {
-      copyPath(source, resolve(targetUpstream, file))
-    }
-  }
-
-  for (const dir of upstreamDirs) {
-    const source = resolve(upstreamDir, dir)
-    const target = resolve(targetUpstream, dir)
-    requirePath(source, `upstream directory ${dir}`)
-    copyPath(source, target)
-  }
+  return stageBackendRuntimeImage({ backendDir, targetDir: targetBackend })
 }
 
 function copyBundledFonts() {
@@ -201,7 +149,11 @@ function main() {
   ensureCleanDirectory(stagingRoot)
 
   copyPath(frontendDist, resolve(stagingRoot, 'frontend-dist'))
-  copyBackendSource()
+  const targetBackend = copyBackendSource()
+  validateBackendRuntimeImage({
+    pythonExecutable: detectPythonRuntimeExecutable(runtimeDir),
+    targetDir: targetBackend,
+  })
   copyBundledFonts()
   copyPath(runtimeDir, resolve(stagingRoot, 'python-runtime'))
 

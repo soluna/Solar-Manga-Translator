@@ -15,6 +15,8 @@
     "test:erase-workflow": "node scripts/test-erase-workflow.mjs",
     "test:font-preview": "node scripts/test-font-preview.mjs",
     "test:local-port": "node scripts/test-local-port.mjs",
+    "test:page-command-state": "node scripts/test-page-command-state.mjs",
+    "test:project-revision-state": "node scripts/test-project-revision-state.mjs",
     "test:project-artifact-state": "node scripts/test-project-artifact-state.mjs",
     "test:region-typography": "node scripts/test-region-typography.mjs",
     "test:review-interaction": "node scripts/test-v2-workspace-e2e.mjs --interaction-redesign-only",

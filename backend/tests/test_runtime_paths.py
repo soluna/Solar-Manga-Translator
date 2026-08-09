@@ -62,6 +62,8 @@ class RuntimePathsTests(unittest.TestCase):
 
             self.assertEqual(paths.app_data_dir, (project_root / ".runtime").resolve())
             self.assertEqual(paths.models_dir, (project_root / ".runtime" / "models").resolve())
+            self.assertEqual(paths.tasks_dir, (project_root / ".runtime" / "tasks").resolve())
+            self.assertTrue(paths.tasks_dir.is_dir())
             self.assertTrue(paths.projects_dir.is_dir())
 
     def test_app_data_environment_override_is_preserved(self) -> None:

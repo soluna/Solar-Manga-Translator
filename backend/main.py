@@ -134,7 +134,7 @@ inference_backend, translation_provider, translator_engine = assemble_workflow_e
     APP_PATHS,
 )
 logger = logging.getLogger("manga_translator.api")
-task_manager = TaskManager(logger=logger)
+task_manager = TaskManager(logger=logger, storage_dir=APP_PATHS.tasks_dir)
 
 allowed_hosts = [
     host.strip()
@@ -1100,6 +1100,44 @@ async def inspect_review_regions(session_id: str, payload: dict[str, Any] | None
     return decorate_project_busy_state(session_id, result)
 
 
+@app.post("/api/page-regions/{session_id}")
+async def inspect_page_regions(session_id: str, payload: dict[str, Any] | None = None):
+    session = get_or_restore_session(session_id)
+    payload = payload or {}
+
+    with project_write_lease(session_id, "page-inspection"):
+        result = await translator_engine.inspect_page_regions(
+            session_id=session_id,
+            session=session,
+            raw_config=payload.get("config", {}),
+            target_stored_name=str(
+                payload.get("target_stored_name") or ""
+            ).strip()
+            or None,
+        )
+    return decorate_project_busy_state(session_id, result)
+
+
+async def execute_page_edit(
+    project_id: str,
+    page_id: str,
+    *,
+    config: dict[str, Any] | None,
+    commands: list[dict[str, Any]],
+    expected_page_revision: int | None = None,
+) -> dict[str, Any]:
+    return await workflow_coordinator.execute(
+        ProjectCommand(
+            project_id=project_id,
+            action="page-edit",
+            config=dict(config or {}),
+            target_stored_name=page_id,
+            expected_page_revision=expected_page_revision,
+            page_commands=tuple(commands),
+        )
+    )
+
+
 @app.post("/api/manual-regions/{session_id}")
 async def update_manual_regions(session_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(session_id)
@@ -1112,12 +1150,17 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             region_id = str(payload.get("region_id") or "").strip()
             if not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要删除的补漏框 ID。")
+            stored_name = str(payload.get("stored_name") or "").strip()
+            if not stored_name:
+                stored_name = translator_engine._manual_region_page_id(
+                    session,
+                    region_id,
+                )
             with project_write_lease(session_id, "page-edit"):
-                result = await translator_engine.apply_page_commands(
-                    project_id=session_id,
-                    session=session,
-                    page_id=str(payload.get("stored_name") or "").strip(),
-                    raw_config=payload.get("config", {}),
+                result = await execute_page_edit(
+                    session_id,
+                    stored_name,
+                    config=payload.get("config", {}),
                     commands=[{"type": "delete_manual_region", "region_id": region_id}],
                 )
             return {
@@ -1135,11 +1178,10 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             if not isinstance(region_ids, list) or len(region_ids) < 2:
                 raise HTTPException(status_code=400, detail="至少需要选择两个文本框才能合并。")
             with project_write_lease(session_id, "page-edit"):
-                result = await translator_engine.apply_page_commands(
-                    project_id=session_id,
-                    session=session,
-                    page_id=stored_name,
-                    raw_config=payload.get("config", {}),
+                result = await execute_page_edit(
+                    session_id,
+                    stored_name,
+                    config=payload.get("config", {}),
                     commands=[{"type": "merge_regions", "region_ids": region_ids}],
                 )
             return {
@@ -1155,11 +1197,10 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             if not stored_name or not region_id:
                 raise HTTPException(status_code=400, detail="缺少需要识别的页面或手动框信息。")
             with project_write_lease(session_id, "page-edit"):
-                result = await translator_engine.apply_page_commands(
-                    project_id=session_id,
-                    session=session,
-                    page_id=stored_name,
-                    raw_config=payload.get("config", {}),
+                result = await execute_page_edit(
+                    session_id,
+                    stored_name,
+                    config=payload.get("config", {}),
                     commands=[{"type": "recognize_manual_region", "region_id": region_id}],
                 )
             region = result["recognized_region_payload"]
@@ -1181,11 +1222,10 @@ async def update_manual_regions(session_id: str, payload: dict[str, Any] | None 
             raise HTTPException(status_code=400, detail="缺少目标页面信息。")
 
         with project_write_lease(session_id, "page-edit"):
-            result = await translator_engine.apply_page_commands(
-                project_id=session_id,
-                session=session,
-                page_id=stored_name,
-                raw_config=payload.get("config", {}),
+            result = await execute_page_edit(
+                session_id,
+                stored_name,
+                config=payload.get("config", {}),
                 commands=[{"type": "create_region", "bbox": payload.get("bbox")}],
             )
         return {
@@ -1328,18 +1368,17 @@ async def get_project_translation_request_debug(project_id: str):
 
 @app.post("/api/pages/{session_id}/{page_id}/commands")
 async def apply_page_commands(session_id: str, page_id: str, payload: dict[str, Any] | None = None):
-    session = get_or_restore_session(session_id)
+    _ = get_or_restore_session(session_id)
     payload = payload or {}
 
     try:
         with project_write_lease(session_id, "page-edit"):
-            result = await translator_engine.apply_page_commands(
-                project_id=session_id,
-                session=session,
-                page_id=page_id,
-                raw_config=payload.get("config", {}),
-                commands=payload.get("commands") or [],
-                expected_revision=payload.get("expected_revision"),
+            result = await execute_page_edit(
+                session_id,
+                page_id,
+                config=payload.get("config", {}),
+                commands=list(payload.get("commands") or ()),
+                expected_page_revision=project_command_page_revision(payload),
             )
     except PageDocumentRevisionConflict as exc:
         raise HTTPException(

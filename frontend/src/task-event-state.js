@@ -145,6 +145,10 @@ function deriveTaskStatusMessage(payload, {
     return '任务已停止。'
   }
 
+  if (eventName === 'interrupted') {
+    return '后端重启，之前的任务已中断。'
+  }
+
   if (eventName === 'error') {
     return getTaskFailureStatus(activeAction)
   }

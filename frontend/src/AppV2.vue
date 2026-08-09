@@ -8,6 +8,7 @@ import {
 } from './config-persistence.js'
 import { sanitizeSfntFontForBrowser } from './font-preview.js'
 import { usePageCommandState } from './composables/usePageCommandState.js'
+import { useProjectRevisionState } from './composables/useProjectRevisionState.js'
 import { useTranslationTaskConnection } from './composables/useTranslationTaskConnection.js'
 import {
   mergePageArtifact,
@@ -748,6 +749,12 @@ const savingProjectMeta = ref(false)
 const activeAction = ref('translate')
 const renderNonce = ref(Date.now())
 const sessionId = ref('')
+const {
+  isPayloadForActiveProject,
+  shouldApplyProjectPayload,
+  recordProjectRevision,
+  resetProjectRevision,
+} = useProjectRevisionState()
 const originalImages = ref([])
 const translatedImages = ref([])
 const errorMessage = ref('')
@@ -765,8 +772,8 @@ const fontLibraryRefreshing = ref(false)
 const fontLibraryMessage = ref('')
 const fontLibraryRevision = ref(0)
 const previewFontLoadState = ref({})
-const reviewInspectionPages = ref([])
-const reviewInspectionLoading = ref(false)
+const inspectionPages = ref([])
+const editInspectionLoading = ref(false)
 const translationRegionOverrides = ref({})
 const translationRegionSkipOverrides = ref({})
 const translationRegionDisabledOverrides = ref({})
@@ -774,8 +781,6 @@ const translationRegionLayoutOverrides = ref({})
 const translationInputDrafts = ref({})
 const fontSizeInputDrafts = ref({})
 const fontSizeDraftOriginOverrides = ref({})
-const styleInspectionPages = ref([])
-const styleInspectionLoading = ref(false)
 const styleRegionOverrides = ref({})
 const pageEditHistory = ref({})
 const pageCommandRevisions = ref({})
@@ -893,14 +898,12 @@ let pendingCanvasNudge = null
 let canvasNudgeCommitTimer = null
 let suppressCanvasRegionClickUntil = 0
 let topbarTaskProgressTimer = null
-let reviewInspectionRequestToken = 0
-let styleInspectionRequestToken = 0
+let inspectionRequestToken = 0
 let previewFontWarmRequestToken = 0
 let autoFitCanvasPageIds = new Set()
 let brushEditBaseImage = null
 let brushEditSourceImage = null
 let brushEditActiveStroke = null
-const pageCommandExecutionQueue = new Map()
 const preloadedImageUrls = new Set()
 const imageLoadPromises = new Map()
 const sanitizedPreviewFontFaces = new Map()
@@ -942,8 +945,8 @@ const {
   pageCommandPendingCounts,
   regionCommitStates,
   hasPendingPageCommands,
-  setPageCommandPending,
   isPageCommandPending,
+  executePageCommand,
   getCommandRegionIds,
   setRegionCommitState,
   clearRegionCommitState,
@@ -1105,7 +1108,6 @@ const hasTranslationOverrides = computed(
     || Object.keys(translationRegionLayoutOverrides.value).length > 0
 )
 const hasStyleOverrides = computed(() => Object.keys(styleRegionOverrides.value).length > 0)
-const editInspectionLoading = computed(() => reviewInspectionLoading.value || styleInspectionLoading.value)
 const isAdjustingRegionBBox = computed(() => Boolean(adjustingRegionId.value))
 const canvasInteractionLockReason = computed(() => {
   if (!isCanvasReviewMode.value) {
@@ -1186,79 +1188,13 @@ const latestTranslatedImageUrlByPage = computed(() => {
   return mapping
 })
 const mergedInspectionPages = computed(() => {
-  const pageOrder = []
-  const pageMap = new Map()
-
-  const ensurePage = (page) => {
-    if (!page) {
-      return null
-    }
-
-    if (!pageMap.has(page.stored_name)) {
-      pageOrder.push(page.stored_name)
-      pageMap.set(page.stored_name, {
-        stored_name: page.stored_name,
-        name: page.name,
-        image_url: page.image_url,
-        source_image_url: page.source_image_url || '',
-        base_image_url: page.base_image_url || page.source_image_url || page.image_url,
-        translated_image_url: page.translated_image_url || page.image_url,
-        image_width: page.image_width,
-        image_height: page.image_height,
-        regions: new Map()
-      })
-    }
-
-    return pageMap.get(page.stored_name)
-  }
-
-  for (const page of reviewInspectionPages.value) {
-    const mergedPage = ensurePage(page)
-    for (const region of page.regions || []) {
-      mergedPage.regions.set(region.id, {
-        ...region
-      })
-    }
-  }
-
-  for (const page of styleInspectionPages.value) {
-    const mergedPage = ensurePage(page)
-    if (!mergedPage.image_url) {
-      mergedPage.image_url = page.image_url
-    }
-    if (!mergedPage.source_image_url && page.source_image_url) {
-      mergedPage.source_image_url = page.source_image_url
-    }
-    if (!mergedPage.base_image_url && page.base_image_url) {
-      mergedPage.base_image_url = page.base_image_url
-    }
-    if (!mergedPage.translated_image_url && page.translated_image_url) {
-      mergedPage.translated_image_url = page.translated_image_url
-    }
-    for (const region of page.regions || []) {
-      const existing = mergedPage.regions.get(region.id) || { id: region.id, index: region.index, bbox: region.bbox }
-      mergedPage.regions.set(region.id, {
-        ...existing,
-        ...region
-      })
-    }
-  }
-
-  for (const storedName of pageOrder) {
-    const mergedPage = pageMap.get(storedName)
-    const latestTranslatedUrl = latestTranslatedImageUrlByPage.value[storedName] || ''
-    if (!mergedPage || !latestTranslatedUrl) {
-      continue
-    }
-    mergedPage.image_url = latestTranslatedUrl
-    mergedPage.translated_image_url = latestTranslatedUrl
-  }
-
-  return pageOrder.map((storedName) => {
-    const page = pageMap.get(storedName)
+  return inspectionPages.value.map((page) => {
+    const latestTranslatedUrl = latestTranslatedImageUrlByPage.value[page.stored_name] || ''
     return {
       ...page,
-      regions: Array.from(page.regions.values()).sort((left, right) => left.index - right.index)
+      image_url: latestTranslatedUrl || page.image_url,
+      translated_image_url: latestTranslatedUrl || page.translated_image_url,
+      regions: [...(page.regions || [])].sort((left, right) => left.index - right.index),
     }
   })
 })
@@ -3123,14 +3059,12 @@ async function recoverCompletedTranslationIfIdle(context = {}, token = translati
 }
 
 function resetStyleInspector() {
-  styleInspectionPages.value = []
-  styleInspectionLoading.value = false
   styleRegionOverrides.value = {}
 }
 
 function resetTranslationReview() {
-  reviewInspectionPages.value = []
-  reviewInspectionLoading.value = false
+  inspectionPages.value = []
+  editInspectionLoading.value = false
   translationRegionOverrides.value = {}
   translationRegionSkipOverrides.value = {}
   translationRegionDisabledOverrides.value = {}
@@ -3424,6 +3358,17 @@ function applySessionPayload(payload, options = {}) {
   const resetInspectors = Boolean(options.resetInspectors)
   const nextSessionId = payload?.session_id || ''
   const sessionChanged = String(nextSessionId || '') !== String(sessionId.value || '')
+  if (
+    (!options.allowProjectSwitch && !isPayloadForActiveProject(payload, sessionId.value))
+    || !shouldApplyProjectPayload(payload, sessionId.value)
+  ) {
+    return false
+  }
+  if (sessionChanged) {
+    invalidateInspectionRequests()
+    resetProjectRevision()
+  }
+  recordProjectRevision(payload)
   const resetEditingState = options.resetEditingState ?? (sessionChanged || resetInspectors)
   const forceRegionIds = Array.isArray(options.forceRegionIds)
     ? options.forceRegionIds.map((regionId) => String(regionId || '').trim()).filter(Boolean)
@@ -3517,6 +3462,7 @@ function applySessionPayload(payload, options = {}) {
       styleRegionOverrides.value = { ...(overrides.style_region_overrides || {}) }
     }
   }
+  return true
 }
 
 async function loadProjectHistory(options = {}) {
@@ -3605,7 +3551,7 @@ async function restoreProject(projectId) {
     if (!response.ok) {
       throw new Error(payload.detail || '恢复历史项目失败')
     }
-    applySessionPayload(payload, { resetInspectors: true })
+    applySessionPayload(payload, { resetInspectors: true, allowProjectSwitch: true })
     await loadProjectHistory({ silent: true })
     const taskResumed = await resumeProjectTaskSubscription(projectId)
     status.value = taskResumed
@@ -3638,7 +3584,7 @@ async function restoreSnapshot(projectId, snapshotId) {
     if (!response.ok) {
       throw new Error(payload.detail || '恢复历史快照失败')
     }
-    applySessionPayload(payload, { resetInspectors: true })
+    applySessionPayload(payload, { resetInspectors: true, allowProjectSwitch: true })
     await loadProjectHistory({ silent: true })
     status.value = `已从历史快照恢复项目「${currentProject.value?.title || payload.session_id}」，可以继续编辑。`
   } catch (error) {
@@ -3708,6 +3654,7 @@ async function deleteProject(project) {
     if (sessionId.value === project.project_id) {
       closeSocket()
       sessionId.value = ''
+      resetProjectRevision()
       originalImages.value = []
       translatedImages.value = []
       downloadUrl.value = ''
@@ -4840,6 +4787,12 @@ function applyInspectionOverrides(overrides, options = {}) {
 }
 
 function applyPageCommandPayload(payload) {
+  if (
+    !isPayloadForActiveProject(payload, sessionId.value)
+    || !recordProjectRevision(payload)
+  ) {
+    return false
+  }
   recordPageCommandRevision(payload)
   if (Number(payload?.artifact_schema_version) > 0) {
     artifactSchemaVersion.value = Number(payload.artifact_schema_version)
@@ -4847,11 +4800,9 @@ function applyPageCommandPayload(payload) {
   if (payload?.page_artifact) {
     pageArtifacts.value = mergePageArtifact(pageArtifacts.value, payload.page_artifact)
   }
-  if (payload?.translation_page) {
-    reviewInspectionPages.value = replaceInspectionPage(reviewInspectionPages.value, payload.translation_page)
-  }
-  if (payload?.style_page) {
-    styleInspectionPages.value = replaceInspectionPage(styleInspectionPages.value, payload.style_page)
+  const nextInspectionPage = payload?.translation_page || payload?.style_page
+  if (nextInspectionPage) {
+    inspectionPages.value = replaceInspectionPage(inspectionPages.value, nextInspectionPage)
   }
   const forceRegionIds = [
     ...(payload?.updated_region_ids || []),
@@ -4863,30 +4814,11 @@ function applyPageCommandPayload(payload) {
   fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
   fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
   syncEditSelection()
-}
-
-function queuePageCommandExecution(pageId, executor) {
-  const normalizedPageId = String(pageId || '').trim()
-  if (!normalizedPageId) {
-    return Promise.resolve(null)
-  }
-  const previous = pageCommandExecutionQueue.get(normalizedPageId) || Promise.resolve()
-  let trackedPromise = null
-  trackedPromise = previous
-    .catch(() => {})
-    .then(executor)
-    .finally(() => {
-      if (pageCommandExecutionQueue.get(normalizedPageId) === trackedPromise) {
-        pageCommandExecutionQueue.delete(normalizedPageId)
-      }
-    })
-  pageCommandExecutionQueue.set(normalizedPageId, trackedPromise)
-  return trackedPromise
+  return true
 }
 
 function invalidateInspectionRequests() {
-  reviewInspectionRequestToken += 1
-  styleInspectionRequestToken += 1
+  inspectionRequestToken += 1
 }
 
 function pushCanvasHistory(pageId, entry) {
@@ -6058,10 +5990,7 @@ function isInspectionPageLoaded(pageId) {
   if (!normalizedPageId) {
     return false
   }
-  const hasReviewPage = reviewInspectionPages.value.some((page) => page?.stored_name === normalizedPageId)
-  const hasStylePage = config.value.font_style_mode !== 'auto-map'
-    || styleInspectionPages.value.some((page) => page?.stored_name === normalizedPageId)
-  return hasReviewPage && hasStylePage
+  return inspectionPages.value.some((page) => page?.stored_name === normalizedPageId)
 }
 
 async function selectEditPageForReview(pageKey) {
@@ -6712,9 +6641,15 @@ async function deleteManualRegion(region) {
   }
 }
 
-function applyReviewInspectionPayload(payload, options = {}) {
-  reviewInspectionPages.value = options.mergePages
-    ? mergeInspectionPages(reviewInspectionPages.value, payload.pages)
+function applyInspectionPayload(payload, options = {}) {
+  if (
+    !isPayloadForActiveProject(payload, sessionId.value)
+    || !recordProjectRevision(payload)
+  ) {
+    return false
+  }
+  inspectionPages.value = options.mergePages
+    ? mergeInspectionPages(inspectionPages.value, payload.pages)
     : (payload.pages || [])
   mergeDocumentRevisions(payload.pages || [])
   if (payload.workflow_stage) {
@@ -6725,7 +6660,7 @@ function applyReviewInspectionPayload(payload, options = {}) {
   const nextSkipOverrides = { ...(sessionOverrides.translation_region_skip_overrides || {}) }
   const nextDisabledOverrides = { ...(sessionOverrides.translation_region_disabled_overrides || {}) }
   const nextLayoutOverrides = { ...(sessionOverrides.translation_region_layout_overrides || {}) }
-  for (const page of reviewInspectionPages.value) {
+  for (const page of inspectionPages.value) {
     for (const region of page.regions || []) {
       if (region.override_translation) {
         nextOverrides[region.id] = region.override_translation
@@ -6740,18 +6675,11 @@ function applyReviewInspectionPayload(payload, options = {}) {
     translation_region_skip_overrides: nextSkipOverrides,
     translation_region_disabled_overrides: nextDisabledOverrides,
     translation_region_layout_overrides: nextLayoutOverrides,
+    style_region_overrides: {
+      ...(sessionOverrides.style_region_overrides || {}),
+    },
   }, { forceRegionIds: options.forceRegionIds || [] })
-}
-
-function applyStyleInspectionPayload(payload, options = {}) {
-  styleInspectionPages.value = options.mergePages
-    ? mergeInspectionPages(styleInspectionPages.value, payload.pages)
-    : (payload.pages || [])
-  mergeDocumentRevisions(payload.pages || [])
-  if (payload.workflow_stage) {
-    workflowStage.value = payload.workflow_stage
-  }
-  applyInspectionOverrides(payload?.overrides, { forceRegionIds: options.forceRegionIds || [] })
+  return true
 }
 
 function updatePagePreviewUrl(pages, storedName, nextImageUrl) {
@@ -6802,111 +6730,10 @@ function upsertTranslatedImage(images, payload, nextImageUrl, sessionIdValue) {
   return [...images, nextImage]
 }
 
-async function loadReviewInspection(options = {}) {
-  const silent = Boolean(options.silent)
-  const pageId = String(options.pageId || '').trim()
-  if (!sessionId.value) {
-    reviewInspectionRequestToken += 1
-    reviewInspectionPages.value = []
-    syncEditSelection()
-    return
-  }
-
-  const requestToken = ++reviewInspectionRequestToken
-  if (!silent) {
-    reviewInspectionLoading.value = true
-  }
-  try {
-    const response = await apiFetch(toApiUrl(`/api/review-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        config: buildRuntimeConfig(),
-        target_stored_name: pageId || undefined,
-      })
-    })
-
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '读取翻译审校结果失败')
-    }
-
-    if (requestToken !== reviewInspectionRequestToken) {
-      return
-    }
-    applyReviewInspectionPayload(payload, {
-      mergePages: Boolean(pageId),
-      forceRegionIds: options.forceRegionIds || [],
-    })
-    syncEditSelection()
-  } catch (error) {
-    if (requestToken !== reviewInspectionRequestToken) {
-      return
-    }
-    errorMessage.value = error instanceof Error ? error.message : '读取翻译审校结果失败'
-  } finally {
-    if (!silent && requestToken === reviewInspectionRequestToken) {
-      reviewInspectionLoading.value = false
-    }
-  }
-}
-
-async function loadStyleInspection(options = {}) {
-  const silent = Boolean(options.silent)
-  const pageId = String(options.pageId || '').trim()
-  if (!sessionId.value || config.value.font_style_mode !== 'auto-map') {
-    styleInspectionRequestToken += 1
-    styleInspectionPages.value = []
-    syncEditSelection()
-    return
-  }
-
-  const requestToken = ++styleInspectionRequestToken
-  if (!silent) {
-    styleInspectionLoading.value = true
-  }
-  try {
-    const response = await apiFetch(toApiUrl(`/api/style-regions/${sessionId.value}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        config: buildRuntimeConfig(),
-        target_stored_name: pageId || undefined,
-      })
-    })
-
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new Error(payload.detail || '读取字体样式识别结果失败')
-    }
-
-    if (requestToken !== styleInspectionRequestToken) {
-      return
-    }
-    applyStyleInspectionPayload(payload, {
-      mergePages: Boolean(pageId),
-      forceRegionIds: options.forceRegionIds || [],
-    })
-    syncEditSelection()
-  } catch (error) {
-    if (requestToken !== styleInspectionRequestToken) {
-      return
-    }
-    errorMessage.value = error instanceof Error ? error.message : '读取字体样式识别结果失败'
-  } finally {
-    if (!silent && requestToken === styleInspectionRequestToken) {
-      styleInspectionLoading.value = false
-    }
-  }
-}
-
 async function loadEditInspection(options = {}) {
   const silent = Boolean(options.silent)
   if (!sessionId.value) {
+    inspectionRequestToken += 1
     resetTranslationReview()
     resetStyleInspector()
     resetEditInspectorSelection()
@@ -6922,18 +6749,46 @@ async function loadEditInspection(options = {}) {
       || ''
     ).trim()
   const forceRegionIds = options.forceRegionIds || []
-  const tasks = [loadReviewInspection({ silent, pageId, forceRegionIds })]
-  if (config.value.font_style_mode === 'auto-map') {
-    tasks.push(loadStyleInspection({ silent, pageId, forceRegionIds }))
-  } else {
-    resetStyleInspector()
+  const requestToken = ++inspectionRequestToken
+  if (!silent) {
+    editInspectionLoading.value = true
   }
-
-  await Promise.all(tasks)
-  translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
-  fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
-  fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
-  syncEditSelection()
+  try {
+    const response = await apiFetch(toApiUrl(`/api/page-regions/${sessionId.value}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        config: buildRuntimeConfig(),
+        target_stored_name: pageId || undefined,
+      })
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      throw new Error(payload.detail || '读取页面审校数据失败')
+    }
+    if (requestToken !== inspectionRequestToken) {
+      return
+    }
+    applyInspectionPayload(payload, {
+      mergePages: Boolean(pageId),
+      forceRegionIds,
+    })
+    translationInputDrafts.value = pruneRegionDraftMap(translationInputDrafts.value, mergedInspectionPages.value)
+    fontSizeInputDrafts.value = pruneRegionDraftMap(fontSizeInputDrafts.value, mergedInspectionPages.value)
+    fontSizeDraftOriginOverrides.value = pruneRegionDraftMap(fontSizeDraftOriginOverrides.value, mergedInspectionPages.value)
+    syncEditSelection()
+  } catch (error) {
+    if (requestToken !== inspectionRequestToken) {
+      return
+    }
+    errorMessage.value = error instanceof Error ? error.message : '读取页面审校数据失败'
+  } finally {
+    if (!silent && requestToken === inspectionRequestToken) {
+      editInspectionLoading.value = false
+    }
+  }
 }
 
 async function ensureEditInspectionReadyAfterDetect() {
@@ -7229,13 +7084,13 @@ async function requestPageCommands(pageId, commands, runtimeConfig) {
 
 async function applyPageCommands(pageId, commands, options = {}) {
   const normalizedPageId = String(pageId || '').trim()
-  if (!normalizedPageId || !Array.isArray(commands) || !commands.length) {
+  const projectId = String(sessionId.value || '').trim()
+  if (!projectId || !normalizedPageId || !Array.isArray(commands) || !commands.length) {
     return { payload: null, isLatest: true, revision: 0 }
   }
   invalidateInspectionRequests()
   const revision = Number(options.revision) || bumpPageCommandRevision(normalizedPageId)
-  setPageCommandPending(normalizedPageId, 1)
-  return queuePageCommandExecution(normalizedPageId, async () => {
+  return executePageCommand(projectId, normalizedPageId, async () => {
     try {
       const payload = await requestPageCommands(normalizedPageId, commands, buildRuntimeConfig())
       recordPageCommandRevision(payload)
@@ -7270,8 +7125,6 @@ async function applyPageCommands(pageId, commands, options = {}) {
         }, 0)
       }
       throw error
-    } finally {
-      setPageCommandPending(normalizedPageId, -1)
     }
   })
 }
@@ -10590,7 +10443,7 @@ async function submitFile() {
     closeSocket()
     resetActiveTaskConnection()
     clearTaskError()
-    applySessionPayload(payload, { resetInspectors: true })
+    applySessionPayload(payload, { resetInspectors: true, allowProjectSwitch: true })
     await loadProjectHistory({ silent: true })
     status.value = config.value.pause_after_detection
       ? `上传完成，共解析 ${payload.total_images} 张图片。现在可以先识别文本框，再逐框确认。`
@@ -10652,13 +10505,8 @@ async function handleTranslationTaskEvent(payload, currentSocket = translationTa
       sessionId.value,
     )
     if (eventPayload.stored_name) {
-      reviewInspectionPages.value = updatePagePreviewUrl(
-        reviewInspectionPages.value,
-        eventPayload.stored_name,
-        eventPayload.image_url,
-      )
-      styleInspectionPages.value = updatePagePreviewUrl(
-        styleInspectionPages.value,
+      inspectionPages.value = updatePagePreviewUrl(
+        inspectionPages.value,
         eventPayload.stored_name,
         eventPayload.image_url,
       )
@@ -10696,6 +10544,17 @@ async function handleTranslationTaskEvent(payload, currentSocket = translationTa
     translating.value = false
     errorMessage.value = ''
     clearTaskError()
+    status.value = eventUpdate.statusMessage
+    resetActiveTaskConnection()
+    void loadProjectHistory({ silent: true })
+    return
+  }
+
+  if (eventPayload.event === 'interrupted') {
+    resetTranslationCompletionRecovery()
+    closeSocket(currentSocket)
+    translating.value = false
+    applyTaskError(eventPayload, '任务因后端重启而中断')
     status.value = eventUpdate.statusMessage
     resetActiveTaskConnection()
     void loadProjectHistory({ silent: true })

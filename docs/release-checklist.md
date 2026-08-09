@@ -32,7 +32,9 @@ installer.
 - `node --check desktop/scripts/dev.mjs`
 - `node --check desktop/scripts/test-runtime-paths.mjs`
 - `node --check desktop/scripts/stage-runtime.mjs`
+- `node --check desktop/scripts/runtime-image.mjs`
 - `node --check desktop/scripts/package-win.mjs`
+- `cd desktop && npm run test:runtime-image`
 - `cd desktop && npm run test:runtime-paths`
 - `cd frontend && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`
 - `cd desktop && npm audit --registry=https://registry.npmjs.org --audit-level=moderate`

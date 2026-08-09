@@ -1,6 +1,6 @@
 import { createEmptyTaskPhase } from '../task-event-state.js'
 
-const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 
 export function useTranslationTaskConnection({
   refs,

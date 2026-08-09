@@ -95,6 +95,8 @@ export function createZeroTextRegionsWorkspaceFixture() {
   }
   const sessionPayload = {
     session_id: PROJECT_ID,
+    project_head_generation: 1,
+    project_head_revision_id: 'fixture-head-1',
     review_mode: 'canvas_beta',
     total_images: 1,
     images: [{
@@ -127,6 +129,8 @@ export function createZeroTextRegionsWorkspaceFixture() {
     overrides: emptyOverrides(),
   }
   const inspectionPayload = {
+    project_head_generation: 1,
+    project_head_revision_id: 'fixture-head-1',
     workflow_stage: 'translated',
     pages: [inspectionPage],
     overrides: emptyOverrides(),
@@ -156,8 +160,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
   const routeResponses = {
     [`POST /api/projects/${PROJECT_ID}/restore`]: jsonResponse(sessionPayload),
     [`GET /api/projects/${PROJECT_ID}/task`]: jsonResponse({ task: null }),
-    [`POST /api/review-regions/${PROJECT_ID}`]: jsonResponse(inspectionPayload),
-    [`POST /api/style-regions/${PROJECT_ID}`]: jsonResponse(inspectionPayload),
+    [`POST /api/page-regions/${PROJECT_ID}`]: jsonResponse(inspectionPayload),
     [`GET ${sourcePath}`]: imageResponse,
     [`GET ${blankPath}`]: imageResponse,
     [`GET ${translatedPath}`]: imageResponse,
@@ -219,7 +222,7 @@ export function createZeroTextRegionsWorkspaceFixture() {
       'GET /api/projects',
       `POST /api/projects/${PROJECT_ID}/restore`,
       `GET /api/projects/${PROJECT_ID}/task`,
-      `POST /api/review-regions/${PROJECT_ID}`,
+      `POST /api/page-regions/${PROJECT_ID}`,
       `POST ${eraseSelectionSuggestPath}`,
       `POST ${localAdvancedPath}`,
       `GET ${downloadPath}`,

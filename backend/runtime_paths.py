@@ -138,6 +138,10 @@ class AppPaths:
         return self.app_data_dir / "projects"
 
     @property
+    def tasks_dir(self) -> Path:
+        return self.app_data_dir / "tasks"
+
+    @property
     def project_index_path(self) -> Path:
         return self.projects_dir / "project_index.json"
 
@@ -241,6 +245,7 @@ class AppPaths:
             self.cache_dir,
             self.config_dir,
             self.projects_dir,
+            self.tasks_dir,
             self.cache_uploads_dir,
             self.cache_extracted_dir,
             self.temp_dir,

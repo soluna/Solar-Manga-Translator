@@ -49,6 +49,18 @@
 下载源，并在连接停滞时自动切换。普通 Python/npm 依赖和固定版本核心引擎也会
 实时显示输出并在国内镜像与官方源之间回退；依赖没有变化时，后续启动会跳过重复安装。
 
+### 新前端入口（frontend-v3 · InkStage）
+
+> 与旧入口完全独立的新版工作台（Vue 3 + Vite + 深色主题设计系统），旧 `frontend/` 不受影响、可同时运行。
+
+```bash
+cd frontend-v3
+npm install        # 首次
+npm run dev        # http://127.0.0.1:5273/ （端口可用 VITE_DEV_PORT 覆盖）
+```
+
+后端照常启动（8000 端口）后，新入口通过同一套 `/api` 工作。无后端时可用 `npm run dev:mock` 预览全部页面（假数据）。
+
 ### Windows
 
 ```bat

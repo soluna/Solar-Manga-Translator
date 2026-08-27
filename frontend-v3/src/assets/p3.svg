@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1024" viewBox="0 0 720 1024">
+  <defs>
+    <pattern id="tone" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="4" cy="4" r="1.1" fill="#1A1712" opacity=".55"/>
+    </pattern>
+    <pattern id="toneSparse" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="7" cy="7" r="1" fill="#1A1712" opacity=".3"/>
+    </pattern>
+  </defs>
+  <rect width="720" height="1024" fill="#F4F1E8"/>
+  <polygon points="24,24 696,24 696,300 24,360" fill="#E8E2D2" stroke="#1A1712" stroke-width="3"/>
+<polygon points="24,360 696,300 696,330 24,390" fill="#F4F1E8"/>
+<circle cx="520" cy="130" r="52" fill="#1A1712"/>
+<rect x="24" y="404" width="330" height="300" fill="#EFEAE0" stroke="#1A1712" stroke-width="3"/>
+<rect x="24" y="404" width="330" height="300" fill="url(#tone)" opacity=".22"/>
+<ellipse cx="190" cy="490" rx="92" ry="50" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<rect x="378" y="404" width="318" height="300" fill="#DDD5C2" stroke="#1A1712" stroke-width="3"/>
+<circle cx="530" cy="560" r="56" fill="none" stroke="#1A1712" stroke-width="3"/>
+<rect x="24" y="728" width="672" height="272" fill="#E8E2D2" stroke="#1A1712" stroke-width="3"/>
+<ellipse cx="360" cy="830" rx="150" ry="52" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<text x="120" y="940" font-family="sans-serif" font-size="40" fill="#1A1712" font-weight="800" transform="rotate(-4 120 940)">ドンッ</text>
+</svg>

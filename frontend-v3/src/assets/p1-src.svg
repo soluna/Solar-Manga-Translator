@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1024" viewBox="0 0 720 1024">
+  <defs>
+    <pattern id="tone" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="4" cy="4" r="1.1" fill="#1A1712" opacity=".55"/>
+    </pattern>
+    <pattern id="toneSparse" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="7" cy="7" r="1" fill="#1A1712" opacity=".3"/>
+    </pattern>
+  </defs>
+  <!-- 纸 -->
+  <rect width="720" height="1024" fill="#F4F1E8"/>
+
+  <!-- 格1：宽景 -->
+  <g>
+    <rect x="24" y="24" width="672" height="276" fill="#E8E2D2" stroke="#1A1712" stroke-width="3"/>
+    <rect x="24" y="180" width="672" height="120" fill="url(#toneSparse)"/>
+    <path d="M24 180 H696" stroke="#1A1712" stroke-width="2"/>
+    <circle cx="580" cy="90" r="34" fill="#F4F1E8" stroke="#1A1712" stroke-width="2.5"/>
+    <path d="M60 260 q120 -30 240 -6 t240 -14" stroke="#1A1712" stroke-width="2" fill="none" opacity=".5"/>
+    <!-- 旁白框 -->
+    <rect x="48" y="44" width="196" height="112" fill="#F4F1E8" stroke="#1A1712" stroke-width="2"/>
+    <text font-family="sans-serif" font-size="17" fill="#1A1712" font-weight="600">
+      <tspan x="66" y="74">夜の帳が</tspan>
+      <tspan x="66" y="100">降りる頃、あの店は</tspan>
+      <tspan x="66" y="126">静かに灯をともす。</tspan>
+    </text>
+  </g>
+
+  <!-- 格2：中左人物 -->
+  <g>
+    <rect x="24" y="324" width="320" height="318" fill="#EFEAE0" stroke="#1A1712" stroke-width="3"/>
+    <circle cx="180" cy="500" r="58" fill="#1A1712"/>
+    <path d="M96 640 q84 -86 168 0 Z" fill="#1A1712"/>
+    <rect x="24" y="324" width="320" height="60" fill="url(#tone)" opacity=".35"/>
+    <!-- 气泡 -->
+    <g>
+      <ellipse cx="128" cy="392" rx="88" ry="52" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <polygon points="168,438 184,470 148,442" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <text font-family="sans-serif" font-size="16" fill="#1A1712" text-anchor="middle" font-weight="600">
+        <tspan x="128" y="382">いらっしゃい。</tspan>
+        <tspan x="128" y="406">今日は早かったね。</tspan>
+      </text>
+    </g>
+  </g>
+
+  <!-- 格3：中右人物 -->
+  <g>
+    <rect x="368" y="324" width="328" height="318" fill="#E8E2D2" stroke="#1A1712" stroke-width="3"/>
+    <circle cx="540" cy="520" r="52" fill="none" stroke="#1A1712" stroke-width="3"/>
+    <path d="M470 640 q70 -70 140 0" fill="none" stroke="#1A1712" stroke-width="3"/>
+    <rect x="368" y="560" width="328" height="82" fill="url(#tone)" opacity=".25"/>
+    <g>
+      <ellipse cx="560" cy="392" rx="96" ry="54" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <polygon points="516,440 492,474 536,446" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <text font-family="sans-serif" font-size="16" fill="#1A1712" text-anchor="middle" font-weight="600">
+        <tspan x="560" y="384">うん。ちょっと</tspan>
+        <tspan x="560" y="408">話したいことがあって。</tspan>
+      </text>
+    </g>
+  </g>
+
+  <!-- 格4：底部长镜 -->
+  <g>
+    <rect x="24" y="666" width="672" height="334" fill="#DDD5C2" stroke="#1A1712" stroke-width="3"/>
+    <rect x="24" y="666" width="672" height="334" fill="url(#tone)" opacity=".18"/>
+    <path d="M24 880 H696" stroke="#1A1712" stroke-width="2" opacity=".6"/>
+    <circle cx="240" cy="810" r="44" fill="#1A1712"/>
+    <path d="M176 880 q64 -64 128 0 Z" fill="#1A1712"/>
+    <circle cx="480" cy="800" r="44" fill="none" stroke="#1A1712" stroke-width="3"/>
+    <path d="M420 880 q60 -60 120 0" fill="none" stroke="#1A1712" stroke-width="3"/>
+    <!-- 对白 -->
+    <g>
+      <ellipse cx="420" cy="722" rx="150" ry="44" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <polygon points="330,750 300,782 352,758" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+      <text font-family="sans-serif" font-size="17" fill="#1A1712" text-anchor="middle" font-weight="600">
+        <tspan x="420" y="728">……実は、店を畳もうと思ってるんだ。</tspan>
+      </text>
+    </g>
+    <!-- 拟声词 -->
+    <text x="600" y="770" font-family="sans-serif" font-size="44" fill="#1A1712" font-weight="800" transform="rotate(8 600 770)">ガチャン</text>
+  </g>
+</svg>

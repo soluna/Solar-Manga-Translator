@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1024" viewBox="0 0 720 1024">
+  <defs>
+    <pattern id="tone" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="4" cy="4" r="1.1" fill="#1A1712" opacity=".55"/>
+    </pattern>
+    <pattern id="toneSparse" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="7" cy="7" r="1" fill="#1A1712" opacity=".3"/>
+    </pattern>
+  </defs>
+  <rect width="720" height="1024" fill="#F4F1E8"/>
+  <rect x="24" y="24" width="420" height="470" fill="#E8E2D2" stroke="#1A1712" stroke-width="3"/>
+<rect x="24" y="180" width="420" height="314" fill="url(#tone)" opacity=".2"/>
+<circle cx="230" cy="330" r="70" fill="#1A1712"/>
+<rect x="468" y="24" width="228" height="470" fill="#EFEAE0" stroke="#1A1712" stroke-width="3"/>
+<ellipse cx="582" cy="140" rx="84" ry="60" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<polygon points="540,190 510,230 566,196" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<ellipse cx="582" cy="330" rx="84" ry="54" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<rect x="24" y="518" width="672" height="230" fill="#DDD5C2" stroke="#1A1712" stroke-width="3"/>
+<rect x="24" y="518" width="672" height="230" fill="url(#toneSparse)"/>
+<ellipse cx="180" cy="620" rx="110" ry="56" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<rect x="24" y="772" width="672" height="228" fill="#EFEAE0" stroke="#1A1712" stroke-width="3"/>
+<ellipse cx="500" cy="880" rx="130" ry="58" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+<polygon points="400,912 360,950 428,922" fill="#FBF9F3" stroke="#1A1712" stroke-width="2.5"/>
+</svg>

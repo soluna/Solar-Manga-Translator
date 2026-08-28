@@ -2,6 +2,15 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
+:: Frontend variant: default legacy frontend/ (5173); pass "v3" to use frontend-v3/ (5273).
+set "FRONTEND_SUBDIR=frontend"
+set "FRONTEND_PORT=5173"
+if /i "%~1"=="v3" (
+    set "FRONTEND_V3=1"
+    set "FRONTEND_SUBDIR=frontend-v3"
+    set "FRONTEND_PORT=5273"
+)
+
 :: Get absolute path to the directory containing this script, without a trailing slash.
 for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
 if defined APP_DATA_DIR (
@@ -135,16 +144,20 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/3] Installing Frontend Dependencies...
+echo [2/3] Installing Frontend Dependencies (%FRONTEND_SUBDIR%)...
 cd /d "%ROOT_DIR%"
-if not exist frontend\package.json (
-    echo [Error] Frontend project files are missing.
+if not exist "%FRONTEND_SUBDIR%\package.json" (
+    echo [Error] Frontend project files are missing (%FRONTEND_SUBDIR%).
     pause
     exit /b
 )
-cd frontend
-set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
-"%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" check frontend --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%" >nul 2>&1
+cd "%FRONTEND_SUBDIR%"
+if defined FRONTEND_V3 (
+    set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies-v3.json"
+) else (
+    set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
+)
+"%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" check %FRONTEND_SUBDIR% --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [2/3 - 1/1] Installing frontend dependencies. This can take several minutes on first run.
     "%VENV_PYTHON%" "%BOOTSTRAP_RUNNER%" --label "[2/3 - 1/1] Frontend dependencies via npmmirror" --log "%BOOTSTRAP_LOG%" --heartbeat-seconds 15 -- cmd.exe /d /c npm install --registry https://registry.npmmirror.com
@@ -158,16 +171,16 @@ if %errorlevel% neq 0 (
         pause
         exit /b 1
     )
-    "%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" mark frontend --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%"
+    "%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" mark %FRONTEND_SUBDIR% --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%"
 ) else (
     echo Frontend dependencies are unchanged; skipping npm install.
 )
 
 echo.
 echo [3/3] Starting Services...
-echo Launching managed browser session...
+echo Launching managed browser session (frontend: %FRONTEND_SUBDIR%, port %FRONTEND_PORT%)...
 set "MANAGED_SCRIPT=%ROOT_DIR%\start.managed.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%MANAGED_SCRIPT%" -RootDir "%ROOT_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%MANAGED_SCRIPT%" -RootDir "%ROOT_DIR%" -FrontendDir "%FRONTEND_SUBDIR%" -FrontendPort %FRONTEND_PORT%
 exit /b %errorlevel%
 
 :show_bootstrap_log

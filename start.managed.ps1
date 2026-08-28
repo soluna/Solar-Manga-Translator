@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$RootDir
+    [string]$RootDir,
+    [string]$FrontendDir = "frontend",
+    [int]$FrontendPort = 5173
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +14,8 @@ if ([string]::IsNullOrWhiteSpace($normalizedRootDir)) {
 
 $root = (Resolve-Path -LiteralPath $normalizedRootDir).Path
 $backendDir = Join-Path $root "backend"
-$frontendDir = Join-Path $root "frontend"
+$frontendDir = Join-Path $root $FrontendDir
+$frontendLabel = if ($FrontendDir -eq "frontend-v3") { "Solar-Manga-Translator WebUI (v3)" } else { "Solar-Manga-Translator WebUI" }
 $backendUrl = $null
 $browserProfileBase = if (-not [string]::IsNullOrWhiteSpace($env:APP_DATA_DIR)) {
     [System.IO.Path]::GetFullPath($env:APP_DATA_DIR)
@@ -70,7 +73,10 @@ function Find-FreeTcpPort {
 }
 
 function Resolve-FrontendPort {
-    $preferredPort = 5173
+    param(
+        [int]$PreferredPort = 5173
+    )
+    $preferredPort = $PreferredPort
     $candidates = @($env:FRONTEND_PORT, $env:VITE_DEV_PORT)
     foreach ($candidate in $candidates) {
         if ($candidate -match '^\d+$') {
@@ -291,7 +297,7 @@ try {
     $backendPort = Find-FreeTcpPort -PreferredPort 8000 -HostName "127.0.0.1"
     $backendBaseUrl = "http://127.0.0.1:$backendPort"
     $backendUrl = "$backendBaseUrl/api/status"
-    $frontendPort = Resolve-FrontendPort
+    $frontendPort = Resolve-FrontendPort -PreferredPort $FrontendPort
     $frontendUrl = "http://127.0.0.1:$frontendPort"
     $frontendCommand = 'set "VITE_DEV_PROXY_TARGET=' + $backendBaseUrl + '" && set "VITE_API_BASE_URL=' + $backendBaseUrl + '" && set "VITE_API_TOKEN=' + $apiToken + '" && set "FRONTEND_PORT=' + $frontendPort + '" && set "VITE_DEV_PORT=' + $frontendPort + '" && npm run dev -- --host 127.0.0.1 --port ' + $frontendPort + ' --strictPort'
 
@@ -306,7 +312,7 @@ try {
     }
 
     $frontendProcess = Start-CmdWindow `
-        -Title "Solar-Manga-Translator WebUI" `
+        -Title $frontendLabel `
         -WorkingDirectory $frontendDir `
         -Command $frontendCommand `
         -LogPath $frontendLogPath

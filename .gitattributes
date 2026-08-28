@@ -1,0 +1,5 @@
+# Windows batch/PowerShell scripts must keep CRLF line endings;
+# cmd.exe mis-parses parenthesized blocks in LF batch files.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

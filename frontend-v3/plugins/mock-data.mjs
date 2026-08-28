@@ -58,8 +58,13 @@ const demoDocument = {
   regions: [
     demoRegion('r1', [64, 92, 532, 168], '欢迎光临「夜帷喫茶店」。', '欢迎光临「夜帷喫茶店」。', { translation_status: 'confirmed' }),
     demoRegion('r2', [88, 210, 508, 296], '今天也请慢慢享受。', '今天也请慢慢享受。', { translation_status: 'translated' }),
-    demoRegion('r3', [120, 318, 470, 386], '「ミルクたっぷりのコーヒーをどうぞ」', '「请用这杯加了大量牛奶的咖啡。」', { translation_status: 'edited' }),
-    demoRegion('r4', [96, 404, 500, 460], 'ああ……いい香り。', '啊……好香。', { translation_status: 'translated' }),
+    // 真实后端契约：translation 为 {machine, edited, resolved} 字典（取值 resolved > edited > machine）
+    demoRegion('r3', [120, 318, 470, 386], '「ミルクたっぷりのコーヒーをどうぞ」',
+      { machine: '「请用这杯加了很多牛奶的咖啡。」', edited: '「请用这杯加了大量牛奶的咖啡。」', resolved: '「请用这杯加了大量牛奶的咖啡。」' },
+      { translation_status: 'edited' }),
+    demoRegion('r4', [96, 404, 500, 460], 'ああ……いい香り。',
+      { machine: '啊……好香的味道。', edited: '', resolved: '啊……好香。' },
+      { translation_status: 'translated' }),
   ],
 }
 
@@ -116,7 +121,12 @@ export default {
     rendering_backend: 'manga-translator',
     rerender_output_format: 'webp',
   },
-  glossaries: { demo: { entries: demoDocument.regions.map((r) => ({ id: r.id, term: r.source_text.slice(0, 8), translation: r.translation.slice(0, 8) })) } },
+  glossaries: { demo: { entries: demoDocument.regions.map((r) => {
+    const t = r.translation && typeof r.translation === 'object'
+      ? (r.translation.resolved || r.translation.edited || r.translation.machine || '')
+      : (r.translation || '')
+    return { id: r.id, term: r.source_text.slice(0, 8), translation: String(t).slice(0, 8) }
+  }) } },
   fonts: [
     { name: '系统默认（思源黑体）', source: 'system', url: '/api/fonts/file/user/NotoSansSC' },
     { name: '方正准圆', source: 'user', url: '/api/fonts/file/user/FZXiaoBiaoSong' },

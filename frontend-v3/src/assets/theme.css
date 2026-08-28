@@ -46,9 +46,11 @@
   --border: rgba(255, 255, 255, .07);
   --border-strong: rgba(255, 255, 255, .13);
 
-  --text-1: #E9EBF1;
-  --text-2: #9BA3B0;
-  --text-3: #5E6572;
+  /* 文字层级（按 Apple 深色模式规范：层级靠透明度衰减而非压暗，
+     保证次/三级文字在深色面上仍达 WCAG AA 4.5:1+，长时间阅读不刺眼） */
+  --text-1: #F2F4FA;
+  --text-2: #B7BFCC;
+  --text-3: #8B93A3;
 
   --accent: #3ECFC0;
   --accent-strong: #64DCD0;

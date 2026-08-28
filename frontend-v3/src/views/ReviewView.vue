@@ -152,7 +152,7 @@ const filter = ref('all') // all | attention | manual | disabled
 const filteredRegions = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
   return regions.value.filter((r, index) => {
-    const needle = `${r.id} ${r.source_text || ''} ${r.translation || ''} ${index + 1}`.toLowerCase()
+    const needle = `${r.id} ${r.source_text || ''} ${resolveRegionTranslation(r)} ${index + 1}`.toLowerCase()
     if (q && !needle.includes(q)) return false
     if (filter.value === 'attention' && !needsAttention(r)) return false
     if (filter.value === 'manual' && !isManual(r)) return false
@@ -169,7 +169,7 @@ function needsAttention(r) {
   if (String(r.recognition_status || 'ready') !== 'ready') return true
   if (String(r.translation_status || '') === 'failed') return true
   const src = String(r.source_text || '').length
-  const dst = String(r.translation || r.machine_translation || '').length
+  const dst = resolveRegionTranslation(r).length
   if (src > 0 && dst > src * 1.8) return true
   return false
 }
@@ -190,10 +190,19 @@ function regionFontLabel(r) {
   return hit ? hit.label : (key || '默认字体')
 }
 function regionSrcText(r) {
-  return r.source_text || ''
+  return String(r.source_text || '').trim()
+}
+function resolveRegionTranslation(r) {
+  // 后端 translation 字段是 {machine, edited, resolved} 字典，取值 resolved > edited > machine；
+  // 兼容历史字符串形状与 machine_translation 兜底，统一 trim。
+  const pick = (v) => {
+    if (v && typeof v === 'object') return String(v.resolved || v.edited || v.machine || '').trim()
+    return String(v || '').trim()
+  }
+  return pick(r.translation) || pick(r.machine_translation)
 }
 function regionDstText(r) {
-  return r.translation || r.machine_translation || ''
+  return resolveRegionTranslation(r)
 }
 
 function isOpen(r) {

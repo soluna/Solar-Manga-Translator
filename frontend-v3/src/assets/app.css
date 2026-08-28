@@ -243,11 +243,12 @@
 .stage-bar-group { display: flex; align-items: center; gap: 6px; }
 .stage-bar .spacer { flex: 1; }
 
-/* 视口条带：单视图或多视图对比 */
+/* 视口条带：单视图或多视图对比；N 个视图同一行等分（与旧前端 v2-pane-strip 一致） */
 .pane-strip { flex: 1; min-height: 0; display: grid; gap: 1px; background: var(--border); }
 .pane-strip[data-count="1"] { grid-template-columns: 1fr; }
-.pane-strip[data-count="2"] { grid-template-columns: 1fr 1fr; }
-.pane-strip[data-count="3"], .pane-strip[data-count="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.pane-strip[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pane-strip[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pane-strip[data-count="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .pane { position: relative; min-width: 0; min-height: 0; background: var(--canvas-bg); display: flex; flex-direction: column; overflow: hidden; }
 .pane-label {
@@ -415,7 +416,7 @@
 
 .region-edit-field { display: flex; flex-direction: column; gap: 5px; }
 .region-edit-field > span { font-size: var(--fs-micro); font-weight: 600; color: var(--text-3); letter-spacing: .06em; }
-.region-edit-field textarea { min-height: 72px; }
+.region-edit-field textarea { min-height: 72px; max-height: 360px; field-sizing: content; }
 
 .region-edit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .region-edit-grid .field input, .region-edit-grid .field select { height: 28px; font-size: var(--fs-sub); }

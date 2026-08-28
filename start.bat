@@ -5,11 +5,9 @@ setlocal enabledelayedexpansion
 :: Frontend variant: default legacy frontend/ (5173); pass "v3" to use frontend-v3/ (5273).
 set "FRONTEND_SUBDIR=frontend"
 set "FRONTEND_PORT=5173"
-if /i "%~1"=="v3" (
-    set "FRONTEND_V3=1"
-    set "FRONTEND_SUBDIR=frontend-v3"
-    set "FRONTEND_PORT=5273"
-)
+if /i "%~1"=="v3" set "FRONTEND_V3=1"
+if defined FRONTEND_V3 set "FRONTEND_SUBDIR=frontend-v3"
+if defined FRONTEND_V3 set "FRONTEND_PORT=5273"
 
 :: Get absolute path to the directory containing this script, without a trailing slash.
 for %%I in ("%~dp0.") do set "ROOT_DIR=%%~fI"
@@ -144,19 +142,16 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/3] Installing Frontend Dependencies (%FRONTEND_SUBDIR%)...
+echo [2/3] Installing Frontend Dependencies - %FRONTEND_SUBDIR%
 cd /d "%ROOT_DIR%"
 if not exist "%FRONTEND_SUBDIR%\package.json" (
-    echo [Error] Frontend project files are missing (%FRONTEND_SUBDIR%).
+    echo [Error] Frontend folder missing - %FRONTEND_SUBDIR%
     pause
     exit /b
 )
 cd "%FRONTEND_SUBDIR%"
-if defined FRONTEND_V3 (
-    set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies-v3.json"
-) else (
-    set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
-)
+set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies.json"
+if defined FRONTEND_V3 set "FRONTEND_DEPS_STAMP=%CD%\node_modules\.solar-dependencies-v3.json"
 "%VENV_PYTHON%" "%ROOT_DIR%\backend\dependency_state.py" check %FRONTEND_SUBDIR% --root "%ROOT_DIR%" --stamp "%FRONTEND_DEPS_STAMP%" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [2/3 - 1/1] Installing frontend dependencies. This can take several minutes on first run.
@@ -178,7 +173,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [3/3] Starting Services...
-echo Launching managed browser session (frontend: %FRONTEND_SUBDIR%, port %FRONTEND_PORT%)...
+echo Launching managed browser session - %FRONTEND_SUBDIR% on port %FRONTEND_PORT%
 set "MANAGED_SCRIPT=%ROOT_DIR%\start.managed.ps1"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%MANAGED_SCRIPT%" -RootDir "%ROOT_DIR%" -FrontendDir "%FRONTEND_SUBDIR%" -FrontendPort %FRONTEND_PORT%
 exit /b %errorlevel%

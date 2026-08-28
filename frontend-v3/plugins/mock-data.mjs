@@ -53,6 +53,7 @@ const demoDocument = {
   revision: 7,
   page_id: 'c002.png',
   image: { url: '/api/pages/demo/c002.png/translated-image' },
+  dimensions: { width: 800, height: 1200 },
   base_image: { url: '/api/pages/demo/c002.png/base-image' },
   source_image: { url: '/api/pages/demo/c002.png/source-image' },
   regions: [

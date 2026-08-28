@@ -15,6 +15,19 @@ const DOT_PNG = Buffer.from(
   'base64',
 )
 
+// 页面占位图：真实比例（800×1200）的 SVG，供自由画布测量自然尺寸
+function pageSvg(label, bg) {
+  const lines = []
+  for (let x = 100; x < 800; x += 100) lines.push(`<line x1="${x}" y1="0" x2="${x}" y2="1200" stroke="#b9b2a4" stroke-width="1"/>`)
+  for (let y = 100; y < 1200; y += 100) lines.push(`<line x1="0" y1="${y}" x2="800" y2="${y}" stroke="#b9b2a4" stroke-width="1"/>`)
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200">` +
+    `<rect width="800" height="1200" fill="${bg}"/>${lines.join('')}` +
+    `<text x="400" y="620" font-size="72" text-anchor="middle" fill="#6b6558" font-family="sans-serif">${label}</text>` +
+    `</svg>`,
+  )
+}
+
 export default function mockApiPlugin() {
   const data = mockData
 
@@ -34,10 +47,14 @@ export default function mockApiPlugin() {
         }
 
         // ---- 图片与下载 ----
-        if (url.includes('/image') || url.includes('/previews/')) {
-          res.setHeader('Content-Type', 'image/png')
+        // 注意：端点是 /base-image /source-image 等（斜杠后是字母），
+        // 用 includes('image') 才能命中；'/image' 会漏掉全部页面图片。
+        if (url.includes('image') || url.includes('/previews/')) {
+          const kind = url.includes('translated-image') ? '嵌后' : url.includes('source-image') ? '原图' : '框页/空页'
+          const bg = url.includes('translated-image') ? '#e2ead9' : url.includes('source-image') ? '#eadfd2' : '#e8e4dc'
+          res.setHeader('Content-Type', 'image/svg+xml')
           res.setHeader('Cache-Control', 'no-store')
-          res.end(DOT_PNG)
+          res.end(pageSvg(kind, bg))
           return
         }
         if (url.includes('/download/')) {

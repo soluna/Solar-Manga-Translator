@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   apiFetch, apiGetJson, apiPostJson, readApiError, toApiUrl,
@@ -48,19 +48,125 @@ function imageUrl(kind, maxSide = 1280) {
   return withCacheBust(withImagePreviewSize(toApiUrl(path), maxSide))
 }
 
-// ---- 缩放 ----
-const zoom = ref(1)
-const frameImg = ref(null)
-const scale = computed(() => {
-  const el = frameImg.value
-  if (!el || !el.naturalWidth) return 1
-  return (el.getBoundingClientRect().width / el.naturalWidth) * zoom.value
-})
+// ---- 自由画布（缩放 + 平移；四个视图共享同一视口联动） ----
+// 设计参照旧前端：stage 尺寸 = 原图坐标系（自然像素），img/overlay 同处一个
+// 被 transform(translate+scale) 的 stage 内，缩放平移时框零换算自动跟随。
+const ZOOM_MIN = 0.2
+const ZOOM_MAX = 6
+const natural = ref({ w: 0, h: 0 }) // 预览图自然尺寸（兜底坐标源）
+const frameCanvas = ref(null)
+const view = reactive({ zoom: 1, panX: 0, panY: 0 })
+// 用户一旦缩放/平移/点 HUD 即视为接管视口；接管前允许布局稳定过程中反复 refit
+let userTookOver = false
 
-function zoomFit() { zoom.value = 1 }
-function zoomWidth() { zoom.value = 1 }
-function zoomOut() { zoom.value = Math.max(0.4, +(zoom.value - 0.1).toFixed(2)) }
-function zoomIn() { zoom.value = Math.min(3, +(zoom.value + 0.1).toFixed(2)) }
+// 坐标系 = 原图像素：后端 dimensions 优先（bbox 的参考系），其次预览图自然尺寸
+const imgW = computed(() => Number(document.value?.dimensions?.width) || natural.value.w || 800)
+const imgH = computed(() => Number(document.value?.dimensions?.height) || natural.value.h || 1200)
+
+const stageStyle = computed(() => ({
+  width: `${imgW.value}px`,
+  height: `${imgH.value}px`,
+  transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+}))
+
+function clampZoom(v) { return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(v) || 1)) }
+function anyCanvasEl() { return frameCanvas.value || window.document.querySelector('.pane-canvas') }
+
+function fitView() {
+  const el = anyCanvasEl()
+  if (!el || !imgW.value || !imgH.value) return
+  const rect = el.getBoundingClientRect()
+  if (rect.width < 10 || rect.height < 10) return
+  view.zoom = clampZoom(Math.min((rect.width - 2) / imgW.value, (rect.height - 2) / imgH.value))
+  view.panX = (rect.width - imgW.value * view.zoom) / 2
+  view.panY = (rect.height - imgH.value * view.zoom) / 2
+}
+
+function fitWidth() {
+  userTookOver = true
+  const el = anyCanvasEl()
+  if (!el || !imgW.value) return
+  const rect = el.getBoundingClientRect()
+  view.zoom = clampZoom((rect.width - 2) / imgW.value)
+  view.panX = 1
+  view.panY = Math.max(1, (rect.height - imgH.value * view.zoom) / 2)
+}
+
+function zoomAt(nextZoom, x, y, el = anyCanvasEl()) {
+  if (!el) return
+  userTookOver = true // 用户主动缩放，接管视口（ResizeObserver 兜底 fit 不再干预）
+  const rect = el.getBoundingClientRect()
+  const px = x ?? rect.width / 2
+  const py = y ?? rect.height / 2
+  const k = clampZoom(nextZoom) / view.zoom
+  view.panX = px - (px - view.panX) * k
+  view.panY = py - (py - view.panY) * k
+  view.zoom = clampZoom(nextZoom)
+}
+
+function onCanvasWheel(event) {
+  if (!document.value) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12
+  zoomAt(view.zoom * factor, event.clientX - rect.left, event.clientY - rect.top, event.currentTarget)
+}
+
+// 空白处拖拽平移（添加框模式 / 点在框或控件上时不触发）
+const panState = ref(null)
+const panning = computed(() => Boolean(panState.value))
+function onCanvasPanDown(event) {
+  if (addingMode.value || !document.value) return
+  if (event.target.closest('.region-box, .region-pop, .canvas-hud, button, a')) return
+  event.preventDefault()
+  userTookOver = true // 用户主动平移，接管视口
+  panState.value = { startX: event.clientX, startY: event.clientY, panX: view.panX, panY: view.panY }
+  window.addEventListener('pointermove', onPanMove)
+  window.addEventListener('pointerup', onPanUp, { once: true })
+}
+function onPanMove(event) {
+  const d = panState.value
+  if (!d) return
+  view.panX = d.panX + (event.clientX - d.startX)
+  view.panY = d.panY + (event.clientY - d.startY)
+}
+function onPanUp() {
+  window.removeEventListener('pointermove', onPanMove)
+  panState.value = null
+}
+
+function onFrameImgLoad(event) {
+  const img = event.target
+  natural.value = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 }
+  // nextTick + rAF：等 Vue 提交 DOM 且浏览器完成布局后再测量
+  if (!userTookOver) nextTick(() => requestAnimationFrame(() => fitView()))
+}
+
+function zoomFit() { userTookOver = true; fitView() }
+function zoomWidth() { fitWidth() }
+function zoomOut() { zoomAt(view.zoom / 1.15) }
+function zoomIn() { zoomAt(view.zoom * 1.15) }
+function zoomReset() {
+  userTookOver = true
+  const el = anyCanvasEl()
+  if (!el) { view.zoom = 1; return }
+  const rect = el.getBoundingClientRect()
+  view.zoom = 1
+  view.panX = (rect.width - imgW.value) / 2
+  view.panY = (rect.height - imgH.value) / 2
+}
+
+// 开/关视图后可用尺寸变化，重新 fit；换页后重置接管标志，由 img onload/RO 重新 fit
+watch(paneCount, () => nextTick(() => fitView()))
+watch(pageId, () => { userTookOver = false })
+
+// 布局晚稳定（字体/侧栏渲染）时尺寸会多次变化：ResizeObserver 在用户接管前
+// 持续 refit，最终一次即为稳定布局的正确 fit；用户交互后立即停手
+let canvasResizeObs = null
+onMounted(() => {
+  canvasResizeObs = new ResizeObserver(() => { if (!userTookOver) fitView() })
+  if (frameCanvas.value) canvasResizeObs.observe(frameCanvas.value)
+})
+onUnmounted(() => canvasResizeObs?.disconnect())
 
 // ---- 文档加载 ----
 async function loadDocument() {
@@ -224,21 +330,29 @@ function selectRegion(r, { open = true } = {}) {
 
 function locateRegion(r) {
   selectRegion(r)
-  const el = document.querySelector(`[data-canvas-region="${r.id}"]`)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    el.classList.remove('flash')
-    void el.offsetWidth
-    el.classList.add('flash')
+  // 自由画布：pan 使目标框移动到视口中心（scrollIntoView 对 transform 舞台无效）
+  const el = anyCanvasEl()
+  if (el && r?.bbox) {
+    const rect = el.getBoundingClientRect()
+    const [x1, y1, x2, y2] = r.bbox
+    view.panX = rect.width / 2 - ((x1 + x2) / 2) * view.zoom
+    view.panY = rect.height / 2 - ((y1 + y2) / 2) * view.zoom
   }
+  nextTick(() => {
+    const box = window.document.querySelector(`[data-canvas-region="${r.id}"]`)
+    if (box) {
+      box.classList.remove('flash')
+      void box.offsetWidth
+      box.classList.add('flash')
+    }
+  })
 }
 
 // ---- 画布框 ----
 function regionBoxStyle(r) {
-  const d = document.value
   const [x1, y1, x2, y2] = r.bbox || [0, 0, 0, 0]
-  const w = d?.image?.width || 800
-  const h = d?.image?.height || 1200
+  const w = imgW.value
+  const h = imgH.value
   return {
     left: `${(x1 / w) * 100}%`,
     top: `${(y1 / h) * 100}%`,
@@ -249,7 +363,7 @@ function regionBoxStyle(r) {
 }
 
 function regionBoxText(r) {
-  return r.translation || r.machine_translation || r.source_text || ''
+  return resolveRegionTranslation(r) || r.source_text || ''
 }
 
 // 拖动/缩放
@@ -260,13 +374,11 @@ function onRegionPointerDown(event, r) {
   event.preventDefault()
   event.stopPropagation()
   selectRegion(r, { open: true })
-  const canvas = event.currentTarget.closest('.pane-page')
-  const rect = canvas.getBoundingClientRect()
+  const stage = event.currentTarget.closest('.pane-stage')
+  const rect = stage.getBoundingClientRect()
   const [x1, y1, x2, y2] = r.bbox
-  const w = document.value?.image?.width || 800
-  const h = document.value?.image?.height || 1200
-  const sx = rect.width / w
-  const sy = rect.height / h
+  const sx = rect.width / imgW.value
+  const sy = rect.height / imgH.value
   const mode = event.target.closest('.handle') ? 'resize' : 'move'
   dragState.value = {
     mode,
@@ -313,10 +425,8 @@ function onFramePointerDown(event) {
   const d = document.value
   if (!addingMode.value || !d) return
   const rect = event.currentTarget.getBoundingClientRect()
-  const w = d?.image?.width || 800
-  const h = d?.image?.height || 1200
-  const sx = rect.width / w
-  const sy = rect.height / h
+  const sx = rect.width / imgW.value
+  const sy = rect.height / imgH.value
   const x = Math.round((event.clientX - rect.left) / sx)
   const y = Math.round((event.clientY - rect.top) / sy)
   addDrag.value = { start: [x, y], current: [x, y] }
@@ -327,13 +437,11 @@ function onFramePointerDown(event) {
 function onAddMove(event) {
   const d = addDrag.value
   if (!d) return
-  const rect = document.querySelector('.pane-page')?.getBoundingClientRect()
+  const rect = window.document.querySelector('.pane-stage')?.getBoundingClientRect()
   if (!rect) return
-  const w = document.value?.image?.width || 800
-  const h = document.value?.image?.height || 1200
   d.current = [
-    Math.round((event.clientX - rect.left) / (rect.width / w)),
-    Math.round((event.clientY - rect.top) / (rect.height / h)),
+    Math.round((event.clientX - rect.left) / (rect.width / imgW.value)),
+    Math.round((event.clientY - rect.top) / (rect.height / imgH.value)),
   ]
 }
 
@@ -361,8 +469,8 @@ async function onAddUp() {
 function addDragStyle() {
   const d = addDrag.value
   if (!d || !document.value) return {}
-  const w = document.value?.image?.width || 800
-  const h = document.value?.image?.height || 1200
+  const w = imgW.value
+  const h = imgH.value
   const [x1, y1] = d.start
   const [x2, y2] = d.current
   return {
@@ -705,14 +813,19 @@ onUnmounted(() => {
         <div class="pane-strip" :data-count="paneCount">
           <div v-if="panes.frame" class="pane">
             <span class="pane-label"><i></i>框页 · 可编辑</span>
-            <div class="pane-canvas">
-              <div class="pane-page" @pointerdown="onFramePointerDown">
+            <div
+              ref="frameCanvas"
+              class="pane-canvas"
+              :class="{ 'is-panning': panning }"
+              @wheel.prevent="onCanvasWheel"
+              @pointerdown="onCanvasPanDown"
+            >
+              <div class="pane-stage" :style="stageStyle" @pointerdown="onFramePointerDown">
                 <img
-                  ref="frameImg"
                   :src="imageUrl('base-image')"
                   alt="框页"
                   draggable="false"
-                  :style="{ transform: `scale(${zoom})`, transformOrigin: 'top left' }"
+                  @load="onFrameImgLoad"
                 />
                 <template v-if="document">
                   <div
@@ -760,15 +873,15 @@ onUnmounted(() => {
               <button type="button" data-tip="适应宽度" @click="zoomWidth">适宽</button>
               <span class="pop-divider" style="width:1px;height:16px;background:var(--border-strong);margin:0 3px;"></span>
               <button type="button" aria-label="缩小" @click="zoomOut">−</button>
-              <span class="hud-zoom">{{ Math.round(zoom * 100) }}%</span>
+              <span class="hud-zoom" data-tip="回到 100%" role="button" @click="zoomReset">{{ Math.round(view.zoom * 100) }}%</span>
               <button type="button" aria-label="放大" @click="zoomIn">＋</button>
             </div>
           </div>
 
           <div v-if="panes.final" class="pane">
             <span class="pane-label is-final"><i></i>嵌后 · 联动</span>
-            <div class="pane-canvas">
-              <div class="pane-page">
+            <div class="pane-canvas" :class="{ 'is-panning': panning }" @wheel.prevent="onCanvasWheel" @pointerdown="onCanvasPanDown">
+              <div class="pane-stage" :style="stageStyle">
                 <img :src="imageUrl('translated-image')" alt="嵌字结果" loading="lazy" />
               </div>
             </div>
@@ -776,8 +889,8 @@ onUnmounted(() => {
 
           <div v-if="panes.src" class="pane">
             <span class="pane-label is-src"><i></i>原图</span>
-            <div class="pane-canvas">
-              <div class="pane-page">
+            <div class="pane-canvas" :class="{ 'is-panning': panning }" @wheel.prevent="onCanvasWheel" @pointerdown="onCanvasPanDown">
+              <div class="pane-stage" :style="stageStyle">
                 <img :src="imageUrl('source-image')" alt="原图" loading="lazy" />
               </div>
             </div>
@@ -785,8 +898,8 @@ onUnmounted(() => {
 
           <div v-if="panes.blank" class="pane">
             <span class="pane-label is-blank"><i></i>空页</span>
-            <div class="pane-canvas">
-              <div class="pane-page">
+            <div class="pane-canvas" :class="{ 'is-panning': panning }" @wheel.prevent="onCanvasWheel" @pointerdown="onCanvasPanDown">
+              <div class="pane-stage" :style="stageStyle">
                 <img :src="imageUrl('base-image', 1024)" alt="空页" loading="lazy" />
               </div>
             </div>

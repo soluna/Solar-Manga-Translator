@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiGetJson, apiPostJson, toApiUrl, withCacheBust, withImagePreviewSize } from '../api/client.js'
 import { useProject } from '../composables/useProject.js'
@@ -20,8 +20,9 @@ const pageIndex = computed(() => {
   return i >= 0 ? i + 1 : '?'
 })
 
-// ---- 画布 ----
+// ---- 画布（自由画布：缩放 + 平移，对齐审校页与旧版擦除弹窗）----
 const canvasImg = ref(null)
+const eraseCanvas = ref(null)
 const imgNatural = ref({ w: 0, h: 0 })
 const imgError = ref(false)
 
@@ -34,10 +35,91 @@ const fallbackImageUrl = computed(() =>
 )
 const displayUrl = ref('')
 
+const ZOOM_MIN = 0.2
+const ZOOM_MAX = 6
+const view = reactive({ zoom: 1, panX: 0, panY: 0 })
+let userTookOver = false
+const spacePan = ref(false)
+const panState = ref(null)
+
+const stageStyle = computed(() => ({
+  width: `${imgNatural.value.w || 800}px`,
+  height: `${imgNatural.value.h || 1200}px`,
+  transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+}))
+
+function clampZoom(v) { return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(v) || 1)) }
+
+function fitErase() {
+  const el = eraseCanvas.value
+  if (!el || !imgNatural.value.w || !imgNatural.value.h) return
+  const rect = el.getBoundingClientRect()
+  if (rect.width < 10 || rect.height < 10) return
+  view.zoom = clampZoom(Math.min((rect.width - 2) / imgNatural.value.w, (rect.height - 2) / imgNatural.value.h))
+  view.panX = (rect.width - imgNatural.value.w * view.zoom) / 2
+  view.panY = (rect.height - imgNatural.value.h * view.zoom) / 2
+}
+
+function zoomEraseAt(nextZoom, x, y) {
+  const el = eraseCanvas.value
+  if (!el) return
+  userTookOver = true
+  const rect = el.getBoundingClientRect()
+  const px = x ?? rect.width / 2
+  const py = y ?? rect.height / 2
+  const k = clampZoom(nextZoom) / view.zoom
+  view.panX = px - (px - view.panX) * k
+  view.panY = py - (py - view.panY) * k
+  view.zoom = clampZoom(nextZoom)
+}
+
+function zoomErase100() {
+  const el = eraseCanvas.value
+  if (!el) return
+  userTookOver = true
+  const rect = el.getBoundingClientRect()
+  view.zoom = 1
+  view.panX = (rect.width - imgNatural.value.w) / 2
+  view.panY = (rect.height - imgNatural.value.h) / 2
+}
+
+// 滚轮模型：普通滚轮 = 平移（Shift 横向），Ctrl/⌘ + 滚轮 = 缩放
+function onEraseWheel(event) {
+  if (event.ctrlKey || event.metaKey) {
+    const rect = event.currentTarget.getBoundingClientRect()
+    zoomEraseAt(view.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX - rect.left, event.clientY - rect.top)
+    return
+  }
+  userTookOver = true
+  const dx = event.shiftKey ? event.deltaY : event.deltaX
+  const dy = event.shiftKey ? 0 : event.deltaY
+  view.panX -= dx
+  view.panY -= dy
+}
+
+function startErasePan(event) {
+  event.preventDefault()
+  userTookOver = true
+  panState.value = { startX: event.clientX, startY: event.clientY, panX: view.panX, panY: view.panY }
+  window.addEventListener('pointermove', onErasePanMove)
+  window.addEventListener('pointerup', onErasePanUp, { once: true })
+}
+function onErasePanMove(event) {
+  const d = panState.value
+  if (!d) return
+  view.panX = d.panX + (event.clientX - d.startX)
+  view.panY = d.panY + (event.clientY - d.startY)
+}
+function onErasePanUp() {
+  window.removeEventListener('pointermove', onErasePanMove)
+  panState.value = null
+}
+
 function onImgLoad() {
   const el = canvasImg.value
   if (el && el.naturalWidth) {
     imgNatural.value = { w: el.naturalWidth, h: el.naturalHeight }
+    if (!userTookOver) nextTick(() => requestAnimationFrame(() => fitErase()))
   }
 }
 
@@ -51,6 +133,7 @@ function onImgError() {
 function toNaturalPoint(event) {
   const el = canvasImg.value
   if (!el || !imgNatural.value.w) return null
+  // getBoundingClientRect 已包含 stage 的 transform，缩放/平移下换算依然成立
   const rect = el.getBoundingClientRect()
   const scale = imgNatural.value.w / rect.width
   const x = Math.round((event.clientX - rect.left) * scale)
@@ -87,6 +170,11 @@ function clearMarks() {
 }
 
 async function onCanvasPointerDown(event) {
+  // 按住 Space = 平移画布（优先于工具）
+  if (spacePan.value) {
+    startErasePan(event)
+    return
+  }
   if (scope.value === 'full') return
   const pt = toNaturalPoint(event)
   if (!pt) return
@@ -307,8 +395,58 @@ function backToReview() {
   router.back()
 }
 
+// ---- 快捷键（对齐旧版擦除弹窗：⌘Z 撤销标记、0 适合、+/- 缩放、Space 平移、Esc 取消绘制）----
+function isEraseTypingTarget(target) {
+  return target instanceof HTMLElement && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function onEraseKeydown(event) {
+  if (isEraseTypingTarget(event.target)) return
+  if (event.code === 'Space') {
+    spacePan.value = true
+    event.preventDefault()
+    return
+  }
+  const meta = event.metaKey || event.ctrlKey
+  if (meta && !event.shiftKey && event.key.toLowerCase() === 'z') {
+    event.preventDefault()
+    if (drawing.value) drawing.value = null
+    else if (marks.value.length) marks.value.pop()
+    return
+  }
+  if (!meta && event.key === '0') {
+    event.preventDefault()
+    userTookOver = false
+    fitErase()
+    return
+  }
+  if (!meta && (event.key === '+' || event.key === '=')) {
+    event.preventDefault()
+    zoomEraseAt(view.zoom * 1.15)
+    return
+  }
+  if (!meta && (event.key === '-' || event.key === '_')) {
+    event.preventDefault()
+    zoomEraseAt(view.zoom / 1.15)
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    drawing.value = null
+  }
+}
+
+function onEraseKeyup(event) {
+  if (event.code === 'Space') spacePan.value = false
+}
+
+let eraseResizeObs = null
 onMounted(async () => {
   displayUrl.value = baseImageUrl.value
+  window.addEventListener('keydown', onEraseKeydown)
+  window.addEventListener('keyup', onEraseKeyup)
+  eraseResizeObs = new ResizeObserver(() => { if (!userTookOver) fitErase() })
+  if (eraseCanvas.value) eraseResizeObs.observe(eraseCanvas.value)
   try {
     await loadProject(sessionId.value)
   } catch {
@@ -318,6 +456,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('pointermove', onCanvasPointerMove)
+  window.removeEventListener('pointermove', onErasePanMove)
+  window.removeEventListener('keydown', onEraseKeydown)
+  window.removeEventListener('keyup', onEraseKeyup)
+  eraseResizeObs?.disconnect()
 })
 </script>
 
@@ -355,38 +497,53 @@ onUnmounted(() => {
         </div>
 
         <div class="erase-canvas-wrap">
-          <div class="erase-page" @pointerdown="onCanvasPointerDown">
-            <img ref="canvasImg" :src="displayUrl" alt="页面底图" draggable="false" @load="onImgLoad" @error="onImgError" />
-            <template v-if="scope === 'selection'">
-              <div v-for="(mark, i) in marks.filter(m => m.bbox)" :key="`m${i}`" class="erase-mark" :style="markStyle(mark)">
-                <span>{{ mark.kind === 'auto' ? '自动' : '框选' }}</span>
+          <div
+            ref="eraseCanvas"
+            class="erase-canvas"
+            :class="{ 'is-space-pan': spacePan, 'is-panning': panState }"
+            title="滚轮平移 · Shift 滚轮横向 · Ctrl/⌘+滚轮缩放 · 按住 Space 拖平移 · 0 适合 · ⌘Z 撤销标记"
+            @wheel.prevent="onEraseWheel"
+            @pointerdown="onCanvasPointerDown"
+          >
+            <div class="erase-stage" :style="stageStyle">
+              <img ref="canvasImg" :src="displayUrl" alt="页面底图" draggable="false" @load="onImgLoad" @error="onImgError" />
+              <template v-if="scope === 'selection'">
+                <div v-for="(mark, i) in marks.filter(m => m.bbox)" :key="`m${i}`" class="erase-mark" :style="markStyle(mark)">
+                  <span>{{ mark.kind === 'auto' ? '自动' : '框选' }}</span>
+                </div>
+                <div v-if="drawing?.kind === 'box'" class="erase-mark is-drawing" :style="drawingStyle()"></div>
+                <svg v-if="marks.some(m => m.points) || drawing?.kind === 'brush'" class="brush-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
+                  <polyline
+                    v-for="(mark, i) in marks.filter(m => m.points)"
+                    :key="`b${i}`"
+                    :points="brushPolyline(mark)"
+                    fill="none"
+                    stroke="rgba(232,163,61,.75)"
+                    :stroke-width="((mark.radius * 2) / imgNatural.w) * 100"
+                    stroke-linecap="round"
+                    vector-effect="non-scaling-stroke"
+                  />
+                  <polyline
+                    v-if="drawing?.kind === 'brush'"
+                    :points="brushPolyline(drawing)"
+                    fill="none"
+                    stroke="rgba(232,163,61,.9)"
+                    :stroke-width="(brushSize / imgNatural.w) * 100"
+                    stroke-linecap="round"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </svg>
+              </template>
+              <div v-if="scope === 'full'" class="full-scope-hint">
+                <span class="badge is-accent no-dot" style="height:auto;padding:8px 14px;font-size:var(--fs-sub);">整页处理 · 将自动检测并擦除本页全部文字</span>
               </div>
-              <div v-if="drawing?.kind === 'box'" class="erase-mark is-drawing" :style="drawingStyle()"></div>
-              <svg v-if="marks.some(m => m.points) || drawing?.kind === 'brush'" class="brush-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
-                <polyline
-                  v-for="(mark, i) in marks.filter(m => m.points)"
-                  :key="`b${i}`"
-                  :points="brushPolyline(mark)"
-                  fill="none"
-                  stroke="rgba(232,163,61,.75)"
-                  :stroke-width="((mark.radius * 2) / imgNatural.w) * 100"
-                  stroke-linecap="round"
-                  vector-effect="non-scaling-stroke"
-                />
-                <polyline
-                  v-if="drawing?.kind === 'brush'"
-                  :points="brushPolyline(drawing)"
-                  fill="none"
-                  stroke="rgba(232,163,61,.9)"
-                  :stroke-width="(brushSize / imgNatural.w) * 100"
-                  stroke-linecap="round"
-                  vector-effect="non-scaling-stroke"
-                />
-              </svg>
-            </template>
-            <div v-if="scope === 'full'" class="full-scope-hint">
-              <span class="badge is-accent no-dot" style="height:auto;padding:8px 14px;font-size:var(--fs-sub);">整页处理 · 将自动检测并擦除本页全部文字</span>
             </div>
+          </div>
+          <div class="canvas-hud erase-hud">
+            <button type="button" data-tip="适合窗口（0）" @click="fitEraseManual">适合</button>
+            <button type="button" aria-label="缩小（-）" @click="zoomEraseAt(view.zoom / 1.15)">−</button>
+            <span class="hud-zoom" data-tip="回到 100%" role="button" @click="zoomErase100">{{ Math.round(view.zoom * 100) }}%</span>
+            <button type="button" aria-label="放大（+）" @click="zoomEraseAt(view.zoom * 1.15)">＋</button>
           </div>
         </div>
       </section>
@@ -497,11 +654,15 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.erase-page { position: relative; user-select: none; touch-action: none; }
-.erase-page img { display: block; width: 100%; height: auto; pointer-events: none; }
+.erase-canvas { position: absolute; inset: 0; overflow: hidden; user-select: none; touch-action: none; }
+.erase-canvas.is-space-pan { cursor: grab; }
+.erase-canvas.is-panning { cursor: grabbing; }
+.erase-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.erase-stage > img { display: block; width: 100%; height: 100%; pointer-events: none; box-shadow: 0 12px 44px rgba(0,0,0,.5); }
 .brush-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .erase-mark.is-drawing { border-style: dashed; }
 .full-scope-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.erase-hud { position: absolute; right: 12px; bottom: 12px; z-index: 6; }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { padding: 10px 16px; border-radius: 10px; background: var(--surface-3, #232838); border: 1px solid var(--line, rgba(255,255,255,.1)); color: var(--text-1, #e8eaf0); font-size: 13px; cursor: pointer; max-width: 360px; }
 .toast.is-error { border-color: #e05656; }

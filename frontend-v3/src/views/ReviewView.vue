@@ -104,19 +104,30 @@ function zoomAt(nextZoom, x, y, el = anyCanvasEl()) {
   view.zoom = clampZoom(nextZoom)
 }
 
+// 滚轮模型对齐旧版：普通滚轮 = 平移（Shift 滚轮 = 横向平移），Ctrl/⌘ + 滚轮 = 缩放
 function onCanvasWheel(event) {
   if (!document.value) return
-  const rect = event.currentTarget.getBoundingClientRect()
-  const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12
-  zoomAt(view.zoom * factor, event.clientX - rect.left, event.clientY - rect.top, event.currentTarget)
+  const el = event.currentTarget
+  const rect = el.getBoundingClientRect()
+  if (event.ctrlKey || event.metaKey) {
+    const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12
+    zoomAt(view.zoom * factor, event.clientX - rect.left, event.clientY - rect.top, el)
+    return
+  }
+  userTookOver = true // 用户滚轮平移，接管视口
+  const dx = event.shiftKey ? event.deltaY : event.deltaX
+  const dy = event.shiftKey ? 0 : event.deltaY
+  view.panX -= dx
+  view.panY -= dy
 }
 
-// 空白处拖拽平移（添加框模式 / 点在框或控件上时不触发）
+// 空白处拖拽平移（添加框模式 / 点在框或控件上时不触发）；按住 Space 时任意位置拖平移
 const panState = ref(null)
 const panning = computed(() => Boolean(panState.value))
+const spacePan = ref(false)
 function onCanvasPanDown(event) {
   if (addingMode.value || !document.value) return
-  if (event.target.closest('.region-box, .region-pop, .canvas-hud, button, a')) return
+  if (!spacePan.value && event.target.closest('.region-box, .region-pop, .canvas-hud, button, a')) return
   event.preventDefault()
   userTookOver = true // 用户主动平移，接管视口
   panState.value = { startX: event.clientX, startY: event.clientY, panX: view.panX, panY: view.panY }
@@ -165,8 +176,14 @@ let canvasResizeObs = null
 onMounted(() => {
   canvasResizeObs = new ResizeObserver(() => { if (!userTookOver) fitView() })
   if (frameCanvas.value) canvasResizeObs.observe(frameCanvas.value)
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('keyup', onGlobalKeyup)
 })
-onUnmounted(() => canvasResizeObs?.disconnect())
+onUnmounted(() => {
+  canvasResizeObs?.disconnect()
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('keyup', onGlobalKeyup)
+})
 
 // ---- 文档加载 ----
 async function loadDocument() {
@@ -348,9 +365,27 @@ function locateRegion(r) {
   })
 }
 
+// 当前选中框（面板「定位当前框」、快捷键 Shift+2、Enter 等共用）
+const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedRegionId.value) || null)
+
+// 上/下一个文本框（面板按钮与 Alt+↑/↓ 共用）
+function stepRegion(delta) {
+  const list = filteredRegions.value
+  if (!list.length) return
+  const current = list.findIndex((r) => r.id === selectedRegionId.value)
+  const next = current < 0 ? 0 : (current + delta + list.length) % list.length
+  const r = list[next]
+  selectRegion(r)
+  locateRegion(r)
+}
+
 // ---- 画布框 ----
 function regionBoxStyle(r) {
-  const [x1, y1, x2, y2] = r.bbox || [0, 0, 0, 0]
+  // 拖动/缩放过程中用本地 preview 即时渲染（对齐旧版 layout override 体感）
+  const pb = dragState.value && dragState.value.id === r.id && dragState.value.preview
+    ? dragState.value.preview
+    : (r.bbox || [0, 0, 0, 0])
+  const [x1, y1, x2, y2] = pb
   const w = imgW.value
   const h = imgH.value
   return {
@@ -370,7 +405,9 @@ function regionBoxText(r) {
 const dragState = ref(null)
 
 function onRegionPointerDown(event, r) {
+  if (spacePan.value) return // 空格平移模式：不拦截，事件冒泡给画布平移
   if (dragState.value || !r?.bbox) return
+  flushPendingNudge() // 有未提交的微调先落库，避免历史顺序颠倒
   event.preventDefault()
   event.stopPropagation()
   selectRegion(r, { open: true })
@@ -379,15 +416,21 @@ function onRegionPointerDown(event, r) {
   const [x1, y1, x2, y2] = r.bbox
   const sx = rect.width / imgW.value
   const sy = rect.height / imgH.value
-  const mode = event.target.closest('.handle') ? 'resize' : 'move'
+  const handleEl = event.target.closest('.handle')
+  const mode = handleEl ? 'resize' : 'move'
+  const handle = handleEl
+    ? ['tl', 'tr', 'bl', 'br'].find((h) => handleEl.classList.contains(h)) || 'br'
+    : ''
   dragState.value = {
     mode,
+    handle,
     id: r.id,
     startX: event.clientX,
     startY: event.clientY,
     bbox: [...r.bbox],
     sx, sy,
     moved: false,
+    preview: null,
   }
   window.addEventListener('pointermove', onDragMove)
   window.addEventListener('pointerup', onDragUp, { once: true })
@@ -396,14 +439,22 @@ function onRegionPointerDown(event, r) {
 function onDragMove(event) {
   const d = dragState.value
   if (!d) return
-  const dx = Math.round((event.clientX - d.startX) / d.sx)
-  const dy = Math.round((event.clientY - d.startY) / d.sy)
+  let dx = Math.round((event.clientX - d.startX) / d.sx)
+  let dy = Math.round((event.clientY - d.startY) / d.sy)
   if (Math.abs(dx) + Math.abs(dy) > 2) d.moved = true
-  const [x1, y1, x2, y2] = d.bbox
   if (d.mode === 'move') {
-    dragState.value.preview = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+    if (event.shiftKey) {
+      // 锁轴移动（对齐旧版）
+      if (Math.abs(dx) >= Math.abs(dy)) dy = 0
+      else dx = 0
+    }
+    d.preview = translateBBoxPage(d.bbox, dx, dy)
   } else {
-    dragState.value.preview = [x1, y1, Math.max(x1 + 12, x2 + dx), Math.max(y1 + 12, y2 + dy)]
+    // 四角各自缩放；Shift 等比，Alt 中心（对齐旧版）
+    d.preview = resizeBBoxPage(d.bbox, d.handle, dx, dy, {
+      proportional: event.shiftKey,
+      fromCenter: event.altKey,
+    })
   }
 }
 
@@ -414,7 +465,15 @@ async function onDragUp() {
   if (!d?.moved || !d.preview) return
   const [px1, py1, px2, py2] = d.preview
   if (px2 - px1 < 20 || py2 - py1 < 12) return
-  await submitCommands([{ type: 'update_region_bbox', region_id: d.id, bbox: [px1, py1, px2, py2] }])
+  const res = await submitCommands([{ type: 'update_region_bbox', region_id: d.id, bbox: d.preview }])
+  if (res) {
+    pushHistory({
+      kind: 'bbox',
+      label: d.mode === 'move' ? '移动文本框' : '调整文本框大小',
+      undoCommands: [{ type: 'update_region_bbox', region_id: d.id, bbox: d.bbox }],
+      redoCommands: [{ type: 'update_region_bbox', region_id: d.id, bbox: [...d.preview] }],
+    })
+  }
 }
 
 // 手动添加框
@@ -452,11 +511,13 @@ async function onAddUp() {
   if (!d) return
   const [x1, y1] = d.start
   const [x2, y2] = d.current
-  const bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)]
+  let bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)]
   if (bbox[2] - bbox[0] < 20 || bbox[3] - bbox[1] < 12) return
+  bbox = clampBBoxPage(bbox) // 钳制在页面内
   const res = await submitCommands([{ type: 'create_region', bbox }])
   if (res?.created_region?.[0]?.id || res?.created_region_payload?.id) {
     const rid = res.created_region_payload?.id || res.created_region?.[0]?.id
+    pushHistory({ kind: 'create_region', label: '新增手动框', bbox, createdRegionId: rid })
     addingMode.value = false
     await loadDocument()
     nextTick(() => {
@@ -478,6 +539,257 @@ function addDragStyle() {
     top: `${(Math.min(y1, y2) / h) * 100}%`,
     width: `${(Math.abs(x2 - x1) / w) * 100}%`,
     height: `${(Math.abs(y2 - y1) / h) * 100}%`,
+  }
+}
+
+// ---- bbox 几何（对齐旧版：边界钳制 / 锁轴移动 / 四角缩放 / Shift 等比 / Alt 中心）----
+function clampBBoxPage(bbox) {
+  const W = imgW.value
+  const H = imgH.value
+  let [x1, y1, x2, y2] = bbox.map((v) => Math.round(v))
+  if (x2 < x1) [x1, x2] = [x2, x1]
+  if (y2 < y1) [y1, y2] = [y2, y1]
+  x1 = Math.min(Math.max(0, x1), W)
+  x2 = Math.min(Math.max(0, x2), W)
+  y1 = Math.min(Math.max(0, y1), H)
+  y2 = Math.min(Math.max(0, y2), H)
+  if (x2 - x1 < 20) {
+    if (x1 + 20 <= W) x2 = x1 + 20
+    else { x2 = W; x1 = Math.max(0, W - 20) }
+  }
+  if (y2 - y1 < 12) {
+    if (y1 + 12 <= H) y2 = y1 + 12
+    else { y2 = H; y1 = Math.max(0, H - 12) }
+  }
+  return [x1, y1, x2, y2]
+}
+
+function translateBBoxPage(origin, dx, dy) {
+  const W = imgW.value
+  const H = imgH.value
+  const w = Math.max(8, origin[2] - origin[0])
+  const h = Math.max(8, origin[3] - origin[1])
+  const x1 = Math.min(Math.max(0, origin[0] + dx), Math.max(0, W - w))
+  const y1 = Math.min(Math.max(0, origin[1] + dy), Math.max(0, H - h))
+  return [Math.round(x1), Math.round(y1), Math.round(x1 + w), Math.round(y1 + h)]
+}
+
+// handle 取 tl/tr/bl/br；proportional=Shift 等比；fromCenter=Alt 中心缩放（对齐旧版语义）
+function resizeBBoxPage(origin, handle, dx, dy, { proportional = false, fromCenter = false } = {}) {
+  let [x1, y1, x2, y2] = origin
+  if (handle.includes('t')) { y1 += dy; if (fromCenter) y2 -= dy }
+  if (handle.includes('b')) { y2 += dy; if (fromCenter) y1 -= dy }
+  if (handle.includes('l')) { x1 += dx; if (fromCenter) x2 -= dx }
+  if (handle.includes('r')) { x2 += dx; if (fromCenter) x1 -= dx }
+  if (proportional) {
+    const ow = Math.max(8, origin[2] - origin[0])
+    const oh = Math.max(8, origin[3] - origin[1])
+    const ratio = ow / oh
+    let nw = Math.max(8, Math.abs(x2 - x1))
+    let nh = Math.max(8, Math.abs(y2 - y1))
+    if (nw / ow >= nh / oh) nh = nw / ratio
+    else nw = nh * ratio
+    if (fromCenter) {
+      const cx = (origin[0] + origin[2]) / 2
+      const cy = (origin[1] + origin[3]) / 2
+      x1 = cx - nw / 2; x2 = cx + nw / 2
+      y1 = cy - nh / 2; y2 = cy + nh / 2
+    } else {
+      // 锚定在拖拽角的对角
+      if (handle.includes('l')) x1 = x2 - nw
+      else x2 = x1 + nw
+      if (handle.includes('t')) y1 = y2 - nh
+      else y2 = y1 + nh
+    }
+  }
+  return clampBBoxPage([x1, y1, x2, y2])
+}
+
+// ---- 撤销 / 重做（画布编辑历史，按页隔离）----
+const HISTORY_LIMIT = 50
+const editHistory = ref({}) // pageId → { undo: [], redo: [] }
+const pageHistory = computed(() => editHistory.value[pageId.value] || { undo: [], redo: [] })
+const canUndo = computed(() => pageHistory.value.undo.length > 0)
+const canRedo = computed(() => pageHistory.value.redo.length > 0)
+
+function replaceHistory(pid, undo, redo) {
+  editHistory.value = { ...editHistory.value, [pid]: { undo, redo } }
+}
+function pushHistory(entry) {
+  const pid = pageId.value
+  const cur = pageHistory.value
+  replaceHistory(pid, [...cur.undo, entry].slice(-HISTORY_LIMIT), [])
+}
+
+async function undoEdit() {
+  const pid = pageId.value
+  const cur = pageHistory.value
+  const entry = cur.undo[cur.undo.length - 1]
+  if (!entry) return
+  let commands
+  if (entry.kind === 'create_region') {
+    commands = [{ type: 'delete_manual_region', region_id: entry.createdRegionId }]
+  } else if (entry.kind === 'delete_manual_region') {
+    commands = [{ type: 'restore_manual_region', payload: entry.deletedPayload }]
+  } else {
+    commands = entry.undoCommands
+  }
+  const res = await submitCommands(commands)
+  if (!res) return
+  replaceHistory(pid, cur.undo.slice(0, -1), [...cur.redo, entry].slice(-HISTORY_LIMIT))
+  toast(`已撤销：${entry.label}`, 'ok', 1500)
+  if (entry.kind === 'delete_manual_region' && entry.deletedPayload?.id) {
+    nextTick(() => {
+      const r = regions.value.find((x) => x.id === entry.deletedPayload.id)
+      if (r) selectRegion(r)
+    })
+  }
+}
+
+async function redoEdit() {
+  const pid = pageId.value
+  const cur = pageHistory.value
+  const entry = cur.redo[cur.redo.length - 1]
+  if (!entry) return
+  if (entry.kind === 'create_region') {
+    // 重建会拿到新 id，回写进历史项，保证再次撤销删的是同一个框
+    const res = await submitCommands([{ type: 'create_region', bbox: entry.bbox }])
+    if (!res) return
+    const rid = res?.created_region_payload?.id || res?.created_region?.[0]?.id || ''
+    const refreshed = { ...entry, createdRegionId: rid || entry.createdRegionId }
+    replaceHistory(pid, [...cur.undo, refreshed].slice(-HISTORY_LIMIT), cur.redo.slice(0, -1))
+    toast(`已重做：${entry.label}`, 'ok', 1500)
+    return
+  }
+  const commands = entry.kind === 'delete_manual_region'
+    ? [{ type: 'delete_manual_region', region_id: entry.deletedPayload?.id }]
+    : entry.redoCommands
+  const res = await submitCommands(commands)
+  if (!res) return
+  replaceHistory(pid, [...cur.undo, entry].slice(-HISTORY_LIMIT), cur.redo.slice(0, -1))
+  toast(`已重做：${entry.label}`, 'ok', 1500)
+}
+
+// ---- 方向键微调（本地即时预览，松开方向键合并成一次提交，对齐旧版 pendingCanvasNudge）----
+let pendingNudge = null // { regionId, originBBox }
+function nudgeSelectedRegion(dx, dy) {
+  const r = regions.value.find((x) => x.id === selectedRegionId.value)
+  if (!r?.bbox) return
+  if (pendingNudge && pendingNudge.regionId !== r.id) flushPendingNudge()
+  if (!pendingNudge) pendingNudge = { regionId: r.id, originBBox: [...r.bbox] }
+  const next = translateBBoxPage(r.bbox, dx, dy)
+  if (next.every((v, i) => v === r.bbox[i])) return
+  r.bbox = next // 直接改本地文档副本，框即时跟随
+}
+
+async function flushPendingNudge() {
+  const p = pendingNudge
+  pendingNudge = null
+  if (!p) return
+  const r = regions.value.find((x) => x.id === p.regionId)
+  if (!r?.bbox) return
+  if (r.bbox.every((v, i) => v === p.originBBox[i])) return
+  const redoBBox = [...r.bbox]
+  const res = await submitCommands([{ type: 'update_region_bbox', region_id: p.regionId, bbox: redoBBox }])
+  if (res) {
+    pushHistory({
+      kind: 'bbox',
+      label: '微调文本框',
+      undoCommands: [{ type: 'update_region_bbox', region_id: p.regionId, bbox: p.originBBox }],
+      redoCommands: [{ type: 'update_region_bbox', region_id: p.regionId, bbox: redoBBox }],
+    })
+  }
+}
+
+// ---- 全局快捷键（对齐旧版 handleGlobalCanvasKeydown）----
+function isTypingTarget(target) {
+  return target instanceof HTMLElement && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function onGlobalKeydown(event) {
+  if (isTypingTarget(event.target)) return
+  if (event.code === 'Space') {
+    spacePan.value = true
+    event.preventDefault()
+    return
+  }
+  if (!document.value) return
+  const meta = event.metaKey || event.ctrlKey
+  const key = event.key.toLowerCase()
+  if (meta && !event.shiftKey && key === 'z') {
+    event.preventDefault()
+    if (!taskBusy.value) undoEdit()
+    return
+  }
+  if ((meta && event.shiftKey && key === 'z') || (meta && key === 'y')) {
+    event.preventDefault()
+    if (!taskBusy.value) redoEdit()
+    return
+  }
+  if (event.key === 'PageUp' || event.key === '[') {
+    event.preventDefault()
+    prevPage()
+    return
+  }
+  if (event.key === 'PageDown' || event.key === ']') {
+    event.preventDefault()
+    nextPage()
+    return
+  }
+  if (event.altKey && event.key === 'ArrowUp') {
+    event.preventDefault()
+    stepRegion(-1)
+    return
+  }
+  if (event.altKey && event.key === 'ArrowDown') {
+    event.preventDefault()
+    stepRegion(1)
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    addingMode.value = false
+    exportMenuOpen.value = false
+    selectedRegionId.value = ''
+    return
+  }
+  if (event.shiftKey && event.code === 'Digit1') {
+    event.preventDefault()
+    zoomFit()
+    return
+  }
+  if (event.shiftKey && event.code === 'Digit0') {
+    event.preventDefault()
+    zoomReset()
+    return
+  }
+  if (event.shiftKey && event.code === 'Digit2') {
+    event.preventDefault()
+    if (selectedRegion.value) locateRegion(selectedRegion.value)
+    return
+  }
+  if (event.key === 'Enter' && selectedRegion.value) {
+    event.preventDefault()
+    toggleOpen(selectedRegion.value, true)
+    nextTick(() => {
+      window.document.querySelector('.region-card.is-selected textarea')?.focus()
+    })
+    return
+  }
+  // 方向键微调：1px，Ctrl/⌘ 5px，Shift 10px
+  if (!selectedRegion.value?.bbox || addingMode.value || taskBusy.value) return
+  const nudgeMap = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }
+  const d = nudgeMap[event.key]
+  if (!d) return
+  event.preventDefault()
+  const step = event.shiftKey ? 10 : meta ? 5 : 1
+  nudgeSelectedRegion(d[0] * step, d[1] * step)
+}
+
+function onGlobalKeyup(event) {
+  if (event.code === 'Space') spacePan.value = false
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    flushPendingNudge()
   }
 }
 
@@ -575,7 +887,12 @@ async function applyAdvancedStyle(r) {
 }
 
 async function deleteRegion(r) {
+  if (!r) return
+  // 删除前抓完整 payload（含 stored_name），撤销时 restore_manual_region 用
+  const deletedPayload = { ...r, stored_name: pageId.value }
   const res = await submitCommands([{ type: 'delete_manual_region', region_id: r.id }], { reload: false })
+  if (!res) return
+  pushHistory({ kind: 'delete_manual_region', label: '删除文本框', deletedPayload })
   openRegionIds.value.delete(r.id)
   selectedRegionId.value = ''
   await loadDocument()
@@ -679,6 +996,7 @@ onMounted(async () => {
   await Promise.all([loadDocument(), loadFonts()])
 })
 watch(pageId, async () => {
+  flushPendingNudge() // 换页前落库未提交的微调
   selectedRegionId.value = ''
   openRegionIds.value = new Set()
   draftCache.value = {}
@@ -816,7 +1134,8 @@ onUnmounted(() => {
             <div
               ref="frameCanvas"
               class="pane-canvas"
-              :class="{ 'is-panning': panning }"
+              :class="{ 'is-panning': panning, 'is-space-pan': spacePan }"
+              title="滚轮平移 · Shift 滚轮横向平移 · Ctrl/⌘+滚轮缩放 · 按住 Space 拖平移 · 移动时 Shift 锁轴 · 缩框 Shift 等比 / Alt 中心"
               @wheel.prevent="onCanvasWheel"
               @pointerdown="onCanvasPanDown"
             >
@@ -869,11 +1188,14 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="canvas-hud">
-              <button type="button" data-tip="适合窗口" @click="zoomFit">适合</button>
+              <button type="button" data-tip="撤销（⌘/Ctrl+Z）" :disabled="!canUndo" @click="undoEdit">↶</button>
+              <button type="button" data-tip="重做（⇧⌘/Ctrl+Z 或 Ctrl+Y）" :disabled="!canRedo" @click="redoEdit">↷</button>
+              <span class="pop-divider" style="width:1px;height:16px;background:var(--border-strong);margin:0 3px;"></span>
+              <button type="button" data-tip="适合窗口（Shift+1）" @click="zoomFit">适合</button>
               <button type="button" data-tip="适应宽度" @click="zoomWidth">适宽</button>
               <span class="pop-divider" style="width:1px;height:16px;background:var(--border-strong);margin:0 3px;"></span>
               <button type="button" aria-label="缩小" @click="zoomOut">−</button>
-              <span class="hud-zoom" data-tip="回到 100%" role="button" @click="zoomReset">{{ Math.round(view.zoom * 100) }}%</span>
+              <span class="hud-zoom" data-tip="回到 100%（Shift+0）" role="button" @click="zoomReset">{{ Math.round(view.zoom * 100) }}%</span>
               <button type="button" aria-label="放大" @click="zoomIn">＋</button>
             </div>
           </div>
@@ -1056,25 +1378,9 @@ onUnmounted(() => {
   </div>
 </template>
 
-<script>
-export default {
-  computed: {
-    selectedRegion() {
-      if (!this.document) return null
-      return this.document.regions.find((r) => r.id === this.selectedRegionId) || null
-    },
-  },
-  methods: {
-    stepRegion(delta) {
-      const list = this.filteredRegions || []
-      if (!list.length) return
-      const current = list.findIndex((r) => r.id === this.selectedRegionId)
-      const next = current < 0 ? 0 : (current + delta + list.length) % list.length
-      const r = list[next]
-      this.selectedRegionId = r.id
-      this.toggleOpen(r, true)
-      this.locateRegion(r)
-    },
-  },
-}
-</script>
+<style scoped>
+.pane-canvas.is-space-pan { cursor: grab; }
+.pane-canvas.is-space-pan .region-box,
+.pane-canvas.is-space-pan .handle { cursor: grab !important; }
+.canvas-hud button:disabled { opacity: .35; pointer-events: none; }
+</style>

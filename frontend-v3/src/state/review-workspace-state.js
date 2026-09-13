@@ -188,3 +188,59 @@ function getImageRegionCount(image) {
   }
   return mergeRegionCount(image.region_count, image.regionCount)
 }
+
+export const REVIEW_LOCATION_VERSION = 1
+
+/** Keep only serializable, bounded UI state in the per-project work location. */
+export function normalizeReviewLocation(value = {}) {
+  const source = value && typeof value === 'object' ? value : {}
+  const panes = source.panes && typeof source.panes === 'object' ? source.panes : {}
+  const panelWidth = Number(source.panelWidth)
+  const listScrollTop = Number(source.listScrollTop)
+  const normalizedPanes = {
+    frame: panes.frame !== false,
+    final: panes.final !== false,
+    src: Boolean(panes.src),
+    blank: Boolean(panes.blank),
+  }
+  if (!Object.values(normalizedPanes).some(Boolean)) normalizedPanes.frame = true
+  return {
+    version: REVIEW_LOCATION_VERSION,
+    pageId: String(source.pageId || '').trim(),
+    regionId: String(source.regionId || '').trim(),
+    previousPageId: String(source.previousPageId || '').trim(),
+    previousRegionId: String(source.previousRegionId || '').trim(),
+    filter: ['all', 'attention', 'manual', 'disabled'].includes(source.filter) ? source.filter : 'all',
+    searchQuery: String(source.searchQuery || '').slice(0, 160),
+    panelCollapsed: Boolean(source.panelCollapsed),
+    panelWidth: Number.isFinite(panelWidth) ? Math.min(520, Math.max(280, Math.round(panelWidth))) : 348,
+    listScrollTop: Number.isFinite(listScrollTop) ? Math.max(0, Math.round(listScrollTop)) : 0,
+    previewTypography: source.previewTypography !== false,
+    panes: normalizedPanes,
+  }
+}
+
+export function reviewLocationStorageKey(projectId) {
+  const id = String(projectId || '').trim()
+  return id ? `inkstage-review-location-v${REVIEW_LOCATION_VERSION}:${id}` : ''
+}
+
+export function nextIssueRegion(regions = [], currentId = '', { isIssue = (region) => Boolean(region?.issueReason) } = {}) {
+  const candidates = (Array.isArray(regions) ? regions : []).filter((region) => isIssue(region))
+  if (!candidates.length) return null
+  const index = candidates.findIndex((region) => region.id === currentId)
+  return candidates[(index + 1 + candidates.length) % candidates.length]
+}
+
+export function selectRegionRange(regions = [], anchorId = '', targetId = '', existingIds = []) {
+  const list = Array.isArray(regions) ? regions : []
+  const anchor = list.findIndex((region) => region?.id === anchorId)
+  const target = list.findIndex((region) => region?.id === targetId)
+  if (anchor < 0 || target < 0) return new Set(existingIds || [])
+  const [start, end] = anchor <= target ? [anchor, target] : [target, anchor]
+  const next = new Set(existingIds || [])
+  for (const region of list.slice(start, end + 1)) {
+    if (region?.id) next.add(region.id)
+  }
+  return next
+}

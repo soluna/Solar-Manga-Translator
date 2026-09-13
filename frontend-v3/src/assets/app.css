@@ -169,8 +169,8 @@
   height: 22px; padding: 0 8px;
   border-radius: var(--r-pill);
   display: inline-flex; align-items: center;
-  background: rgba(8, 9, 12, .72);
-  color: #E9EBF1;
+  background: var(--media-label-bg);
+  color: var(--media-label-text);
   font-family: var(--font-mono); font-size: 11px; font-weight: 600;
   backdrop-filter: blur(4px);
 }
@@ -213,8 +213,8 @@
   position: absolute; left: 4px; bottom: 4px;
   height: 16px; min-width: 22px; padding: 0 5px;
   border-radius: 4px;
-  background: rgba(8, 9, 12, .78);
-  color: #E9EBF1;
+  background: var(--media-label-bg-strong);
+  color: var(--media-label-text);
   font-family: var(--font-mono); font-size: 10px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center;
 }
@@ -256,16 +256,15 @@
   display: inline-flex; align-items: center; gap: 6px;
   height: 24px; padding: 0 10px;
   border-radius: var(--r-pill);
-  background: rgba(8, 9, 12, .72);
+  background: var(--media-label-bg);
   backdrop-filter: blur(6px);
-  color: #E9EBF1;
+  color: var(--media-label-text);
   font-size: var(--fs-micro); font-weight: 600; letter-spacing: .04em;
 }
-:root[data-theme="light"] .pane-label { background: rgba(255,255,255,.85); color: #171B24; }
 .pane-label i { width: 6px; height: 6px; border-radius: 2px; background: var(--accent); font-style: normal; }
 .pane-label.is-final i { background: var(--ok); }
 .pane-label.is-src i { background: var(--warn); }
-.pane-label.is-blank i { background: #8FA7FF; }
+.pane-label.is-blank i { background: var(--blank-accent); }
 
 .pane-canvas {
   flex: 1; min-height: 0;
@@ -286,9 +285,8 @@
   position: absolute;
   left: 0; top: 0;
   transform-origin: 0 0;
-  box-shadow: 0 12px 44px rgba(0, 0, 0, .5), 0 2px 10px rgba(0, 0, 0, .4);
+  box-shadow: var(--stage-shadow);
 }
-:root[data-theme="light"] .pane-stage { box-shadow: 0 12px 40px rgba(18, 22, 32, .22), 0 2px 8px rgba(18, 22, 32, .12); }
 .pane-stage img { width: 100%; height: 100%; display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
 
 /* 文本框覆盖层 */
@@ -300,7 +298,7 @@
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
-.region-box:hover { background: rgba(62, 207, 192, .14); }
+.region-box:hover { background: var(--accent-dim); }
 .region-box .region-no {
   position: absolute; top: -9px; left: -6px;
   min-width: 18px; height: 18px; padding: 0 4px;
@@ -313,9 +311,9 @@
 .region-box.is-active {
   border-color: var(--region-active);
   background: var(--region-active-fill);
-  box-shadow: 0 0 0 3px rgba(255, 209, 102, .18);
+  box-shadow: 0 0 0 3px var(--region-active-fill);
 }
-.region-box.is-active .region-no { background: var(--region-active); color: #3A2A00; }
+.region-box.is-active .region-no { background: var(--region-active); color: var(--region-active-ink); }
 /* 手柄 */
 .region-box .handle {
   position: absolute; width: 8px; height: 8px;
@@ -333,7 +331,7 @@
 .region-box .box-text {
   position: absolute; inset: 5px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 10px; font-weight: 600; color: #221E16;
+  font-size: 10px; font-weight: 600; color: var(--paper-ink);
   text-align: center; line-height: 1.3;
   overflow: hidden;
   pointer-events: none;
@@ -570,11 +568,11 @@ details.advanced-fold .fold-body { padding: 4px 16px 16px; display: flex; flex-d
 .erase-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .erase-canvas-wrap { flex: 1; min-height: 0; position: relative; background: var(--canvas-bg); display: grid; place-items: center; overflow: hidden; }
 .erase-page { position: relative; width: min(58vh, 480px); }
-.erase-page img { width: 100%; box-shadow: 0 12px 44px rgba(0,0,0,.5); }
+.erase-page img { width: 100%; box-shadow: var(--stage-shadow); }
 /* 选区标记示意 */
-.erase-mark { position: absolute; border: 1.5px dashed var(--region-active); background: rgba(255, 209, 102, .12); border-radius: 4px; }
-.erase-mark span { position: absolute; top: -8px; left: -6px; height: 16px; padding: 0 5px; border-radius: 4px; background: var(--region-active); color: #3A2A00; font-size: 9px; font-weight: 700; font-family: var(--font-mono); display: grid; place-items: center; }
-.erase-brush-stroke { position: absolute; border-radius: 50%; background: rgba(255, 209, 102, .25); border: 1.5px dashed var(--region-active); }
+.erase-mark { position: absolute; border: 1.5px dashed var(--region-active); background: var(--region-active-fill); border-radius: 4px; }
+.erase-mark span { position: absolute; top: -8px; left: -6px; height: 16px; padding: 0 5px; border-radius: 4px; background: var(--region-active); color: var(--region-active-ink); font-size: 9px; font-weight: 700; font-family: var(--font-mono); display: grid; place-items: center; }
+.erase-brush-stroke { position: absolute; border-radius: 50%; background: var(--region-active-fill); border: 1.5px dashed var(--region-active); }
 
 .erase-side { width: 300px; flex: none; border-left: 1px solid var(--border); background: var(--bg-panel); display: flex; flex-direction: column; min-height: 0; }
 .erase-side-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
@@ -635,3 +633,21 @@ details.advanced-fold .fold-body { padding: 4px 16px 16px; display: flex; flex-d
 /* ==================== 通用工具 ==================== */
 .spacer { flex: 1; }
 .hidden { display: none !important; }
+
+/* 任务条占据 route-host 之外的高度；短窗口中压缩入口和历史卡片，保留继续工作的主路径。 */
+@media (max-height: 760px) {
+  .home { padding: 24px 24px; }
+  .home-inner { gap: 18px; }
+  .home-hero { gap: 8px; }
+  .home-hero h1 { font-size: 28px; }
+  .dropzone { padding: 30px 24px; }
+  .dropzone-icon { width: 44px; height: 44px; }
+  .dropzone-actions { margin-top: 8px; }
+
+  .projects-view { padding: 16px 22px 28px; }
+  .projects-inner { gap: 12px; }
+  .project-grid { gap: 10px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  .project-card-top { padding: 10px; }
+  .project-card-cover { width: 56px; height: 76px; }
+  .project-card-actions { padding: 8px 10px; }
+}

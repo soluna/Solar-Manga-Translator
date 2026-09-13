@@ -1,16 +1,25 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { apiGetJson, apiPatchJson, toApiUrl } from '../api/client.js'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { apiGetJson, toApiUrl } from '../api/client.js'
+import { useSettings } from '../composables/useSettings.js'
+import { SETTINGS_GROUPS } from '../state/settings-fields.js'
+import SettingsFields from '../components/SettingsFields.vue'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
 
 const router = useRouter()
+const state = useSettings()
+const { settings, draft, loading, saving, validating, dirty } = state
+const formKeys = SETTINGS_GROUPS[0].keys
+const configError = ref('正在读取配置…')
+let checkEpoch = 0
+let allowLeave = false
 
 // ---- 环境检查 ----
 const checks = ref([
   { key: 'backend', label: '后端服务', state: 'run', detail: '检测中…' },
-  { key: 'translation', label: '翻译服务', state: 'run', detail: '检测中…' },
+  { key: 'translation', label: '翻译配置', state: 'run', detail: '检测中…' },
   { key: 'fonts', label: '字体目录', state: 'run', detail: '检测中…' },
   { key: 'lama', label: 'LaMa 擦字模型', state: 'run', detail: '检测中…' },
 ])
@@ -24,17 +33,23 @@ function setCheck(key, state, detail) {
 }
 
 async function runChecks() {
+  const epoch = ++checkEpoch
+  const current = () => epoch === checkEpoch
   checks.value.forEach((c) => { c.state = 'run'; c.detail = '检测中…' })
   // 后端
   let online = false
   try {
     const status = await apiGetJson('/api/status', '连接失败')
+    if (!current()) return
     online = status?.status === 'running'
     setCheck('backend', online ? 'ok' : 'fail', online ? '运行中' : '未响应')
   } catch {
+    if (!current()) return
     setCheck('backend', 'fail', '未连接（请先启动后端）')
   }
+  if (!current()) return
   if (!online) {
+    configError.value = '请先连接后端再保存设置。'
     setCheck('translation', 'fail', '需后端在线')
     setCheck('fonts', 'fail', '需后端在线')
     setCheck('lama', 'fail', '需后端在线')
@@ -42,28 +57,40 @@ async function runChecks() {
   }
   // 翻译服务
   try {
-    const { settings } = await apiGetJson('/api/app/settings', '读取设置失败')
-    const provider = settings?.translation_service || settings?.translation_provider || ''
-    const key = settings?.translation_api_key || settings?.api_key || ''
-    const ok = Boolean(provider) && Boolean(key)
-    setCheck('translation', ok ? 'ok' : 'fail', ok ? `${provider} 已配置` : '未配置 API Key')
-  } catch {
+    await state.load()
+    if (!current()) return
+    configError.value = ''
+    const provider = draft.translator || ''
+    const hasApiKey = state.secretConfigured('api_key') || Boolean(String(draft.api_key || '').trim())
+    const ok = Boolean(provider) && hasApiKey
+    setCheck('translation', ok ? 'ok' : 'fail', ok ? `${provider} 已配置，连接待验证` : '请填写翻译服务和 API Key')
+  } catch (err) {
+    if (!current()) return
+    configError.value = err.message
     setCheck('translation', 'fail', '读取失败')
   }
   // 字体
   try {
     const data = await apiGetJson('/api/fonts', '读取字体失败')
+    if (!current()) return
     const fonts = data?.fonts || []
     setCheck('fonts', fonts.length ? 'ok' : 'fail', fonts.length ? `${fonts.length} 个可用` : '字体目录为空')
   } catch {
+    if (!current()) return
     setCheck('fonts', 'fail', '读取失败')
   }
   // LaMa
   try {
     const data = await apiGetJson('/api/app/local-models/lama-large', '读取失败')
-    const ok = Boolean(data?.available ?? data?.downloaded ?? data?.installed)
-    setCheck('lama', ok ? 'ok' : 'fail', ok ? '已就绪' : '未下载')
+    if (!current()) return
+    const model = data?.model || {}
+    const downloaded = Boolean(model.downloaded) && Number(model.size_bytes) > 0
+    const partial = Boolean(model.partial_downloaded) || Number(model.partial_size_bytes) > 0
+    setCheck('lama', downloaded ? 'ok' : 'fail', downloaded
+      ? '已下载，首次使用会校验'
+      : partial ? '下载未完成' : '未下载')
   } catch {
+    if (!current()) return
     setCheck('lama', 'fail', '状态未知')
   }
 }
@@ -72,48 +99,56 @@ function exportDiagnostics() {
   window.open(toApiUrl('/api/app/diagnostics/export'), '_blank')
 }
 
-// ---- 翻译服务表单 ----
-const provider = ref('gemini')
-const targetLang = ref('简体中文')
-const apiKey = ref('')
-const saving = ref(false)
-
-const PROVIDERS = ['gemini', '豆包 Ark', 'OpenAI Compatible', 'deepseek', '自定义']
-const LANGS = ['简体中文', '繁体中文', '英语', '日语', '韩语']
-
-const allGreen = computed(() => checks.value.every((c) => c.state === 'ok'))
-
-async function saveAndStart() {
-  if (saving.value) return
-  saving.value = true
+const allGreen = computed(() => checks.value.every(c => c.state === 'ok'))
+async function validateService() {
   try {
-    const patch = {}
-    if (provider.value) patch.translation_service = provider.value
-    if (targetLang.value) patch.target_language = targetLang.value
-    if (apiKey.value) patch.translation_api_key = apiKey.value
-    if (Object.keys(patch).length) {
-      await apiPatchJson('/api/app/settings', patch, '保存设置失败')
-    }
-    try {
-      window.localStorage.setItem('solar-v3-onboarded', '1')
-    } catch { /* ignore */ }
+    const result = await state.validate()
+    if (!result) return
+    setCheck('translation', result.ok ? 'ok' : 'fail', result.message || (result.ok ? '连接成功' : '连接失败'))
+    toast(result.message || (result.ok ? '连接成功' : '连接失败'), result.ok ? 'ok' : 'error')
+  } catch (err) { toastError(err) }
+}
+async function saveAndStart() {
+  if (saving.value || loading.value || configError.value) return
+  try {
+    await state.flush()
+    try { window.localStorage.setItem('solar-v3-onboarded', '1') } catch { /* optional preference */ }
     toast('设置已保存，欢迎使用。', 'ok')
     router.push('/')
-  } catch (err) {
-    toastError(err)
-  } finally {
-    saving.value = false
-  }
+  } catch (err) { toastError(err) }
 }
 
 function skip() {
+  if (!leaveSafely()) return
+  allowLeave = true
   try {
     window.localStorage.setItem('solar-v3-onboarded', '1')
   } catch { /* ignore */ }
   router.push('/')
 }
 
-onMounted(runChecks)
+function leaveSafely() {
+  if (allowLeave) {
+    allowLeave = false
+    return true
+  }
+  if (saving.value) {
+    toast('设置正在保存，请稍候。', 'warn')
+    return false
+  }
+  return !dirty.value || window.confirm('有未保存的设置，离开将丢失这些修改。确定离开吗？')
+}
+
+function beforeUnload(event) {
+  if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' }
+}
+
+onBeforeRouteLeave(leaveSafely)
+onMounted(() => {
+  runChecks()
+  window.addEventListener('beforeunload', beforeUnload)
+})
+onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 </script>
 
 <template>
@@ -142,7 +177,7 @@ onMounted(runChecks)
         </div>
         <div class="onboard-steps" style="margin-top:14px">
           <i :class="{ done: checks.every(c => c.state !== 'run') }"></i>
-          <i :class="{ done: apiKey || allGreen }"></i>
+          <i :class="{ done: state.secretConfigured('api_key') || draft.api_key || allGreen }"></i>
           <i></i>
         </div>
         <div class="modal-body" style="display:flex;flex-direction:column;gap:16px">
@@ -165,30 +200,16 @@ onMounted(runChecks)
 
           <section class="panel" style="padding:16px">
             <h3 style="font-size:var(--fs-strong);font-weight:700;margin-bottom:12px">翻译服务</h3>
-            <div class="form-grid">
-              <label class="field">
-                <span>翻译引擎</span>
-                <select v-model="provider">
-                  <option v-for="p in PROVIDERS" :key="p" :value="p">{{ p }}</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>目标语言</span>
-                <select v-model="targetLang">
-                  <option v-for="l in LANGS" :key="l" :value="l">{{ l }}</option>
-                </select>
-              </label>
-              <label class="field span2">
-                <span>API Key</span>
-                <input v-model="apiKey" type="password" placeholder="粘贴你的 API Key" />
-              </label>
-            </div>
-            <p class="inline-note" style="margin-top:10px">设置会保存到本机配置文件，不会上传到服务器。</p>
+            <p v-if="loading" class="inline-note">正在读取设置…</p>
+            <p v-else-if="configError" class="inline-note">{{ configError }}</p>
+            <SettingsFields v-else :draft="draft" :keys="formKeys" :configured-secrets="settings.configured_secrets" />
+            <button class="btn btn-secondary" style="margin-top:12px" :disabled="loading || saving || validating || !!configError" @click="validateService">{{ validating ? '验证中…' : '验证当前配置' }}</button>
+            <p class="inline-note" style="margin-top:10px">密钥保存在本机。验证和在线翻译会向所选服务商发送文本；输入框留空会保留已保存的密钥。</p>
           </section>
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" type="button" @click="skip">跳过，稍后再说</button>
-          <button class="btn btn-primary" type="button" :disabled="saving" @click="saveAndStart">
+          <button class="btn btn-primary" type="button" :disabled="saving || loading || !!configError" @click="saveAndStart">
             {{ saving ? '保存中…' : '保存并开始' }}
           </button>
         </div>
@@ -202,24 +223,27 @@ onMounted(runChecks)
 </template>
 
 <style scoped>
+.onboard-page { height: 100%; min-height: 0; }
 .onboard-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 48px 20px;
-  min-height: calc(100vh - 60px);
+  padding: 32px 20px;
 }
 .onboard-wrap .modal.onboard {
   position: static;
   max-width: 640px;
   width: 100%;
 }
-.c-ico.ok { color: #3ecfc0; }
-.c-ico.fail { color: #e05656; }
-.c-ico.run { color: #e8a33d; }
+.c-ico.ok { color: var(--ok); }
+.c-ico.fail { color: var(--danger); }
+.c-ico.run { color: var(--warn); }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
-.toast { padding: 10px 16px; border-radius: 10px; background: var(--surface-3, #232838); border: 1px solid var(--line, rgba(255,255,255,.1)); color: var(--text-1, #e8eaf0); font-size: 13px; cursor: pointer; max-width: 360px; }
-.toast.is-error { border-color: #e05656; }
-.toast.is-warn { border-color: #e8a33d; }
-.toast.is-ok { border-color: #3ecfc0; }
+.toast { padding: 10px 16px; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-1); font-size: 13px; cursor: pointer; max-width: 360px; }
+.toast.is-error { border-color: var(--danger); }
+.toast.is-warn { border-color: var(--warn); }
+.toast.is-ok { border-color: var(--accent); }
 </style>

@@ -59,7 +59,7 @@ npm install        # 首次
 npm run dev        # http://127.0.0.1:5273/ （端口可用 VITE_DEV_PORT 覆盖）
 ```
 
-后端照常启动（8000 端口）后，新入口通过同一套 `/api` 工作。无后端时可用 `npm run dev:mock` 预览全部页面（假数据）。
+后端照常启动（8000 端口）后，新入口通过同一套 `/api` 工作。无后端时可用 `npm run dev:mock` 浏览合成演示项目；演示模式不执行保存、导入、模型处理或导出。该命令兼容 Windows 与 macOS/Linux。
 
 ### Windows
 
@@ -284,6 +284,11 @@ npm run dev -- --host 127.0.0.1
 ```bash
 # 后端
 python -m unittest discover backend/tests -v
+
+# InkStage 前端与真实 API 契约（在仓库根目录运行）
+npm --prefix frontend-v3 run test:unit
+npm --prefix frontend-v3 run build
+python scripts/check_editor_contract.py
 
 # 前端
 cd frontend

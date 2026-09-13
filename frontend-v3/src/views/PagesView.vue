@@ -1,11 +1,20 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiFetch, apiPostJson, readApiError, toApiUrl, withCacheBust, withImagePreviewSize } from '../api/client.js'
 import { useProject } from '../composables/useProject.js'
 import { useTaskEvents } from '../composables/useTaskEvents.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+import { loadProcessingConfig } from '../api/processing-config.js'
+import { pageStatus, projectReadiness } from '../state/page-status.js'
+import { recentPageFor, rememberRecentPage } from '../state/recent-location.js'
+import {
+  baseImageUploadMessage,
+  emptyBaseImageUploadSummary,
+  mergeBaseImageUploadFailure,
+  mergeBaseImageUploadSummary,
+} from '../state/base-image-upload.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,47 +27,52 @@ const { taskState } = taskEvents
 const search = ref('')
 const exportMenuOpen = ref(false)
 const baseImageInput = ref(null)
+const baseUploadBusy = ref(false)
+const baseUploadProgress = ref({ done: 0, total: 0 })
+const baseUploadFeedback = ref(null)
 
-const images = computed(() => project.value?.images || [])
+function stablePageNumber(image, index) {
+  const explicit = Number(image?.page_number)
+  if (Number.isInteger(explicit) && explicit > 0) return explicit
+  const zeroBased = Number(image?.page_index)
+  if (Number.isInteger(zeroBased) && zeroBased >= 0) return zeroBased + 1
+  return index + 1
+}
+
+const images = computed(() => (project.value?.images || []).map((image, index) => ({
+  ...image,
+  page_number: stablePageNumber(image, index),
+})))
+const readiness = computed(() => projectReadiness(images.value))
 const filteredImages = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return images.value
   return images.value.filter((img) =>
     String(img.name || '').toLowerCase().includes(q)
-    || String(img.stored_name || '').toLowerCase().includes(q),
+    || String(img.stored_name || '').toLowerCase().includes(q)
+    || pageBadge(img).text.includes(q)
+    || String(img.page_number) === q,
   )
 })
 
 const projectTitle = computed(() => project.value?.project?.title || project.value?.project?.project_id || sessionId.value || '项目')
 const pageCount = computed(() => project.value?.total_images ?? images.value.length)
 const workflowStage = computed(() => String(project.value?.workflow_stage || 'idle'))
-const taskBusy = computed(() => Boolean(taskState.value.activeTaskId) && !['completed', 'failed', 'error', 'cancelled', 'interrupted'].includes(taskState.value.eventName))
+const preparingTask = ref(false)
+const taskBusy = computed(() => taskEvents.busy.value || preparingTask.value)
+const currentTask = computed(() => taskEvents.sessionId.value === sessionId.value && taskBusy.value ? {
+  busy: true, action: taskState.value.activeAction, pageId: taskState.value.activeTaskTargetStoredName,
+} : null)
 
-// ---- 流水线状态 ----
-// idle → 未开始；detecting → 识别中；detected → 已识别可翻译；translating → 翻译中；translated → 可审校/重嵌字
 const pipeline = computed(() => {
-  const stage = workflowStage.value
   const steps = [
-    { key: 'detect', no: 1, title: '识别', desc: '文本检测 · OCR · 擦字生成空页' },
-    { key: 'translate', no: 2, title: '翻译', desc: 'AI 初稿回填审校工作台' },
-    { key: 'rerender', no: 3, title: '审校嵌字', desc: '应用人工调整，重新嵌字' },
+    { key: 'detect', no: 1, title: '识别', desc: '文本检测 · OCR · 擦字生成空页', done: readiness.value.recognized, ready: images.value.length > 0 },
+    { key: 'translate', no: 2, title: '翻译', desc: 'AI 初稿回填审校工作台', done: readiness.value.translated, ready: readiness.value.canTranslate },
+    { key: 'rerender', no: 3, title: '重新嵌字', desc: '把当前译文和排版生成图片', done: readiness.value.rendered, ready: readiness.value.canRender },
   ]
-  const stateOf = (key) => {
-    if (key === 'detect') {
-      if (stage === 'detecting') return 'running'
-      if (['detected', 'translating', 'translated'].includes(stage)) return 'done'
-      return 'ready'
-    }
-    if (key === 'translate') {
-      if (stage === 'translating') return 'running'
-      if (stage === 'translated') return 'done'
-      if (stage === 'detected') return 'ready'
-      return 'locked'
-    }
-    if (stage === 'translated') return 'ready'
-    return 'locked'
-  }
-  return steps.map((s) => ({ ...s, state: stateOf(s.key) }))
+  return steps.map(step => ({ ...step, state: currentTask.value && (currentTask.value.action === step.key
+    || (step.key === 'translate' && ['translate-page', 'resume-translate'].includes(currentTask.value.action)))
+    ? 'running' : step.done ? 'done' : step.ready ? 'ready' : 'locked' }))
 })
 
 const stageBadgeText = computed(() => {
@@ -69,13 +83,7 @@ const stageBadgeText = computed(() => {
   return map[workflowStage.value] || workflowStage.value
 })
 
-function pageBadge(img) {
-  const caps = img?.artifact_state?.capabilities || {}
-  if (caps.can_export || workflowStage.value === 'translated') return { text: '已嵌字', cls: 'is-ok' }
-  if (taskBusy.value && taskState.value.activeAction === 'translate') return { text: '翻译中', cls: 'is-accent' }
-  if (workflowStage.value === 'detected') return { text: '已识别', cls: 'is-ok' }
-  return { text: '待处理', cls: '' }
-}
+function pageBadge(img) { return pageStatus(img, currentTask.value) }
 
 function thumbUrl(img) {
   const raw = img?.url || `/api/pages/${sessionId.value}/${img.stored_name}/source-image`
@@ -83,15 +91,20 @@ function thumbUrl(img) {
 }
 
 function openReview(img) {
+  if (baseUploadBusy.value) return
+  rememberRecentPage(sessionId.value, img.stored_name)
   router.push(`/review/${sessionId.value}/${encodeURIComponent(img.stored_name)}`)
 }
 
 function firstPageId() {
+  const remembered = recentPageFor(sessionId.value, images.value)
+  if (remembered) return remembered
   const first = images.value[0]
   return first ? first.stored_name : ''
 }
 
 function enterReview() {
+  if (baseUploadBusy.value) return
   const pid = firstPageId()
   if (!pid) {
     toast('项目还没有页面。', 'warn')
@@ -101,33 +114,41 @@ function enterReview() {
 }
 
 function gotoGlossary() {
-  router.push(`/glossary/${sessionId.value}`)
+  if (baseUploadBusy.value) return
+  const page = recentPageFor(sessionId.value, images.value)
+  const target = { path: `/glossary/${encodeURIComponent(sessionId.value)}` }
+  if (page) target.query = { page }
+  router.push(target)
 }
 
 // ---- 任务控制 ----
 async function runAction(action) {
-  if (!sessionId.value || taskBusy.value) return
+  if (!sessionId.value || taskBusy.value || baseUploadBusy.value) return
+  preparingTask.value = true
+  const id = sessionId.value
   try {
-    taskEvents.start(sessionId.value, action, project.value?.config || {})
+    const config = await loadProcessingConfig(project.value?.config || {})
+    if (id !== sessionId.value) return
+    const nextAction = action === 'translate' && !readiness.value.translated ? 'resume-translate' : action
+    taskEvents.start(id, nextAction, config)
   } catch (err) {
     toastError(err)
-  }
+  } finally { preparingTask.value = false }
 }
 
 async function cancelTask() {
-  const taskId = taskState.value.activeTaskId
-  if (!taskId) return
   try {
-    await apiPostJson(`/api/tasks/${taskId}/cancel`, {}, '取消任务失败')
-    toast('已发送取消请求', 'ok')
+    const requested = await taskEvents.cancel()
+    toast(requested ? '已请求取消，等待后台停止。' : '任务已发送，正在确认后台任务；确认后可取消。', requested ? 'ok' : 'warn')
   } catch (err) {
     toastError(err)
   }
 }
 
-async function reloadProject() {
+async function reloadProject(id = sessionId.value) {
+  if (!id) return
   try {
-    await loadProject(sessionId.value)
+    await loadProject(id)
   } catch (err) {
     toastError(err)
   }
@@ -136,6 +157,7 @@ async function reloadProject() {
 watch(
   () => taskState.value.eventName,
   (name) => {
+    if (taskEvents.sessionId.value !== sessionId.value) return
     if (name === 'completed') {
       toast('任务完成', 'ok')
       reloadProject()
@@ -149,7 +171,7 @@ watch(
 // ---- 导出 ----
 function exportResult() {
   const url = project.value?.download_url
-  if (!url) {
+  if (!url || !readiness.value.rendered || taskBusy.value || baseUploadBusy.value) {
     toast('还没有可导出的结果。', 'warn')
     return
   }
@@ -158,44 +180,78 @@ function exportResult() {
 }
 
 function exportBlank() {
+  if (!readiness.value.blankReady || taskBusy.value || baseUploadBusy.value) return
   window.open(withCacheBust(toApiUrl(`/api/download/${sessionId.value}/blank`)), '_blank')
   exportMenuOpen.value = false
 }
 
 // ---- 补充无字图 ----
 function pickBaseImages() {
+  if (baseUploadBusy.value || taskBusy.value) return
   baseImageInput.value?.click()
 }
 
 async function onBaseImagePicked(event) {
-  const file = (event.target.files || [])[0]
+  const files = Array.from(event.target.files || [])
   event.target.value = ''
-  if (!file) return
+  if (!files.length || baseUploadBusy.value || taskBusy.value) return
+  const uploadProjectId = sessionId.value
+  if (!uploadProjectId) return
+  baseUploadBusy.value = true
+  baseUploadProgress.value = { done: 0, total: files.length }
+  let summary = emptyBaseImageUploadSummary()
   try {
-    const fd = new FormData()
-    fd.append('file', file)
-    const res = await apiFetch(`/api/projects/${sessionId.value}/base-images`, { method: 'POST', body: fd })
-    if (!res.ok) throw new Error(await readApiError(res, '补充无字图失败'))
-    const data = await res.json().catch(() => ({}))
-    adoptResponse(data)
-    toast('无字图已补充。', 'ok')
-    reloadProject()
-  } catch (err) {
-    toastError(err)
+    // The backend endpoint deliberately accepts one image/archive per request;
+    // serialize the batch so a project write lease cannot race itself.
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index]
+      if (sessionId.value !== uploadProjectId || taskBusy.value) {
+        const reason = sessionId.value === uploadProjectId ? '后台任务已开始，未继续上传' : '项目已切换，未上传'
+        for (let rest = index; rest < files.length; rest += 1) {
+          summary = mergeBaseImageUploadFailure(summary, files[rest].name, reason)
+          baseUploadProgress.value = { done: rest + 1, total: files.length }
+        }
+        break
+      }
+      try {
+        const fd = new FormData()
+        fd.append('file', file)
+        const res = await apiFetch(`/api/projects/${encodeURIComponent(uploadProjectId)}/base-images`, { method: 'POST', body: fd })
+        if (!res.ok) throw new Error(await readApiError(res, '补充无字图失败'))
+        const data = await res.json().catch(() => null)
+        if (!data?.base_image_upload || typeof data.base_image_upload !== 'object') {
+          throw new Error('后端未返回无字图匹配结果。')
+        }
+        summary = mergeBaseImageUploadSummary(summary, data)
+        if (sessionId.value === uploadProjectId) adoptResponse(data)
+      } catch (error) {
+        summary = mergeBaseImageUploadFailure(summary, file.name, error.message)
+      } finally {
+        baseUploadProgress.value = { done: baseUploadProgress.value.done + 1, total: files.length }
+      }
+    }
+    if (sessionId.value === uploadProjectId) {
+      baseUploadFeedback.value = summary
+      toast(baseImageUploadMessage(summary), summary.matched ? 'ok' : 'warn', 7000)
+      await reloadProject(uploadProjectId)
+    }
+  } finally {
+    baseUploadBusy.value = false
   }
 }
 
-onMounted(async () => {
+watch(sessionId, async id => {
+  baseUploadFeedback.value = null
   try {
-    await loadProject(sessionId.value)
-  } catch {
-    /* error ref 已承载 */
-  }
-})
-
-onUnmounted(() => {
-  taskEvents.disconnect()
-})
+    await loadProject(id)
+    if (id === sessionId.value && route.query.resume === '1') {
+      const remembered = recentPageFor(id, project.value?.images || [])
+      if (remembered) {
+        await router.replace(`/review/${encodeURIComponent(id)}/${encodeURIComponent(remembered)}`)
+      }
+    }
+  } catch { /* The view exposes the load error. */ }
+}, { immediate: true })
 </script>
 
 <template>
@@ -223,15 +279,15 @@ onUnmounted(() => {
           ></progress>
         </span>
         <a class="btn btn-ghost" href="#/projects">项目管理</a>
-        <button class="btn btn-ghost" type="button" @click="pickBaseImages">补充无字图</button>
+        <button class="btn btn-ghost" type="button" :disabled="baseUploadBusy || taskBusy" @click="pickBaseImages">{{ baseUploadBusy ? '补充中…' : '补充无字图' }}</button>
         <div class="export-menu-wrap">
-          <button class="btn btn-secondary" type="button" @click="exportMenuOpen = !exportMenuOpen">
+          <button class="btn btn-secondary" type="button" data-tip="导出结果或无字页" aria-haspopup="menu" :aria-expanded="exportMenuOpen" @click="exportMenuOpen = !exportMenuOpen">
             导出
             <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 6 4 4 4-4"/></svg>
           </button>
-          <div v-if="exportMenuOpen" class="export-menu">
-            <button type="button" @click="exportResult">导出结果（.zip）</button>
-            <button type="button" @click="exportBlank">导出空页（.zip）</button>
+          <div v-if="exportMenuOpen" class="export-menu" role="menu">
+            <button type="button" role="menuitem" :disabled="!readiness.rendered || taskBusy || baseUploadBusy" @click="exportResult">导出结果（.zip）</button>
+            <button type="button" role="menuitem" :disabled="!readiness.blankReady || taskBusy || baseUploadBusy" @click="exportBlank">导出空页（.zip）</button>
           </div>
         </div>
         <ThemeToggle />
@@ -250,8 +306,8 @@ onUnmounted(() => {
             <p class="sub">确认识别结果，执行翻译，再逐页进入审校。</p>
           </div>
           <div class="pages-head-actions">
-            <button class="btn btn-secondary" type="button" @click="gotoGlossary">专有名词库</button>
-            <button class="btn btn-primary" type="button" @click="enterReview">进入审校</button>
+            <button class="btn btn-secondary" type="button" :disabled="baseUploadBusy" @click="gotoGlossary">专有名词库</button>
+            <button class="btn btn-primary" type="button" :disabled="baseUploadBusy" @click="enterReview">进入审校</button>
           </div>
         </div>
 
@@ -267,8 +323,9 @@ onUnmounted(() => {
               v-for="step in pipeline"
               :key="step.key"
               class="pipe-step"
+              :aria-label="`${step.title}：${step.state === 'done' ? '已完成' : step.state === 'running' ? '进行中' : step.state === 'ready' ? '可执行' : '待前一步'}`"
               :class="{ 'is-done': step.state === 'done', 'is-running': step.state === 'running' }"
-              :disabled="step.state === 'locked' || step.state === 'running' || taskBusy"
+              :disabled="step.state === 'locked' || step.state === 'running' || taskBusy || baseUploadBusy"
               @click="step.state === 'ready' || step.state === 'done' ? runAction(step.key) : null"
             >
               <span class="step-no">{{ step.state === 'done' ? '✓' : step.no }}</span>
@@ -282,14 +339,14 @@ onUnmounted(() => {
             </button>
           </div>
           <p class="pipeline-note">
-            第 1 步生成可编辑空页；第 2 步把译文回填到审校工作台并生成初稿；第 3 步应用审校调整重新嵌字。翻译进行中仍可进入审校查看已完成页。
+            第 1 步生成可编辑空页；第 2 步把译文回填到审校工作台并生成初稿；第 3 步应用调整重新嵌字，生成图片不代表人工审校完成。翻译进行中仍可进入审校查看已完成页。
             <button v-if="taskBusy" class="btn btn-ghost btn-sm" type="button" @click="cancelTask">取消任务</button>
           </p>
 
           <div class="pages-toolbar">
             <div class="search-box">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-              <input v-model="search" type="search" placeholder="搜索页名 / 状态" />
+              <input v-model="search" type="search" aria-label="搜索页名、状态或页码" placeholder="搜索页名 / 状态 / 页码" />
             </div>
             <div class="meta">
               <span class="num">{{ pageCount }} 页</span>
@@ -297,17 +354,43 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <div v-if="baseUploadBusy" class="base-upload-progress card" role="status" aria-live="polite">
+            <span class="spin" />
+            <span>正在处理无字图 {{ baseUploadProgress.done }} / {{ baseUploadProgress.total }}…</span>
+          </div>
+          <div v-else-if="baseUploadFeedback" class="base-upload-feedback card" role="status" aria-live="polite">
+            <div class="base-upload-feedback-head">
+              <strong>{{ baseImageUploadMessage(baseUploadFeedback) }}</strong>
+              <button class="icon-btn" type="button" data-tip="关闭反馈" aria-label="关闭无字图上传反馈" @click="baseUploadFeedback = null">×</button>
+            </div>
+            <div class="base-upload-counts">
+              <span class="badge is-ok">匹配 {{ baseUploadFeedback.matched }}</span>
+              <span class="badge is-warn">未匹配 {{ baseUploadFeedback.unmatched }}</span>
+              <span class="badge is-danger">无效 {{ baseUploadFeedback.invalid }}</span>
+              <span v-if="baseUploadFeedback.failed" class="badge is-danger">失败 {{ baseUploadFeedback.failed }}</span>
+            </div>
+            <details v-if="baseUploadFeedback.unmatchedFiles.length || baseUploadFeedback.invalidFiles.length || baseUploadFeedback.failedFiles.length">
+              <summary>查看文件明细</summary>
+              <p v-if="baseUploadFeedback.unmatchedFiles.length" class="inline-note">未匹配：{{ baseUploadFeedback.unmatchedFiles.join('、') }}</p>
+              <p v-if="baseUploadFeedback.invalidFiles.length" class="inline-note is-error">无效：{{ baseUploadFeedback.invalidFiles.join('、') }}</p>
+              <p v-if="baseUploadFeedback.failedFiles.length" class="inline-note is-error">上传失败：{{ baseUploadFeedback.failedFiles.join('、') }}</p>
+              <p v-for="(error, errorIndex) in baseUploadFeedback.errors" :key="`${error.file}-${errorIndex}`" class="inline-note is-error">{{ error.file }}：{{ error.message }}</p>
+            </details>
+          </div>
+
           <div class="page-grid">
             <a
-              v-for="(img, index) in filteredImages"
+              v-for="img in filteredImages"
               :key="img.stored_name"
               class="page-card"
-              href="javascript:void(0)"
-              @click="openReview(img)"
+              :href="`#/review/${sessionId}/${encodeURIComponent(img.stored_name)}`"
+              :title="`第 ${img.page_number} 页 · ${img.name || img.stored_name}`"
+              :aria-label="`打开第 ${img.page_number} 页：${img.name || img.stored_name}`"
+              @click.prevent="openReview(img)"
             >
               <div class="page-card-media">
-                <img :src="thumbUrl(img)" :alt="`第 ${index + 1} 页`" loading="lazy" />
-                <span class="page-no">P{{ index + 1 }}</span>
+                <img :src="thumbUrl(img)" :alt="`第 ${img.page_number} 页`" loading="lazy" />
+                <span class="page-no">P{{ img.page_number }}</span>
                 <span class="page-status badge" :class="pageBadge(img).cls">{{ pageBadge(img).text }}</span>
               </div>
               <div class="page-card-body">
@@ -323,7 +406,7 @@ onUnmounted(() => {
       </div>
     </main>
 
-    <input ref="baseImageInput" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp" hidden @change="onBaseImagePicked" />
+    <input ref="baseImageInput" type="file" accept=".zip,.cbz,.png,.jpg,.jpeg,.webp,.bmp" multiple hidden @change="onBaseImagePicked" />
 
     <div class="toast-stack">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="`is-${t.kind}`" @click="dismiss(t.id)">{{ t.message }}</div>
@@ -338,38 +421,38 @@ onUnmounted(() => {
   right: 0;
   top: calc(100% + 6px);
   min-width: 180px;
-  background: var(--surface-2, #1c2130);
-  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 6px;
   display: flex;
   flex-direction: column;
   gap: 2px;
   z-index: 50;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-pop);
 }
 .export-menu button {
   text-align: left;
   padding: 8px 12px;
   border: none;
   background: transparent;
-  color: var(--text-1, #e8eaf0);
+  color: var(--text-1);
   font-size: 13px;
   border-radius: 7px;
   cursor: pointer;
 }
-.export-menu button:hover { background: var(--surface-3, #262c3d); }
+.export-menu button:hover:not(:disabled) { background: var(--bg-hover); }
 .pages-loading, .pages-error {
   padding: 60px 0;
   text-align: center;
-  color: var(--text-2, #8a8f9e);
+  color: var(--text-2);
 }
-.pages-error { color: #e05656; }
+.pages-error { color: var(--danger); }
 .pages-error .btn { margin-top: 12px; }
-.pages-empty { grid-column: 1 / -1; padding: 40px; text-align: center; color: var(--text-2, #8a8f9e); }
+.pages-empty { grid-column: 1 / -1; padding: 40px; text-align: center; color: var(--text-2); }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
-.toast { padding: 10px 16px; border-radius: 10px; background: var(--surface-3, #232838); border: 1px solid var(--line, rgba(255,255,255,.1)); color: var(--text-1, #e8eaf0); font-size: 13px; cursor: pointer; max-width: 360px; }
-.toast.is-error { border-color: #e05656; }
-.toast.is-warn { border-color: #e8a33d; }
-.toast.is-ok { border-color: #3ecfc0; }
+.toast { padding: 10px 16px; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-1); font-size: 13px; cursor: pointer; max-width: 360px; }
+.toast.is-error { border-color: var(--danger); }
+.toast.is-warn { border-color: var(--warn); }
+.toast.is-ok { border-color: var(--accent); }
 </style>

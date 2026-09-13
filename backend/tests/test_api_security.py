@@ -706,6 +706,34 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertTrue(page_artifact["capabilities"]["final_stale"])
         self.assertFalse(page_artifact["capabilities"]["can_export"])
 
+    def test_missing_glossary_entries_cannot_clear_saved_terms(self) -> None:
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 32), "white").save(image_bytes, format="PNG")
+        with mock.patch.object(main, "API_TOKEN", ""):
+            upload = self.client.post(
+                "/api/upload",
+                files={"file": ("synthetic.png", image_bytes.getvalue(), "image/png")},
+            )
+            self.assertEqual(upload.status_code, 200)
+            project_id = upload.json()["session_id"]
+            url = f"/api/projects/{project_id}/glossary"
+            saved = self.client.put(url, json={"entries": [
+                {"source": "アキ", "translation": "阿纪", "category": "人名"},
+            ]})
+            self.assertEqual(saved.status_code, 200)
+            expected = self.client.get(url).json()["glossary"]["entries"]
+            self.assertEqual(len(expected), 1)
+            for method, target in (("put", url), ("post", url + "/apply")):
+                for invalid in ({}, {"entries": None}, {"entries": {}}, {"entries": ""}, {"entries": False}):
+                    with self.subTest(method=method, payload=invalid):
+                        response = getattr(self.client, method)(target, json=invalid)
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(self.client.get(url).json()["glossary"]["entries"], expected)
+            # An explicit empty list remains the deliberate clear operation.
+            cleared = self.client.put(url, json={"entries": []})
+            self.assertEqual(cleared.status_code, 200)
+            self.assertEqual(self.client.get(url).json()["glossary"]["entries"], [])
+
     def test_glossary_extract_button_supplements_a_name_after_an_earlier_empty_result(self) -> None:
         image_bytes = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 255, 255)).save(image_bytes, format="PNG")
@@ -766,6 +794,29 @@ class ApiSecurityTests(unittest.TestCase):
             ),
             mock.patch.object(main, "API_TOKEN", ""),
         ):
+            candidate_response = self.client.post(
+                f"/api/projects/{project_id}/glossary/extract",
+                json={
+                    "preview_only": True,
+                    "config": {
+                        "translator": "custom_openai",
+                        "selected_translator": "openai-compatible",
+                        "target_lang": "CHS",
+                        "openai_base_url": "https://api.example.com/v1",
+                        "openai_model": "example-model",
+                        "api_key": "secret",
+                    },
+                },
+            )
+            self.assertEqual(candidate_response.status_code, 200)
+            self.assertEqual(len(candidate_response.json()["glossary"]["entries"]), 1)
+            self.assertEqual(
+                self.client.get(f"/api/projects/{project_id}/glossary").json()["glossary"]["entries"],
+                [],
+            )
+            restored = self.client.post(f"/api/projects/{project_id}/restore")
+            self.assertEqual(restored.status_code, 200)
+            self.assertEqual(restored.json()["glossary"]["entries"], [])
             response = self.client.post(
                 f"/api/projects/{project_id}/glossary/extract",
                 json={

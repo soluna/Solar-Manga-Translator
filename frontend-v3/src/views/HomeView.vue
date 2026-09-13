@@ -4,21 +4,26 @@ import { useRouter } from 'vue-router'
 import { apiFetch, apiGetJson, readApiError } from '../api/client.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+import { buildImportForm, readDroppedFiles } from '../state/project-import.js'
+import { recentPageFor } from '../state/recent-location.js'
 
 const router = useRouter()
 const uploading = ref(false)
+const readingDrop = ref(false)
+const importBusy = computed(() => uploading.value || readingDrop.value)
 const backendOnline = ref(null) // null=未知 true/false
 const recentProjects = ref([])
 const fileInput = ref(null)
 const folderInput = ref(null)
 
-const REVIEW_MODE = 'auto'
 
 function pickFiles() {
+  if (importBusy.value) return
   fileInput.value?.click()
 }
 
 function pickFolder() {
+  if (importBusy.value) return
   folderInput.value?.click()
 }
 
@@ -65,12 +70,24 @@ function stageBadge(stage) {
   return map[stage] || { text: stage || '未知', cls: '' }
 }
 
-async function uploadAndEnter(buildFormData) {
+function recentProjectHref(project) {
+  const projectId = String(project?.project_id || '')
+  const recentPage = recentPageFor(projectId)
+  return recentPage
+    ? `#/pages/${encodeURIComponent(projectId)}?resume=1`
+    : `#/pages/${encodeURIComponent(projectId)}`
+}
+
+function recentProjectMeta(project) {
+  const recentPage = recentPageFor(project?.project_id)
+  return recentPage ? `继续上次 · ${recentPage}` : `${project?.page_count ?? 0} 页 · ${relativeTime(project?.updated_at)}`
+}
+
+async function uploadAndEnter(files, options = {}) {
   if (uploading.value) return
   uploading.value = true
   try {
-    const formData = buildFormData()
-    formData.append('review_mode', REVIEW_MODE)
+    const formData = buildImportForm(files, options)
     const res = await apiFetch('/api/upload', { method: 'POST', body: formData })
     if (!res.ok) {
       throw new Error(await readApiError(res, '上传失败'))
@@ -81,7 +98,7 @@ async function uploadAndEnter(buildFormData) {
       throw new Error('后端未返回项目 ID')
     }
     toast('项目创建成功，正在进入…', 'ok')
-    router.push(`/pages/${sessionId}`)
+    router.push(`/pages/${encodeURIComponent(sessionId)}`)
   } catch (err) {
     toastError(err)
     if (!backendOnline.value) {
@@ -92,58 +109,32 @@ async function uploadAndEnter(buildFormData) {
   }
 }
 
-const IMAGE_RE = /\.(png|jpe?g|webp|bmp|gif)$/i
-const ARCHIVE_RE = /\.(zip|cbz)$/i
-
 async function onFilesPicked(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
-  if (!files.length) return
-  await uploadAndEnter((fd) => {
-    fd.append('file', files[0])
-    return fd
-  })
+  if (files.length) await uploadAndEnter(files)
 }
 
 async function onFolderPicked(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
-  const images = files.filter((f) => IMAGE_RE.test(f.name) || ARCHIVE_RE.test(f.name))
-  if (!images.length) {
-    toast('所选文件夹中没有可识别的图片或压缩包。', 'warn')
-    return
-  }
+  if (!files.length) return
   const folderName = files[0]?.webkitRelativePath?.split('/')[0] || '图片文件夹'
-  await uploadAndEnter((fd) => {
-    images.forEach((f) => fd.append('files', f))
-    images.forEach((f) => fd.append('relative_paths', f.webkitRelativePath || f.name))
-    fd.append('folder_name', folderName)
-    return fd
-  })
+  await uploadAndEnter(files, { folderName })
 }
 
-function onDrop(event) {
+async function onDrop(event) {
   event.preventDefault()
-  const items = Array.from(event.dataTransfer?.files || [])
-  if (!items.length) return
-  if (items.length === 1 && (ARCHIVE_RE.test(items[0].name) || IMAGE_RE.test(items[0].name))) {
-    uploadAndEnter((fd) => {
-      fd.append('file', items[0])
-      return fd
-    })
-    return
+  if (importBusy.value) return
+  readingDrop.value = true
+  try {
+    const result = await readDroppedFiles(event.dataTransfer)
+    if (result.files.length) await uploadAndEnter(result.files, result)
+  } catch (error) {
+    toastError(error)
+  } finally {
+    readingDrop.value = false
   }
-  const images = items.filter((f) => IMAGE_RE.test(f.name))
-  if (!images.length) {
-    toast('拖入的内容里没有可识别的图片。', 'warn')
-    return
-  }
-  uploadAndEnter((fd) => {
-    images.forEach((f) => fd.append('files', f))
-    images.forEach((f) => fd.append('relative_paths', f.name))
-    fd.append('folder_name', '拖拽导入')
-    return fd
-  })
 }
 
 function onDragOver(event) {
@@ -181,7 +172,7 @@ onMounted(() => {
         <div class="home-hero">
           <span class="kicker">Local Manga Translation Workbench</span>
           <h1>把生肉放上<em>审片台</em>，<br/>翻译到嵌字，一步一检。</h1>
-          <p>本地运行的漫画翻译工作台：导入、识别、翻译、修图、嵌字、审校与导出，全部在你的电脑上完成。</p>
+          <p>在本机管理漫画项目，逐页完成识别、翻译、修图与审校。在线翻译和修图会将所需文本或图片发送给你选择的服务商。</p>
           <div class="home-flow">
             <b>导入</b><i>→</i><b>识别</b><i>→</i><b>翻译</b><i>→</i><b>审校</b><i>→</i><b>导出</b>
           </div>
@@ -191,8 +182,8 @@ onMounted(() => {
           <span class="dropzone-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           </span>
-          <strong>{{ uploading ? '正在上传并创建项目…' : '拖入图片 / 图片包，开始新项目' }}</strong>
-          <p>支持单张图片、图片文件夹与压缩包；素材只保存在本机，不会上传到任何服务器。</p>
+          <strong>{{ importBusy ? (readingDrop ? '正在读取文件夹…' : '正在上传并创建项目…') : '拖入图片 / 图片包，开始新项目' }}</strong>
+          <p>支持多张图片、图片文件夹或单个 ZIP / CBZ。导入的素材与项目进度保存在本机。</p>
           <div class="dropzone-formats">
             <span class="tag">ZIP</span>
             <span class="tag">CBZ</span>
@@ -202,10 +193,10 @@ onMounted(() => {
             <span class="tag">文件夹</span>
           </div>
           <div class="dropzone-actions">
-            <button class="btn btn-primary btn-lg" type="button" :disabled="uploading" @click.stop="pickFiles">选择文件</button>
-            <button class="btn btn-secondary btn-lg" type="button" :disabled="uploading" @click.stop="pickFolder">选择文件夹</button>
+            <button class="btn btn-primary btn-lg" type="button" :disabled="importBusy" @click.stop="pickFiles">选择文件</button>
+            <button class="btn btn-secondary btn-lg" type="button" :disabled="importBusy" @click.stop="pickFolder">选择文件夹</button>
           </div>
-          <input ref="fileInput" type="file" accept=".zip,.cbz,.png,.jpg,.jpeg,.webp,.bmp,.gif" hidden @change="onFilesPicked" />
+          <input ref="fileInput" type="file" accept=".zip,.cbz,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden @change="onFilesPicked" />
           <input ref="folderInput" type="file" webkitdirectory hidden @change="onFolderPicked" />
         </section>
 
@@ -219,13 +210,14 @@ onMounted(() => {
               v-for="item in recentProjects"
               :key="item.project_id"
               class="recent-card"
-              :href="`#/pages/${item.project_id}`"
+              :href="recentProjectHref(item)"
+              :aria-label="`继续项目 ${item.title || item.project_id}`"
             >
               <img v-if="item.cover_image" :src="item.cover_image" alt="项目封面" />
               <span v-else class="recent-card-cover-placeholder">{{ (item.title || '?').slice(0, 1) }}</span>
               <div class="recent-card-info">
                 <strong>{{ item.title || item.project_id }}</strong>
-                <span>{{ item.page_count }} 页 · {{ relativeTime(item.updated_at) }}</span>
+                <span>{{ recentProjectMeta(item) }}</span>
               </div>
               <span class="badge" :class="stageBadge(item.workflow_stage).cls">{{ stageBadge(item.workflow_stage).text }}</span>
             </a>
@@ -235,7 +227,7 @@ onMounted(() => {
           </div>
         </section>
 
-        <p class="home-foot">LOCAL ONLY · 素材与进度均保存在本机 .runtime 目录</p>
+        <p class="home-foot">项目存储在本机 · 在线处理范围由所选服务决定</p>
       </div>
     </main>
 
@@ -247,22 +239,24 @@ onMounted(() => {
 
 <style scoped>
 .recent-card-cover-placeholder {
-  width: 100%;
-  aspect-ratio: 3 / 4;
+  width: 44px;
+  height: 60px;
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
+  font-size: 20px;
   font-weight: 700;
-  background: var(--surface-2, rgba(255, 255, 255, 0.04));
-  color: var(--text-2, #8a8f9e);
-  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
 }
 .recent-empty {
   padding: 24px;
-  border: 1px dashed var(--line, rgba(255, 255, 255, 0.12));
+  border: 1px dashed var(--border-strong);
   border-radius: 12px;
-  color: var(--text-2, #8a8f9e);
+  color: var(--text-2);
   text-align: center;
 }
 .toast-stack {
@@ -277,14 +271,14 @@ onMounted(() => {
 .toast {
   padding: 10px 16px;
   border-radius: 10px;
-  background: var(--surface-3, #232838);
-  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
-  color: var(--text-1, #e8eaf0);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-1);
   font-size: 13px;
   cursor: pointer;
   max-width: 360px;
 }
-.toast.is-error { border-color: #e05656; }
-.toast.is-warn { border-color: #e8a33d; }
-.toast.is-ok { border-color: #3ecfc0; }
+.toast.is-error { border-color: var(--danger); }
+.toast.is-warn { border-color: var(--warn); }
+.toast.is-ok { border-color: var(--accent); }
 </style>

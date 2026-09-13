@@ -1,14 +1,30 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import {
-  apiFetch, apiGetJson, apiPostJson, readApiError, toApiUrl,
+  apiGetJson, toApiUrl,
   withCacheBust, withImagePreviewSize,
 } from '../api/client.js'
 import { useProject } from '../composables/useProject.js'
+import { usePageEditor } from '../composables/usePageEditor.js'
+import {
+  buildStablePageImageUrl,
+  regionIssueReason,
+  regionNeedsAttention,
+  resolveRegionText,
+} from '../state/review-document.js'
+import {
+  nextIssueRegion,
+  normalizeReviewLocation,
+  reviewLocationStorageKey,
+  selectRegionRange,
+} from '../state/review-workspace-state.js'
 import { useTaskEvents } from '../composables/useTaskEvents.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+import { loadProcessingConfig } from '../api/processing-config.js'
+import { rememberRecentPage } from '../state/recent-location.js'
+import { useFontPreview } from '../composables/useFontPreview.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,10 +36,18 @@ const taskEvents = useTaskEvents()
 const { taskState } = taskEvents
 
 // ---- 基础数据 ----
-const document = ref(null)
-const docLoading = ref(false)
+const editor = usePageEditor({
+  getConfig: id => project.value?.session_id === id ? project.value.config || {} : {},
+  onResponse: (response, identity) => {
+    if (identity.projectId === sessionId.value) adoptResponse(response)
+  },
+})
+const { document, loading: docLoading, draftFor } = editor
 const fonts = ref([])
-const savedAt = ref('')
+const fontPreview = useFontPreview()
+const saveStatus = computed(() => editor.pending.value ? '保存中…'
+  : editor.error.value ? '保存失败 · 修改已保留'
+    : editor.dirty.value ? '有未保存修改' : '修改已保存')
 
 const images = computed(() => project.value?.images || [])
 const currentIndex = computed(() => images.value.findIndex((img) => img.stored_name === pageId.value))
@@ -31,8 +55,46 @@ const pageNumber = computed(() => (currentIndex.value >= 0 ? currentIndex.value 
 const projectTitle = computed(() => project.value?.project?.title || '项目')
 const regions = computed(() => document.value?.regions || [])
 const regionCount = computed(() => regions.value.length)
+const currentImage = computed(() => images.value[currentIndex.value] || null)
+const currentArtifact = computed(() => currentImage.value?.artifact_state
+  || project.value?.page_artifacts?.[pageId.value]
+  || null)
+const currentCapabilities = computed(() => currentArtifact.value?.capabilities || {})
+const reviewed = computed(() => !editor.dirty.value && document.value?.canonical?.metadata?.review?.status === 'reviewed')
+const pendingRenderPages = computed(() => images.value.filter((image) => {
+  const caps = image?.artifact_state?.capabilities || project.value?.page_artifacts?.[image?.stored_name]?.capabilities || {}
+  return Boolean(caps.final_stale || (caps.can_render && !caps.can_export))
+}))
+const pendingRenderCount = computed(() => pendingRenderPages.value.length)
+function pageCapabilities(image) {
+  return image?.artifact_state?.capabilities
+    || project.value?.page_artifacts?.[image?.stored_name]?.capabilities
+    || {}
+}
+const finalArtifactsReady = computed(() => Boolean(
+  images.value.length
+  && project.value?.download_url
+  && images.value.every(image => {
+    const caps = pageCapabilities(image)
+    return Boolean(caps.can_export && !caps.final_stale)
+  }),
+))
+const blankArtifactsReady = computed(() => Boolean(
+  images.value.length && images.value.every(image => pageCapabilities(image).blank_ready),
+))
+const exporting = ref(false)
+const finalRenderLabel = computed(() => {
+  if (currentCapabilities.value.final_stale) return '成品需重新嵌字'
+  if (currentCapabilities.value.can_export) return '成品已生成'
+  if (currentCapabilities.value.can_render) return '尚未生成成品'
+  return '成品状态待同步'
+})
 
+const preparingTask = ref(false)
 const taskBusy = computed(() => {
+  if (preparingTask.value) return true
+  if (taskEvents.sessionId.value !== sessionId.value) return false
+  if (taskEvents.busy.value) return true
   const s = taskState.value
   return Boolean(s.activeTaskId) && !['completed', 'failed', 'error', 'cancelled', 'interrupted'].includes(s.eventName)
 })
@@ -42,10 +104,55 @@ const TERMINALS = ['completed', 'failed', 'error', 'cancelled', 'interrupted']
 // ---- 图片层 ----
 const panes = ref({ frame: true, final: true, src: false, blank: false })
 const paneCount = computed(() => Object.values(panes.value).filter(Boolean).length)
+const previewTypography = ref(true)
+
+function togglePane(key) {
+  if (!Object.hasOwn(panes.value, key)) return
+  if (panes.value[key] && paneCount.value <= 1) {
+    toast('至少保留一个画布视图。', 'warn', 1800)
+    return
+  }
+  panes.value = { ...panes.value, [key]: !panes.value[key] }
+}
+
+// The right editor panel is useful at different widths and can be hidden for
+// a larger canvas.  Keep a minimum width so one canvas always remains usable.
+const panelCollapsed = ref(false)
+const panelWidth = ref(348)
+const panelResize = ref(null)
+const panelStyle = computed(() => panelCollapsed.value ? { display: 'none' } : { width: `${panelWidth.value}px` })
+
+function startPanelResize(event) {
+  if (panelCollapsed.value) return
+  event.preventDefault()
+  panelResize.value = { startX: event.clientX, startWidth: panelWidth.value }
+  window.addEventListener('pointermove', onPanelResizeMove)
+  window.addEventListener('pointerup', onPanelResizeUp, { once: true })
+}
+function onPanelResizeMove(event) {
+  const state = panelResize.value
+  if (!state) return
+  panelWidth.value = Math.min(520, Math.max(280, Math.round(state.startWidth + state.startX - event.clientX)))
+}
+function onPanelResizeUp() {
+  window.removeEventListener('pointermove', onPanelResizeMove)
+  panelResize.value = null
+}
+function onPanelResizeKeydown(event) {
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    const delta = event.key === 'ArrowLeft' ? 16 : -16
+    panelWidth.value = Math.min(520, Math.max(280, panelWidth.value + delta))
+  } else if (event.key === 'Home' || event.key === 'End') {
+    event.preventDefault()
+    panelWidth.value = event.key === 'Home' ? 280 : 520
+  }
+}
 
 function imageUrl(kind, maxSide = 1280) {
-  const path = `/api/pages/${sessionId.value}/${pageId.value}/${kind}`
-  return withCacheBust(withImagePreviewSize(toApiUrl(path), maxSide))
+  return buildStablePageImageUrl({ sessionId: sessionId.value, pageId: pageId.value, kind, maxSide,
+    document: document.value, artifact: project.value?.page_artifacts?.[pageId.value],
+    toApiUrl, withImagePreviewSize })
 }
 
 // ---- 自由画布（缩放 + 平移；四个视图共享同一视口联动） ----
@@ -187,16 +294,7 @@ onUnmounted(() => {
 
 // ---- 文档加载 ----
 async function loadDocument() {
-  docLoading.value = true
-  try {
-    const data = await apiGetJson(`/api/pages/${sessionId.value}/${pageId.value}/document`, '加载页面文档失败')
-    document.value = data?.document || null
-  } catch (err) {
-    toastError(err)
-    document.value = null
-  } finally {
-    docLoading.value = false
-  }
+  try { await editor.load(sessionId.value, pageId.value) } catch (error) { toastError(error) }
 }
 
 async function ensureProject() {
@@ -218,10 +316,83 @@ async function loadFonts() {
   }
 }
 
-function switchPage(targetId) {
+function switchPage(targetId, { remember = true } = {}) {
   if (targetId && targetId !== pageId.value) {
+    if (remember) rememberCurrentLocationAsPrevious()
     router.push(`/review/${sessionId.value}/${encodeURIComponent(targetId)}`)
   }
+}
+
+const reviewList = ref(null)
+const savedLocation = ref(normalizeReviewLocation())
+function readSavedLocation(projectId = sessionId.value) {
+  const key = reviewLocationStorageKey(projectId)
+  if (!key) return normalizeReviewLocation()
+  try {
+    return normalizeReviewLocation(JSON.parse(window.localStorage.getItem(key) || '{}'))
+  } catch {
+    return normalizeReviewLocation()
+  }
+}
+function writeSavedLocation(location) {
+  const key = reviewLocationStorageKey(sessionId.value)
+  if (!key) return
+  const normalized = normalizeReviewLocation(location)
+  savedLocation.value = normalized
+  try { window.localStorage.setItem(key, JSON.stringify(normalized)) } catch { /* storage is optional */ }
+}
+function rememberCurrentLocationAsPrevious() {
+  const previous = readSavedLocation()
+  writeSavedLocation({
+    ...previous,
+    previousPageId: pageId.value,
+    previousRegionId: selectedRegionId.value,
+  })
+}
+const recentPageId = computed(() => savedLocation.value.previousPageId || '')
+const hasRecentPage = computed(() => Boolean(recentPageId.value && recentPageId.value !== pageId.value
+  && images.value.some((image) => image.stored_name === recentPageId.value)))
+function returnToRecentPage() {
+  if (!hasRecentPage.value) return
+  const targetPageId = recentPageId.value
+  const targetRegionId = savedLocation.value.previousRegionId
+  writeSavedLocation({
+    ...savedLocation.value,
+    pageId: targetPageId,
+    regionId: targetRegionId,
+    previousPageId: pageId.value,
+    previousRegionId: selectedRegionId.value,
+  })
+  switchPage(targetPageId, { remember: false })
+}
+function persistReviewLocation() {
+  if (!document.value || document.value.page_id !== pageId.value) return
+  const previous = readSavedLocation()
+  writeSavedLocation({
+    ...previous,
+    pageId: pageId.value,
+    regionId: selectedRegionId.value,
+    filter: filter.value,
+    searchQuery: searchQuery.value,
+    panelCollapsed: panelCollapsed.value,
+    panelWidth: panelWidth.value,
+    previewTypography: previewTypography.value,
+    panes: panes.value,
+    listScrollTop: reviewList.value?.scrollTop ?? previous.listScrollTop,
+  })
+}
+function restoreReviewLocation(projectId = sessionId.value) {
+  const location = readSavedLocation(projectId)
+  savedLocation.value = location
+  panelCollapsed.value = location.panelCollapsed
+  panelWidth.value = location.panelWidth
+  previewTypography.value = location.previewTypography
+  panes.value = { ...panes.value, ...location.panes }
+  filter.value = location.filter
+  searchQuery.value = location.searchQuery
+  nextTick(() => {
+    if (reviewList.value) reviewList.value.scrollTop = location.listScrollTop
+  })
 }
 
 function prevPage() {
@@ -234,48 +405,29 @@ function nextPage() {
 }
 
 // ---- 命令提交 ----
-async function submitCommands(commands, { reload = true } = {}) {
-  if (!document.value || !commands.length) return null
-  try {
-    const res = await apiFetch(toApiUrl(`/api/pages/${sessionId.value}/${pageId.value}/commands`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        config: project.value?.config || {},
-        commands,
-        expected_page_revision: document.value.revision,
-      }),
-    })
-    if (res.status === 409) {
-      const detail = await res.json().catch(() => ({}))
-      toast(detail?.detail?.message || '页面已被其他操作更新，已刷新。', 'warn')
-      await loadDocument()
-      return null
-    }
-    if (!res.ok) {
-      throw new Error(await readApiError(res, '命令执行失败'))
-    }
-    const view = await res.json()
-    adoptResponse(view)
-    savedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    if (reload) await loadDocument()
-    return view
-  } catch (err) {
-    toastError(err)
-    return null
-  }
+async function submitCommands(commands, options = {}) {
+  if (taskBusy.value) { toast('请等待当前处理任务结束。', 'warn'); return null }
+  try { return await editor.execute(commands, options) }
+  catch (error) { toastError(error); return null }
+}
+
+async function saveDraft(region, fields) {
+  try { return await editor.saveDraft(region.id, fields) }
+  catch (error) { toastError(error); return null }
 }
 
 // ---- 文本框状态 ----
 const selectedRegionId = ref('')
+const selectedRegionIds = ref(new Set())
+const selectionAnchorId = ref('')
 const openRegionIds = ref(new Set())
 const searchQuery = ref('')
 const filter = ref('all') // all | attention | manual | disabled
 
 const filteredRegions = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  return regions.value.filter((r, index) => {
-    const needle = `${r.id} ${r.source_text || ''} ${resolveRegionTranslation(r)} ${index + 1}`.toLowerCase()
+  return regions.value.filter((r) => {
+    const needle = `${r.id} ${r.source_text || ''} ${resolveRegionTranslation(r)} ${r.number || r.sequence + 1}`.toLowerCase()
     if (q && !needle.includes(q)) return false
     if (filter.value === 'attention' && !needsAttention(r)) return false
     if (filter.value === 'manual' && !isManual(r)) return false
@@ -283,21 +435,28 @@ const filteredRegions = computed(() => {
     return true
   })
 })
+const revealedRegionId = ref('')
+const visibleRegions = computed(() => {
+  const list = filteredRegions.value
+  if (!revealedRegionId.value || list.some(region => region.id === revealedRegionId.value)) return list
+  const target = regions.value.find(region => region.id === revealedRegionId.value)
+  return target ? [target, ...list] : list
+})
+const revealedRegionIsFiltered = computed(() => Boolean(
+  revealedRegionId.value
+  && !filteredRegions.value.some(region => region.id === revealedRegionId.value),
+))
 
 const attentionCount = computed(() => regions.value.filter(needsAttention).length)
 const manualCount = computed(() => regions.value.filter(isManual).length)
 const disabledCount = computed(() => regions.value.filter(isDisabled).length)
 
 function needsAttention(r) {
-  if (String(r.recognition_status || 'ready') !== 'ready') return true
-  if (String(r.translation_status || '') === 'failed') return true
-  const src = String(r.source_text || '').length
-  const dst = resolveRegionTranslation(r).length
-  if (src > 0 && dst > src * 1.8) return true
-  return false
+  return regionNeedsAttention(r)
 }
+function issueReason(r) { return regionIssueReason(r) }
 function isManual(r) {
-  return Boolean(r.is_manual || r.manual || String(r.id || '').startsWith('manual'))
+  return Boolean(r?.is_manual || r?.manual || String(r?.id || '').startsWith('manual'))
 }
 function isDisabled(r) {
   return Boolean(r.disabled)
@@ -313,16 +472,10 @@ function regionFontLabel(r) {
   return hit ? hit.label : (key || '默认字体')
 }
 function regionSrcText(r) {
-  return String(r.source_text || '').trim()
+  return String(r.source_text || '').trim() || (isManual(r) ? '尚未识别原文' : '')
 }
 function resolveRegionTranslation(r) {
-  // 后端 translation 字段是 {machine, edited, resolved} 字典，取值 resolved > edited > machine；
-  // 兼容历史字符串形状与 machine_translation 兜底，统一 trim。
-  const pick = (v) => {
-    if (v && typeof v === 'object') return String(v.resolved || v.edited || v.machine || '').trim()
-    return String(v || '').trim()
-  }
-  return pick(r.translation) || pick(r.machine_translation)
+  return resolveRegionText(r)
 }
 function regionDstText(r) {
   return resolveRegionTranslation(r)
@@ -340,12 +493,48 @@ function toggleOpen(r, force) {
   openRegionIds.value = next
 }
 
-function selectRegion(r, { open = true } = {}) {
+function selectRegion(r, { open = true, event = null } = {}) {
+  if (!r?.id) return
+  const additive = Boolean(event?.metaKey || event?.ctrlKey)
+  const range = Boolean(event?.shiftKey)
+  let next = new Set(selectedRegionIds.value)
+  if (range && selectionAnchorId.value) {
+    next = selectRegionRange(regions.value, selectionAnchorId.value, r.id, next)
+  } else if (additive) {
+    if (next.has(r.id)) next.delete(r.id)
+    else next.add(r.id)
+  } else {
+    next = new Set([r.id])
+  }
+  if (!next.size) next.add(r.id)
+  selectedRegionIds.value = next
   selectedRegionId.value = r.id
+  selectionAnchorId.value = selectionAnchorId.value || r.id
+  if (!additive && !range) selectionAnchorId.value = r.id
   if (open) toggleOpen(r, true)
 }
 
+const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedRegionId.value) || null)
+const selectedRegions = computed(() => regions.value.filter((r) => selectedRegionIds.value.has(r.id)))
+const selectionCount = computed(() => selectedRegionIds.value.size)
+function isSelected(r) { return selectedRegionIds.value.has(r?.id) }
+function clearSelection() {
+  selectedRegionId.value = ''
+  selectedRegionIds.value = new Set()
+  selectionAnchorId.value = ''
+}
+
+function onRegionCardKeydown(event, r) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    selectRegion(r, { event })
+    toggleOpen(r, true)
+  }
+}
+
 function locateRegion(r) {
+  if (!r?.id) return
+  revealedRegionId.value = filteredRegions.value.some(region => region.id === r.id) ? '' : r.id
   selectRegion(r)
   // 自由画布：pan 使目标框移动到视口中心（scrollIntoView 对 transform 舞台无效）
   const el = anyCanvasEl()
@@ -362,11 +551,11 @@ function locateRegion(r) {
       void box.offsetWidth
       box.classList.add('flash')
     }
+    const card = Array.from(window.document.querySelectorAll('[data-region-card]'))
+      .find(element => element.dataset.regionCard === r.id)
+    card?.scrollIntoView({ block: 'nearest' })
   })
 }
-
-// 当前选中框（面板「定位当前框」、快捷键 Shift+2、Enter 等共用）
-const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedRegionId.value) || null)
 
 // 上/下一个文本框（面板按钮与 Alt+↑/↓ 共用）
 function stepRegion(delta) {
@@ -377,6 +566,15 @@ function stepRegion(delta) {
   const r = list[next]
   selectRegion(r)
   locateRegion(r)
+}
+
+function nextIssue() {
+  const target = nextIssueRegion(regions.value, selectedRegionId.value, { isIssue: needsAttention })
+  if (!target) {
+    toast('当前页没有待处理问题。', 'ok', 1600)
+    return
+  }
+  locateRegion(target)
 }
 
 // ---- 画布框 ----
@@ -398,7 +596,44 @@ function regionBoxStyle(r) {
 }
 
 function regionBoxText(r) {
-  return resolveRegionTranslation(r) || r.source_text || ''
+  const draft = draftFor(r)
+  return String(draft.translation || draft.sourceText || r.source_text || '')
+}
+
+function previewFontFor(r) {
+  const draft = draftFor(r), config = project.value?.config || {}
+  const bucket = draft.fontStyle || r.font_style
+  const key = draft.fontKey || config[`style_font_${bucket}_key`] || r.font_key || config.font_key
+  return fonts.value.find(font => font.id === key || font.name === key || (!key && font.name === r.font_family))
+}
+watch(() => regions.value.map(r => previewFontFor(r)?.id || '').join('|'), () => {
+  for (const font of new Map(regions.value.map(r => previewFontFor(r)).filter(Boolean).map(font => [font.id, font])).values()) fontPreview.load(font)
+})
+const previewFontUnavailable = computed(() => regions.value.some(r => {
+  const font = previewFontFor(r)
+  return !font || fontPreview.failures[font.id]
+}))
+
+function regionPreviewStyle(r) {
+  const draft = draftFor(r)
+  const font = previewFontFor(r)
+  const size = Math.max(8, Number(draft.fontSize) || 12)
+  const lineSpacing = Math.max(0.8, Number(draft.lineSpacing) || 1)
+  const strokeWidth = Math.max(0, Number(draft.strokeWidth) || 0)
+  return {
+    fontFamily: fontPreview.families[font?.id] || 'sans-serif',
+    fontSize: `${size}px`,
+    fontWeight: 'normal',
+    fontSynthesis: 'none',
+    writingMode: draft.direction === 'vertical' ? 'vertical-rl' : 'horizontal-tb',
+    letterSpacing: `${Math.max(0, (Number(draft.letterSpacing) - 1) * size)}px`,
+    lineHeight: String(lineSpacing),
+    color: draft.fgColor || '#1A1712',
+    WebkitTextStroke: strokeWidth ? `${size * strokeWidth * 0.35}px ${draft.bgColor || '#FFFFFF'}` : undefined,
+    paintOrder: 'stroke fill',
+    whiteSpace: 'pre-wrap',
+    transform: Number(draft.rotation) ? `rotate(${Number(draft.rotation)}deg)` : undefined,
+  }
 }
 
 // 拖动/缩放
@@ -410,7 +645,8 @@ function onRegionPointerDown(event, r) {
   flushPendingNudge() // 有未提交的微调先落库，避免历史顺序颠倒
   event.preventDefault()
   event.stopPropagation()
-  selectRegion(r, { open: true })
+  selectRegion(r, { open: true, event })
+  if (event.metaKey || event.ctrlKey || event.shiftKey) return
   const stage = event.currentTarget.closest('.pane-stage')
   const rect = stage.getBoundingClientRect()
   const [x1, y1, x2, y2] = r.bbox
@@ -465,15 +701,8 @@ async function onDragUp() {
   if (!d?.moved || !d.preview) return
   const [px1, py1, px2, py2] = d.preview
   if (px2 - px1 < 20 || py2 - py1 < 12) return
-  const res = await submitCommands([{ type: 'update_region_bbox', region_id: d.id, bbox: d.preview }])
-  if (res) {
-    pushHistory({
-      kind: 'bbox',
-      label: d.mode === 'move' ? '移动文本框' : '调整文本框大小',
-      undoCommands: [{ type: 'update_region_bbox', region_id: d.id, bbox: d.bbox }],
-      redoCommands: [{ type: 'update_region_bbox', region_id: d.id, bbox: [...d.preview] }],
-    })
-  }
+  await submitCommands([{ type: 'update_region_bbox', region_id: d.id, bbox: d.preview }])
+
 }
 
 // 手动添加框
@@ -515,11 +744,9 @@ async function onAddUp() {
   if (bbox[2] - bbox[0] < 20 || bbox[3] - bbox[1] < 12) return
   bbox = clampBBoxPage(bbox) // 钳制在页面内
   const res = await submitCommands([{ type: 'create_region', bbox }])
-  if (res?.created_region?.[0]?.id || res?.created_region_payload?.id) {
-    const rid = res.created_region_payload?.id || res.created_region?.[0]?.id
-    pushHistory({ kind: 'create_region', label: '新增手动框', bbox, createdRegionId: rid })
+  if (res?.created_region_id) {
+    const rid = res.created_region_id
     addingMode.value = false
-    await loadDocument()
     nextTick(() => {
       const r = regions.value.find((item) => item.id === rid)
       if (r) selectRegion(r)
@@ -605,69 +832,13 @@ function resizeBBoxPage(origin, handle, dx, dy, { proportional = false, fromCent
   return clampBBoxPage([x1, y1, x2, y2])
 }
 
-// ---- 撤销 / 重做（画布编辑历史，按页隔离）----
-const HISTORY_LIMIT = 50
-const editHistory = ref({}) // pageId → { undo: [], redo: [] }
-const pageHistory = computed(() => editHistory.value[pageId.value] || { undo: [], redo: [] })
-const canUndo = computed(() => pageHistory.value.undo.length > 0)
-const canRedo = computed(() => pageHistory.value.redo.length > 0)
-
-function replaceHistory(pid, undo, redo) {
-  editHistory.value = { ...editHistory.value, [pid]: { undo, redo } }
-}
-function pushHistory(entry) {
-  const pid = pageId.value
-  const cur = pageHistory.value
-  replaceHistory(pid, [...cur.undo, entry].slice(-HISTORY_LIMIT), [])
-}
-
+// Every persisted edit shares one history with page/document revision guards.
+const { canUndo, canRedo } = editor
 async function undoEdit() {
-  const pid = pageId.value
-  const cur = pageHistory.value
-  const entry = cur.undo[cur.undo.length - 1]
-  if (!entry) return
-  let commands
-  if (entry.kind === 'create_region') {
-    commands = [{ type: 'delete_manual_region', region_id: entry.createdRegionId }]
-  } else if (entry.kind === 'delete_manual_region') {
-    commands = [{ type: 'restore_manual_region', payload: entry.deletedPayload }]
-  } else {
-    commands = entry.undoCommands
-  }
-  const res = await submitCommands(commands)
-  if (!res) return
-  replaceHistory(pid, cur.undo.slice(0, -1), [...cur.redo, entry].slice(-HISTORY_LIMIT))
-  toast(`已撤销：${entry.label}`, 'ok', 1500)
-  if (entry.kind === 'delete_manual_region' && entry.deletedPayload?.id) {
-    nextTick(() => {
-      const r = regions.value.find((x) => x.id === entry.deletedPayload.id)
-      if (r) selectRegion(r)
-    })
-  }
+  try { if (await flushPendingNudge()) await editor.undo() } catch (error) { toastError(error) }
 }
-
 async function redoEdit() {
-  const pid = pageId.value
-  const cur = pageHistory.value
-  const entry = cur.redo[cur.redo.length - 1]
-  if (!entry) return
-  if (entry.kind === 'create_region') {
-    // 重建会拿到新 id，回写进历史项，保证再次撤销删的是同一个框
-    const res = await submitCommands([{ type: 'create_region', bbox: entry.bbox }])
-    if (!res) return
-    const rid = res?.created_region_payload?.id || res?.created_region?.[0]?.id || ''
-    const refreshed = { ...entry, createdRegionId: rid || entry.createdRegionId }
-    replaceHistory(pid, [...cur.undo, refreshed].slice(-HISTORY_LIMIT), cur.redo.slice(0, -1))
-    toast(`已重做：${entry.label}`, 'ok', 1500)
-    return
-  }
-  const commands = entry.kind === 'delete_manual_region'
-    ? [{ type: 'delete_manual_region', region_id: entry.deletedPayload?.id }]
-    : entry.redoCommands
-  const res = await submitCommands(commands)
-  if (!res) return
-  replaceHistory(pid, [...cur.undo, entry].slice(-HISTORY_LIMIT), cur.redo.slice(0, -1))
-  toast(`已重做：${entry.label}`, 'ok', 1500)
+  try { if (await flushPendingNudge()) await editor.redo() } catch (error) { toastError(error) }
 }
 
 // ---- 方向键微调（本地即时预览，松开方向键合并成一次提交，对齐旧版 pendingCanvasNudge）----
@@ -685,20 +856,15 @@ function nudgeSelectedRegion(dx, dy) {
 async function flushPendingNudge() {
   const p = pendingNudge
   pendingNudge = null
-  if (!p) return
+  if (!p) return true
   const r = regions.value.find((x) => x.id === p.regionId)
-  if (!r?.bbox) return
-  if (r.bbox.every((v, i) => v === p.originBBox[i])) return
+  if (!r?.bbox) { pendingNudge = p; return false }
+  if (r.bbox.every((v, i) => v === p.originBBox[i])) return true
   const redoBBox = [...r.bbox]
   const res = await submitCommands([{ type: 'update_region_bbox', region_id: p.regionId, bbox: redoBBox }])
-  if (res) {
-    pushHistory({
-      kind: 'bbox',
-      label: '微调文本框',
-      undoCommands: [{ type: 'update_region_bbox', region_id: p.regionId, bbox: p.originBBox }],
-      redoCommands: [{ type: 'update_region_bbox', region_id: p.regionId, bbox: redoBBox }],
-    })
-  }
+  if (res) return true
+  pendingNudge = p
+  return false
 }
 
 // ---- 全局快捷键（对齐旧版 handleGlobalCanvasKeydown）----
@@ -707,6 +873,14 @@ function isTypingTarget(target) {
 }
 
 function onGlobalKeydown(event) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    addingMode.value = false
+    exportMenuOpen.value = false
+    rerenderMenuOpen.value = false
+    clearSelection()
+    return
+  }
   if (isTypingTarget(event.target)) return
   if (event.code === 'Space') {
     spacePan.value = true
@@ -744,13 +918,6 @@ function onGlobalKeydown(event) {
   if (event.altKey && event.key === 'ArrowDown') {
     event.preventDefault()
     stepRegion(1)
-    return
-  }
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    addingMode.value = false
-    exportMenuOpen.value = false
-    selectedRegionId.value = ''
     return
   }
   if (event.shiftKey && event.code === 'Digit1') {
@@ -794,108 +961,36 @@ function onGlobalKeyup(event) {
 }
 
 // ---- 卡片编辑 ----
-const draftCache = ref({}) // regionId → {translation, fontKey, fontSize, rotation, strokeWidth, letterSpacing, lineSpacing, fgColor, bgColor, preserveBackground}
-
-function draftFor(r) {
-  if (!draftCache.value[r.id]) {
-    const adv = r.advanced_style || r.advanced || {}
-    draftCache.value[r.id] = {
-      translation: regionDstText(r),
-      fontKey: r.font_key || r.font_family || '',
-      fontSize: Math.max(8, Math.round(Number(r.font_size || 12))),
-      bold: Boolean(r.resolved_style?.bold || r.auto_style?.bold),
-      italic: Boolean(r.resolved_style?.italic || r.auto_style?.italic),
-      rotation: adv.rotation ?? 0,
-      strokeWidth: adv.stroke_width ?? 1,
-      letterSpacing: adv.letter_spacing ?? 1,
-      lineSpacing: adv.line_spacing ?? 1.2,
-      fgColor: adv.fg_color ? hexFromTriplet(adv.fg_color) : '#1A1712',
-      bgColor: adv.bg_color ? hexFromTriplet(adv.bg_color) : '#FFFFFF',
-      preserveBackground: Boolean(adv.preserve_background),
-      enabled: !isDisabled(r),
-      direction: String(r.direction || 'horizontal'),
-      keepOriginal: Boolean(r.override_skip),
-    }
-  }
-  return draftCache.value[r.id]
-}
-
-function hexFromTriplet(t) {
-  if (!Array.isArray(t) || t.length < 3) return '#1A1712'
-  return `#${t.slice(0, 3).map((v) => Math.max(0, Math.min(255, Math.round(Number(v) || 0))).toString(16).padStart(2, '0')).join('')}`
-}
-function tripletFromHex(hex) {
-  const m = String(hex || '').replace('#', '')
-  if (m.length !== 6) return [21, 26, 52]
-  return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)]
-}
-
-async function applyTranslation(r) {
-  const d = draftFor(r)
-  await submitCommands([{ type: 'update_translation', region_id: r.id, text: d.translation }])
-}
-
+async function applySourceText(r) { return saveDraft(r, ['sourceText']) }
+async function applyTranslation(r) { return saveDraft(r, ['translation']) }
 async function applyToggleEnabled(r) {
-  const d = draftFor(r)
-  const enabled = !d.enabled
-  d.enabled = enabled
-  await submitCommands([{ type: enabled ? 'restore_region' : 'disable_region', region_id: r.id }])
+  draftFor(r).enabled = !draftFor(r).enabled
+  return saveDraft(r, ['enabled'])
 }
-
 async function applyDirection(r, direction) {
-  const d = draftFor(r)
-  d.direction = direction
-  await submitCommands([{ type: 'update_text_direction', region_id: r.id, direction }])
+  draftFor(r).direction = direction
+  return saveDraft(r, ['direction'])
 }
-
-async function applyKeepOriginal(r) {
-  const d = draftFor(r)
-  await submitCommands([{ type: 'set_keep_original', region_id: r.id, enabled: Boolean(d.keepOriginal) }])
-}
-
-async function applyFont(r) {
-  const d = draftFor(r)
-  await submitCommands([{ type: 'update_region_font', region_id: r.id, font_key: d.fontKey }])
-}
-
-async function applyFontSize(r) {
-  const d = draftFor(r)
-  const size = Math.max(8, Math.round(Number(d.fontSize) || 12))
-  d.fontSize = size
-  await submitCommands([{ type: 'update_font_size', region_id: r.id, font_size: size }])
-}
-
-async function applyFontStyle(r) {
-  const d = draftFor(r)
-  const style = [d.bold ? 'bold' : '', d.italic ? 'italic' : ''].filter(Boolean).join(' ') || ''
-  await submitCommands([{ type: 'update_font_style', region_id: r.id, style }])
-}
-
+async function applyKeepOriginal(r) { return saveDraft(r, ['keepOriginal']) }
+async function applyFont(r) { return saveDraft(r, ['fontKey']) }
+async function applyFontSize(r) { return saveDraft(r, ['fontSize']) }
+async function applyFontStyle(r) { return saveDraft(r, ['fontStyle']) }
 async function applyAdvancedStyle(r) {
-  const d = draftFor(r)
-  await submitCommands([{
-    type: 'update_region_style',
-    region_id: r.id,
-    rotation: Number(d.rotation || 0),
-    stroke_width: Number(d.strokeWidth ?? 1),
-    letter_spacing: Number(d.letterSpacing ?? 1),
-    line_spacing: Number(d.lineSpacing ?? 1.2),
-    fg_color: tripletFromHex(d.fgColor),
-    bg_color: tripletFromHex(d.bgColor),
-    preserve_background: Boolean(d.preserveBackground),
-  }])
+  return saveDraft(r, ['rotation', 'strokeWidth', 'letterSpacing', 'lineSpacing', 'fgColor', 'bgColor', 'preserveBackground'])
 }
 
 async function deleteRegion(r) {
   if (!r) return
-  // 删除前抓完整 payload（含 stored_name），撤销时 restore_manual_region 用
-  const deletedPayload = { ...r, stored_name: pageId.value }
-  const res = await submitCommands([{ type: 'delete_manual_region', region_id: r.id }], { reload: false })
+  const type = isManual(r) ? 'delete_manual_region' : 'disable_region'
+  const res = await submitCommands([{ type, region_id: r.id }])
   if (!res) return
-  pushHistory({ kind: 'delete_manual_region', label: '删除文本框', deletedPayload })
-  openRegionIds.value.delete(r.id)
-  selectedRegionId.value = ''
-  await loadDocument()
+  const nextOpen = new Set(openRegionIds.value)
+  nextOpen.delete(r.id)
+  openRegionIds.value = nextOpen
+  const nextSelected = new Set(selectedRegionIds.value)
+  nextSelected.delete(r.id)
+  selectedRegionIds.value = nextSelected
+  if (selectedRegionId.value === r.id) selectedRegionId.value = [...nextSelected][0] || ''
 }
 
 // 样式复制/粘贴
@@ -905,8 +1000,7 @@ function copyStyle(r) {
   styleClipboard.value = {
     fontKey: d.fontKey,
     fontSize: d.fontSize,
-    bold: d.bold,
-    italic: d.italic,
+    fontStyle: d.fontStyle,
     direction: d.direction,
     rotation: d.rotation,
     strokeWidth: d.strokeWidth,
@@ -921,91 +1015,268 @@ function copyStyle(r) {
 async function pasteStyle(r) {
   const s = styleClipboard.value
   if (!s) return
-  const d = draftFor(r)
-  Object.assign(d, s)
-  await submitCommands([
-    { type: 'update_text_direction', region_id: r.id, direction: s.direction },
-    { type: 'update_region_font', region_id: r.id, font_key: s.fontKey },
-    { type: 'update_font_size', region_id: r.id, font_size: s.fontSize },
-    { type: 'update_font_style', region_id: r.id, style: [s.bold ? 'bold' : '', s.italic ? 'italic' : ''].filter(Boolean).join(' ') || '' },
-    {
-      type: 'update_region_style',
-      region_id: r.id,
-      rotation: s.rotation,
-      stroke_width: s.strokeWidth,
-      letter_spacing: s.letterSpacing,
-      line_spacing: s.lineSpacing,
-      fg_color: tripletFromHex(s.fgColor),
-      bg_color: tripletFromHex(s.bgColor),
-      preserve_background: s.preserveBackground,
-    },
-  ])
+  const targets = selectedRegionIds.value.has(r.id) && selectionCount.value > 1
+    ? selectedRegions.value
+    : [r]
+  const commands = []
+  for (const target of targets) {
+    commands.push(...styleCommands(target.id, s))
+  }
+  await submitCommands(commands, { label: targets.length > 1 ? '批量粘贴样式' : '粘贴样式' })
+}
+
+function styleCommands(regionId, style = {}) {
+  const commands = []
+  if (Object.hasOwn(style, 'fontKey')) commands.push({ type: 'update_region_font', region_id: regionId, font_key: style.fontKey })
+  if (Object.hasOwn(style, 'fontSize')) commands.push({ type: 'update_font_size', region_id: regionId, font_size: Math.max(8, Math.round(Number(style.fontSize) || 12)) })
+  if (Object.hasOwn(style, 'fontStyle')) commands.push({ type: 'update_font_style', region_id: regionId, style: style.fontStyle || '' })
+  if (Object.hasOwn(style, 'direction')) commands.push({ type: 'update_text_direction', region_id: regionId, direction: style.direction || 'auto' })
+  const advanced = {}
+  if (Object.hasOwn(style, 'rotation')) advanced.rotation = Number(style.rotation) || 0
+  if (Object.hasOwn(style, 'strokeWidth')) advanced.stroke_width = Number(style.strokeWidth) || 0
+  if (Object.hasOwn(style, 'letterSpacing')) advanced.letter_spacing = Number(style.letterSpacing) || 0
+  if (Object.hasOwn(style, 'lineSpacing')) advanced.line_spacing = Number(style.lineSpacing) || 0
+  if (Object.hasOwn(style, 'fgColor')) advanced.fg_color = colorTriplet(style.fgColor)
+  if (Object.hasOwn(style, 'bgColor')) advanced.bg_color = colorTriplet(style.bgColor)
+  if (Object.hasOwn(style, 'preserveBackground')) advanced.preserve_background = Boolean(style.preserveBackground)
+  if (Object.keys(advanced).length) commands.push({ type: 'update_region_style', region_id: regionId, ...advanced })
+  return commands
+}
+
+const ocrBusyRegionIds = ref(new Set())
+function colorTriplet(value) { return [1, 3, 5].map(index => parseInt(String(value).slice(index, index + 2), 16)) }
+function isOcrBusy(r) { return ocrBusyRegionIds.value.has(r?.id) }
+async function retryOcr(r) {
+  if (!r || isOcrBusy(r)) return
+  const next = new Set(ocrBusyRegionIds.value)
+  next.add(r.id)
+  ocrBusyRegionIds.value = next
+  try {
+    const result = await submitCommands([
+      { type: 'retry_region_ocr', region_id: r.id },
+    ], { label: '重新识别原文' })
+    if (result?.recognized_region_payload?.recognition_status === 'failed') {
+      toast(`OCR 失败，原有内容已保留：${result.recognized_region_payload.recognition_error}`, 'error')
+    } else if (result) toast('OCR 原文已更新，请检查译文。', 'ok', 1800)
+  } finally {
+    const done = new Set(ocrBusyRegionIds.value)
+    done.delete(r.id)
+    ocrBusyRegionIds.value = done
+  }
+}
+
+function batchTargets() {
+  return selectedRegions.value
+}
+
+async function applyBatchField(field, value, label) {
+  const targets = batchTargets()
+  if (targets.length < 2) return
+  const commands = []
+  for (const region of targets) {
+    commands.push(...fieldCommand(region.id, field, value))
+  }
+  await submitCommands(commands, { label })
+}
+
+function fieldCommand(regionId, field, value) {
+  if (field === 'fontKey') return [{ type: 'update_region_font', region_id: regionId, font_key: value || '' }]
+  if (field === 'fontSize') return [{ type: 'update_font_size', region_id: regionId, font_size: Math.max(8, Math.round(Number(value) || 12)) }]
+  if (field === 'fontStyle') return [{ type: 'update_font_style', region_id: regionId, style: value || '' }]
+  if (field === 'direction') return [{ type: 'update_text_direction', region_id: regionId, direction: value || 'auto' }]
+  if (field === 'enabled') return [{ type: value ? 'restore_region' : 'disable_region', region_id: regionId }]
+  if (field === 'keepOriginal') return [{ type: 'set_keep_original', region_id: regionId, enabled: Boolean(value) }]
+  return []
+}
+
+const batchFontKey = ref('')
+const batchFontSize = ref('')
+const batchFontStyle = ref('')
+const batchDirection = ref('horizontal')
+
+async function mergeSelected() {
+  const targets = batchTargets().filter(region => !isDisabled(region))
+  if (targets.length < 2) return
+  const result = await submitCommands([
+    { type: 'merge_regions', region_ids: targets.map((region) => region.id) },
+  ], { label: '合并文本框' })
+  const mergedId = result?.created_region_id
+  if (mergedId) {
+    selectedRegionIds.value = new Set([mergedId])
+    selectedRegionId.value = mergedId
+    selectionAnchorId.value = mergedId
+    const merged = regions.value.find((region) => region.id === mergedId)
+    if (merged) toggleOpen(merged, true)
+  }
 }
 
 // ---- 任务 ----
-async function runTranslatePage() {
+async function runPageTask(action, targetPageId = pageId.value, { resolveTargetAfterFlush = false } = {}) {
+  if (preparingTask.value || taskEvents.busy.value) return
+  const sid = sessionId.value, pid = pageId.value
+  preparingTask.value = true
   try {
-    taskEvents.start(sessionId.value, 'translate-page', project.value?.config || {}, pageId.value)
-  } catch (err) {
-    toastError(err)
-  }
+    if (!await leaveSafely()) return
+    const config = await loadProcessingConfig(project.value?.config || {})
+    if (sid !== sessionId.value || pid !== pageId.value) return
+    const resolvedTargetPageId = resolveTargetAfterFlush
+      ? pendingRenderPages.value.map(image => image.stored_name)
+      : targetPageId
+    if (resolveTargetAfterFlush && !resolvedTargetPageId.length) {
+      toast('没有需要重新嵌字的页面。', 'ok', 1800)
+      return
+    }
+    if (Array.isArray(resolvedTargetPageId)) taskEvents.startBatch(sid, action, config, resolvedTargetPageId)
+    else taskEvents.start(sid, action, config, resolvedTargetPageId)
+  } catch (error) { toastError(error) }
+  finally { preparingTask.value = false }
 }
-async function runRerender() {
-  try {
-    taskEvents.start(sessionId.value, 'rerender', project.value?.config || {})
-  } catch (err) {
-    toastError(err)
-  }
+function runTranslatePage() { return runPageTask('translate-page') }
+function runRerender(scope = 'page') {
+  rerenderMenuOpen.value = false
+  return scope === 'page'
+    ? runPageTask('rerender', pageId.value)
+    : runPageTask('rerender', null, { resolveTargetAfterFlush: true })
 }
+function runRerenderCurrent() { return runRerender('page') }
+function runRerenderPending() { return runRerender('pending') }
 async function cancelTask() {
-  const taskId = taskState.value.activeTaskId
-  if (!taskId) return
   try {
-    await apiPostJson(`/api/tasks/${taskId}/cancel`, {}, '取消失败')
+    const requested = await taskEvents.cancel()
+    toast(requested ? '已请求取消，后续页面不会继续启动。' : '任务已发送，正在确认后台任务；后续页面不会继续启动。', requested ? 'ok' : 'warn')
   } catch (err) {
     toastError(err)
   }
 }
 
-watch(() => taskState.value.eventName, (name) => {
+watch(() => [taskState.value.activeTaskId, taskState.value.eventName], async ([taskId, name]) => {
+  if (!taskId || !TERMINALS.includes(name)) return
+  // Capture the task identity before awaiting project/document refreshes. The
+  // route may change while a cross-page task finishes.
+  const callbackSessionId = taskEvents.sessionId.value
+  const callbackPageId = taskState.value.activeTaskTargetStoredName
+  const callbackMessage = taskState.value.statusMessage
+  if (callbackSessionId !== sessionId.value) return
   if (name === 'completed') {
     toast('任务完成', 'ok')
-    loadDocument()
+    try { await loadProject(callbackSessionId) } catch (error) { toastError(error) }
+    if (callbackSessionId !== sessionId.value) return
+    if (!callbackPageId || callbackPageId === pageId.value) await loadDocument()
   } else if (name === 'error' || name === 'failed') {
-    toast(taskState.value.statusMessage || '任务失败', 'error')
-    loadDocument()
+    toast(callbackMessage || '任务失败', 'error')
+    if (callbackSessionId === sessionId.value && (!callbackPageId || callbackPageId === pageId.value)) {
+      await loadDocument()
+    }
   }
 })
 
 // ---- 导出 ----
 const exportMenuOpen = ref(false)
-function exportResult() {
-  const url = project.value?.download_url
-  if (!url) { toast('还没有可导出的结果。', 'warn'); return }
-  window.open(withCacheBust(toApiUrl(url)), '_blank')
-  exportMenuOpen.value = false
+const rerenderMenuOpen = ref(false)
+async function exportResult() {
+  if (exporting.value) return
+  const callbackSessionId = sessionId.value
+  if (taskBusy.value) { toast('请等待当前任务完成后再导出。', 'warn'); return }
+  exporting.value = true
+  try {
+    if (!await leaveSafely()) return
+    if (callbackSessionId !== sessionId.value) return
+    // Refresh artifact capabilities after the final save. A stale project
+    // download URL must never make an older archive look current.
+    await loadProject(callbackSessionId)
+    if (callbackSessionId !== sessionId.value) return
+    const url = project.value?.download_url
+    if (!url || !finalArtifactsReady.value || taskBusy.value || editor.hasUnsaved.value) {
+      toast('所有页面都需要有效的最新成品后才能导出。', 'warn')
+      return
+    }
+    window.open(withCacheBust(toApiUrl(url)), '_blank')
+    exportMenuOpen.value = false
+  } catch (error) { toastError(error) }
+  finally { exporting.value = false }
 }
-function exportBlank() {
-  window.open(withCacheBust(toApiUrl(`/api/download/${sessionId.value}/blank`)), '_blank')
-  exportMenuOpen.value = false
+async function exportBlank() {
+  if (exporting.value) return
+  const callbackSessionId = sessionId.value
+  if (taskBusy.value) { toast('请等待当前任务完成后再导出。', 'warn'); return }
+  exporting.value = true
+  try {
+    if (!await leaveSafely()) return
+    if (callbackSessionId !== sessionId.value) return
+    await loadProject(callbackSessionId)
+    if (callbackSessionId !== sessionId.value) return
+    if (!blankArtifactsReady.value || taskBusy.value || editor.hasUnsaved.value) {
+      toast('所有页面都需要有效的空页后才能导出。', 'warn')
+      return
+    }
+    window.open(withCacheBust(toApiUrl(`/api/download/${callbackSessionId}/blank`)), '_blank')
+    exportMenuOpen.value = false
+  } catch (error) { toastError(error) }
+  finally { exporting.value = false }
 }
 
-// ---- 生命周期 ----
-onMounted(async () => {
-  await ensureProject()
-  await Promise.all([loadDocument(), loadFonts()])
+// Flush before changing route identity; a failed save keeps the current editor open.
+let navigationFlush = null
+function leaveSafely() {
+  if (navigationFlush) return navigationFlush
+  navigationFlush = (async () => {
+    try {
+      if (!await flushPendingNudge()) return false
+      await editor.flush()
+      return true
+    } catch (error) { toastError(error); return false }
+    finally { navigationFlush = null }
+  })()
+  return navigationFlush
+}
+onBeforeRouteLeave(leaveSafely)
+onBeforeRouteUpdate((to, from) => to.params.sessionId === from.params.sessionId && to.params.pageId === from.params.pageId
+  ? true : leaveSafely())
+function beforeUnload(event) {
+  if (editor.hasUnsaved.value || pendingNudge || taskEvents.batch.value) { event.preventDefault(); event.returnValue = '' }
+}
+onMounted(() => {
+  loadFonts()
+  window.addEventListener('beforeunload', beforeUnload)
+  restoreReviewLocation(sessionId.value)
 })
-watch(pageId, async () => {
-  flushPendingNudge() // 换页前落库未提交的微调
+watch([sessionId, pageId], async () => {
   selectedRegionId.value = ''
+  selectedRegionIds.value = new Set()
+  selectionAnchorId.value = ''
   openRegionIds.value = new Set()
-  draftCache.value = {}
-  await loadDocument()
+  userTookOver = false
+  const selectedProject = sessionId.value, selectedPage = pageId.value
+  if (savedLocation.value.pageId !== selectedPage || savedLocation.value.version !== 1) {
+    // Preferences persist across pages; the current route remains authoritative.
+    restoreReviewLocation(selectedProject)
+  }
+  await Promise.all([ensureProject(), loadDocument()])
+  if (sessionId.value !== selectedProject || pageId.value !== selectedPage) return
+  rememberRecentPage(selectedProject, selectedPage)
+  const targetId = route.query.region || (savedLocation.value.pageId === selectedPage ? savedLocation.value.regionId : '')
+  const target = regions.value.find(r => r.id === String(targetId || ''))
+  if (target) nextTick(() => locateRegion(target))
+  persistReviewLocation()
+}, { immediate: true })
+watch([filter, searchQuery], () => { revealedRegionId.value = '' })
+watch([selectedRegionId, filter, searchQuery, panelCollapsed, panelWidth, previewTypography, panes], persistReviewLocation, { deep: true })
+watch(() => reviewList.value?.scrollTop, persistReviewLocation)
+watch(() => route.query.region, id => {
+  const target = regions.value.find(r => r.id === String(id || ''))
+  if (target) locateRegion(target)
 })
 onUnmounted(() => {
   taskEvents.disconnect()
+  window.removeEventListener('beforeunload', beforeUnload)
+  onPanelResizeUp()
+  persistReviewLocation()
   window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', onDragUp)
   window.removeEventListener('pointermove', onAddMove)
+  window.removeEventListener('pointerup', onAddUp)
+  window.removeEventListener('pointermove', onPanMove)
+  window.removeEventListener('pointerup', onPanUp)
 })
 </script>
 
@@ -1025,19 +1296,28 @@ onUnmounted(() => {
         <strong>{{ projectTitle }}</strong>
         <span>第 {{ pageNumber }} / {{ images.length }} 页</span>
       </div>
+      <button v-if="hasRecentPage" class="btn btn-ghost btn-sm recent-location" type="button" title="返回上一次审校页面和文本框位置" @click="returnToRecentPage">
+        返回最近位置
+      </button>
       <div class="topbar-spacer"></div>
       <div class="topbar-actions">
         <span v-if="taskBusy" class="task-pill is-busy">
           <span class="dot"></span>
-          <span class="task-text">{{ taskState.statusMessage || '任务进行中…' }}</span>
+          <span class="task-text">{{ taskState.statusMessage || '任务进行中…' }}<small v-if="taskState.activeAction === 'rerender'"> · {{ taskState.activeTaskTargetStoredName ? '当前页' : '待处理页' }}</small></span>
           <progress
             v-if="taskState.progress && taskState.progress.total"
             :value="taskState.progress.current"
             :max="taskState.progress.total"
           ></progress>
         </span>
-        <span v-else-if="savedAt" class="saved-hint">已保存 {{ savedAt }}</span>
-        <a class="btn btn-ghost" href="#/glossary" @click.prevent="router.push(`/glossary/${sessionId}`)">专有名词库</a>
+        <span v-else class="saved-hint" role="status" aria-live="polite">{{ saveStatus }}</span>
+        <button class="btn btn-ghost btn-sm" :disabled="taskBusy || !document" :aria-pressed="reviewed"
+          title="人工确认本页；内容变化后需要重新审校"
+          @click="submitCommands([{ type: 'set_review_status', status: reviewed ? 'unreviewed' : 'reviewed' }], { label: '人工审校标记' })">
+          {{ reviewed ? '人工已审校 ✓' : '标记人工已审校' }}
+        </button>
+        <button v-if="editor.dirty.value || editor.error.value" class="btn btn-ghost btn-sm" type="button" :disabled="editor.pending.value > 0" @click="leaveSafely">保存修改</button>
+        <a class="btn btn-ghost" href="#/glossary" @click.prevent="router.push({ path: `/glossary/${sessionId}`, query: { page: pageId } })">专有名词库</a>
         <button v-if="taskBusy" class="btn btn-ghost" type="button" @click="cancelTask">取消任务</button>
         <div class="export-menu-wrap">
           <button class="btn btn-secondary" type="button" @click="exportMenuOpen = !exportMenuOpen">
@@ -1045,11 +1325,20 @@ onUnmounted(() => {
             <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 6 4 4 4-4"/></svg>
           </button>
           <div v-if="exportMenuOpen" class="export-menu">
-            <button type="button" @click="exportResult">导出结果（.zip）</button>
-            <button type="button" @click="exportBlank">导出空页（.zip）</button>
+            <button type="button" :disabled="!finalArtifactsReady || taskBusy || exporting" @click="exportResult">导出结果（.zip）</button>
+            <button type="button" :disabled="!blankArtifactsReady || taskBusy || exporting" @click="exportBlank">导出空页（.zip）</button>
           </div>
         </div>
-        <button class="btn btn-primary" type="button" :disabled="taskBusy" @click="runRerender">重新嵌字</button>
+        <div class="rerender-menu-wrap">
+          <button class="btn btn-primary" type="button" :disabled="taskBusy" title="重新嵌当前页" @click="runRerenderCurrent">
+            重嵌当前页
+          </button>
+          <button class="btn btn-primary rerender-menu-trigger" type="button" :disabled="taskBusy" aria-label="打开重嵌范围菜单" title="选择当前页或待处理页" @click="rerenderMenuOpen = !rerenderMenuOpen">⌄</button>
+          <div v-if="rerenderMenuOpen" class="export-menu rerender-menu">
+            <button type="button" @click="runRerenderCurrent">重嵌当前页（第 {{ pageNumber }} 页）</button>
+            <button type="button" :disabled="!pendingRenderCount" @click="runRerenderPending">重嵌待处理页（{{ pendingRenderCount }} 页）</button>
+          </div>
+        </div>
         <ThemeToggle />
         <a class="icon-btn" href="#/settings" data-tip="设置" aria-label="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -1083,19 +1372,19 @@ onUnmounted(() => {
       <section class="stage">
         <div class="stage-bar">
           <div class="seg" role="group" aria-label="对比视图">
-            <button :class="{ active: panes.frame }" @click="panes.frame = !panes.frame">
+            <button :class="{ active: panes.frame }" title="显示或隐藏空页与框选画布" :aria-pressed="panes.frame" @click="togglePane('frame')">
               <svg class="pane-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="6" height="8" rx="1"/></svg>
               框页
             </button>
-            <button :class="{ active: panes.final }" @click="panes.final = !panes.final">
+            <button :class="{ active: panes.final }" title="显示或隐藏已嵌字成品画布" :aria-pressed="panes.final" @click="togglePane('final')">
               <svg class="pane-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m9 12 2 2 4-4"/></svg>
               嵌后
             </button>
-            <button :class="{ active: panes.src }" @click="panes.src = !panes.src">
+            <button :class="{ active: panes.src }" title="显示或隐藏原图画布" :aria-pressed="panes.src" @click="togglePane('src')">
               <svg class="pane-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.5-3.5a2 2 0 0 0-3 0L6 20"/></svg>
               原图
             </button>
-            <button :class="{ active: panes.blank }" @click="panes.blank = !panes.blank">
+            <button :class="{ active: panes.blank }" title="显示或隐藏空页画布" :aria-pressed="panes.blank" @click="togglePane('blank')">
               <svg class="pane-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15c4-1 8 1 10 3 2.5 2.5 6 1 8-1"/></svg>
               空页
             </button>
@@ -1125,12 +1414,17 @@ onUnmounted(() => {
               <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 6 4 4 4-4"/></svg>
             </a>
             <button class="btn btn-ghost btn-sm" type="button" :disabled="taskBusy" @click="runTranslatePage">重新翻译</button>
+            <button class="btn btn-ghost btn-sm" type="button" :class="{ 'is-on': previewTypography }" title="在空页上显示当前字体和排版草稿" @click="previewTypography = !previewTypography">草稿预览</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="!attentionCount" title="定位到下一个待处理问题" @click="nextIssue">下个问题</button>
+            <button v-if="!panelCollapsed" class="icon-btn" type="button" aria-label="隐藏文本框面板" title="隐藏文本框面板" @click="panelCollapsed = true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+            <button v-else class="btn btn-ghost btn-sm" type="button" title="显示文本框面板" @click="panelCollapsed = false">显示面板</button>
           </div>
         </div>
 
+        <p v-if="previewTypography" class="preview-note">{{ previewFontUnavailable ? '部分字体不可用，当前使用替代字体。' : '' }}草稿用于检查字体和排版；最终断行、字形和溢出请以重新嵌字后的成品为准。</p>
         <div class="pane-strip" :data-count="paneCount">
           <div v-if="panes.frame" class="pane">
-            <span class="pane-label"><i></i>框页 · 可编辑</span>
+            <span class="pane-label"><i></i>框页 · {{ previewTypography ? '草稿预览' : '可编辑框' }}</span>
             <div
               ref="frameCanvas"
               class="pane-canvas"
@@ -1151,13 +1445,13 @@ onUnmounted(() => {
                     v-for="r in document.regions"
                     :key="r.id"
                     class="region-box"
-                    :class="{ 'is-active': r.id === selectedRegionId, 'is-disabled': isDisabled(r) }"
+                    :class="{ 'is-active': r.id === selectedRegionId, 'is-multi-selected': isSelected(r), 'is-disabled': isDisabled(r) }"
                     :data-canvas-region="r.id"
                     :style="regionBoxStyle(r)"
                     @pointerdown="onRegionPointerDown($event, r)"
                   >
-                    <span class="region-no">{{ regions.indexOf(r) + 1 }}</span>
-                    <span v-if="r.id === selectedRegionId" class="box-text">{{ regionBoxText(r) }}</span>
+                    <span class="region-no">{{ r.number }}</span>
+                    <span v-if="previewTypography && draftFor(r).enabled && !draftFor(r).keepOriginal" class="box-text" :style="regionPreviewStyle(r)">{{ regionBoxText(r) }}</span>
                     <span v-if="r.id === selectedRegionId" class="handle tl"></span>
                     <span v-if="r.id === selectedRegionId" class="handle tr"></span>
                     <span v-if="r.id === selectedRegionId" class="handle bl"></span>
@@ -1180,7 +1474,7 @@ onUnmounted(() => {
                     <button class="icon-btn" type="button" data-tip="纵排 / 横排" aria-label="纵横排" @click="applyDirection(regions.find((r) => r.id === selectedRegionId), regions.find((r) => r.id === selectedRegionId).direction === 'vertical' ? 'horizontal' : 'vertical')">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 4v13M7 17l-3-3M7 17l3-3"/><path d="M17 20V7M17 7l-3 3M17 7l3 3"/></svg>
                     </button>
-                    <button class="icon-btn" type="button" data-tip="删除此框" aria-label="删除此框" @click="deleteRegion(regions.find((r) => r.id === selectedRegionId))">
+                    <button class="icon-btn" type="button" :data-tip="isManual(selectedRegion) ? '删除此框' : '停用此框'" :aria-label="isManual(selectedRegion) ? '删除此框' : '停用此框'" @click="deleteRegion(regions.find((r) => r.id === selectedRegionId))">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
                   </div>
@@ -1201,7 +1495,7 @@ onUnmounted(() => {
           </div>
 
           <div v-if="panes.final" class="pane">
-            <span class="pane-label is-final"><i></i>嵌后 · 联动</span>
+            <span class="pane-label is-final"><i></i>嵌后 · {{ finalRenderLabel }}</span>
             <div class="pane-canvas" :class="{ 'is-panning': panning }" @wheel.prevent="onCanvasWheel" @pointerdown="onCanvasPanDown">
               <div class="pane-stage" :style="stageStyle">
                 <img :src="imageUrl('translated-image')" alt="嵌字结果" loading="lazy" />
@@ -1219,7 +1513,7 @@ onUnmounted(() => {
           </div>
 
           <div v-if="panes.blank" class="pane">
-            <span class="pane-label is-blank"><i></i>空页</span>
+            <span class="pane-label is-blank"><i></i>空页 · 草稿预览</span>
             <div class="pane-canvas" :class="{ 'is-panning': panning }" @wheel.prevent="onCanvasWheel" @pointerdown="onCanvasPanDown">
               <div class="pane-stage" :style="stageStyle">
                 <img :src="imageUrl('base-image', 1024)" alt="空页" loading="lazy" />
@@ -1233,7 +1527,8 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <aside class="region-panel">
+      <div v-if="!panelCollapsed" class="panel-resizer" role="separator" tabindex="0" aria-label="调整文本框面板宽度" aria-orientation="vertical" :aria-valuemin="280" :aria-valuemax="520" :aria-valuenow="panelWidth" title="拖动或使用方向键调整文本框面板宽度" @pointerdown="startPanelResize" @keydown="onPanelResizeKeydown"></div>
+      <aside v-if="!panelCollapsed" class="region-panel" :style="panelStyle">
         <div class="region-panel-head">
           <div class="region-panel-top">
             <span class="kicker">文本框</span>
@@ -1255,18 +1550,37 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="region-list">
+        <div v-if="selectionCount > 1" class="batch-controls" role="group" aria-label="批量编辑所选文本框">
+          <strong>已选 {{ selectionCount }} 个框</strong>
+          <button class="btn btn-ghost btn-sm" :disabled="taskBusy" @click="mergeSelected">合并启用框</button>
+          <button class="btn btn-ghost btn-sm" @click="clearSelection">清除选择</button>
+          <select v-model="batchFontKey" aria-label="批量字体" @change="applyBatchField('fontKey', batchFontKey, '批量设置字体')">
+            <option value="">默认字体</option><option v-for="f in fonts" :key="f.id" :value="f.id">{{ f.label }}</option>
+          </select>
+          <input v-model="batchFontSize" type="number" min="8" placeholder="批量字号" aria-label="批量字号" @change="applyBatchField('fontSize', batchFontSize, '批量设置字号')" />
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('direction', 'horizontal', '批量横排')">横排</button>
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('direction', 'vertical', '批量纵排')">纵排</button>
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('enabled', true, '批量启用')">启用</button>
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('enabled', false, '批量停用')">停用</button>
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('keepOriginal', true, '批量保留原文')">保留原文</button>
+          <button class="btn btn-ghost btn-sm" @click="applyBatchField('keepOriginal', false, '批量恢复嵌字')">恢复嵌字</button>
+        </div>
+        <div class="region-list" ref="reviewList" @scroll="persistReviewLocation">
+          <p v-if="revealedRegionIsFiltered" class="preview-note">已显示定位目标 #{{ regions.find(region => region.id === revealedRegionId)?.number }}；它被当前筛选暂时隐藏。</p>
           <article
-            v-for="(r, index) in filteredRegions"
+            v-for="r in visibleRegions"
             :key="r.id"
             class="region-card"
-            :class="{ 'is-open': isOpen(r), 'is-selected': r.id === selectedRegionId, 'is-disabled': isDisabled(r) }"
-            @click="selectRegion(r)"
+            :class="{ 'is-open': isOpen(r), 'is-selected': isSelected(r), 'is-disabled': isDisabled(r) }"
+            :data-region-card="r.id"
+            tabindex="0" @keydown.self="onRegionCardKeydown($event, r)"
+            @click="selectRegion(r, { event: $event })"
           >
-            <header class="region-card-head" @click.stop="toggleOpen(r)">
-              <span class="rid">#{{ index + 1 }}</span>
+            <header class="region-card-head" @click.stop="selectRegion(r, { event: $event, open: false }); toggleOpen(r)">
+              <input type="checkbox" :checked="isSelected(r)" :aria-label="`选择第 ${r.number} 个文本框`" @click.stop="selectRegion(r, { event: { ctrlKey: true }, open: false })" />
+              <span class="rid">#{{ r.number }}</span>
               <span class="tag">{{ regionFontLabel(r) }}</span>
-              <span v-if="needsAttention(r)" class="tag is-warn">需留意</span>
+              <span v-if="needsAttention(r)" class="tag is-warn" :title="issueReason(r)">{{ issueReason(r) }}</span>
               <span v-if="isManual(r)" class="tag">手动</span>
               <div class="spacer"></div>
               <span class="mini-state">{{ regionStatusLabel(r) }}</span>
@@ -1277,6 +1591,11 @@ onUnmounted(() => {
             </div>
 
             <div v-if="isOpen(r)" class="region-card-body" @click.stop>
+              <label class="region-edit-field">
+                <span>原文</span>
+                <textarea rows="2" :value="draftFor(r).sourceText" @input="draftFor(r).sourceText = $event.target.value" @blur="applySourceText(r)"></textarea>
+              </label>
+              <button class="btn btn-ghost btn-sm" :disabled="taskBusy || isOcrBusy(r)" @click="retryOcr(r)">{{ isOcrBusy(r) ? '识别中…' : '重新识别原文（本地 OCR）' }}</button>
               <label class="region-edit-field">
                 <span>译文</span>
                 <textarea rows="3" :value="draftFor(r).translation" @input="draftFor(r).translation = $event.target.value" @blur="applyTranslation(r)"></textarea>
@@ -1303,22 +1622,27 @@ onUnmounted(() => {
                 <div class="field">
                   <span>字号</span>
                   <div class="stepper">
-                    <button type="button" @click="draftFor(r).fontSize = Math.max(8, draftFor(r).fontSize - 1)">−</button>
+                    <button type="button" @click="draftFor(r).fontSize = Math.max(8, Number(draftFor(r).fontSize) - 1); applyFontSize(r)">−</button>
                     <input
                       type="text"
                       inputmode="numeric"
                       :value="draftFor(r).fontSize"
                       @change="draftFor(r).fontSize = Number($event.target.value) || 12; applyFontSize(r)"
                     />
-                    <button type="button" @click="draftFor(r).fontSize = Math.min(200, draftFor(r).fontSize + 1)">＋</button>
+                    <button type="button" @click="draftFor(r).fontSize = Math.min(200, Number(draftFor(r).fontSize) + 1); applyFontSize(r)">＋</button>
                   </div>
                 </div>
               </div>
 
-              <div class="font-style-row">
-                <button class="toggle-chip" :class="{ active: draftFor(r).bold }" type="button" @click="draftFor(r).bold = !draftFor(r).bold; applyFontStyle(r)">粗体</button>
-                <button class="toggle-chip" :class="{ active: draftFor(r).italic }" type="button" @click="draftFor(r).italic = !draftFor(r).italic; applyFontStyle(r)">斜体</button>
-              </div>
+              <label class="field font-style-row">
+                <span>字体风格</span>
+                <select :value="draftFor(r).fontStyle" @change="draftFor(r).fontStyle = $event.target.value; applyFontStyle(r)">
+                  <option value="">自动识别</option>
+                  <option value="gothic">黑体</option><option value="mincho">宋体</option>
+                  <option value="rounded">圆体</option><option value="cartoon">漫画体</option>
+                  <option value="handwritten">手写体</option><option value="sfx">拟声字</option>
+                </select>
+              </label>
 
               <details class="adv-block">
                 <summary>高级样式 <span style="font-size: var(--fs-micro); color: var(--text-3); font-weight: 400;">旋转 · 描边 · 字距 · 行距 · 颜色</span></summary>
@@ -1360,12 +1684,12 @@ onUnmounted(() => {
                 <button class="icon-btn" type="button" data-tip="复制全部样式" aria-label="复制全部样式" @click="copyStyle(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10"/><path d="M12 12 7 7"/><path d="m17 16 4-4-4-4"/><path d="M21 12H9"/></svg></button>
                 <button class="icon-btn" type="button" data-tip="粘贴全部样式" aria-label="粘贴全部样式" @click="pasteStyle(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg></button>
                 <div class="spacer"></div>
-                <button class="icon-btn" type="button" data-tip="删除此框" aria-label="删除此框" @click="deleteRegion(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                <button class="icon-btn" type="button" :data-tip="isManual(r) ? '删除此框' : '停用此框'" :aria-label="isManual(r) ? '删除此框' : '停用此框'" @click="deleteRegion(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
               </div>
             </div>
           </article>
 
-          <div v-if="!filteredRegions.length" class="region-empty">
+          <div v-if="!visibleRegions.length" class="region-empty">
             <p>{{ docLoading ? '加载中…' : '没有匹配的文本框。' }}</p>
           </div>
         </div>
@@ -1383,4 +1707,18 @@ onUnmounted(() => {
 .pane-canvas.is-space-pan .region-box,
 .pane-canvas.is-space-pan .handle { cursor: grab !important; }
 .canvas-hud button:disabled { opacity: .35; pointer-events: none; }
+.panel-resizer { width: 6px; flex: none; cursor: col-resize; background: var(--border); touch-action: none; }
+.panel-resizer:hover { background: var(--accent); }
+.region-panel { flex: none; min-width: 280px; max-width: 45vw; }
+.batch-controls { display: flex; flex-wrap: wrap; gap: 5px; padding: 10px; border-bottom: 1px solid var(--border); }
+.batch-controls input { width: 90px; }
+.batch-controls select { max-width: 100%; }
+.stage-bar { height: auto; min-height: 46px; flex-wrap: wrap; padding-block: 7px; }
+.stage-bar-group { flex-wrap: wrap; }
+.topbar { height: auto; min-height: 56px; flex-wrap: wrap; }
+.topbar-actions { flex-wrap: wrap; }
+.region-card-head .is-warn { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.region-box.is-multi-selected { border-color: var(--region-active); background: var(--region-active-fill); }
+.region-card:focus-visible, .panel-resizer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.preview-note { margin: 0; padding: 5px 12px; font-size: 11px; color: var(--text-2); background: var(--bg-panel); }
 </style>

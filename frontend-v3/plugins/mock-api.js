@@ -1,19 +1,6 @@
-/**
- * Mock API 插件 —— 仅用于无后端时的视觉/交互验证。
- *
- * 启用：VITE_MOCK_API=1 npm run dev（package.json 的 dev:mock）。
- * 数据：mock-data.mjs；所有 /api/** 请求被拦截。
- * 重要：mock 仅模拟契约形状，不代表后端真实行为。
- *
- * 路径分段说明：seg = url 去掉 /api/ 前缀后按 / 切分，
- * 例如 /api/pages/sid/pid/document → ['pages','sid','pid','document']。
- */
+/** Read-only synthetic preview. Unsupported work must never report success. */
 import mockData from './mock-data.mjs'
-
-const DOT_PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-)
+import { readFileSync } from 'node:fs'
 
 // 页面占位图：真实比例（800×1200）的 SVG，供自由画布测量自然尺寸
 function pageSvg(label, bg) {
@@ -29,130 +16,66 @@ function pageSvg(label, bg) {
 }
 
 export default function mockApiPlugin() {
-  const data = mockData
-
   return {
     name: 'mock-api',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = String(req.url || '')
-        if (!url.startsWith('/api/')) {
-          return next()
-        }
-
-        const sendJson = (status, body) => {
+        if (!url.startsWith('/api/')) return next()
+        const send = (status, body) => {
           res.statusCode = status
           res.setHeader('Content-Type', 'application/json')
+          res.setHeader('Cache-Control', 'no-store')
           res.end(JSON.stringify(body))
         }
-
-        // ---- 图片与下载 ----
-        // 注意：端点是 /base-image /source-image 等（斜杠后是字母），
-        // 用 includes('image') 才能命中；'/image' 会漏掉全部页面图片。
-        if (url.includes('image') || url.includes('/previews/')) {
-          const kind = url.includes('translated-image') ? '嵌后' : url.includes('source-image') ? '原图' : '框页/空页'
-          const bg = url.includes('translated-image') ? '#e2ead9' : url.includes('source-image') ? '#eadfd2' : '#e8e4dc'
-          res.setHeader('Content-Type', 'image/svg+xml')
-          res.setHeader('Cache-Control', 'no-store')
-          res.end(pageSvg(kind, bg))
-          return
-        }
-        if (url.includes('/download/')) {
-          res.setHeader('Content-Type', 'application/zip')
-          res.end('mock-zip')
-          return
-        }
-
-        const seg = url.replace(/^\/api\//, '').split('?')[0].split('/').filter(Boolean)
-        const resource = seg[0] || ''
+        let seg
+        try { seg = url.split('?')[0].slice(5).split('/').filter(Boolean).map(decodeURIComponent) }
+        catch { return send(400, { detail: '无效的请求路径。' }) }
+        const [resource, id, sub, operation] = seg
         const method = String(req.method || 'GET').toUpperCase()
-
-        // /api/status
-        if (resource === 'status') {
-          return sendJson(200, { status: 'running', auth_required: false })
+        const unsupported = () => send(501, { detail: '演示模式不执行保存、导入、模型处理或导出。请连接真实后端。' })
+        const missing = () => send(404, { detail: '演示数据中不存在此项目、页面或端点。' })
+        const view = mockData.projectViews[id]
+        // Restoring the demo view is the sole POST supported in read-only mode.
+        if (resource === 'projects' && seg.length === 3 && sub === 'restore' && method === 'POST') {
+          return view ? send(200, view) : missing()
         }
-
-        // /api/projects...
+        if (method !== 'GET' || resource === 'download') return unsupported()
+        if (resource === 'status') return send(200, { status: 'running', auth_required: false })
         if (resource === 'projects') {
-          // GET /api/projects
-          if (seg.length === 1 && method === 'GET') {
-            return sendJson(200, { projects: data.projects || [] })
-          }
-          const projectId = seg[1] || ''
-          const sub = seg[2] || ''
-          // POST /api/projects/{id}/restore
-          if (sub === 'restore' && method === 'POST') {
-            const view = data.projectViews?.[projectId] || Object.values(data.projectViews || {})[0]
-            return sendJson(200, view || { session_id: projectId, images: [], total_images: 0, workflow_stage: 'idle', project: { project_id: projectId } })
-          }
-          // GET/PUT /api/projects/{id}/glossary
-          if (sub === 'glossary') {
-            const gloss = data.glossaries?.[projectId] || Object.values(data.glossaries || {})[0] || { entries: [] }
-            return sendJson(200, gloss)
-          }
-          // GET /api/projects/{id}/snapshots
-          if (sub === 'snapshots') {
-            return sendJson(200, { snapshots: data.snapshots?.[projectId] || [] })
-          }
-          // PATCH/DELETE /api/projects/{id}
-          if (seg.length === 2) {
-            return sendJson(200, { ok: true })
-          }
-          return sendJson(200, { ok: true })
+          if (seg.length === 1) return send(200, { projects: mockData.projects })
+          if (!view) return missing()
+          if (sub === 'task') return send(200, { task: null })
+          if (sub === 'glossary') return send(200, { glossary: mockData.glossaries[id] })
+          if (sub === 'snapshots') return send(200, { snapshots: [] })
+          return missing()
         }
-
-        // /api/pages/{sid}/{pid}/...
         if (resource === 'pages') {
-          const sessionId = seg[1] || ''
-          const pageId = seg[2] || ''
-          const sub = seg[3] || ''
-          if (sub === 'document') {
-            const doc = data.pageDocuments?.[pageId] || Object.values(data.pageDocuments || {})[0] || { revision: 0, regions: [] }
-            return sendJson(200, { document: doc })
+          if (!view || !view.images.some(image => image.stored_name === sub)) return missing()
+          const document = mockData.pageDocuments[sub]
+          if (operation === 'document') return send(200, { document })
+          if (['source-image', 'base-image', 'preview-image', 'translated-image'].includes(operation)) {
+            if (operation === 'translated-image' && !document.translated_image) return missing()
+            if (operation === 'base-image' && !document.base_image) return missing()
+            const label = operation === 'translated-image' ? '合成嵌字示例' : operation === 'base-image' ? '合成空页示例' : '合成原图示例'
+            res.setHeader('Content-Type', 'image/svg+xml')
+            res.setHeader('Cache-Control', 'no-store')
+            res.end(pageSvg(label, '#e8e4dc'))
+            return
           }
-          if (sub === 'commands') {
-            const view = data.projectViews?.[sessionId] || Object.values(data.projectViews || {})[0]
-            return sendJson(200, view || { session_id: sessionId, ok: true })
-          }
-          if (sub === 'advanced-erase') {
-            if (seg[4] === 'suggest-selection') {
-              return sendJson(200, { selection: { bbox: [120, 180, 320, 260] } })
-            }
-            if (seg[4] === 'previews') {
-              res.setHeader('Content-Type', 'image/png')
-              res.end(DOT_PNG)
-              return
-            }
-            return sendJson(200, { attempt_id: 'mock-attempt' })
-          }
-          return sendJson(404, { detail: `[mock] 未实现的 pages 端点: ${url}` })
+          return missing()
         }
-
-        // /api/app/settings
-        if (resource === 'app' && seg[1] === 'settings') {
-          return sendJson(200, { settings: data.settings || {} })
-        }
-        // /api/app/local-models/xxx
-        if (resource === 'app' && seg[1] === 'local-models') {
-          return sendJson(200, { available: true })
-        }
-        // /api/app/diagnostics/export
-        if (resource === 'app' && seg[1] === 'diagnostics') {
-          res.setHeader('Content-Type', 'application/zip')
-          res.end('mock-diagnostics')
+        if (resource === 'app' && id === 'settings' && seg.length === 2) return send(200, { settings: mockData.settings })
+        if (resource === 'app' && id === 'local-models') return send(200, { model: { downloaded: false, size_bytes: 0, partial_downloaded: false, partial_size_bytes: 0 } })
+        if (resource === 'fonts') {
+          if (seg.length === 1) return send(200, { fonts: mockData.fonts })
+          const font = mockData.fonts.find(font => font.url === url.split('?')[0])
+          if (!font) return missing()
+          res.setHeader('Content-Type', 'font/otf')
+          res.end(readFileSync(new URL(`../../fonts/system/${font.name}`, import.meta.url)))
           return
         }
-
-        // /api/fonts
-        if (resource === 'fonts') {
-          return sendJson(200, { fonts: data.fonts || [] })
-        }
-        // /api/tasks/{id} 与 /cancel
-        if (resource === 'tasks') {
-          return sendJson(200, { task_id: seg[1] || '', status: 'completed' })
-        }
-
-        return sendJson(404, { detail: `[mock] 未实现的端点: ${url}` })
+        return missing()
       })
     },
   }

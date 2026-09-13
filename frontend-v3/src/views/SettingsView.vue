@@ -1,241 +1,57 @@
 <script setup>
-/**
- * 设置 — 分组设置表单 + 服务验证 + 高级运维
- * GET   /api/app/settings            → { settings: {...} }（按 key 通用渲染，未知字段进「其他设置」）
- * PATCH /api/app/settings            → 仅提交改动字段 → { settings }
- * POST  /api/app/settings/validate   → 校验翻译服务
- * GET   /api/fonts                   → { fonts: [{name, source, url}] }
- * 高级：remote-diagnostics start|stop / remote-execution enable|rotate-token|disable
- *       open-logs / open-data-directory / open-user-fonts / logs/tail / diagnostics/export
- */
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { apiFetch, apiGetJson, apiPatchJson, apiPostJson } from '../api/client.js'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { apiFetch, apiGetJson, apiPostJson } from '../api/client.js'
 import { dismiss, toast, toastError, toasts } from '../composables/useToast.js'
+import { useSettings } from '../composables/useSettings.js'
+import { SETTINGS_GROUPS } from '../state/settings-fields.js'
+import SettingsFields from '../components/SettingsFields.vue'
 import ThemeToggle from '../components/ThemeToggle.vue'
 
 const router = useRouter()
-
-// ---- 数据 ----
-const loading = ref(true)
+const state = useSettings()
+const { settings, draft, loading, saving, validating, changedKeys, dirty } = state
 const loadError = ref('')
-const settings = ref({}) // 服务端版本（脏检查基准）
-const draft = reactive({}) // 编辑副本
-const saving = ref(false)
-const validating = ref(false)
+const navGroups = SETTINGS_GROUPS
+const formGroups = SETTINGS_GROUPS.filter(group => group.keys)
+const fonts = ref([]), fontsLoading = ref(false), fontsError = ref('')
 
-const fonts = ref([])
-const fontsLoading = ref(false)
-const fontsError = ref('')
-
-// ---- 分组定义（顺序即导航顺序）----
-const GROUPS = [
-  {
-    id: 'translation',
-    label: '翻译服务',
-    desc: '控制翻译引擎、模型与密钥',
-    keys: ['translation_service', 'translation_provider', 'translation_model', 'translation_api_key', 'language'],
-  },
-  {
-    id: 'detect',
-    label: '检测与识别',
-    desc: '文字检测与 OCR 相关参数',
-    keys: ['detect_model', 'ocr'],
-  },
-  {
-    id: 'render',
-    label: '渲染与嵌字',
-    desc: '嵌字渲染与输出格式',
-    keys: ['rendering_backend', 'rerender_output_format', 'font_family', 'render_font_family'],
-  },
-  { id: 'fonts', label: '字体', desc: '本机可用字库' },
-  { id: 'advanced', label: '高级', desc: '远程诊断 / 运维操作' },
-]
-
-const KNOWN_KEYS = new Set(GROUPS.flatMap((g) => g.keys || []))
-
-const FIELD_LABELS = {
-  translation_service: '翻译引擎',
-  translation_provider: '服务 Provider',
-  translation_model: '模型名称',
-  translation_api_key: 'API Key',
-  language: '目标语言',
-  detect_model: '检测模型',
-  ocr: 'OCR 引擎',
-  rendering_backend: '渲染后端',
-  rerender_output_format: '结果输出格式',
-  font_family: '默认字体',
-  render_font_family: '嵌字字体',
-}
-
-const PROVIDER_OPTIONS = ['gemini', 'openai', 'deepseek', 'doubao', 'groq', 'claude', 'custom_openai']
-const SELECT_OPTIONS = {
-  translation_service: PROVIDER_OPTIONS,
-  translation_provider: PROVIDER_OPTIONS,
-  language: ['简体中文', '繁体中文', '英语', '日语', '韩语'],
-  rerender_output_format: ['webp', 'png', 'jpg'],
-  rendering_backend: ['manga-translator', 'opencv'],
-}
-
-// ---- 加载 ----
 async function loadSettings() {
-  loading.value = true
   loadError.value = ''
-  try {
-    const payload = await apiGetJson('/api/app/settings', '读取设置失败')
-    const next = payload?.settings && typeof payload.settings === 'object' ? payload.settings : {}
-    settings.value = next
-    syncDraft(next)
-  } catch (err) {
-    loadError.value = err.message || '读取设置失败'
-  } finally {
-    loading.value = false
-  }
+  try { await state.load() } catch (err) { loadError.value = err.message }
 }
-
-function syncDraft(source) {
-  Object.keys(draft).forEach((k) => delete draft[k])
-  Object.entries(source).forEach(([k, v]) => {
-    draft[k] = v ?? ''
-  })
-}
-
 async function loadFonts({ silent = false } = {}) {
   if (!silent) fontsLoading.value = true
   fontsError.value = ''
-  try {
-    const payload = await apiGetJson('/api/fonts', '读取字体列表失败')
-    fonts.value = Array.isArray(payload.fonts) ? payload.fonts : []
-  } catch (err) {
-    fontsError.value = err.message || '读取字体列表失败'
-  } finally {
-    fontsLoading.value = false
-  }
+  try { fonts.value = (await apiGetJson('/api/fonts', '读取字体列表失败')).fonts || [] }
+  catch (err) { fontsError.value = err.message }
+  finally { fontsLoading.value = false }
 }
-
+async function saveSettings() {
+  try { await state.flush(); toast('设置已保存。', 'ok') } catch (err) { toastError(err) }
+}
+function resetDraft() { state.reset() }
+async function validateService() {
+  try {
+    const result = await state.validate()
+    if (result) toast(result.message || (result.ok ? '翻译服务验证通过。' : '翻译服务验证未通过。'), result.ok ? 'ok' : 'error')
+  } catch (err) { toastError(err) }
+}
+function fontSourceLabel(source) {
+  return ({ system: '内置', custom: '自定义', user: '自定义', bundled: '内置' })[source] || source || '未知'
+}
+function beforeUnload(event) {
+  if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' }
+}
+onBeforeRouteLeave(async () => {
+  try { await state.flush(); return true } catch (err) { toastError(err); return false }
+})
 onMounted(() => {
   loadSettings()
   loadFonts({ silent: true })
+  window.addEventListener('beforeunload', beforeUnload)
 })
-
-// ---- 字段渲染规则 ----
-function labelOf(key) {
-  return FIELD_LABELS[key] || key
-}
-
-function optionsOf(key) {
-  const base = SELECT_OPTIONS[key]
-  if (!base) return null
-  const current = String(draft[key] ?? '')
-  return current && !base.includes(current) ? [...base, current] : base
-}
-
-function isSecret(key) {
-  return /api[_-]?key|token|secret/i.test(key)
-}
-
-function isBoolean(key) {
-  return typeof settings.value[key] === 'boolean'
-}
-
-function isNumber(key) {
-  return typeof settings.value[key] === 'number'
-}
-
-function isLongText(key) {
-  return typeof settings.value[key] === 'string' && settings.value[key].length > 60
-}
-
-function isWide(key) {
-  return isSecret(key) || isLongText(key) || /endpoint|url|prompt/i.test(key)
-}
-
-function groupFields(groupId) {
-  const group = GROUPS.find((g) => g.id === groupId)
-  const keys = Object.keys(settings.value)
-  if (groupId === 'other') {
-    return keys.filter((k) => !KNOWN_KEYS.has(k))
-  }
-  if (!group?.keys) return []
-  return group.keys.filter((k) => keys.includes(k))
-}
-
-const otherKeys = computed(() => Object.keys(settings.value).filter((k) => !KNOWN_KEYS.has(k)))
-
-const navGroups = computed(() => {
-  const list = GROUPS.map((g) => ({ id: g.id, label: g.label }))
-  if (otherKeys.value.length) {
-    list.splice(list.length - 1, 0, { id: 'other', label: '其他设置' })
-  }
-  return list
-})
-
-// ---- 脏检查与保存 ----
-const changedKeys = computed(() => {
-  const keys = new Set([...Object.keys(settings.value), ...Object.keys(draft)])
-  return [...keys].filter((k) => !isEqual(draft[k], settings.value[k]))
-})
-
-function isEqual(a, b) {
-  return String(a ?? '') === String(b ?? '')
-}
-
-const dirty = computed(() => changedKeys.value.length > 0)
-
-async function saveSettings() {
-  if (saving.value || !dirty.value) return
-  saving.value = true
-  try {
-    const patch = {}
-    changedKeys.value.forEach((k) => {
-      patch[k] = draft[k]
-    })
-    const payload = await apiPatchJson('/api/app/settings', patch, '保存设置失败')
-    if (payload?.settings && typeof payload.settings === 'object') {
-      settings.value = payload.settings
-      syncDraft(payload.settings)
-    } else {
-      settings.value = { ...settings.value, ...patch }
-    }
-    toast('设置已保存。', 'success')
-  } catch (err) {
-    toastError(err)
-  } finally {
-    saving.value = false
-  }
-}
-
-function resetDraft() {
-  syncDraft(settings.value)
-}
-
-// ---- 翻译服务验证 ----
-async function validateService() {
-  if (validating.value) return
-  validating.value = true
-  try {
-    const payload = await apiPostJson('/api/app/settings/validate', {}, '验证翻译服务失败')
-    const ok = payload?.ok ?? payload?.valid ?? true
-    const message = payload?.message || payload?.detail || ''
-    const issues = Array.isArray(payload?.issues) ? payload.issues : []
-    if (ok === false || issues.length) {
-      const text = [message, ...issues.map((i) => (typeof i === 'string' ? i : i?.message))].filter(Boolean).join('；')
-      toast(text || '验证未通过，请检查翻译服务配置。', 'error', 6000)
-    } else {
-      toast(message || '翻译服务验证通过。', 'success')
-    }
-  } catch (err) {
-    toastError(err)
-  } finally {
-    validating.value = false
-  }
-}
-
-// ---- 字体组操作 ----
-function fontSourceLabel(source) {
-  const map = { system: '系统', user: '自定义', bundled: '内置' }
-  return map[source] || source || '未知'
-}
+onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 
 // ---- 高级运维 ----
 const advBusy = ref('')
@@ -421,118 +237,18 @@ function goBack() {
           </div>
 
           <template v-else>
-            <!-- 翻译服务 -->
-            <section class="settings-group" :id="'settings-translation'">
-              <div class="group-head">
-                <h3>翻译服务</h3>
-                <span>控制翻译引擎、模型与密钥</span>
-              </div>
+            <section v-for="group in formGroups" :id="`settings-${group.id}`" :key="group.id" class="settings-group">
+              <div class="group-head"><h3>{{ group.label }}</h3></div>
               <div class="group-body">
-                <div class="form-grid">
-                  <template v-for="key in groupFields('translation')" :key="key">
-                    <label v-if="!isBoolean(key)" class="field" :class="{ span2: isWide(key) }">
-                      <span>{{ labelOf(key) }}</span>
-                      <select v-if="optionsOf(key)" v-model="draft[key]">
-                        <option v-for="opt in optionsOf(key)" :key="opt" :value="opt">{{ opt }}</option>
-                      </select>
-                      <input v-else-if="isSecret(key)" v-model="draft[key]" type="password" autocomplete="off" placeholder="粘贴你的 API Key" />
-                      <input v-else-if="isNumber(key)" v-model.number="draft[key]" type="number" />
-                      <textarea v-else-if="isLongText(key)" v-model="draft[key]" rows="3" />
-                      <input v-else v-model="draft[key]" type="text" />
-                    </label>
-                    <label v-else class="check-row">
-                      <input v-model="draft[key]" type="checkbox" />
-                      <span>{{ labelOf(key) }}</span>
-                    </label>
-                  </template>
-                </div>
-                <div class="inline-actions">
-                  <button class="btn btn-secondary" :disabled="validating" @click="validateService">
-                    <span v-if="validating" class="spin" />
-                    <template v-else>验证</template>
-                  </button>
-                  <button class="btn btn-ghost" :disabled="!dirty" @click="resetDraft">放弃改动</button>
-                </div>
-                <p class="inline-note">验证使用当前已保存的配置；请先保存再验证新填写的密钥。</p>
-              </div>
-            </section>
-
-            <!-- 检测与识别 -->
-            <section class="settings-group" :id="'settings-detect'">
-              <div class="group-head">
-                <h3>检测与识别</h3>
-                <span>文字检测与 OCR 相关参数</span>
-              </div>
-              <div class="group-body">
-                <div class="form-grid">
-                  <template v-for="key in groupFields('detect')" :key="key">
-                    <label v-if="!isBoolean(key)" class="field" :class="{ span2: isWide(key) }">
-                      <span>{{ labelOf(key) }}</span>
-                      <select v-if="optionsOf(key)" v-model="draft[key]">
-                        <option v-for="opt in optionsOf(key)" :key="opt" :value="opt">{{ opt }}</option>
-                      </select>
-                      <input v-else-if="isNumber(key)" v-model.number="draft[key]" type="number" />
-                      <input v-else v-model="draft[key]" type="text" />
-                    </label>
-                    <label v-else class="check-row">
-                      <input v-model="draft[key]" type="checkbox" />
-                      <span>{{ labelOf(key) }}</span>
-                    </label>
-                  </template>
-                </div>
-                <p v-if="!groupFields('detect').length" class="inline-note">后端未返回检测与识别相关字段。</p>
-              </div>
-            </section>
-
-            <!-- 渲染与嵌字 -->
-            <section class="settings-group" :id="'settings-render'">
-              <div class="group-head">
-                <h3>渲染与嵌字</h3>
-                <span>嵌字渲染与输出格式</span>
-              </div>
-              <div class="group-body">
-                <div class="form-grid">
-                  <template v-for="key in groupFields('render')" :key="key">
-                    <label v-if="!isBoolean(key)" class="field" :class="{ span2: isWide(key) }">
-                      <span>{{ labelOf(key) }}</span>
-                      <select v-if="optionsOf(key)" v-model="draft[key]">
-                        <option v-for="opt in optionsOf(key)" :key="opt" :value="opt">{{ opt }}</option>
-                      </select>
-                      <input v-else-if="isNumber(key)" v-model.number="draft[key]" type="number" />
-                      <input v-else v-model="draft[key]" type="text" />
-                    </label>
-                    <label v-else class="check-row">
-                      <input v-model="draft[key]" type="checkbox" />
-                      <span>{{ labelOf(key) }}</span>
-                    </label>
-                  </template>
-                </div>
-                <p v-if="!groupFields('render').length" class="inline-note">后端未返回渲染相关字段。</p>
-              </div>
-            </section>
-
-            <!-- 其他设置（未知字段原样展示） -->
-            <section v-if="otherKeys.length" class="settings-group" :id="'settings-other'">
-              <div class="group-head">
-                <h3>其他设置</h3>
-                <span>后端返回的其余字段</span>
-              </div>
-              <div class="group-body">
-                <div class="form-grid">
-                  <template v-for="key in otherKeys" :key="key">
-                    <label v-if="!isBoolean(key)" class="field" :class="{ span2: isWide(key) }">
-                      <span>{{ labelOf(key) }}</span>
-                      <input v-if="isSecret(key)" v-model="draft[key]" type="password" autocomplete="off" />
-                      <input v-else-if="isNumber(key)" v-model.number="draft[key]" type="number" />
-                      <textarea v-else-if="isLongText(key)" v-model="draft[key]" rows="3" />
-                      <input v-else v-model="draft[key]" type="text" />
-                    </label>
-                    <label v-else class="check-row">
-                      <input v-model="draft[key]" type="checkbox" />
-                      <span>{{ labelOf(key) }}</span>
-                    </label>
-                  </template>
-                </div>
+                <SettingsFields :draft="draft" :keys="group.keys" :configured-secrets="settings.configured_secrets" :fonts="fonts" />
+                <template v-if="group.id === 'translation'">
+                  <div class="inline-actions">
+                    <button class="btn btn-secondary" :disabled="validating || saving" @click="validateService">{{ validating ? '验证中…' : '验证当前配置' }}</button>
+                    <button class="btn btn-ghost" :disabled="!dirty || saving" @click="resetDraft">放弃改动</button>
+                  </div>
+                  <p class="inline-note">验证会使用当前填写的配置向所选服务发送测试文本。密钥保存在本机，留空保留已有密钥。</p>
+                </template>
+                <p v-if="group.id === 'cleanup'" class="inline-note">在线清理与在线擦除会把所需图片发送给你选择的服务商；本地 LaMa 不需要在线擦除密钥。在线擦除目前使用 Ark / Seedream。</p>
               </div>
             </section>
 
@@ -553,9 +269,9 @@ function goBack() {
                 <p v-if="fontsError" class="inline-note is-error">{{ fontsError }}</p>
                 <p v-else class="inline-note">共 {{ fonts.length }} 款字体</p>
                 <div v-if="fonts.length" class="font-list">
-                  <div v-for="font in fonts" :key="`${font.source}:${font.name}`" class="mark-item">
+                  <div v-for="font in fonts" :key="font.id" class="mark-item">
                     <span class="tag" :class="{ 'is-accent': font.source === 'user' }">{{ fontSourceLabel(font.source) }}</span>
-                    <span>{{ font.name }}</span>
+                    <span>{{ font.label || font.id }}</span>
                     <span class="num">{{ font.source }}</span>
                   </div>
                 </div>

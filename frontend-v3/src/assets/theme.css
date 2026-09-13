@@ -31,6 +31,19 @@
   /* 阴影 */
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, .38), 0 2px 8px rgba(0, 0, 0, .28);
   --shadow-modal: 0 24px 80px rgba(0, 0, 0, .55), 0 4px 16px rgba(0, 0, 0, .35);
+
+  /* 组件语义令牌：菜单、提示和画布标记共享主题，不依赖组件内 fallback 色。 */
+  --surface-1: var(--bg-panel);
+  --surface-2: var(--bg-elevated);
+  --surface-3: var(--bg-elevated);
+  --line: var(--border);
+  --media-label-bg: rgba(8, 9, 12, .72);
+  --media-label-bg-strong: rgba(8, 9, 12, .78);
+  --media-label-text: #E9EBF1;
+  --blank-accent: #8FA7FF;
+  --paper-ink: #221E16;
+  --region-active-ink: #3A2A00;
+  --stage-shadow: 0 12px 44px rgba(0, 0, 0, .5), 0 2px 10px rgba(0, 0, 0, .4);
 }
 
 /* ---------- 深色主题（默认） ---------- */
@@ -96,31 +109,44 @@
 
   --text-1: #171B24;
   --text-2: #596372;
-  --text-3: #98A1AF;
+  /* 小字号弱文字仍需在面板和应用背景上保持可读。 */
+  --text-3: #5F6B7A;
 
-  --accent: #0CA898;
-  --accent-strong: #0B9688;
-  --accent-dim: rgba(12, 168, 152, .10);
+  --accent: #07776B;
+  --accent-strong: #066D63;
+  --accent-dim: rgba(7, 119, 107, .10);
   --accent-ink: #FFFFFF;
-  --accent-border: rgba(12, 168, 152, .45);
+  --accent-border: rgba(7, 119, 107, .45);
 
-  --ok: #1E9E6A;
+  --ok: #167A52;
   --ok-dim: rgba(30, 158, 106, .10);
-  --warn: #C77F1A;
+  --warn: #9A5F00;
   --warn-dim: rgba(199, 127, 26, .12);
-  --danger: #D64541;
+  --danger: #B3261E;
   --danger-dim: rgba(214, 69, 65, .10);
-  --ai: #7C66E8;
+  --ai: #6346C5;
   --ai-dim: rgba(124, 102, 232, .10);
 
   --canvas-bg: #E4E6EA;
   --canvas-grid: rgba(18, 22, 32, .05);
-  --region-line: #0CA898;
-  --region-fill: rgba(12, 168, 152, .08);
+  --region-line: #07776B;
+  --region-fill: rgba(7, 119, 107, .08);
   --region-active: #D9930D;
   --region-active-fill: rgba(217, 147, 13, .12);
 
   --topbar-bg: rgba(255, 255, 255, .85);
+
+  --surface-1: var(--bg-panel);
+  --surface-2: var(--bg-elevated);
+  --surface-3: var(--bg-elevated);
+  --line: var(--border);
+  --media-label-bg: rgba(255, 255, 255, .88);
+  --media-label-bg-strong: rgba(255, 255, 255, .92);
+  --media-label-text: #171B24;
+  --blank-accent: #526BC4;
+  --paper-ink: #221E16;
+  --region-active-ink: #3A2A00;
+  --stage-shadow: 0 12px 40px rgba(18, 22, 32, .22), 0 2px 8px rgba(18, 22, 32, .12);
 
   --shadow-pop: 0 8px 28px rgba(18, 22, 32, .12), 0 2px 8px rgba(18, 22, 32, .06);
   --shadow-modal: 0 24px 80px rgba(18, 22, 32, .20), 0 4px 16px rgba(18, 22, 32, .08);
@@ -167,6 +193,10 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
+button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 input::placeholder, textarea::placeholder { color: var(--text-3); }
 img { display: block; max-width: 100%; }
 
@@ -180,7 +210,7 @@ img { display: block; max-width: 100%; }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 
 /* ---------- 3. 应用骨架 ---------- */
-.app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100vh; }
+.app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; }
 
 /* 顶部命令栏 */
 .topbar {

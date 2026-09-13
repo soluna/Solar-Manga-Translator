@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 import asyncio
 import contextlib
+import copy
 import logging
 import os
 import secrets
@@ -974,7 +975,7 @@ async def get_project_glossary(project_id: str, include_occurrences: bool = Fals
 async def save_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(project_id)
     payload = payload or {}
-    entries = payload.get("entries") or []
+    entries = payload.get("entries")
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
     with project_write_lease(project_id, "glossary-save"):
@@ -985,11 +986,24 @@ async def save_project_glossary(project_id: str, payload: dict[str, Any] | None 
 @app.post("/api/projects/{project_id}/glossary/extract")
 async def extract_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(project_id)
+    payload = payload or {}
+    preview_only = payload.get("preview_only", False)
+    if not isinstance(preview_only, bool):
+        raise HTTPException(status_code=400, detail="preview_only 必须为布尔值。")
     with project_write_lease(project_id, "glossary-extract"):
-        config = translator_engine.capture_page_command_config(session, (payload or {}).get("config") or session.get("last_config") or {})
-        glossary = await translator_engine.extract_project_glossary(project_id, session, config, force=True)
+        # Candidate review must not change either the live session or its Head.
+        working_session = copy.deepcopy(session) if preview_only else session
+        config = translator_engine.capture_page_command_config(working_session, payload.get("config") or session.get("last_config") or {})
+        glossary = await translator_engine.extract_project_glossary(
+            project_id, working_session, config, force=True, persist=not preview_only,
+        )
+        glossary = {
+            **glossary,
+            **translator_engine.get_project_glossary(project_id, working_session, include_occurrences=True),
+        }
     return {
         "glossary": glossary,
+        "preview_only": preview_only,
         "message": str(glossary.get("extract_message") or ""),
     }
 
@@ -1008,7 +1022,7 @@ async def preview_project_glossary_application(project_id: str, payload: dict[st
 async def apply_project_glossary(project_id: str, payload: dict[str, Any] | None = None):
     session = get_or_restore_session(project_id)
     payload = payload or {}
-    entries = payload.get("entries") or []
+    entries = payload.get("entries")
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="名词库条目格式不正确。")
     try:

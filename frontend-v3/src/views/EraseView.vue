@@ -1,10 +1,13 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { apiGetJson, apiPostJson, toApiUrl, withCacheBust, withImagePreviewSize } from '../api/client.js'
 import { useProject } from '../composables/useProject.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+import { loadProcessingConfig } from '../api/processing-config.js'
+import { useTaskEvents } from '../composables/useTaskEvents.js'
+import { normalizedPoint, selectionBox, eraseRequest, previewAttempt as readPreviewAttempt, brushOperations } from '../state/erase-contract.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,6 +15,10 @@ const sessionId = computed(() => String(route.params.sessionId || ''))
 const pageId = computed(() => String(route.params.pageId || ''))
 
 const { project, loadProject, adoptResponse } = useProject()
+const taskBusy = useTaskEvents().busy
+const loading = ref(true), sourceSize = ref(null)
+let pageEpoch = 0
+const endpoint = computed(() => `/api/pages/${encodeURIComponent(sessionId.value)}/${encodeURIComponent(pageId.value)}`)
 
 const projectTitle = computed(() => project.value?.project?.title || sessionId.value)
 const pageIndex = computed(() => {
@@ -118,7 +125,7 @@ function onErasePanUp() {
 function onImgLoad() {
   const el = canvasImg.value
   if (el && el.naturalWidth) {
-    imgNatural.value = { w: el.naturalWidth, h: el.naturalHeight }
+    imgNatural.value = sourceSize.value || { w: el.naturalWidth, h: el.naturalHeight }
     if (!userTookOver) nextTick(() => requestAnimationFrame(() => fitErase()))
   }
 }
@@ -135,17 +142,23 @@ function toNaturalPoint(event) {
   if (!el || !imgNatural.value.w) return null
   // getBoundingClientRect 已包含 stage 的 transform，缩放/平移下换算依然成立
   const rect = el.getBoundingClientRect()
-  const scale = imgNatural.value.w / rect.width
-  const x = Math.round((event.clientX - rect.left) * scale)
-  const y = Math.round((event.clientY - rect.top) * scale)
-  return [x, y]
+  if (!rect.width || !rect.height) return null
+  const x = Math.round((event.clientX - rect.left) * imgNatural.value.w / rect.width)
+  const y = Math.round((event.clientY - rect.top) * imgNatural.value.h / rect.height)
+  if (!drawing.value && (x < 0 || y < 0 || x > imgNatural.value.w || y > imgNatural.value.h)) return null
+  return [Math.max(0, Math.min(imgNatural.value.w, x)), Math.max(0, Math.min(imgNatural.value.h, y))]
 }
 
 // ---- 模式与工具 ----
+const provider = ref('local')
+const paintMode = ref('paint'), paintColor = ref('#ffffff'), feather = ref(0)
 const scope = ref('selection') // full | selection
 const tool = ref('click') // click | box | brush
 const brushSize = ref(48)
-const maskMode = ref('stroke') // stroke | region → local_mask_mode
+const maskMode = ref('stroke')
+const maxBrushSize = computed(() => Math.max(4, Math.min(200, Math.floor(Math.min(imgNatural.value.w || 800, imgNatural.value.h || 1200) / 4))))
+watch(maxBrushSize, maximum => { brushSize.value = Math.min(brushSize.value, maximum) })
+watch(provider, value => { if (value === 'brush') { scope.value = 'selection'; tool.value = 'brush' } })
 
 const TOOL_HINTS = {
   click: '直接点击文字；系统优先命中已有文本框，需要时调用本地文字检测。',
@@ -156,20 +169,35 @@ const TOOL_HINTS = {
 // ---- 标记 ----
 const marks = ref([]) // {kind:'auto'|'box'|'brush', bbox?, points?, radius?, label}
 const drawing = ref(null) // 进行中的 box/brush
+let actionSerial = 0
+
+function beginAction() {
+  if (!canRun.value) return 0
+  const token = ++actionSerial
+  running.value = true
+  return token
+}
+
+function finishAction(token) {
+  if (token && token === actionSerial) running.value = false
+}
 
 function addMark(mark) {
   marks.value.push(mark)
 }
 
 function removeMark(index) {
+  if (running.value) return
   marks.value.splice(index, 1)
 }
 
 function clearMarks() {
+  if (running.value) return
   marks.value = []
 }
 
 async function onCanvasPointerDown(event) {
+  if (!canRun.value || drawing.value) return
   // 按住 Space = 平移画布（优先于工具）
   if (spacePan.value) {
     startErasePan(event)
@@ -189,7 +217,7 @@ async function onCanvasPointerDown(event) {
     return
   }
   if (tool.value === 'brush') {
-    drawing.value = { kind: 'brush', points: [pt] }
+    drawing.value = { kind: 'brush', points: [pt], radius: brushSize.value / 2 }
     window.addEventListener('pointermove', onCanvasPointerMove)
     window.addEventListener('pointerup', onCanvasPointerUp, { once: true })
   }
@@ -217,28 +245,31 @@ function onCanvasPointerUp() {
     if (bbox[2] - bbox[0] > 6 && bbox[3] - bbox[1] > 6) {
       addMark({ kind: 'box', bbox, label: `选区 ${marks.value.length + 1}` })
     }
-  } else if (d.kind === 'brush' && d.points.length > 2) {
-    addMark({ kind: 'brush', points: d.points, radius: brushSize.value / 2, label: `笔触 ${marks.value.length + 1}` })
+  } else if (d.kind === 'brush' && d.points.length) {
+    addMark({ kind: 'brush', points: d.points, radius: d.radius, label: `笔触 ${marks.value.length + 1}` })
   }
 }
 
 async function handleClickSelect(pt) {
+  const token = beginAction()
+  if (!token) return
+  const epoch = pageEpoch
   try {
     const data = await apiPostJson(
       `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase/suggest-selection`,
-      { point: pt, config: {} },
+      { point: normalizedPoint(pt, imgNatural.value), config: await loadProcessingConfig(project.value?.config || {}) },
       '点击选区失败',
     )
-    const sel = data?.selection
-    const bbox = Array.isArray(sel?.bbox) ? sel.bbox : (Array.isArray(sel) ? sel : null)
+    if (epoch !== pageEpoch) return
+    const bbox = selectionBox(data?.selection, imgNatural.value)
     if (bbox && bbox.length === 4) {
       addMark({ kind: 'auto', bbox: bbox.map(Math.round), label: `自动 ${marks.value.length + 1}` })
     } else {
       toast('未能识别该位置的文字区域，试试框选或画笔。', 'warn')
     }
   } catch (err) {
-    toastError(err)
-  }
+    if (epoch === pageEpoch) toastError(err)
+  } finally { finishAction(token) }
 }
 
 // bbox → 画布显示坐标（百分比）
@@ -265,135 +296,134 @@ function drawingStyle() {
 
 function brushPolyline(mark) {
   if (!imgNatural.value.w) return ''
-  return mark.points.map(([x, y]) => `${(x / imgNatural.value.w) * 100},${(y / imgNatural.value.h) * 100}`).join(' ')
+  return mark.points.map(([x, y]) => `${x},${y}`).join(' ')
 }
 
 // ---- 执行 ----
 const running = ref(false)
-const previewAttempt = ref(null) // {attempt_id, kinds: {candidate, mask, overlay}}
+const previewAttempt = ref(null)
+const canRun = computed(() => !running.value && !loading.value && Boolean(sourceSize.value) && !taskBusy.value)
 
 async function runErase() {
-  if (running.value) return
-  running.value = true
+  const token = beginAction()
+  if (!token) return
+  const epoch = pageEpoch
   try {
-    if (scope.value === 'full') {
-      const res = await apiPostJson(
-        `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase`,
-        { action: 'erase', config: {} },
-        '整页擦除失败',
-      )
-      adoptResponse(res)
-      toast('整页擦除完成。', 'ok')
-      displayUrl.value = withCacheBust(displayUrl.value)
-      return
+    if (provider.value === 'brush') return await runBrush(token, epoch)
+    const config = await loadProcessingConfig(project.value?.config || {})
+    if (epoch !== pageEpoch) return
+    const body = eraseRequest({ provider: provider.value, scope: scope.value, marks: marks.value,
+      dimensions: imgNatural.value, maskMode: maskMode.value, config })
+    const response = await apiPostJson(`${endpoint.value}/advanced-erase`, body, '擦除失败')
+    if (epoch !== pageEpoch) return
+    if (body.action === 'local-advanced-preview') {
+      previewAttempt.value = readPreviewAttempt(response)
+      toast('整页预览已生成，请对比后应用。', 'ok')
+    } else {
+      adoptResponse(response)
+      previewAttempt.value = null
+      marks.value = []
+      displayUrl.value = withCacheBust(baseImageUrl.value)
+      const fallback = response.advanced_erase?.mask_mode === 'selection_fallback'
+      toast(fallback ? '未找到可分离的文字笔画，已按整块选区处理。可恢复原空页。' : '擦除完成，需重新嵌字后导出。', fallback ? 'warn' : 'ok')
     }
-    const selections = marks.value.filter((m) => m.bbox).map((m) => ({ bbox: m.bbox }))
-    const strokes = marks.value.filter((m) => m.points).map((m) => ({ points: m.points, radius: m.radius }))
-    if (!selections.length && !strokes.length) {
-      toast('请先在画布上标记要擦除的区域。', 'warn')
-      return
-    }
-    const res = await apiPostJson(
-      `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase`,
-      {
-        action: 'local-selection',
-        config: {},
-        selections: selections.length ? selections : undefined,
-        selection_strokes: strokes.length ? strokes : undefined,
-        local_mask_mode: maskMode.value === 'stroke' ? 'local' : 'region',
-      },
-      '选区擦除失败',
-    )
-    adoptResponse(res)
-    toast('选区擦除完成。', 'ok')
-    marks.value = []
-    displayUrl.value = withCacheBust(displayUrl.value)
-  } catch (err) {
-    toastError(err)
-  } finally {
-    running.value = false
-  }
+  } catch (error) {
+    if (epoch === pageEpoch) toastError(error)
+  } finally { finishAction(token) }
 }
 
-async function runLamaPreview() {
-  if (running.value) return
-  running.value = true
+async function runBrush(token = beginAction(), epoch = pageEpoch) {
+  if (!token) return
   try {
-    const selections = marks.value.filter((m) => m.bbox).map((m) => ({ bbox: m.bbox }))
-    const strokes = marks.value.filter((m) => m.points).map((m) => ({ points: m.points, radius: m.radius }))
-    const res = await apiPostJson(
-      `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase`,
-      {
-        action: 'local-advanced-preview',
-        config: {},
-        selections: selections.length ? selections : undefined,
-        selection_strokes: strokes.length ? strokes : undefined,
-        local_mask_mode: maskMode.value === 'stroke' ? 'local' : 'region',
-      },
-      'LaMa 预览失败',
-    )
-    const attemptId = res?.attempt_id || res?.preview?.attempt_id || ''
-    if (!attemptId) {
-      toast('后端未返回预览 ID。', 'warn')
-      return
-    }
-    previewAttempt.value = { attempt_id: attemptId }
-    toast('预览已生成。', 'ok')
-  } catch (err) {
-    toastError(err)
-  } finally {
-    running.value = false
-  }
+    const operations = brushOperations(marks.value, paintMode.value, paintColor.value, feather.value, imgNatural.value)
+    const response = await apiPostJson(`${endpoint.value}/brush-edit`, { operations }, '画笔修补失败')
+    if (epoch !== pageEpoch) return
+    adoptResponse(response)
+    previewAttempt.value = null
+    marks.value = []
+    displayUrl.value = withCacheBust(baseImageUrl.value)
+    toast('画笔修补已保存，需重新嵌字后导出。', 'ok')
+  } catch (error) {
+    if (epoch === pageEpoch) toastError(error)
+  } finally { finishAction(token) }
 }
 
 function previewUrl(kind) {
-  if (!previewAttempt.value) return ''
-  return toApiUrl(`/api/pages/${sessionId.value}/${pageId.value}/advanced-erase/previews/${previewAttempt.value.attempt_id}/${kind}`)
+  return toApiUrl(previewAttempt.value?.preview?.[`${kind}_url`] || '')
 }
 
 async function applyPreview() {
-  if (!previewAttempt.value || running.value) return
-  running.value = true
+  if (!previewAttempt.value) return
+  const token = beginAction()
+  if (!token) return
+  const epoch = pageEpoch
+  const attemptId = previewAttempt.value.attempt_id
   try {
-    const res = await apiPostJson(
-      `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase`,
-      { action: 'local-advanced-apply', config: {}, attempt_id: previewAttempt.value.attempt_id },
-      '应用预览失败',
-    )
-    adoptResponse(res)
+    const response = await apiPostJson(`${endpoint.value}/advanced-erase`,
+      { action: 'local-advanced-apply', config: project.value?.config || {}, attempt_id: attemptId }, '应用预览失败')
+    if (epoch !== pageEpoch) return
+    adoptResponse(response)
     previewAttempt.value = null
     marks.value = []
-    toast('已应用新空页。', 'ok')
-    displayUrl.value = withCacheBust(displayUrl.value)
-  } catch (err) {
-    toastError(err)
-  } finally {
-    running.value = false
-  }
+    displayUrl.value = withCacheBust(baseImageUrl.value)
+    toast('已应用新空页，需重新嵌字后导出。', 'ok')
+  } catch (error) {
+    if (epoch === pageEpoch) toastError(error)
+  } finally { finishAction(token) }
 }
 
 async function restoreBlank() {
-  if (running.value) return
-  running.value = true
+  const token = beginAction()
+  if (!token) return
+  const epoch = pageEpoch
   try {
-    const res = await apiPostJson(
-      `/api/pages/${sessionId.value}/${pageId.value}/advanced-erase`,
-      { action: 'restore', config: {} },
-      '恢复失败',
-    )
-    adoptResponse(res)
-    toast('已恢复擦除前的空页。', 'ok')
-    displayUrl.value = withCacheBust(displayUrl.value)
-  } catch (err) {
-    toastError(err)
-  } finally {
-    running.value = false
-  }
+    const response = await apiPostJson(`${endpoint.value}/advanced-erase`, { action: 'restore', config: project.value?.config || {} }, '恢复失败')
+    if (epoch !== pageEpoch) return
+    adoptResponse(response)
+    previewAttempt.value = null
+    displayUrl.value = withCacheBust(baseImageUrl.value)
+    toast('已恢复首次修图前的空页。', 'ok')
+  } catch (error) {
+    if (epoch === pageEpoch) toastError(error)
+  } finally { finishAction(token) }
 }
 
 function backToReview() {
-  router.back()
+  router.push(`/review/${encodeURIComponent(sessionId.value)}/${encodeURIComponent(pageId.value)}`)
 }
+function leaveSafely() {
+  if (running.value) { toast('请等待当前修图操作完成。', 'warn'); return false }
+  return (!marks.value.length && !previewAttempt.value) || window.confirm('还有未应用的标记或预览，离开将放弃这些内容。确定离开？')
+}
+onBeforeRouteLeave(leaveSafely)
+onBeforeRouteUpdate(leaveSafely)
+function beforeUnload(event) {
+  if (running.value || marks.value.length || previewAttempt.value) { event.preventDefault(); event.returnValue = '' }
+}
+watch([sessionId, pageId], async ([sid, pid]) => {
+  const epoch = ++pageEpoch
+  actionSerial += 1
+  running.value = false
+  loading.value = true
+  sourceSize.value = null
+  previewAttempt.value = null
+  marks.value = []
+  drawing.value = null
+  panState.value = null
+  userTookOver = false
+  try {
+    const [result] = await Promise.all([apiGetJson(`${endpoint.value}/document`, '读取页面尺寸失败'), loadProject(sid)])
+    if (epoch !== pageEpoch) return
+    const dimensions = result.document?.dimensions
+    if (!(dimensions?.width > 0 && dimensions?.height > 0)) throw new Error('后端没有返回有效的原图尺寸。')
+    sourceSize.value = { w: dimensions.width, h: dimensions.height }
+    imgNatural.value = sourceSize.value
+    imgError.value = false
+    displayUrl.value = baseImageUrl.value
+    nextTick(fitErase)
+  } catch (error) { if (epoch === pageEpoch) toastError(error) }
+  finally { if (epoch === pageEpoch) loading.value = false }
+}, { immediate: true })
 
 // ---- 快捷键（对齐旧版擦除弹窗：⌘Z 撤销标记、0 适合、+/- 缩放、Space 平移、Esc 取消绘制）----
 function isEraseTypingTarget(target) {
@@ -401,6 +431,7 @@ function isEraseTypingTarget(target) {
 }
 
 function onEraseKeydown(event) {
+  if (running.value) return
   if (isEraseTypingTarget(event.target)) return
   if (event.code === 'Space') {
     spacePan.value = true
@@ -441,20 +472,21 @@ function onEraseKeyup(event) {
 }
 
 let eraseResizeObs = null
-onMounted(async () => {
+onMounted(() => {
   displayUrl.value = baseImageUrl.value
+  window.addEventListener('beforeunload', beforeUnload)
   window.addEventListener('keydown', onEraseKeydown)
   window.addEventListener('keyup', onEraseKeyup)
   eraseResizeObs = new ResizeObserver(() => { if (!userTookOver) fitErase() })
   if (eraseCanvas.value) eraseResizeObs.observe(eraseCanvas.value)
-  try {
-    await loadProject(sessionId.value)
-  } catch {
-    /* 允许离线浏览画布 */
-  }
+
 })
 
 onUnmounted(() => {
+  pageEpoch += 1
+  window.removeEventListener('beforeunload', beforeUnload)
+  window.removeEventListener('pointerup', onCanvasPointerUp)
+  window.removeEventListener('pointerup', onErasePanUp)
   window.removeEventListener('pointermove', onCanvasPointerMove)
   window.removeEventListener('pointermove', onErasePanMove)
   window.removeEventListener('keydown', onEraseKeydown)
@@ -464,7 +496,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app" style="overflow:auto;">
+  <div class="app erase-app" style="overflow:auto;">
     <header class="topbar">
       <a class="topbar-brand" href="#/">
         <span class="brand-mark">S</span>
@@ -485,13 +517,13 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="erase-view" style="flex:none;min-height:calc(100vh - 46px);">
+    <div class="erase-view">
       <section class="erase-main">
         <div class="stage-bar">
           <span style="font-size:var(--fs-sub);color:var(--text-3);flex:none;">范围</span>
           <div class="seg" role="group" aria-label="擦除范围">
-            <button :class="{ active: scope === 'full' }" @click="scope = 'full'">整页处理</button>
-            <button :class="{ active: scope === 'selection' }" @click="scope = 'selection'">指定区域</button>
+            <button :disabled="provider === 'brush' || running" :class="{ active: scope === 'full' }" @click="scope = 'full'">整页处理</button>
+            <button :disabled="running" :class="{ active: scope === 'selection' }" @click="scope = 'selection'">指定区域</button>
           </div>
           <div class="spacer"></div>
         </div>
@@ -512,30 +544,28 @@ onUnmounted(() => {
                   <span>{{ mark.kind === 'auto' ? '自动' : '框选' }}</span>
                 </div>
                 <div v-if="drawing?.kind === 'box'" class="erase-mark is-drawing" :style="drawingStyle()"></div>
-                <svg v-if="marks.some(m => m.points) || drawing?.kind === 'brush'" class="brush-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
+                <svg v-if="marks.some(m => m.points) || drawing?.kind === 'brush'" class="brush-layer" :viewBox="`0 0 ${imgNatural.w} ${imgNatural.h}`">
                   <polyline
                     v-for="(mark, i) in marks.filter(m => m.points)"
                     :key="`b${i}`"
                     :points="brushPolyline(mark)"
                     fill="none"
-                    stroke="rgba(232,163,61,.75)"
-                    :stroke-width="((mark.radius * 2) / imgNatural.w) * 100"
+                    stroke="var(--warn)"
+                    :stroke-width="mark.radius * 2"
                     stroke-linecap="round"
-                    vector-effect="non-scaling-stroke"
                   />
                   <polyline
                     v-if="drawing?.kind === 'brush'"
                     :points="brushPolyline(drawing)"
                     fill="none"
-                    stroke="rgba(232,163,61,.9)"
-                    :stroke-width="(brushSize / imgNatural.w) * 100"
+                    stroke="var(--warn)"
+                    :stroke-width="drawing.radius * 2"
                     stroke-linecap="round"
-                    vector-effect="non-scaling-stroke"
                   />
                 </svg>
               </template>
               <div v-if="scope === 'full'" class="full-scope-hint">
-                <span class="badge is-accent no-dot" style="height:auto;padding:8px 14px;font-size:var(--fs-sub);">整页处理 · 将自动检测并擦除本页全部文字</span>
+                <span class="badge is-accent no-dot" style="height:auto;padding:8px 14px;font-size:var(--fs-sub);">整页处理 · 生成新的无字底图</span>
               </div>
             </div>
           </div>
@@ -550,18 +580,27 @@ onUnmounted(() => {
 
       <aside class="erase-side">
         <div class="erase-side-body">
+          <label class="field"><span>处理方式</span><select v-model="provider" :disabled="running">
+            <option value="local">本地 LaMa</option><option value="online">在线 Ark / Seedream</option><option value="brush">本地手工修补</option>
+          </select></label>
+          <p v-if="provider === 'online'" class="erase-hint">所需图片会发送至你配置的在线修图服务，费用由服务商收取。</p>
+          <template v-if="provider === 'brush'">
+            <label class="field"><span>画笔操作</span><select v-model="paintMode" :disabled="running"><option value="paint">涂色覆盖</option><option value="restore">恢复原图</option></select></label>
+            <label v-if="paintMode === 'paint'" class="field"><span>颜色</span><input v-model="paintColor" type="color" :disabled="running" /></label>
+            <label v-if="paintMode === 'paint'" class="field"><span>羽化（像素）</span><input v-model.number="feather" type="number" min="0" :max="brushSize / 2" :disabled="running" /></label>
+          </template>
           <template v-if="scope === 'selection'">
             <span class="kicker">选择工具</span>
             <div class="tool-list">
-              <button class="tool-item" :class="{ active: tool === 'click' }" @click="tool = 'click'">
+              <button v-if="provider !== 'brush'" class="tool-item" :disabled="running" :class="{ active: tool === 'click' }" @click="tool = 'click'">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/></svg>
                 <span><strong>点击选中</strong><small>自动扩展文字范围</small></span>
               </button>
-              <button class="tool-item" :class="{ active: tool === 'box' }" @click="tool = 'box'">
+              <button v-if="provider !== 'brush'" class="tool-item" :disabled="running" :class="{ active: tool === 'box' }" @click="tool = 'box'">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3a2 2 0 0 0-2 2"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 19a2 2 0 0 1-2 2"/><path d="M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1"/><path d="M9 21h1"/><path d="M14 3h1"/><path d="M14 21h1"/><path d="M3 9v1"/><path d="M21 9v1"/><path d="M3 14v1"/><path d="M21 14v1"/></svg>
                 <span><strong>框选</strong><small>拖拽矩形区域</small></span>
               </button>
-              <button class="tool-item" :class="{ active: tool === 'brush' }" @click="tool = 'brush'">
+              <button class="tool-item" :disabled="running" :class="{ active: tool === 'brush' }" @click="tool = 'brush'">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"/></svg>
                 <span><strong>画笔</strong><small>涂抹补充 mask</small></span>
               </button>
@@ -570,34 +609,36 @@ onUnmounted(() => {
             <div class="field" v-if="tool === 'brush'">
               <span>笔刷大小</span>
               <div style="display:flex;align-items:center;gap:10px;">
-                <input v-model.number="brushSize" type="range" min="4" max="200" aria-label="笔刷大小" style="flex:1;height:auto;padding:0;border:none;background:transparent;accent-color:var(--accent);" />
+                <input v-model.number="brushSize" type="range" min="4" :max="maxBrushSize" aria-label="笔刷大小" :disabled="running" style="flex:1;height:auto;padding:0;border:none;background:transparent;accent-color:var(--accent);" />
                 <span class="num" style="flex:none;font-size:var(--fs-sub);color:var(--text-2);">{{ brushSize }} px</span>
               </div>
             </div>
 
             <p class="erase-hint">{{ TOOL_HINTS[tool] }}</p>
           </template>
-          <p v-else class="erase-hint">整页处理将自动检测本页全部文字区域并合成 mask，无需手动标记范围。</p>
+          <p v-else class="erase-hint">{{ provider === 'local' ? '本地整页处理先生成预览，对比确认后再应用；不会使用局部标记。' : '在线整页处理直接生成新空页；局部标记只在指定区域模式使用。' }}</p>
 
-          <span class="kicker">擦除方式</span>
+          <template v-if="provider === 'local' && scope === 'selection'">
+          <span class="kicker">擦除范围</span>
           <div style="display:flex;flex-direction:column;gap:10px;">
             <div>
-              <label class="check-row"><input v-model="maskMode" type="radio" value="stroke" /><span>只擦文字笔画</span></label>
+              <label class="check-row"><input v-model="maskMode" type="radio" value="stroke" :disabled="running" /><span>只擦文字笔画</span></label>
               <small style="display:block;margin-left:22px;font-size:var(--fs-micro);color:var(--text-3);">尽量保留气泡和边框</small>
             </div>
             <div>
-              <label class="check-row"><input v-model="maskMode" type="radio" value="region" /><span>擦整个选区</span></label>
+              <label class="check-row"><input v-model="maskMode" type="radio" value="region" :disabled="running" /><span>擦整个选区</span></label>
               <small style="display:block;margin-left:22px;font-size:var(--fs-micro);color:var(--text-3);">适合无边框拟声字或整块重绘</small>
             </div>
           </div>
 
+          </template>
           <template v-if="scope === 'selection'">
             <span class="kicker">范围标记 · {{ marks.length }}</span>
             <div class="mark-list">
               <div v-for="(mark, i) in marks" :key="i" class="mark-item">
                 <span class="tag" :class="{ 'is-accent': mark.kind === 'auto' }">{{ mark.kind === 'auto' ? '自动' : mark.kind === 'box' ? '框选' : '画笔' }}</span>
                 <span>{{ mark.label }}</span>
-                <button class="icon-btn" type="button" aria-label="删除标记" @click="removeMark(i)">
+                <button class="icon-btn" type="button" :disabled="running" aria-label="删除标记" @click="removeMark(i)">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
               </div>
@@ -607,15 +648,14 @@ onUnmounted(() => {
         </div>
 
         <div class="erase-side-foot">
-          <button class="btn btn-ghost" style="width:100%;" :disabled="running" @click="restoreBlank">恢复擦除前空页</button>
+          <button class="btn btn-ghost" style="width:100%;" :disabled="!canRun" @click="restoreBlank">恢复首次修图前空页</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
             <button class="btn btn-ghost" type="button" :disabled="running || !marks.length" @click="marks.pop()">撤销</button>
             <button class="btn btn-ghost" type="button" :disabled="running || !marks.length" @click="clearMarks">清空</button>
           </div>
-          <button class="btn btn-primary btn-lg" style="width:100%;" :disabled="running" @click="runErase">
-            {{ running ? '处理中…' : '执行擦除' }}
+          <button class="btn btn-primary btn-lg" style="width:100%;" :disabled="!canRun" @click="runErase">
+            {{ running ? '处理中…' : provider === 'brush' ? '应用修补画笔' : provider === 'local' && scope === 'full' ? '生成整页预览' : '执行擦除' }}
           </button>
-          <button class="btn btn-secondary" style="width:100%;" :disabled="running" @click="runLamaPreview">LaMa 预览</button>
         </div>
       </aside>
     </div>
@@ -642,7 +682,7 @@ onUnmounted(() => {
         </div>
         <div class="inline-actions" style="justify-content:flex-end;">
           <button class="btn btn-ghost" type="button" :disabled="running" @click="previewAttempt = null">放弃结果</button>
-          <button class="btn btn-primary" type="button" :disabled="running" @click="applyPreview">应用新空页</button>
+          <button class="btn btn-primary" type="button" :disabled="!canRun" @click="applyPreview">应用新空页</button>
         </div>
       </div>
     </section>
@@ -658,14 +698,14 @@ onUnmounted(() => {
 .erase-canvas.is-space-pan { cursor: grab; }
 .erase-canvas.is-panning { cursor: grabbing; }
 .erase-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
-.erase-stage > img { display: block; width: 100%; height: 100%; pointer-events: none; box-shadow: 0 12px 44px rgba(0,0,0,.5); }
+.erase-stage > img { display: block; width: 100%; height: 100%; pointer-events: none; box-shadow: var(--stage-shadow); }
 .brush-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .erase-mark.is-drawing { border-style: dashed; }
 .full-scope-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
 .erase-hud { position: absolute; right: 12px; bottom: 12px; z-index: 6; }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
-.toast { padding: 10px 16px; border-radius: 10px; background: var(--surface-3, #232838); border: 1px solid var(--line, rgba(255,255,255,.1)); color: var(--text-1, #e8eaf0); font-size: 13px; cursor: pointer; max-width: 360px; }
-.toast.is-error { border-color: #e05656; }
-.toast.is-warn { border-color: #e8a33d; }
-.toast.is-ok { border-color: #3ecfc0; }
+.toast { padding: 10px 16px; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-1); font-size: 13px; cursor: pointer; max-width: 360px; }
+.toast.is-error { border-color: var(--danger); }
+.toast.is-warn { border-color: var(--warn); }
+.toast.is-ok { border-color: var(--accent); }
 </style>

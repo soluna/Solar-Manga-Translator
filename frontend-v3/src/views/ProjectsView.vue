@@ -23,6 +23,7 @@ import { dismiss, toast, toastError, toasts } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
 import { workflowStageLabelMap } from '../state/workflow-state.js'
 import p1Blank from '../assets/p1-blank.svg'
+import { recentPageFor } from '../state/recent-location.js'
 
 const router = useRouter()
 
@@ -146,7 +147,9 @@ async function continueProject(project) {
   try {
     await apiPostJson(`/api/projects/${encodeURIComponent(project.project_id)}/restore`, {}, '恢复项目失败')
     toast(`已恢复「${project.title || project.project_id}」，正在打开…`, 'success')
-    router.push(`/pages/${encodeURIComponent(project.project_id)}`)
+    const target = { path: `/pages/${encodeURIComponent(project.project_id)}` }
+    if (recentPageFor(project.project_id)) target.query = { resume: '1' }
+    router.push(target)
   } catch (err) {
     toastError(err)
   } finally {
@@ -214,13 +217,14 @@ async function confirmRestoreSnapshot() {
   snapshotTarget.value = null
   restoringSnapshotKey.value = key
   try {
-    await apiPostJson(
+    const restored = await apiPostJson(
       `/api/projects/${encodeURIComponent(project.project_id)}/snapshots/${encodeURIComponent(snapshot.snapshot_id)}/restore`,
       {},
       '恢复快照失败',
     )
-    toast(`已恢复快照「${snapshot.summary || '未命名'}」，正在打开…`, 'success')
-    router.push(`/pages/${encodeURIComponent(project.project_id)}`)
+    if (!restored?.session_id) throw new Error('恢复响应缺少项目 ID，请刷新项目列表查看。')
+    toast(`已将快照「${snapshot.summary || '未命名'}」恢复为独立项目，正在打开…`, 'ok')
+    router.push(`/pages/${encodeURIComponent(restored.session_id)}`)
   } catch (err) {
     toastError(err)
   } finally {
@@ -526,9 +530,9 @@ function goBack() {
         </div>
         <div class="modal-body">
           <p class="confirm-copy">
-            将「{{ snapshotTarget.project.title || snapshotTarget.project.project_id }}」恢复到快照
+            从「{{ snapshotTarget.project.title || snapshotTarget.project.project_id }}」的快照
             「<strong>{{ snapshotTarget.snapshot.summary || '未命名' }}</strong>」（{{ relTime(snapshotTarget.snapshot.created_at) }}）？
-            <span class="confirm-hint">当前未保存的工作与页面编辑将被该快照替换。</span>
+            <span class="confirm-hint">创建独立项目副本，并在其中继续编辑。原项目保留。</span>
           </p>
         </div>
         <div class="modal-foot">

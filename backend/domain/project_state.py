@@ -73,6 +73,12 @@ class ProjectState(BaseModel):
     translation_region_disabled_overrides: dict[str, bool] = Field(default_factory=dict)
     translation_region_layout_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     style_region_overrides: dict[str, str] = Field(default_factory=dict)
+    # Source corrections and recognition evidence belong to the canonical
+    # page document, but are kept as keyed session state so legacy caches can
+    # be replayed without rewriting the vendor region format.
+    source_text_overrides: dict[str, str] = Field(default_factory=dict)
+    region_recognition_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    page_review_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
     artifact_state: ProjectArtifactState
 
     @model_validator(mode="after")
@@ -135,6 +141,15 @@ class ProjectState(BaseModel):
                     ),
                     "style_region_overrides": dict(
                         session.get("style_region_overrides") or {}
+                    ),
+                    "source_text_overrides": dict(
+                        session.get("source_text_overrides") or {}
+                    ),
+                    "region_recognition_overrides": dict(
+                        session.get("region_recognition_overrides") or {}
+                    ),
+                    "page_review_state": dict(
+                        session.get("page_review_state") or {}
                     ),
                     "artifact_state": artifact_state,
                 }

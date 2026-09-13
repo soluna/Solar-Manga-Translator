@@ -1,0 +1,254 @@
+{
+  "document": {
+    "page_id": "0001.png",
+    "review_mode": "classic",
+    "source_image": "/api/pages/synthetic-project/0001.png/source-image",
+    "base_image": "/api/pages/synthetic-project/0001.png/base-image",
+    "preview_image": "/api/pages/synthetic-project/0001.png/source-image",
+    "translated_image": "",
+    "dimensions": {
+      "width": 600,
+      "height": 900
+    },
+    "regions": [
+      {
+        "region_id": "region-a",
+        "page_id": "0001.png",
+        "kind": "manual",
+        "origin": "user",
+        "source_ids": [],
+        "bbox": [
+          50,
+          60,
+          240,
+          160
+        ],
+        "polygon": null,
+        "direction": "horizontal",
+        "source_text": "",
+        "ocr_confidence": 1.0,
+        "translation": {
+          "machine": "",
+          "edited": "合成测试译文",
+          "resolved": "合成测试译文"
+        },
+        "recognition": {
+          "status": "pending",
+          "error": "",
+          "translation_status": "pending",
+          "translation_error": ""
+        },
+        "style": {
+          "auto_font_style": "gothic",
+          "font_style_override": "",
+          "font_style": "gothic",
+          "font_family": "SourceHanSansSC-Regular-2.otf",
+          "font_path": "",
+          "font_key_override": "",
+          "font_size": 28,
+          "detected_font_size": 28,
+          "font_size_override": 28,
+          "letter_spacing": 1.1,
+          "line_spacing": 1.2,
+          "alignment": "auto",
+          "fg_color": [
+            25,
+            35,
+            45
+          ],
+          "bg_color": [
+            240,
+            245,
+            250
+          ],
+          "stroke_width": 0.3,
+          "rotation": 12.0
+        },
+        "flags": {
+          "disabled": false,
+          "keep_original": false,
+          "translation_enabled": true,
+          "preserve_background": true
+        },
+        "audit": {
+          "created_by": "user",
+          "updated_at": "2026-09-11T00:00:00+00:00"
+        }
+      },
+      {
+        "region_id": "region-b",
+        "page_id": "0001.png",
+        "kind": "manual",
+        "origin": "user",
+        "source_ids": [],
+        "bbox": [
+          300,
+          200,
+          500,
+          400
+        ],
+        "polygon": null,
+        "direction": "v",
+        "source_text": "",
+        "ocr_confidence": 1.0,
+        "translation": {
+          "machine": "",
+          "edited": "",
+          "resolved": ""
+        },
+        "recognition": {
+          "status": "pending",
+          "error": "",
+          "translation_status": "pending",
+          "translation_error": ""
+        },
+        "style": {
+          "auto_font_style": "gothic",
+          "font_style_override": "",
+          "font_style": "gothic",
+          "font_family": "SourceHanSansSC-Regular-2.otf",
+          "font_path": "",
+          "font_key_override": "",
+          "font_size": 22,
+          "detected_font_size": 28,
+          "font_size_override": null,
+          "letter_spacing": 1.0,
+          "line_spacing": 1.0,
+          "alignment": "auto",
+          "fg_color": [
+            0,
+            0,
+            0
+          ],
+          "bg_color": [
+            255,
+            255,
+            255
+          ],
+          "stroke_width": 0.2,
+          "rotation": 0.0
+        },
+        "flags": {
+          "disabled": true,
+          "keep_original": false,
+          "translation_enabled": false,
+          "preserve_background": false
+        },
+        "audit": {
+          "created_by": "user",
+          "updated_at": "2026-09-11T00:00:00+00:00"
+        }
+      }
+    ],
+    "erase_regions": [],
+    "metadata": {
+      "document_version": 2,
+      "updated_at": "2026-09-11T00:00:00+00:00",
+      "revision": 4,
+      "review": {
+        "status": "unreviewed"
+      }
+    }
+  },
+  "page_artifact": {
+    "page_id": "0001.png",
+    "artifacts": {
+      "source": {
+        "revision": 1,
+        "ready": true,
+        "current": true,
+        "stale": false,
+        "content_hash": "",
+        "derived_from": {}
+      },
+      "recognition": {
+        "revision": 1,
+        "ready": true,
+        "current": true,
+        "stale": false,
+        "content_hash": "",
+        "derived_from": {
+          "source": 1
+        }
+      },
+      "blank": {
+        "revision": 1,
+        "ready": true,
+        "current": true,
+        "stale": false,
+        "content_hash": "",
+        "derived_from": {
+          "source": 1,
+          "recognition": 1
+        }
+      },
+      "translation": {
+        "revision": 1,
+        "ready": true,
+        "current": true,
+        "stale": false,
+        "content_hash": "",
+        "derived_from": {
+          "recognition": 1
+        }
+      },
+      "final": {
+        "revision": 0,
+        "ready": false,
+        "current": false,
+        "stale": false,
+        "content_hash": "",
+        "derived_from": {}
+      }
+    },
+    "capabilities": {
+      "recognition_ready": true,
+      "blank_ready": true,
+      "translation_ready": true,
+      "final_available": false,
+      "final_ready": false,
+      "final_stale": false,
+      "can_review_recognition": true,
+      "can_translate": true,
+      "can_render": true,
+      "can_export": false
+    }
+  },
+  "settings": {
+    "translator": "gemini",
+    "selected_translator": "gemini",
+    "translator_model": "",
+    "target_lang": "CHS",
+    "use_gpu": true,
+    "api_key": "",
+    "openai_base_url": "",
+    "openai_model": "",
+    "font_key": "system:SourceHanSansSC-Regular-2.otf",
+    "render_alignment": "center",
+    "render_letter_spacing": 1.08,
+    "rerender_output_format": "png",
+    "mask_cleanup_strength": "standard",
+    "export_mask_debug": false,
+    "pause_after_detection": false,
+    "advanced_text_repair": "auto",
+    "image_cleanup_mode": "off",
+    "image_cleanup_model": "gemini-2.5-flash-image",
+    "image_cleanup_api_key": "",
+    "advanced_erase_base_url": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "advanced_erase_model": "doubao-seedream-5-0-lite-260128",
+    "advanced_erase_api_key": "",
+    "advanced_erase_timeout_seconds": 120,
+    "advanced_erase_selection_prompt": "Only edit the visible user-selected parts of this manga page; the white area\noutside them is a selection mask and must stay white. Remove all text in the\nvisible parts, including borderless, diagonal, curved, handwritten, stylized,\nand sound-effect text. Reconstruct the hidden background naturally. Preserve\nall non-text artwork and every existing outline or border. Do not create a new\nspeech bubble, caption box, rectangle, border, text, symbol, or decoration.\nDo not translate, crop, rotate, or resize. Return only the cleaned image.",
+    "configured_secrets": {
+      "api_key": false,
+      "image_cleanup_api_key": false,
+      "advanced_erase_api_key": false
+    },
+    "style_font_gothic_key": "system:SourceHanSansSC-Regular-2.otf",
+    "style_font_mincho_key": "system:SourceHanSansSC-Regular-2.otf",
+    "style_font_rounded_key": "system:SourceHanSansSC-Regular-2.otf",
+    "style_font_cartoon_key": "system:SourceHanSansSC-Regular-2.otf",
+    "style_font_handwritten_key": "system:SourceHanSansSC-Regular-2.otf",
+    "style_font_sfx_key": "system:SourceHanSansSC-Regular-2.otf"
+  }
+}

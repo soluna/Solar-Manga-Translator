@@ -29,6 +29,7 @@ from domain.glossary_candidates import GlossaryCandidate, GlossaryCandidateDisco
 from domain.page_regions import PageRegionCollection, is_user_authored_region, region_origin
 from domain.project_artifacts import (
     PROJECT_ARTIFACT_SCHEMA_VERSION,
+    ArtifactTransitionError,
     LegacyPageArtifactEvidence,
     PageArtifactEvent,
     ProjectArtifactSchemaError,
@@ -1005,6 +1006,9 @@ class TranslatorEngine:
             "translation_region_disabled_overrides": {},
             "translation_region_layout_overrides": {},
             "style_region_overrides": {},
+            "source_text_overrides": {},
+            "region_recognition_overrides": {},
+            "page_review_state": {},
             "project_id": project_id,
             "project_title": str(manifest.get("title") or manifest.get("project_title") or project_id),
             "project_note": str(manifest.get("note") or manifest.get("project_note") or ""),
@@ -1142,6 +1146,15 @@ class TranslatorEngine:
             "style_region_overrides": dict(
                 session.get("style_region_overrides") or {}
             ),
+            "source_text_overrides": dict(
+                session.get("source_text_overrides") or {}
+            ),
+            "region_recognition_overrides": dict(
+                session.get("region_recognition_overrides") or {}
+            ),
+            "page_review_state": dict(
+                session.get("page_review_state") or {}
+            ),
             "cover_image": self._project_cover_url(project_id, session),
             "pinned": False,
         }
@@ -1213,14 +1226,14 @@ class TranslatorEngine:
         if not image_paths:
             raise ValueError("没有收到可用的无字图文件。")
 
-        exact_name_map: dict[str, dict[str, Any]] = {}
+        exact_name_map: dict[str, list[dict[str, Any]]] = {}
         stem_name_map: dict[str, list[dict[str, Any]]] = {}
         for image in source_images:
             display_name = str(image.get("name") or image.get("stored_name") or "").strip()
             stored_name = str(image.get("stored_name") or "").strip()
             if not display_name or not stored_name:
                 continue
-            exact_name_map[display_name.lower()] = image
+            exact_name_map.setdefault(display_name.lower(), []).append(image)
             stem_name_map.setdefault(Path(display_name).stem.lower(), []).append(image)
 
         matched_pages: list[dict[str, str]] = []
@@ -1231,8 +1244,9 @@ class TranslatorEngine:
         for raw_image_path in image_paths:
             image_path = Path(raw_image_path)
             upload_name = image_path.name
-            matched_image = exact_name_map.get(upload_name.lower())
-            if matched_image is None:
+            exact_candidates = exact_name_map.get(upload_name.lower(), [])
+            matched_image = exact_candidates[0] if len(exact_candidates) == 1 else None
+            if not exact_candidates:
                 candidates = stem_name_map.get(image_path.stem.lower(), [])
                 if len(candidates) == 1:
                     matched_image = candidates[0]
@@ -1265,7 +1279,7 @@ class TranslatorEngine:
             )
 
         if not matched_page_ids:
-            raise ValueError("没有找到可匹配的页面文件名。请确保无字图与原图文件名一致。")
+            raise ValueError("没有找到可唯一匹配的页面文件名。请确保无字图与原图文件名一致，且项目中没有同名页面。")
 
         unique_page_ids = list(dict.fromkeys(matched_page_ids))
         self._apply_page_artifact_event(
@@ -1691,8 +1705,18 @@ class TranslatorEngine:
             if total_points > self.BRUSH_EDIT_MAX_POINTS:
                 raise ValueError("本次画笔轨迹过多，请先保存当前修改后再继续。")
 
+            raw_size = raw_operation.get("size")
+            raw_feather = raw_operation.get("feather")
+            if str(raw_operation.get("size_space") or "pixel").strip().lower() == "normalized":
+                # Point normalization alone is insufficient when a replacement
+                # blank has a different resolution from the source image.
+                scale = float(min(width, height))
+                normalized_size = self._normalize_float_range(raw_size, 0.0, 1.0, digits=6)
+                normalized_feather = self._normalize_float_range(raw_feather, 0.0, 1.0, digits=6)
+                raw_size = normalized_size * scale if normalized_size is not None else None
+                raw_feather = normalized_feather * scale if normalized_feather is not None else None
             size = self._normalize_float_range(
-                raw_operation.get("size"),
+                raw_size,
                 1.0,
                 min(self.BRUSH_EDIT_MAX_SIZE, float(max(width, height))),
                 digits=2,
@@ -1700,7 +1724,7 @@ class TranslatorEngine:
             feather = 0.0
             if mode == "paint":
                 feather = self._normalize_float_range(
-                    raw_operation.get("feather"),
+                    raw_feather,
                     0.0,
                     size / 2.0,
                     digits=2,
@@ -2801,6 +2825,7 @@ class TranslatorEngine:
         config["translation_region_skip_overrides"] = dict(session.get("translation_region_skip_overrides") or {})
         config["translation_region_disabled_overrides"] = dict(session.get("translation_region_disabled_overrides") or {})
         config["translation_region_layout_overrides"] = dict(session.get("translation_region_layout_overrides") or {})
+        config["source_text_overrides"] = dict(session.get("source_text_overrides") or {})
         session["last_config"] = config
         return config
 
@@ -3160,11 +3185,13 @@ class TranslatorEngine:
         new_translated_dir.mkdir(parents=True, exist_ok=True)
         new_cache_dir = self._rerender_cache_dir(new_project_id)
         new_pages_dir = self._project_pages_dir(new_project_id)
+        snapshot_state_dir = new_output_root / ".snapshot-state"
         artifact_bundle = snapshot.get("artifact_bundle")
         has_versioned_artifacts = (
             isinstance(artifact_bundle, dict)
             and artifact_bundle.get("schema_version") == 1
         )
+        snapshot_state_document: dict[str, Any] = {}
         try:
             if has_versioned_artifacts:
                 self.project_workspace.restore_snapshot_artifacts(
@@ -3175,8 +3202,24 @@ class TranslatorEngine:
                         "translated": new_translated_dir,
                         "cache": new_cache_dir,
                         "pages": new_pages_dir,
+                        "state": snapshot_state_dir,
                     },
                 )
+                snapshot_state_path = snapshot_state_dir / "session.json"
+                if snapshot_state_path.is_file():
+                    try:
+                        loaded_snapshot_state = json.loads(
+                            snapshot_state_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                        raise InvalidProjectStateError(
+                            "快照中的项目状态已损坏，无法安全恢复。"
+                        ) from exc
+                    if not isinstance(loaded_snapshot_state, dict):
+                        raise InvalidProjectStateError(
+                            "快照中的项目状态格式无效，无法安全恢复。"
+                        )
+                    snapshot_state_document = loaded_snapshot_state
             else:
                 if source_source_dir.exists():
                     for source_file in source_source_dir.iterdir():
@@ -3191,6 +3234,8 @@ class TranslatorEngine:
             shutil.rmtree(self._project_dir(new_project_id), ignore_errors=True)
             shutil.rmtree(new_cache_dir, ignore_errors=True)
             raise
+        finally:
+            shutil.rmtree(snapshot_state_dir, ignore_errors=True)
 
         translated_output_map = dict(snapshot.get("translated_output_map") or {})
         copied_output_map: dict[str, str] = {}
@@ -3229,6 +3274,14 @@ class TranslatorEngine:
             "translation_region_disabled_overrides": dict(snapshot.get("translation_region_disabled_overrides") or {}),
             "translation_region_layout_overrides": dict(snapshot.get("translation_region_layout_overrides") or {}),
             "style_region_overrides": dict(snapshot.get("style_region_overrides") or {}),
+            "source_text_overrides": dict(snapshot.get("source_text_overrides") or {}),
+            "region_recognition_overrides": dict(snapshot.get("region_recognition_overrides") or {}),
+            "page_review_state": dict(snapshot.get("page_review_state") or {}),
+            "artifact_state": copy.deepcopy(
+                snapshot_state_document.get("artifact_state")
+                if isinstance(snapshot_state_document.get("artifact_state"), dict)
+                else source_session.get("artifact_state")
+            ),
             "project_id": new_project_id,
             "project_title": f"{source_title}（快照恢复）",
             "project_note": str(source_session.get("project_note") or ""),
@@ -4495,6 +4548,8 @@ class TranslatorEngine:
     ) -> list[Any]:
         regions = self._merge_manual_regions(session, stored_name, regions)
         self._assign_region_keys(regions, stored_name)
+        self._apply_region_recognition_overrides(regions, session)
+        self._apply_region_source_text_overrides(regions, session)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
 
@@ -4559,13 +4614,17 @@ class TranslatorEngine:
                 ),
             )
 
-        return self._dedupe_overlapping_regions(regions)
+        # Overlap suppression is a rendering decision. The editable document
+        # must retain every authored region, including the disabled originals
+        # of a merge, so it can be inspected, restored and undone.
+        return regions
 
     def _serialize_page_document_region(
         self,
         region: Any,
         manual_payloads_by_id: dict[str, dict[str, Any]],
         config: dict[str, Any],
+        recognition_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         region_id = str(
             getattr(region, "translation_region_key", "")
@@ -4574,6 +4633,7 @@ class TranslatorEngine:
         )
         bbox = [int(v) for v in self._region_bbox(region)]
         manual_payload = manual_payloads_by_id.get(region_id) or {}
+        recognition_override = (recognition_overrides or {}).get(region_id) or {}
         source_ids = [str(item) for item in (manual_payload.get("merged_from") or []) if str(item)]
         kind = "auto"
         if bool(getattr(region, "manual_region", False)):
@@ -4596,6 +4656,27 @@ class TranslatorEngine:
         detected_font_size = int(max(float(getattr(region, "font_size", 0) or 0), 8))
         render_font_size = self._resolve_render_font_size(detected_font_size, font_size_override)
 
+        recognition_status = str(
+            recognition_override.get("status")
+            or manual_payload.get("recognition_status")
+            or ""
+        )
+        recognition_error = str(
+            recognition_override.get("error")
+            or manual_payload.get("recognition_error")
+            or ""
+        )
+        translation_status = str(
+            recognition_override.get("translation_status")
+            or manual_payload.get("translation_status")
+            or ""
+        )
+        translation_error = str(
+            recognition_override.get("translation_error")
+            or manual_payload.get("translation_error")
+            or ""
+        )
+
         return {
             "region_id": region_id,
             "page_id": str(manual_payload.get("stored_name") or ""),
@@ -4606,17 +4687,21 @@ class TranslatorEngine:
             "polygon": None,
             "direction": resolved_direction,
             "source_text": self._region_source_text(region),
-            "ocr_confidence": float(getattr(region, "prob", 1.0) or 0.0),
+            "ocr_confidence": float(
+                recognition_override.get("ocr_confidence")
+                if recognition_override.get("ocr_confidence") is not None
+                else getattr(region, "prob", 1.0) or 0.0
+            ),
             "translation": {
                 "machine": str(getattr(region, "machine_translation", "") or ""),
                 "edited": str(getattr(region, "translation_override", "") or ""),
                 "resolved": self._region_preview_text(region),
             },
             "recognition": {
-                "status": str(manual_payload.get("recognition_status") or ""),
-                "error": str(manual_payload.get("recognition_error") or ""),
-                "translation_status": str(manual_payload.get("translation_status") or ""),
-                "translation_error": str(manual_payload.get("translation_error") or ""),
+                "status": recognition_status,
+                "error": recognition_error,
+                "translation_status": translation_status,
+                "translation_error": translation_error,
             },
             "style": {
                 "auto_font_style": str(getattr(region, "auto_font_style", "") or ""),
@@ -4699,7 +4784,12 @@ class TranslatorEngine:
             session=session,
         )
         authored_regions = [
-            self._serialize_page_document_region(region, manual_payloads_by_id, config)
+            self._serialize_page_document_region(
+                region,
+                manual_payloads_by_id,
+                config,
+                session.get("region_recognition_overrides") or {},
+            )
             for region in authored_prepared_regions
         ]
 
@@ -4713,7 +4803,12 @@ class TranslatorEngine:
                 session=session,
             )
             materialized_regions = [
-                self._serialize_page_document_region(region, manual_payloads_by_id, config)
+                self._serialize_page_document_region(
+                    region,
+                    manual_payloads_by_id,
+                    config,
+                    session.get("region_recognition_overrides") or {},
+                )
                 for region in prepared_regions
             ]
         else:
@@ -4769,6 +4864,7 @@ class TranslatorEngine:
                 "document_version": self.PAGE_DOCUMENT_VERSION,
                 "updated_at": self._now_iso(),
                 "revision": previous_revision + 1,
+                "review": self._page_review_state(session, stored_name),
             },
         }
         return self._apply_session_overrides_to_page_document(session, document)
@@ -5212,6 +5308,7 @@ class TranslatorEngine:
             return payload
 
         normalized = copy.deepcopy(payload)
+        self._apply_page_document_source_and_recognition_overrides(session, normalized)
         translation_overrides = dict(session.get("translation_region_overrides") or {})
         skip_overrides = dict(session.get("translation_region_skip_overrides") or {})
         disabled_overrides = dict(session.get("translation_region_disabled_overrides") or {})
@@ -5323,6 +5420,147 @@ class TranslatorEngine:
                 style_payload["bg_color"] = self._rgb_color_payload(layout_override.get("bg_color"), (255, 255, 255))
 
         return normalized
+
+    def _apply_page_document_source_and_recognition_overrides(
+        self,
+        session: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        """Apply source/OCR edits after loading either a legacy or canonical page.
+
+        Detection caches are vendor-owned JSON and older projects do not carry
+        these fields. Keeping the small keyed overlays in ProjectState lets
+        Page Documents remain authoritative without mutating those caches on a
+        read or making OCR retry depend on another inference pass.
+        """
+        source_overrides = session.get("source_text_overrides") or {}
+        recognition_overrides = session.get("region_recognition_overrides") or {}
+        if not isinstance(source_overrides, dict):
+            source_overrides = {}
+        if not isinstance(recognition_overrides, dict):
+            recognition_overrides = {}
+
+        for region in payload.get("regions") or []:
+            if not isinstance(region, dict):
+                continue
+            region_id = str(region.get("region_id") or region.get("id") or "").strip()
+            if not region_id:
+                continue
+
+            recognition = recognition_overrides.get(region_id)
+            if isinstance(recognition, dict):
+                if "source_text" in recognition and region_id not in source_overrides:
+                    region["source_text"] = str(recognition.get("source_text") or "")
+                for field_name in (
+                    "direction",
+                    "ocr_confidence",
+                ):
+                    if field_name in recognition:
+                        region[field_name] = recognition[field_name]
+                if "font_size" in recognition:
+                    style = region.setdefault("style", {})
+                    style["detected_font_size"] = recognition["font_size"]
+                    if not style.get("font_size_override"):
+                        style["font_size"] = recognition["font_size"]
+                for field_name in ("fg_color", "bg_color"):
+                    if field_name in recognition:
+                        style = region.setdefault("style", {})
+                        style[field_name] = self._rgb_color_payload(
+                            recognition.get(field_name),
+                            (0, 0, 0) if field_name == "fg_color" else (255, 255, 255),
+                        )
+
+                recognition_payload = region.setdefault("recognition", {})
+                for field_name in (
+                    "status",
+                    "error",
+                    "translation_status",
+                    "translation_error",
+                ):
+                    if field_name in recognition:
+                        recognition_payload[field_name] = str(recognition.get(field_name) or "")
+
+            if region_id in source_overrides:
+                region["source_text"] = str(source_overrides.get(region_id) or "")
+
+        review = self._page_review_state(session, str(payload.get("page_id") or ""))
+        metadata = payload.setdefault("metadata", {})
+        if review:
+            metadata["review"] = copy.deepcopy(review)
+        elif "review" not in metadata:
+            metadata["review"] = {"status": "unreviewed"}
+
+    def _page_review_state(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+    ) -> dict[str, Any]:
+        states = session.get("page_review_state") or {}
+        if not isinstance(states, dict):
+            return {"status": "unreviewed"}
+        state = states.get(str(page_id or "").strip())
+        if not isinstance(state, dict):
+            return {"status": "unreviewed"}
+        if state.get("artifact_signature") != self._review_artifact_signature(session, page_id):
+            return {"status": "unreviewed"}
+        status = str(state.get("status") or "unreviewed").strip().lower()
+        if status not in {"reviewed", "unreviewed"}:
+            status = "unreviewed"
+        normalized = {"status": status}
+        if state.get("reviewed_at"):
+            normalized["reviewed_at"] = str(state["reviewed_at"])
+        if state.get("reviewer"):
+            normalized["reviewer"] = str(state["reviewer"])
+        if state.get("based_on_revision") is not None:
+            try:
+                normalized["based_on_revision"] = int(state["based_on_revision"])
+            except (TypeError, ValueError):
+                pass
+        return normalized
+
+    @staticmethod
+    def _review_artifact_signature(session: dict[str, Any], page_id: str) -> str:
+        page = ((session.get("artifact_state") or {}).get("pages") or {}).get(page_id) or {}
+        revisions = {key: {"revision": value.get("revision"), "derived_from": value.get("derived_from")}
+                     if isinstance(value, dict) else value for key, value in page.items()}
+        return hashlib.sha256(json.dumps(revisions, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _invalidate_page_review_state(self, session: dict[str, Any], page_id: str) -> None:
+        states = session.get("page_review_state")
+        if not isinstance(states, dict):
+            return
+        states.pop(str(page_id or "").strip(), None)
+
+    def _set_page_review_state(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+        *,
+        status: str,
+        revision: int,
+        reviewer: str = "",
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"reviewed", "unreviewed"}:
+            raise ValueError("审校状态必须是 reviewed 或 unreviewed。")
+        states = session.get("page_review_state")
+        if not isinstance(states, dict):
+            states = {}
+            session["page_review_state"] = states
+        if normalized_status == "unreviewed":
+            states.pop(str(page_id or "").strip(), None)
+            return {"status": "unreviewed"}
+        state = {
+            "status": "reviewed",
+            "reviewed_at": self._now_iso(),
+            "based_on_revision": int(revision),
+            "artifact_signature": self._review_artifact_signature(session, page_id),
+        }
+        normalized_reviewer = str(reviewer or "").strip()
+        if normalized_reviewer:
+            state["reviewer"] = normalized_reviewer[:200]
+        states[str(page_id or "").strip()] = state
+        return copy.deepcopy(state)
 
     def get_page_ocr_debug(self, project_id: str, session: dict[str, Any], page_id: str) -> dict[str, Any]:
         page_document = self.get_page_document(project_id, session, page_id)
@@ -5644,6 +5882,8 @@ class TranslatorEngine:
             "translation_region_disabled_overrides",
             "translation_region_layout_overrides",
             "style_region_overrides",
+            "source_text_overrides",
+            "region_recognition_overrides",
         ):
             override_map = session.get(field_name)
             if isinstance(override_map, dict):
@@ -5781,8 +6021,6 @@ class TranslatorEngine:
         overrides = dict(session.get("translation_region_disabled_overrides") or {})
         if enabled:
             overrides[region_id] = True
-            self._clear_region_overrides(session, region_id)
-            overrides[region_id] = True
         else:
             overrides.pop(region_id, None)
         session["translation_region_disabled_overrides"] = overrides
@@ -5795,6 +6033,375 @@ class TranslatorEngine:
         else:
             overrides.pop(region_id, None)
         session["style_region_overrides"] = overrides
+
+    def _set_region_source_text(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+        region_id: str,
+        text: str,
+    ) -> str:
+        normalized_text = self._normalize_translation_override_text(text)
+        source_overrides = session.get("source_text_overrides")
+        if not isinstance(source_overrides, dict):
+            source_overrides = {}
+            session["source_text_overrides"] = source_overrides
+        # Keep an explicit empty string: clearing OCR text is a meaningful
+        # human correction and must not fall back to the cache on reload.
+        source_overrides[str(region_id)] = normalized_text
+
+        page_regions = self._manual_regions_for_page(session, page_id)
+        for payload in page_regions:
+            if str(payload.get("id") or "") == str(region_id):
+                payload["source_text"] = normalized_text
+                break
+
+        self._set_region_recognition_state(
+            session, region_id, status="ready", error="", source_text=normalized_text,
+        )
+        return normalized_text
+
+    def _set_region_recognition_state(
+        self,
+        session: dict[str, Any],
+        region_id: str,
+        *,
+        status: str,
+        error: str = "",
+        source_text: str | None = None,
+        direction: str | None = None,
+        font_size: int | float | None = None,
+        fg_color: Any = None,
+        bg_color: Any = None,
+        ocr_confidence: float | None = None,
+    ) -> dict[str, Any]:
+        overrides = session.get("region_recognition_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+            session["region_recognition_overrides"] = overrides
+        state = dict(overrides.get(str(region_id)) or {})
+        state["status"] = str(status or "").strip().lower() or "pending"
+        state["error"] = str(error or "")[:1000]
+        if source_text is not None:
+            state["source_text"] = self._normalize_translation_override_text(source_text)
+        if direction:
+            state["direction"] = str(direction).strip().lower()
+        if font_size is not None:
+            try:
+                state["font_size"] = max(8, int(round(float(font_size))))
+            except (TypeError, ValueError):
+                pass
+        if fg_color is not None:
+            state["fg_color"] = self._rgb_color_payload(fg_color, (0, 0, 0))
+        if bg_color is not None:
+            state["bg_color"] = self._rgb_color_payload(bg_color, (255, 255, 255))
+        if ocr_confidence is not None:
+            try:
+                state["ocr_confidence"] = max(0.0, min(1.0, float(ocr_confidence)))
+            except (TypeError, ValueError):
+                pass
+        overrides[str(region_id)] = state
+        return copy.deepcopy(state)
+
+    def _capture_region_ocr_snapshot(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+        region_id: str,
+        region: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source_overrides = session.get("source_text_overrides") or {}
+        recognition_overrides = session.get("region_recognition_overrides") or {}
+        source_entry = {
+            "present": isinstance(source_overrides, dict) and region_id in source_overrides,
+            "value": (
+                str(source_overrides.get(region_id) or "")
+                if isinstance(source_overrides, dict) and region_id in source_overrides
+                else None
+            ),
+        }
+        recognition_entry = {
+            "present": isinstance(recognition_overrides, dict) and region_id in recognition_overrides,
+            "value": (
+                copy.deepcopy(recognition_overrides.get(region_id))
+                if isinstance(recognition_overrides, dict) and region_id in recognition_overrides
+                else None
+            ),
+        }
+        manual_payload = next(
+            (
+                copy.deepcopy(payload)
+                for payload in self._manual_regions_for_page(session, page_id)
+                if str(payload.get("id") or "") == region_id
+            ),
+            None,
+        )
+        snapshot = {
+            "version": 1,
+            "snapshot_id": f"ocr-{uuid.uuid4().hex}",
+            "page_id": page_id,
+            "region_id": region_id,
+            "source_text_override": source_entry,
+            "recognition_override": recognition_entry,
+            "manual_payload": {
+                "present": manual_payload is not None,
+                "value": manual_payload,
+            },
+        }
+        if isinstance(region, dict):
+            snapshot_region = copy.deepcopy(region)
+            if isinstance(recognition_overrides, dict):
+                state = recognition_overrides.get(region_id)
+                if isinstance(state, dict):
+                    if "source_text" in state and not (
+                        isinstance(source_overrides, dict) and region_id in source_overrides
+                    ):
+                        snapshot_region["source_text"] = str(state.get("source_text") or "")
+                    snapshot_region["recognition"] = {
+                        **dict(snapshot_region.get("recognition") or {}),
+                        **{
+                            key: str(state.get(key) or "")
+                            for key in (
+                                "status",
+                                "error",
+                                "translation_status",
+                                "translation_error",
+                            )
+                            if key in state
+                        },
+                    }
+                    if state.get("direction"):
+                        snapshot_region["direction"] = str(state["direction"])
+                    style = snapshot_region.setdefault("style", {})
+                    if state.get("font_size") is not None:
+                        style["detected_font_size"] = state["font_size"]
+                        if not style.get("font_size_override"):
+                            style["font_size"] = state["font_size"]
+                    for key in ("fg_color", "bg_color"):
+                        if key in state:
+                            style[key] = copy.deepcopy(state[key])
+                    if state.get("ocr_confidence") is not None:
+                        snapshot_region["ocr_confidence"] = state["ocr_confidence"]
+            if isinstance(source_overrides, dict) and region_id in source_overrides:
+                snapshot_region["source_text"] = str(source_overrides.get(region_id) or "")
+            snapshot["region"] = snapshot_region
+        return snapshot
+
+    def _restore_region_ocr_snapshot(
+        self,
+        session: dict[str, Any],
+        page_id: str,
+        region_id: str,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(snapshot, dict):
+            raise ValueError("缺少可恢复的 OCR 识别快照。")
+        snapshot_page_id = str(snapshot.get("page_id") or "").strip()
+        snapshot_region_id = str(snapshot.get("region_id") or "").strip()
+        if snapshot_page_id != page_id or snapshot_region_id != region_id:
+            raise ValueError("OCR 识别快照与当前页面或文本框不匹配。")
+        if type(snapshot.get("version")) is not int or snapshot.get("version") != 1 or any(
+            not isinstance(snapshot.get(key), dict) or type(snapshot[key].get("present")) is not bool
+            for key in ("source_text_override", "recognition_override", "manual_payload")
+        ):
+            raise ValueError("OCR 识别快照不完整。")
+        source_entry = snapshot["source_text_override"]
+        if source_entry["present"] and not isinstance(source_entry.get("value"), str):
+            raise ValueError("OCR 识别快照的原文内容无效。")
+        if not source_entry["present"] and source_entry.get("value") is not None:
+            raise ValueError("OCR 识别快照的原文存在标记无效。")
+        recognition_entry = snapshot["recognition_override"]
+        if recognition_entry["present"] and not isinstance(recognition_entry.get("value"), dict):
+            raise ValueError("OCR 识别快照的识别内容无效。")
+        if not recognition_entry["present"] and recognition_entry.get("value") is not None:
+            raise ValueError("OCR 识别快照的识别存在标记无效。")
+        manual_entry = snapshot["manual_payload"]
+        current_manual = any(str(payload.get("id") or "") == region_id
+                             for payload in self._manual_regions_for_page(session, page_id))
+        if manual_entry["present"] != current_manual:
+            raise ValueError("OCR 识别快照不能改变文本框来源。")
+        if manual_entry["present"] and not isinstance(manual_entry.get("value"), dict):
+            raise ValueError("OCR 识别快照的手动框内容无效。")
+        if not manual_entry["present"] and manual_entry.get("value") is not None:
+            raise ValueError("OCR 识别快照的手动框存在标记无效。")
+        if current_manual:
+            manual = manual_entry.get("value")
+            if not isinstance(manual, dict) or manual.get("id") != region_id or manual.get("stored_name") != page_id:
+                raise ValueError("OCR 识别快照中的文本框身份无效。")
+
+        snapshot_region = snapshot.get("region")
+        if snapshot_region is not None:
+            if not isinstance(snapshot_region, dict) or str(
+                snapshot_region.get("region_id") or ""
+            ).strip() != region_id:
+                raise ValueError("OCR 识别快照中的文本框内容无效。")
+            snapshot_region_page_id = str(snapshot_region.get("page_id") or "").strip()
+            if snapshot_region_page_id and snapshot_region_page_id != page_id:
+                raise ValueError("OCR 识别快照中的文本框页面无效。")
+            if "source_text" in snapshot_region and not isinstance(
+                snapshot_region.get("source_text"), str
+            ):
+                raise ValueError("OCR 识别快照中的原文内容无效。")
+            if "recognition" in snapshot_region and not isinstance(
+                snapshot_region.get("recognition"), dict
+            ):
+                raise ValueError("OCR 识别快照中的识别内容无效。")
+
+        source_overrides = session.get("source_text_overrides")
+        if not isinstance(source_overrides, dict):
+            source_overrides = {}
+            session["source_text_overrides"] = source_overrides
+        if bool(source_entry.get("present")):
+            source_overrides[region_id] = self._normalize_translation_override_text(
+                source_entry.get("value")
+            )
+        else:
+            source_overrides.pop(region_id, None)
+
+        recognition_overrides = session.get("region_recognition_overrides")
+        if not isinstance(recognition_overrides, dict):
+            recognition_overrides = {}
+            session["region_recognition_overrides"] = recognition_overrides
+        if bool(recognition_entry.get("present")) and isinstance(
+            recognition_entry.get("value"), dict
+        ):
+            recognition_overrides[region_id] = copy.deepcopy(recognition_entry["value"])
+        else:
+            recognition_overrides.pop(region_id, None)
+
+        if bool(manual_entry.get("present")) and isinstance(manual_entry.get("value"), dict):
+            self.restore_manual_region(session, copy.deepcopy(manual_entry["value"]))
+        else:
+            for payload in list(self._manual_regions_for_page(session, page_id)):
+                if str(payload.get("id") or "") == region_id:
+                    self.pop_manual_region(session, region_id)
+                    break
+        return {
+            "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+            "page_id": page_id,
+            "region_id": region_id,
+        }
+
+    async def retry_region_ocr(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        raw_config: dict[str, Any] | None,
+        stored_name: str,
+        region_id: str,
+    ) -> dict[str, Any]:
+        """Retry local OCR for any canonical region without translating it."""
+        config = self._normalize_config(raw_config)
+        document = self.get_page_document(session_id, session, stored_name)
+        region = next(
+            (
+                item
+                for item in (document.get("regions") or [])
+                if isinstance(item, dict)
+                and str(item.get("region_id") or "") == str(region_id).strip()
+            ),
+            None,
+        )
+        if not isinstance(region, dict):
+            raise FileNotFoundError("没有找到需要重新识别的文本框。")
+        region_id = str(region.get("region_id") or region_id).strip()
+        previous_snapshot = self._capture_region_ocr_snapshot(
+            session, stored_name, region_id, region
+        )
+
+        source_path = Path(session.get("source_dir") or "") / stored_name
+        source_bgr = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source_bgr is None:
+            state = self._set_region_recognition_state(
+                session,
+                region_id,
+                status="failed",
+                error="无法读取当前页面原图。",
+            )
+            current_snapshot = self._capture_region_ocr_snapshot(
+                session, stored_name, region_id, region
+            )
+            return {
+                "region_id": region_id,
+                "source_text": str(region.get("source_text") or ""),
+                "bbox": list(region.get("bbox") or [0, 0, 0, 0]),
+                "recognition_status": "failed",
+                "recognition_error": state.get("error") or "无法读取当前页面原图。",
+                "changed": False,
+                "previous_ocr_snapshot": previous_snapshot,
+                "ocr_snapshot": current_snapshot,
+            }
+
+        source_rgb = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2RGB)
+        bbox = self._normalize_manual_bbox(
+            region.get("bbox"), source_rgb.shape[1], source_rgb.shape[0]
+        )
+        try:
+            ocr_result = await self._ocr_manual_region(
+                source_rgb,
+                bbox,
+                bool(config.get("use_gpu", True)),
+            )
+            recognized_text = self._normalize_translation_override_text(
+                ocr_result.get("source_text") or ""
+            ).strip()
+            if not recognized_text:
+                raise RuntimeError("OCR 未识别到可用文字。")
+        except Exception as exc:
+            logger.exception(
+                "Region OCR retry failed. project=%s page=%s region=%s",
+                session_id,
+                stored_name,
+                region_id,
+            )
+            state = self._set_region_recognition_state(
+                session,
+                region_id,
+                status="failed",
+                error=str(exc)[:1000],
+            )
+            current_snapshot = self._capture_region_ocr_snapshot(
+                session, stored_name, region_id, region
+            )
+            return {
+                "region_id": region_id,
+                "source_text": str(region.get("source_text") or ""),
+                "bbox": list(region.get("bbox") or bbox),
+                "recognition_status": "failed",
+                "recognition_error": state.get("error") or str(exc)[:1000],
+                "changed": False,
+                "previous_ocr_snapshot": previous_snapshot,
+                "ocr_snapshot": current_snapshot,
+            }
+
+        # Retrying OCR corrects recognition only. Typography and translations
+        # remain user-controlled and are never replaced by inferred OCR styles.
+        state = self._set_region_recognition_state(
+            session, region_id, status="ready", error="", source_text=recognized_text,
+            ocr_confidence=ocr_result.get("ocr_confidence", ocr_result.get("confidence", ocr_result.get("prob", 1.0))),
+        )
+        self._set_region_source_text(session, stored_name, region_id, recognized_text)
+        recognized_payload = {
+            "region_id": region_id,
+            "bbox": bbox,
+            "source_text": recognized_text,
+            "ocr_confidence": state.get("ocr_confidence"),
+            "recognition_status": "ready",
+            "recognition_error": "",
+        }
+        current_snapshot = self._capture_region_ocr_snapshot(
+            session,
+            stored_name,
+            region_id,
+            {**region, "bbox": bbox, "source_text": recognized_text},
+        )
+        return {
+            **recognized_payload,
+            "changed": True,
+            "previous_ocr_snapshot": previous_snapshot,
+            "ocr_snapshot": current_snapshot,
+            "recognized_region_payload": recognized_payload,
+        }
 
     async def apply_page_commands(
         self,
@@ -5915,6 +6522,8 @@ class TranslatorEngine:
                 )
 
         supported_command_types = {
+            "update_source_text",
+            "update_region_source_text",
             "update_translation",
             "set_keep_original",
             "disable_region",
@@ -5931,6 +6540,13 @@ class TranslatorEngine:
             "delete_manual_region",
             "recognize_manual_region",
             "restore_manual_region",
+            "retry_region_ocr",
+            "recognize_region_ocr",
+            "restore_region_ocr_snapshot",
+            "restore_ocr_snapshot",
+            "set_review_status",
+            "mark_reviewed",
+            "mark_page_reviewed",
         }
         for command in commands:
             if not isinstance(command, dict):
@@ -5968,26 +6584,103 @@ class TranslatorEngine:
         created_region_id = ""
         created_region_payload: dict[str, Any] | None = None
         recognized_region_payload: dict[str, Any] | None = None
+        previous_ocr_snapshot: dict[str, Any] | None = None
+        ocr_snapshot: dict[str, Any] | None = None
+        ocr_snapshots: dict[str, dict[str, Any]] = {}
+        restored_from_ocr_snapshot: dict[str, Any] | None = None
+        restored_ocr_region_payloads: dict[str, dict[str, Any]] = {}
+        review_state: dict[str, Any] | None = None
         deleted_region_id = ""
         deleted_region_payload: dict[str, Any] | None = None
-        page_region_ids: set[str] | None = None
+        # Resolve against the command base once, then track structural changes
+        # inside this transaction. Reading the committed document again cannot
+        # see a region that an earlier command in this batch just restored.
+        page_region_ids = self._page_document_region_ids(project_id, session, page_id)
 
         def require_existing_region_id(command: dict[str, Any]) -> str:
-            nonlocal page_region_ids
             region_id = str(command.get("region_id") or "").strip()
             if not region_id:
                 raise ValueError("缺少文本框标识。")
-            if page_region_ids is None:
-                page_region_ids = self._page_document_region_ids(project_id, session, page_id)
             if region_id not in page_region_ids:
                 raise FileNotFoundError("目标文本框不存在，请刷新后重试。")
             return region_id
+
+        def base_region_payload(region_id: str) -> dict[str, Any] | None:
+            candidate_documents: list[dict[str, Any]] = []
+            if isinstance(previous_document, dict):
+                candidate_documents.append(previous_document)
+            with contextlib.suppress(Exception):
+                current_document = self.get_page_document(project_id, session, page_id)
+                if isinstance(current_document, dict):
+                    candidate_documents.append(current_document)
+            for candidate_document in candidate_documents:
+                for region in candidate_document.get("regions") or []:
+                    if (
+                        isinstance(region, dict)
+                        and str(region.get("region_id") or "").strip() == region_id
+                    ):
+                        return copy.deepcopy(region)
+            return None
 
         for command in commands:
             if not isinstance(command, dict):
                 continue
             command_type = str(command.get("type") or "").strip().lower()
             if not command_type:
+                continue
+
+            # Review is a separate acknowledgement. Any successful content
+            # command below invalidates it; a failed OCR retry is handled in
+            # its branch after the result is known.
+            if command_type in {
+                "update_source_text",
+                "update_region_source_text",
+                "update_translation",
+                "set_keep_original",
+                "disable_region",
+                "restore_region",
+                "update_region_bbox",
+                "update_font_size",
+                "update_text_direction",
+                "update_region_font",
+                "update_region_style",
+                "update_font_style",
+                "create_region",
+                "duplicate_region",
+                "merge_regions",
+                "delete_manual_region",
+                "restore_manual_region",
+            }:
+                self._invalidate_page_review_state(session, page_id)
+
+            if command_type in {"update_source_text", "update_region_source_text"}:
+                region_id = require_existing_region_id(command)
+                if "text" not in command and "source_text" not in command:
+                    raise ValueError("缺少需要修改的原文内容。")
+                source_text = command.get("text")
+                if source_text is None and "source_text" in command:
+                    source_text = command.get("source_text")
+                previous_ocr_snapshot = self._capture_region_ocr_snapshot(
+                    session,
+                    page_id,
+                    region_id,
+                    base_region_payload(region_id),
+                )
+                self._set_region_source_text(
+                    session,
+                    page_id,
+                    region_id,
+                    str(source_text if source_text is not None else ""),
+                )
+                ocr_snapshot = self._capture_region_ocr_snapshot(
+                    session,
+                    page_id,
+                    region_id,
+                    base_region_payload(region_id),
+                )
+                ocr_snapshots[region_id] = {"before": previous_ocr_snapshot, "after": ocr_snapshot}
+                updated_region_ids.append(region_id)
+                snapshot_hints.append("source_text_updated")
                 continue
 
             if command_type == "update_translation":
@@ -6078,6 +6771,7 @@ class TranslatorEngine:
                 )
                 created_region_id = str(region.get("id") or "")
                 created_region_payload = region
+                page_region_ids.add(created_region_id)
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_added")
                 continue
@@ -6095,7 +6789,7 @@ class TranslatorEngine:
                 created_region_payload = region
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_duplicated")
-                page_region_ids = None
+                page_region_ids.add(created_region_id)
                 continue
 
             if command_type == "merge_regions":
@@ -6110,6 +6804,7 @@ class TranslatorEngine:
                 merged_from = [str(item) for item in (region.get("merged_from") or []) if str(item)]
                 created_region_id = str(region.get("id") or "")
                 created_region_payload = region
+                page_region_ids.add(created_region_id)
                 for source_region_id in merged_from:
                     self._set_region_disabled(session, source_region_id, True)
                 updated_region_ids.extend(merged_from)
@@ -6125,6 +6820,7 @@ class TranslatorEngine:
                 if not removed_payload:
                     raise FileNotFoundError("没有找到对应的手动补框。")
                 self._clear_region_overrides(session, region_id)
+                page_region_ids.discard(region_id)
                 deleted_region_id = region_id
                 deleted_region_payload = removed_payload
                 updated_region_ids.append(region_id)
@@ -6144,26 +6840,130 @@ class TranslatorEngine:
                 )
                 updated_region_ids.append(region_id)
                 snapshot_hints.append("manual_region_recognized")
+                if str(recognized_region_payload.get("recognition_status") or "") == "ready":
+                    self._invalidate_page_review_state(session, page_id)
+                continue
+
+            if command_type in {"retry_region_ocr", "recognize_region_ocr"}:
+                region_id = require_existing_region_id(command)
+                retry_result = await self.retry_region_ocr(
+                    session_id=project_id,
+                    session=session,
+                    raw_config=config,
+                    stored_name=page_id,
+                    region_id=region_id,
+                )
+                recognized_region_payload = retry_result
+                previous_ocr_snapshot = retry_result.get("previous_ocr_snapshot")
+                ocr_snapshot = retry_result.get("ocr_snapshot")
+                ocr_snapshots[region_id] = {"before": previous_ocr_snapshot, "after": ocr_snapshot}
+                updated_region_ids.append(region_id)
+                if bool(retry_result.get("changed")):
+                    snapshot_hints.append("region_ocr_retried")
+                    self._invalidate_page_review_state(session, page_id)
+                else:
+                    snapshot_hints.append("region_ocr_retry_failed")
+                continue
+
+            if command_type in {"restore_region_ocr_snapshot", "restore_ocr_snapshot"}:
+                region_id = require_existing_region_id(command)
+                before_snapshot = self._capture_region_ocr_snapshot(
+                    session, page_id, region_id
+                )
+                raw_snapshot = (
+                    command.get("snapshot")
+                    or command.get("ocr_snapshot")
+                    or command.get("previous_ocr_snapshot")
+                    or command.get("payload")
+                )
+                if not isinstance(raw_snapshot, dict):
+                    raise ValueError("缺少可恢复的 OCR 识别快照。")
+                snapshot_region = raw_snapshot.get("region")
+                if snapshot_region is not None:
+                    if (
+                        not isinstance(snapshot_region, dict)
+                        or str(snapshot_region.get("region_id") or "").strip() != region_id
+                    ):
+                        raise ValueError("OCR 识别快照中的文本框内容无效。")
+                restored_from_ocr_snapshot = self._restore_region_ocr_snapshot(
+                    session,
+                    page_id,
+                    region_id,
+                    raw_snapshot,
+                )
+                if snapshot_region is not None:
+                    restored_ocr_region_payloads[region_id] = copy.deepcopy(snapshot_region)
+                after_snapshot = self._capture_region_ocr_snapshot(
+                    session, page_id, region_id
+                )
+                previous_ocr_snapshot = before_snapshot
+                ocr_snapshot = after_snapshot
+                ocr_snapshots[region_id] = {"before": before_snapshot, "after": after_snapshot}
+                changed = any(
+                    before_snapshot.get(field) != after_snapshot.get(field)
+                    for field in (
+                        "source_text_override",
+                        "recognition_override",
+                        "manual_payload",
+                    )
+                )
+                updated_region_ids.append(region_id)
+                snapshot_hints.append(
+                    "region_ocr_restored" if changed else "region_ocr_snapshot_restored"
+                )
+                if changed:
+                    self._invalidate_page_review_state(session, page_id)
+                continue
+
+            if command_type in {"set_review_status", "mark_reviewed", "mark_page_reviewed"}:
+                status = command.get("status")
+                if status is None and command_type in {"mark_reviewed", "mark_page_reviewed"}:
+                    status = "reviewed"
+                review_state = self._set_page_review_state(
+                    session,
+                    page_id,
+                    status=str(status or ""),
+                    revision=(
+                        int((previous_document or {}).get("metadata", {}).get("revision") or 0)
+                        + 1
+                    ),
+                    reviewer=str(command.get("reviewer") or command.get("reviewed_by") or ""),
+                )
+                snapshot_hints.append("review_status_updated")
                 continue
 
             if command_type == "restore_manual_region":
                 raw_payload = command.get("payload")
                 if not isinstance(raw_payload, dict):
                     raise ValueError("缺少可恢复的手动补框数据。")
+                if str(raw_payload.get("stored_name") or "").strip() != page_id:
+                    raise ValueError("恢复的文本框不属于当前页面。")
                 restored_payload = self.restore_manual_region(session, raw_payload)
                 created_region_id = str(restored_payload.get("id") or "")
                 created_region_payload = restored_payload
+                page_region_ids.add(created_region_id)
                 updated_region_ids.append(created_region_id)
                 snapshot_hints.append("manual_region_restored")
                 continue
 
             raise ValueError(f"暂不支持的页面命令：{command_type}")
 
+        # Commands can remove overrides as well as add them (for example undo).
+        # Rebuild documents from the resulting maps, not the pre-command config:
+        # an absent override cannot cancel a stale value already materialized
+        # into a region from session.last_config.
+        config = self.capture_page_command_config(session, config)
+
         translation_hints = {
             "translation_updated",
             "keep_original_updated",
             "region_disabled",
             "region_restored",
+        }
+        source_hints = {
+            "source_text_updated",
+            "region_ocr_retried",
+            "region_ocr_restored",
         }
         layout_hints = {
             "layout_adjusted",
@@ -6178,7 +6978,28 @@ class TranslatorEngine:
             "manual_region_deleted",
             "manual_region_recognized",
             "manual_region_restored",
+            "region_ocr_retried",
+            "region_ocr_restored",
         }
+        if any(hint in source_hints for hint in snapshot_hints):
+            state = self._project_artifact_state(project_id, session)
+            page_artifact_state = state.pages.get(page_id)
+            # A region-level correction cannot invent the page-wide OCR/blank
+            # artifacts that a full recognition task has not produced yet.
+            event = PageArtifactEvent.LAYOUT_EDITED
+            if page_artifact_state is not None:
+                try:
+                    page_artifact_state.apply(PageArtifactEvent.SOURCE_EDITED)
+                except ArtifactTransitionError:
+                    pass
+                else:
+                    event = PageArtifactEvent.SOURCE_EDITED
+            self._apply_page_artifact_event(
+                project_id,
+                session,
+                [page_id],
+                event,
+            )
         if any(hint in translation_hints for hint in snapshot_hints):
             self._apply_page_artifact_event(
                 project_id,
@@ -6236,6 +7057,25 @@ class TranslatorEngine:
             document = prepared_documents.get(page_id)
             if not isinstance(document, dict):
                 raise RuntimeError("页面命令未能准备有效的 Page Document。")
+
+        # A legacy project may have no editable regions cache. In that case
+        # removing a source overlay alone would leave the already-persisted
+        # corrected text in the Page Document. OCR snapshots carry the region
+        # evidence so undo/redo can restore only source/recognition fields;
+        # translation, geometry and typography remain the current document's.
+        for region_id, snapshot_region in restored_ocr_region_payloads.items():
+            for region in document.get("regions") or []:
+                if (
+                    isinstance(region, dict)
+                    and str(region.get("region_id") or "").strip() == region_id
+                ):
+                    if "source_text" in snapshot_region:
+                        region["source_text"] = str(snapshot_region.get("source_text") or "")
+                    if isinstance(snapshot_region.get("recognition"), dict):
+                        region["recognition"] = copy.deepcopy(snapshot_region["recognition"])
+                    if snapshot_region.get("ocr_confidence") is not None:
+                        region["ocr_confidence"] = snapshot_region["ocr_confidence"]
+                    break
         page_name = self._page_display_name(session, page_id)
         page_artifact = self._project_artifact_state(
             project_id,
@@ -6253,6 +7093,12 @@ class TranslatorEngine:
             "recognized_region_payload": recognized_region_payload or {},
             "deleted_region_id": deleted_region_id,
             "deleted_region_payload": deleted_region_payload or {},
+            "previous_ocr_snapshot": previous_ocr_snapshot or {},
+            "ocr_snapshot": ocr_snapshot or {},
+            "ocr_snapshots": ocr_snapshots,
+            "restored_from_ocr_snapshot": restored_from_ocr_snapshot or {},
+            "review_state": self._page_review_state(session, page_id),
+            "review_status": self._page_review_state(session, page_id)["status"],
             "snapshot_hint": snapshot_hints[-1] if snapshot_hints else "",
             "executed_commands": [str(command.get("type") or "") for command in commands if isinstance(command, dict)],
             "translation_page": self._page_document_to_translation_page(document, page_name),
@@ -6263,6 +7109,10 @@ class TranslatorEngine:
                 "translation_region_disabled_overrides": dict(session.get("translation_region_disabled_overrides") or {}),
                 "translation_region_layout_overrides": dict(session.get("translation_region_layout_overrides") or {}),
                 "style_region_overrides": dict(session.get("style_region_overrides") or {}),
+                "source_text_overrides": dict(session.get("source_text_overrides") or {}),
+                "region_recognition_overrides": copy.deepcopy(
+                    session.get("region_recognition_overrides") or {}
+                ),
             },
         }
 
@@ -11872,6 +12722,8 @@ class TranslatorEngine:
         regions = self._load_cached_regions(page_cache_dir)
         regions = self._merge_manual_regions(session, stored_name, regions)
         regions = self._apply_region_layout_overrides(regions, config, stored_name)
+        self._apply_region_recognition_overrides(regions, session)
+        self._apply_region_source_text_overrides(regions, session)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
         return self._dedupe_overlapping_regions(regions)
@@ -11887,6 +12739,8 @@ class TranslatorEngine:
         regions = self._load_cached_regions(page_cache_dir)
         regions = self._merge_manual_regions(session, stored_name, regions)
         regions = self._apply_region_layout_overrides(regions, config, stored_name)
+        self._apply_region_recognition_overrides(regions, session)
+        self._apply_region_source_text_overrides(regions, session)
         raw_count = len(regions)
         self._apply_region_translation_overrides(regions, config, stored_name)
         self._apply_region_font_styles(source_rgb, regions, config, stored_name)
@@ -12065,6 +12919,8 @@ class TranslatorEngine:
                 continue
             for other_index, other_region in indexed_regions[position + 1:]:
                 if other_index in suppressed:
+                    continue
+                if bool(getattr(region, "disabled_region", False)) or bool(getattr(other_region, "disabled_region", False)):
                     continue
                 if bool(getattr(region, "allow_overlap", False)) or bool(getattr(other_region, "allow_overlap", False)):
                     continue
@@ -12810,6 +13666,74 @@ class TranslatorEngine:
             region.skip_translation = skip_translation
             if override_translation:
                 region.translation = override_translation
+
+    def _apply_region_recognition_overrides(
+        self,
+        regions: list[Any],
+        session: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(session, dict):
+            return
+        overrides = session.get("region_recognition_overrides") or {}
+        if not isinstance(overrides, dict):
+            return
+        for region in regions:
+            region_id = str(
+                getattr(region, "translation_region_key", "")
+                or getattr(region, "style_region_key", "")
+                or getattr(region, "manual_region_id", "")
+                or ""
+            ).strip()
+            state = overrides.get(region_id)
+            if not region_id or not isinstance(state, dict):
+                continue
+            if "source_text" in state:
+                source_text = str(state.get("source_text") or "")
+                region.source_text = source_text
+                region.text_raw = source_text
+            if state.get("direction"):
+                self._assign_region_direction(region, str(state["direction"]))
+            if state.get("font_size") is not None:
+                try:
+                    region.font_size = max(8, int(round(float(state["font_size"]))))
+                except (TypeError, ValueError):
+                    pass
+            if "fg_color" in state:
+                region.fg_colors = np.array(
+                    self._rgb_color_payload(state.get("fg_color"), (0, 0, 0))
+                )
+            if "bg_color" in state:
+                region.bg_colors = np.array(
+                    self._rgb_color_payload(state.get("bg_color"), (255, 255, 255))
+                )
+            if state.get("ocr_confidence") is not None:
+                try:
+                    region.prob = float(state["ocr_confidence"])
+                except (TypeError, ValueError):
+                    pass
+
+    def _apply_region_source_text_overrides(
+        self,
+        regions: list[Any],
+        session: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(session, dict):
+            return
+        overrides = session.get("source_text_overrides") or {}
+        if not isinstance(overrides, dict):
+            return
+        for region in regions:
+            region_id = str(
+                getattr(region, "translation_region_key", "")
+                or getattr(region, "style_region_key", "")
+                or getattr(region, "manual_region_id", "")
+                or ""
+            ).strip()
+            if not region_id or region_id not in overrides:
+                continue
+            source_text = str(overrides.get(region_id) or "")
+            region.source_text = source_text
+            region.text_raw = source_text
 
     async def _render_cached_page(
         self,

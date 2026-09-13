@@ -8,9 +8,10 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:mock": "VITE_MOCK_API=1 vite",
+    "dev:mock": "node scripts/dev-mock.mjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:unit": "node --test scripts/test-*.mjs"
   },
   "dependencies": {
     "lucide-vue-next": "^0.577.0",

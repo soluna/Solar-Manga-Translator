@@ -14,7 +14,8 @@ export default defineConfig(({ command }) => ({
     strictPort: false,
     proxy: {
       '/api': devApiTarget,
-      '/output': devApiTarget
+      '/output': devApiTarget,
+      ...(process.env.VITE_MOCK_API === '1' ? {} : { '/ws': { target: devApiTarget, ws: true } })
     }
   }
 }))

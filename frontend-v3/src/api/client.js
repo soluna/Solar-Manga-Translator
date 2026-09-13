@@ -1,19 +1,20 @@
 /**
  * API client for Solar Manga Translator backend (FastAPI).
  *
- * - Base URL: window.desktopBridge?.runtime?.apiBaseUrl (desktop shell)
- *   → import.meta.env.VITE_API_BASE_URL → http://127.0.0.1:8000
+ * - Base URL: window.mangaDesktop?.runtime?.apiBaseUrl (desktop shell)
+ *   → import.meta.env.VITE_API_BASE_URL → same-origin Vite proxy
  * - Auth: Bearer token (desktop shell / VITE_API_TOKEN / localStorage `solar-v3-api-token`)
  * - WebSocket auth: subprotocol `manga-translator` + `auth.<token>`
  */
 
 const TOKEN_STORAGE_KEY = 'solar-v3-api-token'
+export const isMockMode = import.meta.env?.VITE_MOCK_API === '1'
 
 function resolveRuntimeValue() {
-  if (typeof window !== 'undefined' && window.desktopBridge?.runtime) {
+  if (typeof window !== 'undefined' && window.mangaDesktop?.runtime) {
     return {
-      baseUrl: String(window.desktopBridge.runtime.apiBaseUrl || '').trim(),
-      token: String(window.desktopBridge.runtime.apiToken || '').trim(),
+      baseUrl: String(window.mangaDesktop.runtime.apiBaseUrl || '').trim(),
+      token: String(window.mangaDesktop.runtime.apiToken || '').trim(),
     }
   }
   return { baseUrl: '', token: '' }
@@ -37,18 +38,20 @@ export function storeApiToken(token) {
 
 const runtime = resolveRuntimeValue()
 // 默认相对路径：走同源（Vite dev 代理 / mock / 后端静态托管皆可）；
-// 桌面壳（desktopBridge）或显式 VITE_API_BASE_URL 时才用绝对地址。
+// 桌面壳（mangaDesktop）或显式 VITE_API_BASE_URL 时才用绝对地址。
 export const apiBaseUrl = String(
   runtime.baseUrl
-  || import.meta.env.VITE_API_BASE_URL
+  || import.meta.env?.VITE_API_BASE_URL
   || '',
 ).replace(/\/$/, '')
 
-export const apiAccessToken = (runtime.token || import.meta.env.VITE_API_TOKEN || readStoredToken()).trim()
+export const apiAccessToken = (runtime.token || import.meta.env?.VITE_API_TOKEN || readStoredToken()).trim()
 
 /** Convert a path like /api/projects to an absolute URL. */
 export function toApiUrl(path) {
-  return `${apiBaseUrl}${String(path || '').startsWith('/') ? path : `/${path}`}`
+  const value = String(path || '')
+  if (/^https?:\/\//i.test(value)) return value
+  return `${apiBaseUrl}${value.startsWith('/') ? value : `/${value}`}`
 }
 
 /** Append a query param without clobbering existing ones. */
@@ -57,7 +60,9 @@ export function withUrlQueryParam(url, key, value) {
     return url || ''
   }
   try {
-    const parsedUrl = new URL(url, typeof window !== 'undefined' ? window.location.origin : 'http://localhost')
+    const origin = typeof window !== 'undefined' && /^https?:/.test(window.location?.origin || '')
+      ? window.location.origin : apiBaseUrl || 'http://localhost'
+    const parsedUrl = new URL(url, origin)
     parsedUrl.searchParams.set(key, String(value))
     return parsedUrl.toString()
   } catch {
@@ -75,11 +80,11 @@ export function withImagePreviewSize(url, maxSide) {
 }
 
 /** Bust the browser cache for mutable image artifacts. */
-export function withCacheBust(url) {
+export function withCacheBust(url, revision = Date.now()) {
   if (!url) {
     return ''
   }
-  return withUrlQueryParam(url, '_', Date.now())
+  return withUrlQueryParam(url, '_', revision)
 }
 
 /** fetch() with the local API Bearer token attached. */
@@ -88,7 +93,8 @@ export function apiFetch(input, init = {}) {
   if (apiAccessToken) {
     headers.set('Authorization', `Bearer ${apiAccessToken}`)
   }
-  return window.fetch(input, { ...init, headers })
+  const fetchRequest = typeof window !== 'undefined' ? window.fetch.bind(window) : globalThis.fetch
+  return fetchRequest(toApiUrl(input), { ...init, headers })
 }
 
 /** Response → JSON; throws readable errors on failure. */
@@ -127,6 +133,7 @@ export async function readApiError(response, fallbackMessage) {
 
 /** Open a WebSocket with the local API token (subprotocol auth). */
 export function createApiWebSocket(path) {
+  if (isMockMode) throw Object.assign(new Error('演示模式不执行后台任务，请连接真实后端。'), { code: 'MOCK_READ_ONLY' })
   if (!apiAccessToken) {
     return new WebSocket(toWebSocketUrl(path))
   }

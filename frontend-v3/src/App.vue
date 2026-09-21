@@ -1,12 +1,17 @@
 <script setup>
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import TaskBar from './components/TaskBar.vue'
 import { isMockMode } from './api/client.js'
+
+const route = useRoute()
+const showTaskBar = computed(() => route.name !== 'onboarding')
 </script>
 
 <template>
   <div class="app-shell">
     <div v-if="isMockMode" class="demo-notice" role="status">演示模式 · 合成数据供浏览，保存、导入、处理和导出需连接真实后端。</div>
-    <TaskBar />
+    <TaskBar v-if="showTaskBar" />
     <div class="route-host">
       <router-view v-slot="{ Component }"><component :is="Component" /></router-view>
     </div>

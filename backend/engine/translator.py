@@ -3551,6 +3551,7 @@ class TranslatorEngine:
             return None
 
         now = self._now_iso()
+        updated_at = str(raw_entry.get("updated_at") or existing_entry.get("updated_at") or now)
         entry_id = str(raw_entry.get("id") or existing_entry.get("id") or "").strip()
         if not entry_id:
             entry_id = f"term_{uuid.uuid4().hex[:12]}"
@@ -3586,7 +3587,7 @@ class TranslatorEngine:
             "note": str(note_raw or "").strip(),
             "source_kind": source_kind,
             "created_at": created_at,
-            "updated_at": now,
+            "updated_at": updated_at,
         }
 
     def _normalize_project_glossary(self, raw_value: Any) -> dict[str, Any]:
@@ -3746,6 +3747,7 @@ class TranslatorEngine:
         existing_glossary = self._normalize_project_glossary(session.get("project_glossary"))
         existing_by_id = {str(entry.get("id") or ""): entry for entry in existing_glossary.get("entries") or []}
         existing_by_source = {str(entry.get("source") or ""): entry for entry in existing_glossary.get("entries") or []}
+        edit_timestamp = self._now_iso()
         entries: list[dict[str, Any]] = []
         for raw_entry in raw_entries or []:
             if not isinstance(raw_entry, dict):
@@ -3753,6 +3755,7 @@ class TranslatorEngine:
             existing_entry = existing_by_id.get(str(raw_entry.get("id") or "")) or existing_by_source.get(str(raw_entry.get("source") or raw_entry.get("term") or ""))
             entry = self._normalize_project_glossary_entry(raw_entry, existing_entry=existing_entry)
             if entry:
+                entry["updated_at"] = edit_timestamp
                 previous_translation = str((existing_entry or {}).get("translation") or "").strip()
                 if previous_translation and previous_translation != entry["translation"] and not entry.get("replacement"):
                     entry["replacement"] = previous_translation
@@ -3760,7 +3763,7 @@ class TranslatorEngine:
 
         glossary = self._normalize_project_glossary({
             "entries": entries,
-            "updated_at": self._now_iso(),
+            "updated_at": edit_timestamp,
             "auto_extract_completed": bool(existing_glossary.get("auto_extract_completed")),
             "auto_extracted_at": str(existing_glossary.get("auto_extracted_at") or ""),
         })

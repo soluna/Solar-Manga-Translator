@@ -47,12 +47,13 @@ function draftFrom(region) {
   return {
     sourceText: region.source_text,
     translation: region.current_translation, fontKey: region.font_key_override,
-    fontSize: region.font_size, fontStyle: region.override_style,
+    fontSize: region.font_size, fontSizeOverride: region.font_size_override, fontStyle: region.override_style,
     rotation: region.rotation, strokeWidth: region.stroke_width,
     letterSpacing: region.letter_spacing, lineSpacing: region.line_spacing,
     fgColor: color(region.fg_color), bgColor: color(region.bg_color),
     preserveBackground: region.preserve_background, enabled: !region.disabled,
-    direction: region.direction, keepOriginal: region.keep_original,
+    direction: region.direction, directionIntent: null, directionUndo: null,
+    keepOriginal: region.keep_original,
   }
 }
 
@@ -67,11 +68,16 @@ function draftCommands(regionId, changes) {
     if (field === 'translation') command = { type: 'update_translation', text: value }
     if (field === 'fontKey') command = { type: 'update_region_font', font_key: value }
     if (field === 'fontStyle') command = { type: 'update_font_style', style: value }
-    if (field === 'fontSize') {
-      if (!Number.isFinite(Number(value)) || Number(value) < 8) throw new Error('字号必须是至少 8 的数字。')
-      command = { type: 'update_font_size', font_size: Math.round(Number(value)) }
+    if (field === 'fontSize' || field === 'fontSizeOverride') {
+      if (value == null || value === '') command = { type: 'update_font_size', font_size: null }
+      else {
+        if (!Number.isFinite(Number(value)) || Number(value) < 8) throw new Error('字号必须是至少 8 的数字。')
+        command = { type: 'update_font_size', font_size: Math.round(Number(value)) }
+      }
     }
-    if (field === 'direction') command = { type: 'update_text_direction', direction: value }
+    if (field === 'direction' || field === 'directionIntent') {
+      command = { type: 'update_text_direction', direction: value }
+    }
     if (field === 'enabled') command = { type: value ? 'restore_region' : 'disable_region' }
     if (field === 'keepOriginal') command = { type: 'set_keep_original', enabled: value }
     if (ADVANCED[field]) {
@@ -167,7 +173,7 @@ export function usePageEditor({ api = defaultApi, getConfig = () => ({}), onResp
     if (!state?.document) return Promise.reject(new Error('页面尚未加载。'))
     return queue.enqueue(state.projectId, state.pageId, async () => {
       try {
-        const { commands, sent = {} } = build()
+        const { commands, sent = {}, directionUndoByRegion = {} } = build()
         if (!commands.length) return null
         assertSupportedPageCommands(commands)
         const before = copy(state.document.canonical)
@@ -182,7 +188,7 @@ export function usePageEditor({ api = defaultApi, getConfig = () => ({}), onResp
           }
         }
         if (history) {
-          const entry = pageCommandHistory(commands, before, response, label)
+          const entry = pageCommandHistory(commands, before, response, label, { directionUndoByRegion })
           state.undo = entry ? [...state.undo, entry].slice(-50) : []
           state.redo = []
         }
@@ -211,11 +217,23 @@ export function usePageEditor({ api = defaultApi, getConfig = () => ({}), onResp
     return enqueue(state, () => {
       if (!state.document.regions.some(region => region.id === regionId)) throw new Error('文本区域已被删除，未保存的草稿仍保留。')
       const remaining = Object.fromEntries(Object.entries(sent).filter(([field, value]) => !equal(value, state.baselines[regionId]?.[field])))
-      return { commands: draftCommands(regionId, remaining), sent: { [regionId]: sent } }
+      const directionUndoByRegion = Object.hasOwn(sent, 'directionIntent') && Object.hasOwn(sent, 'directionUndo')
+        ? { [regionId]: sent.directionUndo }
+        : {}
+      return { commands: draftCommands(regionId, remaining), sent: { [regionId]: sent }, directionUndoByRegion }
     })
   }
 
   function saveDraft(regionId, fields) { return saveStateDraft(current.value, regionId, fields) }
+
+  function saveDirectionIntent(regionId, direction, undoDirection = 'auto') {
+    const state = current.value, draft = state?.drafts[regionId]
+    if (!draft) return Promise.reject(new Error('目标文本区域不存在。'))
+    draft.direction = direction
+    draft.directionIntent = direction
+    draft.directionUndo = undoDirection
+    return saveStateDraft(state, regionId, ['directionIntent', 'directionUndo'])
+  }
 
   async function flushState(state) {
     if (!state) return
@@ -252,7 +270,7 @@ export function usePageEditor({ api = defaultApi, getConfig = () => ({}), onResp
     } finally { historyAction = false }
   }
 
-  return { document, dirty, pending, draftFor, load, saveDraft, execute, flush,
+  return { document, dirty, pending, draftFor, load, saveDraft, saveDirectionIntent, execute, flush,
     undo: () => moveHistory('undo'), redo: () => moveHistory('redo'),
     canUndo: computed(() => Boolean(current.value?.undo.length) && !pending.value),
     canRedo: computed(() => Boolean(current.value?.redo.length) && !pending.value),

@@ -13,12 +13,28 @@ import {
   regionNeedsAttention,
   resolveRegionText,
 } from '../state/review-document.js'
+import { hasPartialTranslation } from '../state/page-status.js'
 import {
   nextIssueRegion,
   normalizeReviewLocation,
+  normalizeReviewRegionFilter,
   reviewLocationStorageKey,
   selectRegionRange,
 } from '../state/review-workspace-state.js'
+import {
+  clampCanvasBBox,
+  resizeCanvasBBox,
+  selectCanvasRegions,
+} from '../state/review-canvas-geometry.js'
+import {
+  buildReviewStyleCommands,
+  normalizeReviewDirection,
+  resolveLayoutDirectionOverride,
+  resolveReviewDirection,
+  reviewStyleSnapshot,
+  sourceCropStyle,
+} from '../state/review-style.js'
+import { buildBatchTranslationConfirmation, getProjectTranslateAction } from '../state/workflow-state.js'
 import { useTaskEvents } from '../composables/useTaskEvents.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
@@ -34,6 +50,19 @@ const pageId = computed(() => String(route.params.pageId || ''))
 const { project, loadProject, adoptResponse } = useProject()
 const taskEvents = useTaskEvents()
 const { taskState } = taskEvents
+
+const translatorLabelMap = {
+  gemini: 'Gemini',
+  'doubao-ark': '豆包 Ark',
+  'openai-compatible': 'OpenAI Compatible',
+}
+const targetLanguageLabelMap = {
+  CHS: '简体中文',
+  CHT: '繁体中文',
+  ENG: '英语',
+  JPN: '日语',
+  KOR: '韩语',
+}
 
 // ---- 基础数据 ----
 const editor = usePageEditor({
@@ -98,6 +127,51 @@ const taskBusy = computed(() => {
   const s = taskState.value
   return Boolean(s.activeTaskId) && !['completed', 'failed', 'error', 'cancelled', 'interrupted'].includes(s.eventName)
 })
+
+const workflowStage = computed(() => String(project.value?.workflow_stage || 'idle').trim().toLowerCase())
+const translatedPageCount = computed(() => images.value.filter((image) => {
+  const caps = pageCapabilities(image)
+  return Boolean(caps.translation_ready)
+}).length)
+const translatablePageCount = computed(() => images.value.filter((image) => Boolean(pageCapabilities(image).can_translate)).length)
+const hasPartialTranslatedResults = computed(() => hasPartialTranslation(images.value))
+const fullTranslateAction = computed(() => getProjectTranslateAction({
+  workflowStage: workflowStage.value,
+  hasPartialTranslatedResults: hasPartialTranslatedResults.value,
+}))
+const fullTranslationConfigLoading = ref(false)
+const canFullTranslate = computed(() => Boolean(
+  sessionId.value
+  && images.value.length
+  && !taskBusy.value
+  && ((workflowStage.value === 'detected' && translatablePageCount.value > 0)
+    || ((workflowStage.value === 'translated' || hasPartialTranslatedResults.value) && translatedPageCount.value > 0)),
+))
+const fullTranslateLabel = computed(() => fullTranslateAction.value === 'resume-translate' ? '继续翻译' : '重新翻译')
+const pendingFullTranslateAction = ref('')
+const fullTranslateConfirmationOpen = ref(false)
+const fullTranslationConfig = ref(null)
+const fullTranslationProjectId = ref('')
+const projectTranslationRegionCount = computed(() => {
+  const count = images.value.reduce((total, image) => total + Number(image?.region_count ?? image?.regionCount ?? 0), 0)
+  return count || Number(project.value?.project?.region_count || 0)
+})
+const activeTranslatorServiceLabel = computed(() => {
+  const config = fullTranslationConfig.value || project.value?.config || {}
+  const provider = translatorLabelMap[config.translator] || config.translator || '翻译服务'
+  if (config.translator === 'doubao-ark' && config.translator_model) return `${provider} / ${config.translator_model}`
+  if (config.translator === 'openai-compatible' && config.openai_model) return `${provider} / ${config.openai_model}`
+  return provider
+})
+const batchTranslationConfirmation = computed(() => buildBatchTranslationConfirmation({
+  action: pendingFullTranslateAction.value || fullTranslateAction.value,
+  pageCount: images.value.length,
+  regionCount: projectTranslationRegionCount.value,
+  providerLabel: activeTranslatorServiceLabel.value,
+  targetLanguageLabel: targetLanguageLabelMap[String((fullTranslationConfig.value || project.value?.config || {}).target_lang || '').toUpperCase()]
+    || (fullTranslationConfig.value || project.value?.config || {}).target_lang
+    || '目标语言',
+}))
 
 const TERMINALS = ['completed', 'failed', 'error', 'cancelled', 'interrupted']
 
@@ -388,7 +462,7 @@ function restoreReviewLocation(projectId = sessionId.value) {
   panelWidth.value = location.panelWidth
   previewTypography.value = location.previewTypography
   panes.value = { ...panes.value, ...location.panes }
-  filter.value = location.filter
+  filter.value = normalizeReviewRegionFilter(location.filter)
   searchQuery.value = location.searchQuery
   nextTick(() => {
     if (reviewList.value) reviewList.value.scrollTop = location.listScrollTop
@@ -422,7 +496,7 @@ const selectedRegionIds = ref(new Set())
 const selectionAnchorId = ref('')
 const openRegionIds = ref(new Set())
 const searchQuery = ref('')
-const filter = ref('all') // all | attention | manual | disabled
+const filter = ref('all') // all | attention | manual | keep-original | untranslated | font-override | disabled
 
 const filteredRegions = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
@@ -431,6 +505,9 @@ const filteredRegions = computed(() => {
     if (q && !needle.includes(q)) return false
     if (filter.value === 'attention' && !needsAttention(r)) return false
     if (filter.value === 'manual' && !isManual(r)) return false
+    if (filter.value === 'keep-original' && !isKeepOriginal(r)) return false
+    if (filter.value === 'untranslated' && resolveRegionTranslation(r).trim()) return false
+    if (filter.value === 'font-override' && !hasFontOverride(r)) return false
     if (filter.value === 'disabled' && !isDisabled(r)) return false
     return true
   })
@@ -449,6 +526,9 @@ const revealedRegionIsFiltered = computed(() => Boolean(
 
 const attentionCount = computed(() => regions.value.filter(needsAttention).length)
 const manualCount = computed(() => regions.value.filter(isManual).length)
+const keepOriginalCount = computed(() => regions.value.filter(isKeepOriginal).length)
+const untranslatedCount = computed(() => regions.value.filter((r) => !resolveRegionTranslation(r).trim()).length)
+const fontOverrideCount = computed(() => regions.value.filter(hasFontOverride).length)
 const disabledCount = computed(() => regions.value.filter(isDisabled).length)
 
 function needsAttention(r) {
@@ -461,9 +541,26 @@ function isManual(r) {
 function isDisabled(r) {
   return Boolean(r.disabled)
 }
+function isKeepOriginal(r) {
+  return Boolean(draftFor(r).keepOriginal)
+}
+function hasFontOverride(r) {
+  return Boolean(String(draftFor(r).fontKey || r.font_key_override || '').trim())
+}
+function reviewStyleConfig() {
+  const config = project.value?.config || {}
+  const overrides = project.value?.overrides
+  return overrides ? { ...config, overrides } : config
+}
+function effectiveDirection(r) {
+  return resolveReviewDirection(r, reviewStyleConfig(), draftFor(r))
+}
+function toggledDirection(r) {
+  return effectiveDirection(r) === 'vertical' ? 'horizontal' : 'vertical'
+}
 function regionStatusLabel(r) {
   if (isDisabled(r)) return '已停用'
-  const dir = String(r.direction || 'horizontal') === 'vertical' ? '纵排' : '横排'
+  const dir = effectiveDirection(r) === 'vertical' ? '纵排' : '横排'
   return `已启用 · ${dir}`
 }
 function regionFontLabel(r) {
@@ -595,15 +692,29 @@ function regionBoxStyle(r) {
   }
 }
 
+function regionPopStyle(r) {
+  const pb = dragState.value && dragState.value.id === r.id && dragState.value.preview
+    ? dragState.value.preview
+    : (r.bbox || [0, 0, 0, 0])
+  const [x1, y1, , y2] = pb
+  const edgeSpace = 42 // 工具条约 34px 高，另留 8px 间距
+  const placeBelow = y1 < edgeSpace && imgH.value - y2 >= edgeSpace
+  const anchorY = placeBelow ? y2 : y1
+  return {
+    left: `clamp(4px, ${(x1 / imgW.value) * 100}%, calc(100% - 220px))`,
+    top: `${(anchorY / imgH.value) * 100}%`,
+    transform: placeBelow ? 'translateY(8px)' : 'translateY(calc(-100% - 8px))',
+  }
+}
+
 function regionBoxText(r) {
   const draft = draftFor(r)
   return String(draft.translation || draft.sourceText || r.source_text || '')
 }
 
 function previewFontFor(r) {
-  const draft = draftFor(r), config = project.value?.config || {}
-  const bucket = draft.fontStyle || r.font_style
-  const key = draft.fontKey || config[`style_font_${bucket}_key`] || r.font_key || config.font_key
+  const draft = draftFor(r), config = reviewStyleConfig()
+  const key = reviewStyleSnapshot(r, { draft, config, fonts: fonts.value }).fontKey
   return fonts.value.find(font => font.id === key || font.name === key || (!key && font.name === r.font_family))
 }
 watch(() => regions.value.map(r => previewFontFor(r)?.id || '').join('|'), () => {
@@ -625,7 +736,7 @@ function regionPreviewStyle(r) {
     fontSize: `${size}px`,
     fontWeight: 'normal',
     fontSynthesis: 'none',
-    writingMode: draft.direction === 'vertical' ? 'vertical-rl' : 'horizontal-tb',
+    writingMode: effectiveDirection(r) === 'vertical' ? 'vertical-rl' : 'horizontal-tb',
     letterSpacing: `${Math.max(0, (Number(draft.letterSpacing) - 1) * size)}px`,
     lineHeight: String(lineSpacing),
     color: draft.fgColor || '#1A1712',
@@ -636,8 +747,18 @@ function regionPreviewStyle(r) {
   }
 }
 
+function shouldShowSourceCrop(r) {
+  const draft = draftFor(r)
+  return Boolean(r?.bbox && (draft.keepOriginal || !draft.enabled))
+}
+
+function sourceCropImageStyle(r) {
+  return sourceCropStyle(r?.bbox, imgW.value, imgH.value)
+}
+
 // 拖动/缩放
 const dragState = ref(null)
+const resizeHandleOptions = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 
 function onRegionPointerDown(event, r) {
   if (spacePan.value) return // 空格平移模式：不拦截，事件冒泡给画布平移
@@ -655,7 +776,7 @@ function onRegionPointerDown(event, r) {
   const handleEl = event.target.closest('.handle')
   const mode = handleEl ? 'resize' : 'move'
   const handle = handleEl
-    ? ['tl', 'tr', 'bl', 'br'].find((h) => handleEl.classList.contains(h)) || 'br'
+    ? resizeHandleOptions.find((h) => handleEl.classList.contains(h)) || 'se'
     : ''
   dragState.value = {
     mode,
@@ -686,7 +807,7 @@ function onDragMove(event) {
     }
     d.preview = translateBBoxPage(d.bbox, dx, dy)
   } else {
-    // 四角各自缩放；Shift 等比，Alt 中心（对齐旧版）
+    // 八方向缩放；Shift 仅对角手柄等比，Alt 中心（对齐旧版）
     d.preview = resizeBBoxPage(d.bbox, d.handle, dx, dy, {
       proportional: event.shiftKey,
       fromCenter: event.altKey,
@@ -708,10 +829,41 @@ async function onDragUp() {
 // 手动添加框
 const addingMode = ref(false)
 const addDrag = ref(null)
+const marqueeState = ref(null)
+
+function canvasPagePoint(event, stage) {
+  const rect = stage?.getBoundingClientRect?.() || stage
+  if (!rect || rect.width < 1 || rect.height < 1) return null
+  return {
+    x: Math.min(imgW.value, Math.max(0, (event.clientX - rect.left) * imgW.value / rect.width)),
+    y: Math.min(imgH.value, Math.max(0, (event.clientY - rect.top) * imgH.value / rect.height)),
+  }
+}
 
 function onFramePointerDown(event) {
   const d = document.value
-  if (!addingMode.value || !d) return
+  if (!d || event.button !== 0 || spacePan.value) return
+  if (!addingMode.value) {
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.closest('.region-box, .region-pop, .canvas-hud, button, a')) return
+    const stageRect = event.currentTarget.getBoundingClientRect()
+    const point = canvasPagePoint(event, stageRect)
+    if (!point) return
+    marqueeState.value = {
+      stageRect: { left: stageRect.left, top: stageRect.top, width: stageRect.width, height: stageRect.height },
+      pageId: pageId.value,
+      pointerId: event.pointerId,
+      start: point,
+      current: point,
+      additive: Boolean(event.shiftKey || event.metaKey || event.ctrlKey),
+      moved: false,
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    window.addEventListener('pointermove', onMarqueeMove)
+    window.addEventListener('pointerup', onMarqueeUp, { once: true })
+    return
+  }
   const rect = event.currentTarget.getBoundingClientRect()
   const sx = rect.width / imgW.value
   const sy = rect.height / imgH.value
@@ -720,6 +872,54 @@ function onFramePointerDown(event) {
   addDrag.value = { start: [x, y], current: [x, y] }
   window.addEventListener('pointermove', onAddMove)
   window.addEventListener('pointerup', onAddUp, { once: true })
+}
+
+function onMarqueeMove(event) {
+  const d = marqueeState.value
+  if (!d || d.pageId !== pageId.value) return
+  if (d.pointerId != null && event.pointerId != null && d.pointerId !== event.pointerId) return
+  const point = canvasPagePoint(event, d.stageRect)
+  if (!point) return
+  d.current = point
+  d.moved = d.moved || Math.abs(point.x - d.start.x) >= 4 || Math.abs(point.y - d.start.y) >= 4
+}
+
+function marqueeStyle() {
+  const d = marqueeState.value
+  if (!d) return {}
+  const x1 = Math.min(d.start.x, d.current.x)
+  const y1 = Math.min(d.start.y, d.current.y)
+  const x2 = Math.max(d.start.x, d.current.x)
+  const y2 = Math.max(d.start.y, d.current.y)
+  return {
+    left: `${(x1 / imgW.value) * 100}%`,
+    top: `${(y1 / imgH.value) * 100}%`,
+    width: `${((x2 - x1) / imgW.value) * 100}%`,
+    height: `${((y2 - y1) / imgH.value) * 100}%`,
+  }
+}
+
+function onMarqueeUp(event) {
+  window.removeEventListener('pointermove', onMarqueeMove)
+  const d = marqueeState.value
+  marqueeState.value = null
+  if (!d || d.pageId !== pageId.value) return
+  if (d.pointerId != null && event.pointerId != null && d.pointerId !== event.pointerId) return
+  if (!d.moved) {
+    clearSelection()
+    return
+  }
+  const marquee = [
+    Math.min(d.start.x, d.current.x), Math.min(d.start.y, d.current.y),
+    Math.max(d.start.x, d.current.x), Math.max(d.start.y, d.current.y),
+  ]
+  const nextIds = selectCanvasRegions(regions.value, marquee, {
+    selectedIds: selectedRegionIds.value,
+    additive: d.additive,
+  })
+  selectedRegionIds.value = new Set(nextIds)
+  selectedRegionId.value = nextIds[0] || ''
+  selectionAnchorId.value = nextIds[0] || ''
 }
 
 function onAddMove(event) {
@@ -771,24 +971,7 @@ function addDragStyle() {
 
 // ---- bbox 几何（对齐旧版：边界钳制 / 锁轴移动 / 四角缩放 / Shift 等比 / Alt 中心）----
 function clampBBoxPage(bbox) {
-  const W = imgW.value
-  const H = imgH.value
-  let [x1, y1, x2, y2] = bbox.map((v) => Math.round(v))
-  if (x2 < x1) [x1, x2] = [x2, x1]
-  if (y2 < y1) [y1, y2] = [y2, y1]
-  x1 = Math.min(Math.max(0, x1), W)
-  x2 = Math.min(Math.max(0, x2), W)
-  y1 = Math.min(Math.max(0, y1), H)
-  y2 = Math.min(Math.max(0, y2), H)
-  if (x2 - x1 < 20) {
-    if (x1 + 20 <= W) x2 = x1 + 20
-    else { x2 = W; x1 = Math.max(0, W - 20) }
-  }
-  if (y2 - y1 < 12) {
-    if (y1 + 12 <= H) y2 = y1 + 12
-    else { y2 = H; y1 = Math.max(0, H - 12) }
-  }
-  return [x1, y1, x2, y2]
+  return clampCanvasBBox(bbox, imgW.value, imgH.value)
 }
 
 function translateBBoxPage(origin, dx, dy) {
@@ -801,35 +984,14 @@ function translateBBoxPage(origin, dx, dy) {
   return [Math.round(x1), Math.round(y1), Math.round(x1 + w), Math.round(y1 + h)]
 }
 
-// handle 取 tl/tr/bl/br；proportional=Shift 等比；fromCenter=Alt 中心缩放（对齐旧版语义）
+// handle 取 nw/n/ne/e/se/s/sw/w；proportional=Shift 等比；fromCenter=Alt 中心缩放（对齐旧版语义）
 function resizeBBoxPage(origin, handle, dx, dy, { proportional = false, fromCenter = false } = {}) {
-  let [x1, y1, x2, y2] = origin
-  if (handle.includes('t')) { y1 += dy; if (fromCenter) y2 -= dy }
-  if (handle.includes('b')) { y2 += dy; if (fromCenter) y1 -= dy }
-  if (handle.includes('l')) { x1 += dx; if (fromCenter) x2 -= dx }
-  if (handle.includes('r')) { x2 += dx; if (fromCenter) x1 -= dx }
-  if (proportional) {
-    const ow = Math.max(8, origin[2] - origin[0])
-    const oh = Math.max(8, origin[3] - origin[1])
-    const ratio = ow / oh
-    let nw = Math.max(8, Math.abs(x2 - x1))
-    let nh = Math.max(8, Math.abs(y2 - y1))
-    if (nw / ow >= nh / oh) nh = nw / ratio
-    else nw = nh * ratio
-    if (fromCenter) {
-      const cx = (origin[0] + origin[2]) / 2
-      const cy = (origin[1] + origin[3]) / 2
-      x1 = cx - nw / 2; x2 = cx + nw / 2
-      y1 = cy - nh / 2; y2 = cy + nh / 2
-    } else {
-      // 锚定在拖拽角的对角
-      if (handle.includes('l')) x1 = x2 - nw
-      else x2 = x1 + nw
-      if (handle.includes('t')) y1 = y2 - nh
-      else y2 = y1 + nh
-    }
-  }
-  return clampBBoxPage([x1, y1, x2, y2])
+  return resizeCanvasBBox(origin, handle, dx, dy, {
+    width: imgW.value,
+    height: imgH.value,
+    proportional,
+    fromCenter,
+  })
 }
 
 // Every persisted edit shares one history with page/document revision guards.
@@ -873,11 +1035,22 @@ function isTypingTarget(target) {
 }
 
 function onGlobalKeydown(event) {
+  if (fullTranslateConfirmationOpen.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeFullTranslationConfirmation()
+    }
+    return
+  }
   if (event.key === 'Escape') {
     event.preventDefault()
     addingMode.value = false
     exportMenuOpen.value = false
     rerenderMenuOpen.value = false
+    if (marqueeState.value) {
+      window.removeEventListener('pointermove', onMarqueeMove)
+      marqueeState.value = null
+    }
     clearSelection()
     return
   }
@@ -968,12 +1141,32 @@ async function applyToggleEnabled(r) {
   return saveDraft(r, ['enabled'])
 }
 async function applyDirection(r, direction) {
-  draftFor(r).direction = direction
-  return saveDraft(r, ['direction'])
+  if (!r?.id) return null
+  const draft = draftFor(r)
+  const previousDirection = draft.directionIntent == null
+    ? resolveLayoutDirectionOverride(r, reviewStyleConfig())
+    : normalizeReviewDirection(draft.directionIntent)
+  if (previousDirection === normalizeReviewDirection(direction)) return null
+  try { return await editor.saveDirectionIntent(r.id, direction, previousDirection) }
+  catch (error) { toastError(error); return null }
 }
 async function applyKeepOriginal(r) { return saveDraft(r, ['keepOriginal']) }
 async function applyFont(r) { return saveDraft(r, ['fontKey']) }
-async function applyFontSize(r) { return saveDraft(r, ['fontSize']) }
+async function applyFontSize(r) {
+  const draft = draftFor(r)
+  const baseline = editor.document.value?.regions.find(region => region.id === r.id)
+  draft.fontSizeOverride = Math.max(8, Math.round(Number(draft.fontSize) || 12))
+  const fields = ['fontSize']
+  if (draft.fontSizeOverride !== baseline?.font_size_override) fields.push('fontSizeOverride')
+  return saveDraft(r, fields)
+}
+async function resetFontSize(r) {
+  const draft = draftFor(r)
+  if (draft.fontSizeOverride == null) return null
+  draft.fontSize = Math.max(8, Number(r.detected_font_size) || Number(r.font_size) || 12)
+  draft.fontSizeOverride = null
+  return saveDraft(r, ['fontSizeOverride'])
+}
 async function applyFontStyle(r) { return saveDraft(r, ['fontStyle']) }
 async function applyAdvancedStyle(r) {
   return saveDraft(r, ['rotation', 'strokeWidth', 'letterSpacing', 'lineSpacing', 'fgColor', 'bgColor', 'preserveBackground'])
@@ -996,55 +1189,27 @@ async function deleteRegion(r) {
 // 样式复制/粘贴
 const styleClipboard = ref(null)
 function copyStyle(r) {
-  const d = draftFor(r)
-  styleClipboard.value = {
-    fontKey: d.fontKey,
-    fontSize: d.fontSize,
-    fontStyle: d.fontStyle,
-    direction: d.direction,
-    rotation: d.rotation,
-    strokeWidth: d.strokeWidth,
-    letterSpacing: d.letterSpacing,
-    lineSpacing: d.lineSpacing,
-    fgColor: d.fgColor,
-    bgColor: d.bgColor,
-    preserveBackground: d.preserveBackground,
-  }
+  styleClipboard.value = reviewStyleSnapshot(r, {
+    draft: draftFor(r),
+    config: reviewStyleConfig(),
+    fonts: fonts.value,
+  })
   toast('样式已复制', 'ok', 1500)
 }
 async function pasteStyle(r) {
   const s = styleClipboard.value
-  if (!s) return
+  if (!s || !r?.id) return
   const targets = selectedRegionIds.value.has(r.id) && selectionCount.value > 1
     ? selectedRegions.value
     : [r]
   const commands = []
   for (const target of targets) {
-    commands.push(...styleCommands(target.id, s))
+    commands.push(...buildReviewStyleCommands(target.id, s))
   }
   await submitCommands(commands, { label: targets.length > 1 ? '批量粘贴样式' : '粘贴样式' })
 }
 
-function styleCommands(regionId, style = {}) {
-  const commands = []
-  if (Object.hasOwn(style, 'fontKey')) commands.push({ type: 'update_region_font', region_id: regionId, font_key: style.fontKey })
-  if (Object.hasOwn(style, 'fontSize')) commands.push({ type: 'update_font_size', region_id: regionId, font_size: Math.max(8, Math.round(Number(style.fontSize) || 12)) })
-  if (Object.hasOwn(style, 'fontStyle')) commands.push({ type: 'update_font_style', region_id: regionId, style: style.fontStyle || '' })
-  if (Object.hasOwn(style, 'direction')) commands.push({ type: 'update_text_direction', region_id: regionId, direction: style.direction || 'auto' })
-  const advanced = {}
-  if (Object.hasOwn(style, 'rotation')) advanced.rotation = Number(style.rotation) || 0
-  if (Object.hasOwn(style, 'strokeWidth')) advanced.stroke_width = Number(style.strokeWidth) || 0
-  if (Object.hasOwn(style, 'letterSpacing')) advanced.letter_spacing = Number(style.letterSpacing) || 0
-  if (Object.hasOwn(style, 'lineSpacing')) advanced.line_spacing = Number(style.lineSpacing) || 0
-  if (Object.hasOwn(style, 'fgColor')) advanced.fg_color = colorTriplet(style.fgColor)
-  if (Object.hasOwn(style, 'bgColor')) advanced.bg_color = colorTriplet(style.bgColor)
-  if (Object.hasOwn(style, 'preserveBackground')) advanced.preserve_background = Boolean(style.preserveBackground)
-  if (Object.keys(advanced).length) commands.push({ type: 'update_region_style', region_id: regionId, ...advanced })
-  return commands
-}
-
 const ocrBusyRegionIds = ref(new Set())
-function colorTriplet(value) { return [1, 3, 5].map(index => parseInt(String(value).slice(index, index + 2), 16)) }
 function isOcrBusy(r) { return ocrBusyRegionIds.value.has(r?.id) }
 async function retryOcr(r) {
   if (!r || isOcrBusy(r)) return
@@ -1079,6 +1244,28 @@ async function applyBatchField(field, value, label) {
   await submitCommands(commands, { label })
 }
 
+async function duplicateRegion(r) {
+  if (!r?.id || taskBusy.value) return null
+  const result = await submitCommands([
+    { type: 'duplicate_region', region_id: r.id },
+  ], { label: '复制文本框' })
+  const createdId = result?.created_region_id
+  if (!createdId) return result
+  const next = new Set([createdId])
+  selectedRegionIds.value = next
+  selectedRegionId.value = createdId
+  selectionAnchorId.value = createdId
+  nextTick(() => {
+    const created = regions.value.find(region => region.id === createdId)
+    if (created) {
+      toggleOpen(created, true)
+      locateRegion(created)
+    }
+  })
+  toast('文本框已复制', 'ok', 1500)
+  return result
+}
+
 function fieldCommand(regionId, field, value) {
   if (field === 'fontKey') return [{ type: 'update_region_font', region_id: regionId, font_key: value || '' }]
   if (field === 'fontSize') return [{ type: 'update_font_size', region_id: regionId, font_size: Math.max(8, Math.round(Number(value) || 12)) }]
@@ -1111,13 +1298,13 @@ async function mergeSelected() {
 }
 
 // ---- 任务 ----
-async function runPageTask(action, targetPageId = pageId.value, { resolveTargetAfterFlush = false } = {}) {
+async function runPageTask(action, targetPageId = pageId.value, { resolveTargetAfterFlush = false, processingConfig = null } = {}) {
   if (preparingTask.value || taskEvents.busy.value) return
   const sid = sessionId.value, pid = pageId.value
   preparingTask.value = true
   try {
     if (!await leaveSafely()) return
-    const config = await loadProcessingConfig(project.value?.config || {})
+    const config = processingConfig || await loadProcessingConfig(project.value?.config || {})
     if (sid !== sessionId.value || pid !== pageId.value) return
     const resolvedTargetPageId = resolveTargetAfterFlush
       ? pendingRenderPages.value.map(image => image.stored_name)
@@ -1132,6 +1319,37 @@ async function runPageTask(action, targetPageId = pageId.value, { resolveTargetA
   finally { preparingTask.value = false }
 }
 function runTranslatePage() { return runPageTask('translate-page') }
+async function requestFullTranslation() {
+  if (!canFullTranslate.value) return
+  const requestedProjectId = sessionId.value
+  fullTranslationConfigLoading.value = true
+  try {
+    const loadedConfig = await loadProcessingConfig(project.value?.config || {})
+    if (requestedProjectId !== sessionId.value || !canFullTranslate.value) return
+    fullTranslationConfig.value = loadedConfig
+    fullTranslationProjectId.value = requestedProjectId
+    pendingFullTranslateAction.value = fullTranslateAction.value
+    fullTranslateConfirmationOpen.value = true
+  } catch (error) {
+    toastError(error)
+  } finally {
+    fullTranslationConfigLoading.value = false
+  }
+}
+function closeFullTranslationConfirmation() {
+  fullTranslateConfirmationOpen.value = false
+  pendingFullTranslateAction.value = ''
+  fullTranslationConfig.value = null
+  fullTranslationProjectId.value = ''
+}
+function confirmFullTranslation() {
+  const action = pendingFullTranslateAction.value || fullTranslateAction.value
+  const requestedProjectId = fullTranslationProjectId.value
+  const processingConfig = fullTranslationConfig.value
+  closeFullTranslationConfirmation()
+  if (!requestedProjectId || requestedProjectId !== sessionId.value || !processingConfig || !canFullTranslate.value) return null
+  return runPageTask(action, '', { processingConfig })
+}
 function runRerender(scope = 'page') {
   rerenderMenuOpen.value = false
   return scope === 'page'
@@ -1241,6 +1459,7 @@ onMounted(() => {
   restoreReviewLocation(sessionId.value)
 })
 watch([sessionId, pageId], async () => {
+  if (fullTranslateConfirmationOpen.value) closeFullTranslationConfirmation()
   selectedRegionId.value = ''
   selectedRegionIds.value = new Set()
   selectionAnchorId.value = ''
@@ -1317,6 +1536,7 @@ onUnmounted(() => {
           {{ reviewed ? '人工已审校 ✓' : '标记人工已审校' }}
         </button>
         <button v-if="editor.dirty.value || editor.error.value" class="btn btn-ghost btn-sm" type="button" :disabled="editor.pending.value > 0" @click="leaveSafely">保存修改</button>
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="!canFullTranslate || fullTranslationConfigLoading" title="使用当前设置和模型处理整本漫画" @click="requestFullTranslation">{{ fullTranslationConfigLoading ? '读取设置…' : fullTranslateLabel }}</button>
         <a class="btn btn-ghost" href="#/glossary" @click.prevent="router.push({ path: `/glossary/${sessionId}`, query: { page: pageId } })">专有名词库</a>
         <button v-if="taskBusy" class="btn btn-ghost" type="button" @click="cancelTask">取消任务</button>
         <div class="export-menu-wrap">
@@ -1413,7 +1633,7 @@ onUnmounted(() => {
               擦除
               <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 6 4 4 4-4"/></svg>
             </a>
-            <button class="btn btn-ghost btn-sm" type="button" :disabled="taskBusy" @click="runTranslatePage">重新翻译</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="taskBusy" title="只翻译并嵌字当前页" @click="runTranslatePage">翻译当前页</button>
             <button class="btn btn-ghost btn-sm" type="button" :class="{ 'is-on': previewTypography }" title="在空页上显示当前字体和排版草稿" @click="previewTypography = !previewTypography">草稿预览</button>
             <button class="btn btn-ghost btn-sm" type="button" :disabled="!attentionCount" title="定位到下一个待处理问题" @click="nextIssue">下个问题</button>
             <button v-if="!panelCollapsed" class="icon-btn" type="button" aria-label="隐藏文本框面板" title="隐藏文本框面板" @click="panelCollapsed = true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
@@ -1451,17 +1671,20 @@ onUnmounted(() => {
                     @pointerdown="onRegionPointerDown($event, r)"
                   >
                     <span class="region-no">{{ r.number }}</span>
-                    <span v-if="previewTypography && draftFor(r).enabled && !draftFor(r).keepOriginal" class="box-text" :style="regionPreviewStyle(r)">{{ regionBoxText(r) }}</span>
-                    <span v-if="r.id === selectedRegionId" class="handle tl"></span>
-                    <span v-if="r.id === selectedRegionId" class="handle tr"></span>
-                    <span v-if="r.id === selectedRegionId" class="handle bl"></span>
-                    <span v-if="r.id === selectedRegionId" class="handle br"></span>
+                    <span v-if="shouldShowSourceCrop(r)" class="box-source-crop">
+                      <img :src="imageUrl('source-image')" :style="sourceCropImageStyle(r)" alt="" draggable="false" />
+                    </span>
+                    <span v-else-if="previewTypography && draftFor(r).enabled && !draftFor(r).keepOriginal" class="box-text" :style="regionPreviewStyle(r)">{{ regionBoxText(r) }}</span>
+                    <template v-if="r.id === selectedRegionId">
+                      <span v-for="handle in resizeHandleOptions" :key="`${r.id}-${handle}`" class="handle" :class="handle"></span>
+                    </template>
                   </div>
+                  <div v-if="marqueeState" class="region-marquee" :style="marqueeStyle()"></div>
                   <div v-if="addDrag" class="region-box is-drawing" :style="addDragStyle()"></div>
                   <div
                     v-if="selectedRegionId && regions.find((r) => r.id === selectedRegionId)"
                     class="region-pop"
-                    :style="regionBoxStyle(regions.find((r) => r.id === selectedRegionId))"
+                    :style="regionPopStyle(regions.find((r) => r.id === selectedRegionId))"
                   >
                     <span class="pop-coord num">x{{ regions.find((r) => r.id === selectedRegionId).bbox?.[0] }} · {{ regions.find((r) => r.id === selectedRegionId).bbox?.[1] }}</span>
                     <span class="pop-divider"></span>
@@ -1471,7 +1694,7 @@ onUnmounted(() => {
                     <button class="icon-btn" type="button" data-tip="复制全部样式" aria-label="复制全部样式" @click="copyStyle(regions.find((r) => r.id === selectedRegionId))">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10"/><path d="M12 12 7 7"/><path d="m17 16 4-4-4-4"/><path d="M21 12H9"/></svg>
                     </button>
-                    <button class="icon-btn" type="button" data-tip="纵排 / 横排" aria-label="纵横排" @click="applyDirection(regions.find((r) => r.id === selectedRegionId), regions.find((r) => r.id === selectedRegionId).direction === 'vertical' ? 'horizontal' : 'vertical')">
+                    <button class="icon-btn" type="button" data-tip="纵排 / 横排" aria-label="纵横排" @click="applyDirection(regions.find((r) => r.id === selectedRegionId), toggledDirection(regions.find((r) => r.id === selectedRegionId)))">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 4v13M7 17l-3-3M7 17l3-3"/><path d="M17 20V7M17 7l-3 3M17 7l3 3"/></svg>
                     </button>
                     <button class="icon-btn" type="button" :data-tip="isManual(selectedRegion) ? '删除此框' : '停用此框'" :aria-label="isManual(selectedRegion) ? '删除此框' : '停用此框'" @click="deleteRegion(regions.find((r) => r.id === selectedRegionId))">
@@ -1546,6 +1769,9 @@ onUnmounted(() => {
             <button class="chip" :class="{ active: filter === 'all' }" @click="filter = 'all'">全部 {{ regionCount }}</button>
             <button class="chip" :class="{ active: filter === 'attention' }" @click="filter = 'attention'">需留意 {{ attentionCount }}</button>
             <button class="chip" :class="{ active: filter === 'manual' }" @click="filter = 'manual'">手动 {{ manualCount }}</button>
+            <button class="chip" :class="{ active: filter === 'keep-original' }" @click="filter = 'keep-original'">保留原文 {{ keepOriginalCount }}</button>
+            <button class="chip" :class="{ active: filter === 'untranslated' }" @click="filter = 'untranslated'">未翻译 {{ untranslatedCount }}</button>
+            <button class="chip" :class="{ active: filter === 'font-override' }" @click="filter = 'font-override'">字体覆盖 {{ fontOverrideCount }}</button>
             <button class="chip" :class="{ active: filter === 'disabled' }" @click="filter = 'disabled'">已停用 {{ disabledCount }}</button>
           </div>
         </div>
@@ -1607,11 +1833,11 @@ onUnmounted(() => {
 
               <div class="toggle-chips">
                 <button class="toggle-chip" :class="{ active: draftFor(r).enabled }" type="button" @click="applyToggleEnabled(r)">{{ draftFor(r).enabled ? '已启用' : '已停用' }}</button>
-                <button class="toggle-chip" :class="{ active: draftFor(r).direction === 'horizontal' }" type="button" @click="applyDirection(r, 'horizontal')">横排</button>
-                <button class="toggle-chip" :class="{ active: draftFor(r).direction === 'vertical' }" type="button" @click="applyDirection(r, 'vertical')">纵排</button>
+                <button class="toggle-chip" :class="{ active: effectiveDirection(r) === 'horizontal' }" type="button" @click="applyDirection(r, 'horizontal')">横排</button>
+                <button class="toggle-chip" :class="{ active: effectiveDirection(r) === 'vertical' }" type="button" @click="applyDirection(r, 'vertical')">纵排</button>
               </div>
 
-              <div class="region-edit-grid">
+                <div class="region-edit-grid">
                 <label class="field">
                   <span>字体</span>
                   <select :value="draftFor(r).fontKey" @change="draftFor(r).fontKey = $event.target.value; applyFont(r)">
@@ -1621,15 +1847,18 @@ onUnmounted(() => {
                 </label>
                 <div class="field">
                   <span>字号</span>
-                  <div class="stepper">
-                    <button type="button" @click="draftFor(r).fontSize = Math.max(8, Number(draftFor(r).fontSize) - 1); applyFontSize(r)">−</button>
-                    <input
-                      type="text"
-                      inputmode="numeric"
-                      :value="draftFor(r).fontSize"
-                      @change="draftFor(r).fontSize = Number($event.target.value) || 12; applyFontSize(r)"
-                    />
-                    <button type="button" @click="draftFor(r).fontSize = Math.min(200, Number(draftFor(r).fontSize) + 1); applyFontSize(r)">＋</button>
+                  <div class="font-size-control">
+                    <div class="stepper">
+                      <button type="button" @click="draftFor(r).fontSize = Math.max(8, Number(draftFor(r).fontSize) - 1); applyFontSize(r)">−</button>
+                      <input
+                        type="text"
+                        inputmode="numeric"
+                        :value="draftFor(r).fontSize"
+                        @change="draftFor(r).fontSize = Number($event.target.value) || 12; applyFontSize(r)"
+                      />
+                      <button type="button" @click="draftFor(r).fontSize = Math.min(200, Number(draftFor(r).fontSize) + 1); applyFontSize(r)">＋</button>
+                    </div>
+                    <button class="font-auto-btn" type="button" :disabled="taskBusy || draftFor(r).fontSizeOverride == null" title="恢复检测到的自动字号" @click="resetFontSize(r)">自动</button>
                   </div>
                 </div>
               </div>
@@ -1682,7 +1911,8 @@ onUnmounted(() => {
 
               <div class="region-card-actions">
                 <button class="icon-btn" type="button" data-tip="复制全部样式" aria-label="复制全部样式" @click="copyStyle(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10"/><path d="M12 12 7 7"/><path d="m17 16 4-4-4-4"/><path d="M21 12H9"/></svg></button>
-                <button class="icon-btn" type="button" data-tip="粘贴全部样式" aria-label="粘贴全部样式" @click="pasteStyle(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg></button>
+                <button class="icon-btn" type="button" data-tip="粘贴全部样式" aria-label="粘贴全部样式" :disabled="!styleClipboard" @click="pasteStyle(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg></button>
+                <button class="icon-btn" type="button" data-tip="复制文本框" aria-label="复制文本框" :disabled="taskBusy" @click="duplicateRegion(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button>
                 <div class="spacer"></div>
                 <button class="icon-btn" type="button" :data-tip="isManual(r) ? '删除此框' : '停用此框'" :aria-label="isManual(r) ? '删除此框' : '停用此框'" @click="deleteRegion(r)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
               </div>
@@ -1694,6 +1924,28 @@ onUnmounted(() => {
           </div>
         </div>
       </aside>
+    </div>
+
+    <div v-if="fullTranslateConfirmationOpen" class="batch-confirm-overlay" @click.self="closeFullTranslationConfirmation">
+      <section class="batch-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="batch-translation-title">
+        <header class="batch-confirm-head">
+          <div>
+            <span class="kicker">批量任务</span>
+            <h2 id="batch-translation-title">{{ batchTranslationConfirmation.title }}</h2>
+          </div>
+          <button class="icon-btn" type="button" aria-label="关闭确认" @click="closeFullTranslationConfirmation">✕</button>
+        </header>
+        <div class="batch-confirm-body">
+          <p>{{ batchTranslationConfirmation.summary }}</p>
+          <ul>
+            <li v-for="item in batchTranslationConfirmation.items" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <footer class="batch-confirm-actions">
+          <button class="btn btn-secondary" type="button" @click="closeFullTranslationConfirmation">{{ batchTranslationConfirmation.cancelLabel }}</button>
+          <button class="btn btn-primary" type="button" @click="confirmFullTranslation">{{ batchTranslationConfirmation.confirmLabel }}</button>
+        </footer>
+      </section>
     </div>
 
     <div class="toast-stack">
@@ -1710,6 +1962,23 @@ onUnmounted(() => {
 .panel-resizer { width: 6px; flex: none; cursor: col-resize; background: var(--border); touch-action: none; }
 .panel-resizer:hover { background: var(--accent); }
 .region-panel { flex: none; min-width: 280px; max-width: 45vw; }
+.region-box .handle.nw { top: -4px; left: -4px; cursor: nwse-resize; }
+.region-box .handle.n { top: -4px; left: 50%; margin-left: -4px; cursor: ns-resize; }
+.region-box .handle.ne { top: -4px; right: -4px; cursor: nesw-resize; }
+.region-box .handle.e { top: 50%; right: -4px; margin-top: -4px; cursor: ew-resize; }
+.region-box .handle.se { bottom: -4px; right: -4px; cursor: nwse-resize; }
+.region-box .handle.s { bottom: -4px; left: 50%; margin-left: -4px; cursor: ns-resize; }
+.region-box .handle.sw { bottom: -4px; left: -4px; cursor: nesw-resize; }
+.region-box .handle.w { top: 50%; left: -4px; margin-top: -4px; cursor: ew-resize; }
+.region-box .box-source-crop,
+.region-box .box-text { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.region-box .box-source-crop img { position: absolute; max-width: none; pointer-events: none; user-select: none; -webkit-user-drag: none; }
+.region-box.is-disabled { background: transparent; border-style: dashed; }
+.font-size-control { display: flex; align-items: stretch; gap: 5px; }
+.font-size-control .stepper { flex: 1; min-width: 0; }
+.font-auto-btn { min-width: 36px; padding: 0 7px; border: 1px solid var(--border); border-radius: var(--r-s); background: var(--bg-inset); color: var(--text-2); font-size: var(--fs-micro); }
+.font-auto-btn:hover:not(:disabled) { border-color: var(--accent-border); color: var(--accent); }
+.font-auto-btn:disabled { opacity: .45; cursor: not-allowed; }
 .batch-controls { display: flex; flex-wrap: wrap; gap: 5px; padding: 10px; border-bottom: 1px solid var(--border); }
 .batch-controls input { width: 90px; }
 .batch-controls select { max-width: 100%; }
@@ -1719,6 +1988,15 @@ onUnmounted(() => {
 .topbar-actions { flex-wrap: wrap; }
 .region-card-head .is-warn { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .region-box.is-multi-selected { border-color: var(--region-active); background: var(--region-active-fill); }
+.region-marquee { position: absolute; z-index: 7; border: 1px dashed var(--accent); background: var(--accent-dim); pointer-events: none; }
 .region-card:focus-visible, .panel-resizer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .preview-note { margin: 0; padding: 5px 12px; font-size: 11px; color: var(--text-2); background: var(--bg-panel); }
+.batch-confirm-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgba(17, 24, 39, .38); }
+.batch-confirm-modal { width: min(520px, 100%); border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-elevated); box-shadow: var(--shadow-pop); }
+.batch-confirm-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 12px; border-bottom: 1px solid var(--border); }
+.batch-confirm-head h2 { margin: 4px 0 0; font-size: 18px; }
+.batch-confirm-body { padding: 16px 20px 6px; color: var(--text-2); line-height: 1.55; }
+.batch-confirm-body p { margin: 0 0 10px; }
+.batch-confirm-body ul { margin: 0; padding-left: 20px; }
+.batch-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
 </style>

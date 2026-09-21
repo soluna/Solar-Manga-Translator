@@ -18,6 +18,7 @@ output_images/
 .superpowers/.worktrees/
 backend/manga-image-translator/
 frontend/test-artifacts/
+frontend-v3/test-artifacts/
 playwright-report/
 test-results/
 # Local projects, outputs, models, settings, caches, browser state, and logs.

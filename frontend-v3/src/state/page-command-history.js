@@ -28,7 +28,9 @@ function reviewStateFrom(document) {
 }
 
 /** Derive undo from the last committed document, never from an optimistic preview. */
-export function pageCommandHistory(commands, before, response = {}, label = '编辑文本区域') {
+export function pageCommandHistory(commands, before, response = {}, label = '编辑文本区域', {
+  directionUndoByRegion = {},
+} = {}) {
   const regions = new Map((before?.regions || []).map(region => [region.region_id, region]))
   const undo = [], redo = clone(commands)
   for (let index = commands.length - 1; index >= 0; index--) {
@@ -39,7 +41,9 @@ export function pageCommandHistory(commands, before, response = {}, label = '编
       case 'update_font_size': undo.push({ ...base, font_size: region?.style?.font_size_override ?? null }); break
       case 'update_region_font': undo.push({ ...base, font_key: region?.style?.font_key_override || '' }); break
       case 'update_font_style': undo.push({ ...base, style: region?.style?.font_style_override || '' }); break
-      case 'update_text_direction': undo.push({ ...base, direction: region?.direction || 'auto' }); break
+      case 'update_text_direction': undo.push({ ...base, direction: Object.hasOwn(directionUndoByRegion, command.region_id)
+        ? directionUndoByRegion[command.region_id]
+        : region?.direction || 'auto' }); break
       case 'update_region_bbox': undo.push({ ...base, bbox: clone(region.bbox) }); break
       case 'set_keep_original': undo.push({ ...base, enabled: Boolean(region?.flags?.keep_original) }); break
       case 'disable_region': undo.push(...restoreRegionCommands(region)); break

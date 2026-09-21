@@ -22,10 +22,13 @@ import {
 import { dismiss, toast, toastError, toasts } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
 import { workflowStageLabelMap } from '../state/workflow-state.js'
+import { useTaskEvents } from '../composables/useTaskEvents.js'
+import { canContinueProject, canRestoreProjectSnapshot, projectHasActiveTask } from '../state/project-actions.js'
 import p1Blank from '../assets/p1-blank.svg'
 import { recentPageFor } from '../state/recent-location.js'
 
 const router = useRouter()
+const tasks = useTaskEvents()
 
 // ---- 数据 ----
 const projects = ref([])
@@ -125,8 +128,15 @@ function coverUrl(project) {
 }
 
 function isBusy(project) {
-  const busy = project.is_busy || project.busy
-  return Boolean(busy) || restoringId.value === project.project_id
+  return projectHasActiveTask(project) || restoringId.value === project.project_id
+}
+
+function canContinue(project) {
+  return canContinueProject(project, {
+    restoringId: restoringId.value,
+    activeTaskBusy: tasks.busy.value,
+    activeSessionId: tasks.sessionId.value,
+  })
 }
 
 function busyLabel(project) {
@@ -142,7 +152,7 @@ function snapshotKindLabel(kind) {
 
 // ---- 卡片操作 ----
 async function continueProject(project) {
-  if (restoringId.value) return
+  if (!canContinue(project)) return
   restoringId.value = project.project_id
   try {
     await apiPostJson(`/api/projects/${encodeURIComponent(project.project_id)}/restore`, {}, '恢复项目失败')
@@ -206,6 +216,11 @@ async function pinSnapshot(project, snapshot) {
 }
 
 function askRestoreSnapshot(project, snapshot) {
+  const key = `${project?.project_id}:${snapshot?.snapshot_id}`
+  if (!canRestoreProjectSnapshot(project, { restoringKey: restoringSnapshotKey.value, snapshotKey: key })) {
+    toast('项目任务进行中，完成或停止后才能恢复快照。', 'warn')
+    return
+  }
   snapshotTarget.value = { project, snapshot }
 }
 
@@ -215,6 +230,10 @@ async function confirmRestoreSnapshot() {
   const { project, snapshot } = target
   const key = `${project.project_id}:${snapshot.snapshot_id}`
   snapshotTarget.value = null
+  if (!canRestoreProjectSnapshot(project, { restoringKey: restoringSnapshotKey.value, snapshotKey: key })) {
+    toast('项目任务进行中，完成或停止后才能恢复快照。', 'warn')
+    return
+  }
   restoringSnapshotKey.value = key
   try {
     const restored = await apiPostJson(
@@ -393,9 +412,9 @@ function goBack() {
             </div>
 
             <div class="project-card-actions">
-              <button class="btn btn-primary btn-sm" :disabled="isBusy(project) || !!restoringId" @click="continueProject(project)">
+              <button class="btn btn-primary btn-sm" :disabled="!canContinue(project)" @click="continueProject(project)">
                 <span v-if="restoringId === project.project_id" class="spin" />
-                <template v-else>继续</template>
+                <template v-else>{{ projectHasActiveTask(project) ? '重新连接' : '继续' }}</template>
               </button>
               <button class="btn btn-secondary btn-sm" @click="toggleSnapshots(project)">
                 <span v-if="snapshotLoadingId === project.project_id" class="spin" />
@@ -420,7 +439,7 @@ function goBack() {
                   </div>
                   <button
                     class="btn btn-ghost btn-sm"
-                    :disabled="restoringSnapshotKey === `${project.project_id}:${snapshot.snapshot_id}`"
+                    :disabled="!canRestoreProjectSnapshot(project, { restoringKey: restoringSnapshotKey, snapshotKey: `${project.project_id}:${snapshot.snapshot_id}` })"
                     @click="askRestoreSnapshot(project, snapshot)"
                   >恢复此快照</button>
                   <button

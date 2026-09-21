@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import {
   nextIssueRegion,
   normalizeReviewLocation,
+  normalizeReviewRegionFilter,
   reviewLocationStorageKey,
   selectRegionRange,
 } from '../src/state/review-workspace-state.js'
@@ -30,4 +31,12 @@ test('issue navigation and range selection retain canonical order across filters
   assert.equal(nextIssueRegion(regions, 'd', { isIssue: region => Boolean(region.issueReason) }).id, 'b')
   assert.deepEqual([...selectRegionRange(regions, 'd', 'b', ['a'])], ['a', 'b', 'c', 'd'])
   assert.equal(reviewLocationStorageKey('project-a'), 'inkstage-review-location-v1:project-a')
+})
+
+test('review location preserves the legacy actionable region filters', () => {
+  for (const filter of ['keep-original', 'untranslated', 'font-override']) {
+    assert.equal(normalizeReviewRegionFilter(filter), filter)
+    assert.equal(normalizeReviewLocation({ filter }).filter, filter)
+  }
+  assert.equal(normalizeReviewRegionFilter('removed-filter'), 'all')
 })

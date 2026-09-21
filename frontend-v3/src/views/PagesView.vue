@@ -1,13 +1,14 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { apiFetch, apiPostJson, readApiError, toApiUrl, withCacheBust, withImagePreviewSize } from '../api/client.js'
+import { apiFetch, apiGetJson, apiPostJson, readApiError, toApiUrl, withCacheBust, withImagePreviewSize } from '../api/client.js'
 import { useProject } from '../composables/useProject.js'
 import { useTaskEvents } from '../composables/useTaskEvents.js'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
 import { loadProcessingConfig } from '../api/processing-config.js'
-import { pageStatus, projectReadiness } from '../state/page-status.js'
+import { buildBatchTranslationConfirmation, getProjectTranslateAction, shouldConfirmBatchTranslation } from '../state/workflow-state.js'
+import { hasPartialTranslation, pageStatus, projectReadiness } from '../state/page-status.js'
 import { recentPageFor, rememberRecentPage } from '../state/recent-location.js'
 import {
   baseImageUploadMessage,
@@ -30,6 +31,8 @@ const baseImageInput = ref(null)
 const baseUploadBusy = ref(false)
 const baseUploadProgress = ref({ done: 0, total: 0 })
 const baseUploadFeedback = ref(null)
+const pauseAfterDetection = ref(true)
+const batchTranslationPending = ref(null)
 
 function stablePageNumber(image, index) {
   const explicit = Number(image?.page_number)
@@ -43,7 +46,12 @@ const images = computed(() => (project.value?.images || []).map((image, index) =
   ...image,
   page_number: stablePageNumber(image, index),
 })))
-const readiness = computed(() => projectReadiness(images.value))
+const workflowStage = computed(() => String(project.value?.workflow_stage || 'idle'))
+const readiness = computed(() => projectReadiness(images.value, {
+  pauseAfterDetection: pauseAfterDetection.value,
+  workflowStage: workflowStage.value,
+}))
+const hasPartialTranslatedResults = computed(() => hasPartialTranslation(images.value))
 const filteredImages = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return images.value
@@ -57,7 +65,6 @@ const filteredImages = computed(() => {
 
 const projectTitle = computed(() => project.value?.project?.title || project.value?.project?.project_id || sessionId.value || '项目')
 const pageCount = computed(() => project.value?.total_images ?? images.value.length)
-const workflowStage = computed(() => String(project.value?.workflow_stage || 'idle'))
 const preparingTask = ref(false)
 const taskBusy = computed(() => taskEvents.busy.value || preparingTask.value)
 const currentTask = computed(() => taskEvents.sessionId.value === sessionId.value && taskBusy.value ? {
@@ -129,11 +136,56 @@ async function runAction(action) {
   try {
     const config = await loadProcessingConfig(project.value?.config || {})
     if (id !== sessionId.value) return
-    const nextAction = action === 'translate' && !readiness.value.translated ? 'resume-translate' : action
+    pauseAfterDetection.value = Boolean(config.pause_after_detection)
+    const nextAction = action === 'translate'
+      ? getProjectTranslateAction({
+        workflowStage: workflowStage.value,
+        hasPartialTranslatedResults: hasPartialTranslatedResults.value,
+      })
+      : action
+    if (shouldConfirmBatchTranslation(nextAction)) {
+      batchTranslationPending.value = { projectId: id, action: nextAction, config }
+      return
+    }
     taskEvents.start(id, nextAction, config)
   } catch (err) {
     toastError(err)
   } finally { preparingTask.value = false }
+}
+
+const batchTranslationConfirmation = computed(() => {
+  const pending = batchTranslationPending.value
+  if (!pending) return null
+  const config = pending.config || {}
+  const provider = ({
+    gemini: 'Gemini',
+    'doubao-ark': '豆包 Ark',
+    'openai-compatible': 'OpenAI Compatible',
+  })[config.translator || config.selected_translator] || config.translator || '当前翻译服务'
+  const language = ({ CHS: '简体中文', CHT: '繁体中文', ENG: '英语', JPN: '日语', KOR: '韩语' })[config.target_lang]
+    || config.target_lang || '目标语言'
+  return buildBatchTranslationConfirmation({
+    action: pending.action,
+    pageCount: images.value.length,
+    regionCount: images.value.reduce((total, image) => total + Number(image.region_count || 0), 0),
+    providerLabel: provider,
+    targetLanguageLabel: language,
+  })
+})
+
+function closeBatchTranslationConfirmation() {
+  batchTranslationPending.value = null
+}
+
+function confirmBatchTranslation() {
+  const pending = batchTranslationPending.value
+  batchTranslationPending.value = null
+  if (!pending || pending.projectId !== sessionId.value || taskBusy.value) return
+  try {
+    taskEvents.start(pending.projectId, pending.action, pending.config)
+  } catch (error) {
+    toastError(error)
+  }
 }
 
 async function cancelTask() {
@@ -155,16 +207,20 @@ async function reloadProject(id = sessionId.value) {
 }
 
 watch(
-  () => taskState.value.eventName,
-  (name) => {
+  () => [taskState.value.activeTaskId, taskState.value.eventName],
+  async ([_taskId, name]) => {
     if (taskEvents.sessionId.value !== sessionId.value) return
+    if (!['completed', 'error', 'failed', 'cancelled', 'interrupted'].includes(name)) return
     if (name === 'completed') {
       toast('任务完成', 'ok')
-      reloadProject()
-    } else if (name === 'error' || name === 'failed') {
+    } else if (name === 'cancelled') {
+      toast('任务已取消，项目状态已刷新。', 'ok')
+    } else if (name === 'interrupted') {
+      toast('任务已中断，项目状态已刷新。', 'warn')
+    } else {
       toast(taskState.value.statusMessage || '任务失败', 'error')
-      reloadProject()
     }
+    await reloadProject()
   },
 )
 
@@ -242,8 +298,17 @@ async function onBaseImagePicked(event) {
 
 watch(sessionId, async id => {
   baseUploadFeedback.value = null
+  batchTranslationPending.value = null
+  pauseAfterDetection.value = true
+  const settingsPromise = apiGetJson('/api/app/settings', '读取工作流设置失败')
+    .then(payload => {
+      if (id === sessionId.value && typeof payload?.settings?.pause_after_detection === 'boolean') {
+        pauseAfterDetection.value = payload.settings.pause_after_detection
+      }
+    })
+    .catch(() => {})
   try {
-    await loadProject(id)
+    await Promise.all([loadProject(id), settingsPromise])
     if (id === sessionId.value && route.query.resume === '1') {
       const remembered = recentPageFor(id, project.value?.images || [])
       if (remembered) {
@@ -408,6 +473,28 @@ watch(sessionId, async id => {
 
     <input ref="baseImageInput" type="file" accept=".zip,.cbz,.png,.jpg,.jpeg,.webp,.bmp" multiple hidden @change="onBaseImagePicked" />
 
+    <div v-if="batchTranslationPending && batchTranslationConfirmation" class="overlay" @click.self="closeBatchTranslationConfirmation">
+      <div class="modal batch-translation-modal" role="dialog" aria-modal="true" aria-labelledby="batch-translation-title">
+        <div class="modal-head">
+          <div>
+            <span class="kicker">Batch Translation</span>
+            <h3 id="batch-translation-title">{{ batchTranslationConfirmation.title }}</h3>
+          </div>
+          <button class="icon-btn" type="button" aria-label="关闭翻译确认" @click="closeBatchTranslationConfirmation">×</button>
+        </div>
+        <div class="modal-body batch-translation-body">
+          <p class="confirm-copy">{{ batchTranslationConfirmation.summary }}</p>
+          <ul>
+            <li v-for="item in batchTranslationConfirmation.items" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" type="button" @click="closeBatchTranslationConfirmation">{{ batchTranslationConfirmation.cancelLabel }}</button>
+          <button class="btn btn-primary" type="button" @click="confirmBatchTranslation">{{ batchTranslationConfirmation.confirmLabel }}</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast-stack">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="`is-${t.kind}`" @click="dismiss(t.id)">{{ t.message }}</div>
     </div>
@@ -450,6 +537,11 @@ watch(sessionId, async id => {
 .pages-error { color: var(--danger); }
 .pages-error .btn { margin-top: 12px; }
 .pages-empty { grid-column: 1 / -1; padding: 40px; text-align: center; color: var(--text-2); }
+.batch-translation-modal { width: min(520px, 92vw); }
+.batch-translation-modal h3 { margin: 4px 0 0; font-size: 17px; }
+.batch-translation-body { display: flex; flex-direction: column; gap: 12px; }
+.batch-translation-body .confirm-copy { margin: 0; color: var(--text-1); line-height: 1.7; }
+.batch-translation-body ul { margin: 0; padding-left: 20px; color: var(--text-2); line-height: 1.7; }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { padding: 10px 16px; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-1); font-size: 13px; cursor: pointer; max-width: 360px; }
 .toast.is-error { border-color: var(--danger); }

@@ -1,18 +1,31 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
-import { apiGetJson, toApiUrl } from '../api/client.js'
+import { apiFetch, apiGetJson } from '../api/client.js'
 import { useSettings } from '../composables/useSettings.js'
 import { SETTINGS_GROUPS } from '../state/settings-fields.js'
 import SettingsFields from '../components/SettingsFields.vue'
 import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+import {
+  EMPTY_DIAGNOSTICS,
+  EMPTY_RUNTIME,
+  diagnosticOverallTone,
+  diagnosticTone,
+  gpuLabel,
+  normalizeDiagnostics,
+  normalizeRuntime,
+} from '../state/app-runtime.js'
 
 const router = useRouter()
 const state = useSettings()
 const { settings, draft, loading, saving, validating, dirty } = state
 const formKeys = SETTINGS_GROUPS[0].keys
 const configError = ref('正在读取配置…')
+const runtimeError = ref('')
+const appRuntime = ref({ ...EMPTY_RUNTIME })
+const appDiagnostics = ref({ ...EMPTY_DIAGNOSTICS })
+const validation = ref({ ok: null, message: '' })
 let checkEpoch = 0
 let allowLeave = false
 
@@ -55,18 +68,36 @@ async function runChecks() {
     setCheck('lama', 'fail', '需后端在线')
     return
   }
+  // Runtime, diagnostics and settings are independent reads. Diagnostics is
+  // deliberately fetched from the real endpoint so GPU and environment
+  // guidance reflects the backend that will execute the workflow.
+  const [runtimeResult, diagnosticsResult, settingsResult] = await Promise.allSettled([
+    apiGetJson('/api/app/runtime', '读取应用运行环境失败'),
+    apiGetJson('/api/app/diagnostics', '读取运行环境诊断失败'),
+    state.load(),
+  ])
+  if (!current()) return
+  runtimeError.value = ''
+  if (runtimeResult.status === 'fulfilled') {
+    const bridgeRuntime = typeof window !== 'undefined' ? window.mangaDesktop?.runtime || {} : {}
+    appRuntime.value = normalizeRuntime(runtimeResult.value, { ...EMPTY_RUNTIME, ...bridgeRuntime })
+  } else {
+    runtimeError.value = runtimeResult.reason?.message || '读取应用运行环境失败'
+  }
+  if (diagnosticsResult.status === 'fulfilled') {
+    appDiagnostics.value = normalizeDiagnostics(diagnosticsResult.value, appDiagnostics.value)
+  } else if (!runtimeError.value) {
+    runtimeError.value = diagnosticsResult.reason?.message || '读取运行环境诊断失败'
+  }
   // 翻译服务
-  try {
-    await state.load()
-    if (!current()) return
+  if (settingsResult.status === 'fulfilled') {
     configError.value = ''
     const provider = draft.translator || ''
     const hasApiKey = state.secretConfigured('api_key') || Boolean(String(draft.api_key || '').trim())
     const ok = Boolean(provider) && hasApiKey
     setCheck('translation', ok ? 'ok' : 'fail', ok ? `${provider} 已配置，连接待验证` : '请填写翻译服务和 API Key')
-  } catch (err) {
-    if (!current()) return
-    configError.value = err.message
+  } else {
+    configError.value = settingsResult.reason?.message || '读取设置失败'
     setCheck('translation', 'fail', '读取失败')
   }
   // 字体
@@ -95,24 +126,52 @@ async function runChecks() {
   }
 }
 
-function exportDiagnostics() {
-  window.open(toApiUrl('/api/app/diagnostics/export'), '_blank')
+async function exportDiagnostics() {
+  try {
+    const response = await apiFetch('/api/app/diagnostics/export')
+    if (!response.ok) throw new Error('导出诊断包失败')
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `solar-diagnostics-${Date.now()}.zip`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    toast('诊断包已开始下载。', 'ok')
+  } catch (err) { toastError(err) }
 }
 
 const allGreen = computed(() => checks.value.every(c => c.state === 'ok'))
+const diagnosticsTone = computed(() => diagnosticOverallTone(appDiagnostics.value.checks))
 async function validateService() {
   try {
+    await state.flush({ retryFailedSave: true })
     const result = await state.validate()
     if (!result) return
+    validation.value = { ok: Boolean(result.ok), message: String(result.message || (result.ok ? '连接成功' : '连接失败')) }
     setCheck('translation', result.ok ? 'ok' : 'fail', result.message || (result.ok ? '连接成功' : '连接失败'))
     toast(result.message || (result.ok ? '连接成功' : '连接失败'), result.ok ? 'ok' : 'error')
-  } catch (err) { toastError(err) }
+  } catch (err) {
+    validation.value = { ok: false, message: err.message }
+    toastError(err)
+  }
 }
 async function saveAndStart() {
-  if (saving.value || loading.value || configError.value) return
+  if (saving.value || loading.value || validating.value || configError.value) return
   try {
-    await state.flush()
-    try { window.localStorage.setItem('solar-v3-onboarded', '1') } catch { /* optional preference */ }
+    // Flush first so validation observes exactly the configuration persisted by
+    // the server. A failed flush or validation leaves this route and its draft
+    // in place for a retry.
+    await state.flush({ retryFailedSave: true })
+    const result = await state.validate()
+    validation.value = { ok: Boolean(result?.ok), message: String(result?.message || (result?.ok ? '连接成功' : '连接失败')) }
+    if (!result?.ok) {
+      setCheck('translation', 'fail', validation.value.message)
+      toast(validation.value.message, 'error')
+      return
+    }
     toast('设置已保存，欢迎使用。', 'ok')
     router.push('/')
   } catch (err) { toastError(err) }
@@ -121,9 +180,6 @@ async function saveAndStart() {
 function skip() {
   if (!leaveSafely()) return
   allowLeave = true
-  try {
-    window.localStorage.setItem('solar-v3-onboarded', '1')
-  } catch { /* ignore */ }
   router.push('/')
 }
 
@@ -196,6 +252,20 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
               <button class="btn btn-secondary" type="button" @click="runChecks">重新检查</button>
               <button class="btn btn-ghost" type="button" @click="exportDiagnostics">导出诊断包</button>
             </div>
+            <div v-if="runtimeError || appDiagnostics.checks.length || appDiagnostics.gpu?.action" class="diagnostics-note">
+              <div v-if="runtimeError" class="inline-note is-error">{{ runtimeError }}</div>
+              <div v-else class="diagnostics-summary">
+                <div class="check-item">
+                  <span>GPU / CUDA</span>
+                  <strong :class="'runtime-' + diagnosticsTone">{{ gpuLabel(appDiagnostics) }}</strong>
+                </div>
+                <p v-if="appDiagnostics.gpu?.action" class="inline-note is-error">{{ appDiagnostics.gpu.action }}</p>
+                <div v-for="check in appDiagnostics.checks" :key="check.id" class="check-item">
+                  <span>{{ check.label }}</span>
+                  <small :class="'runtime-' + diagnosticTone(check.status)">{{ check.message || check.status }}</small>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="panel" style="padding:16px">
@@ -204,13 +274,14 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
             <p v-else-if="configError" class="inline-note">{{ configError }}</p>
             <SettingsFields v-else :draft="draft" :keys="formKeys" :configured-secrets="settings.configured_secrets" />
             <button class="btn btn-secondary" style="margin-top:12px" :disabled="loading || saving || validating || !!configError" @click="validateService">{{ validating ? '验证中…' : '验证当前配置' }}</button>
+            <p v-if="validation.message" class="inline-note" :class="validation.ok ? 'is-success' : 'is-error'">{{ validation.message }}</p>
             <p class="inline-note" style="margin-top:10px">密钥保存在本机。验证和在线翻译会向所选服务商发送文本；输入框留空会保留已保存的密钥。</p>
           </section>
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" type="button" @click="skip">跳过，稍后再说</button>
-          <button class="btn btn-primary" type="button" :disabled="saving || loading || !!configError" @click="saveAndStart">
-            {{ saving ? '保存中…' : '保存并开始' }}
+          <button class="btn btn-primary" type="button" :disabled="saving || loading || validating || !!configError" @click="saveAndStart">
+            {{ saving ? '保存中…' : validating ? '验证中…' : '保存并开始' }}
           </button>
         </div>
       </div>
@@ -241,6 +312,12 @@ onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 .c-ico.ok { color: var(--ok); }
 .c-ico.fail { color: var(--danger); }
 .c-ico.run { color: var(--warn); }
+.diagnostics-note { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.diagnostics-summary { display: flex; flex-direction: column; gap: 5px; }
+.diagnostics-summary .check-item { padding: 4px 0; }
+.runtime-ok { color: var(--ok); }
+.runtime-warn { color: var(--warn); }
+.runtime-fail { color: var(--danger); }
 .toast-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { padding: 10px 16px; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-1); font-size: 13px; cursor: pointer; max-width: 360px; }
 .toast.is-error { border-color: var(--danger); }

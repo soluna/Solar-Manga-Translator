@@ -163,3 +163,7 @@ jobs:
       - name: Run new-user workspace workflow
         working-directory: frontend
         run: npm run test:v2-workspace
+      - name: Install InkStage workflow dependencies
+        run: npm ci --prefix frontend-v3
+      - name: Run InkStage workspace workflow
+        run: npm --prefix frontend-v3 run test:workflow

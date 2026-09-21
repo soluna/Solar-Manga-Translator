@@ -4,44 +4,128 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { apiFetch, apiGetJson, apiPostJson } from '../api/client.js'
 import { dismiss, toast, toastError, toasts } from '../composables/useToast.js'
 import { useSettings } from '../composables/useSettings.js'
-import { SETTINGS_GROUPS } from '../state/settings-fields.js'
+import {
+  ADVANCED_ERASE_DEFAULT_PROMPT,
+  SETTINGS_GROUPS,
+  fontSourceLabel,
+} from '../state/settings-fields.js'
+import {
+  EMPTY_DIAGNOSTICS,
+  EMPTY_RUNTIME,
+  diagnosticOverallTone,
+  diagnosticTone,
+  formatBytes,
+  gpuLabel,
+  hasLegacyData,
+  normalizeDiagnostics,
+  normalizeMigration,
+  normalizeRemoteDiagnostics,
+  normalizeRemoteExecution,
+  normalizeRuntime,
+  remoteDiagnosticsConnectionText,
+  remoteExecutionConnectionText,
+} from '../state/app-runtime.js'
 import SettingsFields from '../components/SettingsFields.vue'
 import ThemeToggle from '../components/ThemeToggle.vue'
 
 const router = useRouter()
 const state = useSettings()
-const { settings, draft, loading, saving, validating, changedKeys, dirty } = state
+const { settings, draft, loading, saving, clearing, validating, changedKeys, dirty } = state
 const loadError = ref('')
 const navGroups = SETTINGS_GROUPS
 const formGroups = SETTINGS_GROUPS.filter(group => group.keys)
 const fonts = ref([]), fontsLoading = ref(false), fontsError = ref('')
+const appRuntime = ref({ ...EMPTY_RUNTIME })
+const appDiagnostics = ref({ ...EMPTY_DIAGNOSTICS })
+const migration = ref({})
+const runtimeLoading = ref(false), runtimeError = ref('')
+const clearingSecret = ref('')
 
 async function loadSettings() {
   loadError.value = ''
   try { await state.load() } catch (err) { loadError.value = err.message }
 }
-async function loadFonts({ silent = false } = {}) {
+async function loadFonts({ silent = false, forceRefresh = false } = {}) {
   if (!silent) fontsLoading.value = true
   fontsError.value = ''
-  try { fonts.value = (await apiGetJson('/api/fonts', '读取字体列表失败')).fonts || [] }
+  try {
+    const path = forceRefresh ? `/api/fonts?refresh=${Date.now()}` : '/api/fonts'
+    fonts.value = (await apiGetJson(path, '读取字体列表失败')).fonts || []
+  }
   catch (err) { fontsError.value = err.message }
   finally { fontsLoading.value = false }
 }
 async function saveSettings() {
-  try { await state.flush(); toast('设置已保存。', 'ok') } catch (err) { toastError(err) }
+  try { await state.flush({ retryFailedSave: true }); toast('设置已保存。', 'ok') } catch (err) { toastError(err) }
 }
 function resetDraft() { state.reset() }
 async function validateService() {
   try {
+    await state.flush({ retryFailedSave: true })
     const result = await state.validate()
     if (result) toast(result.message || (result.ok ? '翻译服务验证通过。' : '翻译服务验证未通过。'), result.ok ? 'ok' : 'error')
   } catch (err) { toastError(err) }
 }
-function fontSourceLabel(source) {
-  return ({ system: '内置', custom: '自定义', user: '自定义', bundled: '内置' })[source] || source || '未知'
+
+async function clearSecret(key) {
+  if (clearingSecret.value || !state.secretConfigured(key)) return
+  clearingSecret.value = key
+  try {
+    await state.clearSecrets([key])
+    toast(`${key === 'api_key' ? '翻译服务' : key === 'image_cleanup_api_key' ? '图像清理' : '在线擦除'}密钥已清除。`, 'success')
+  } catch (err) { toastError(err) }
+  finally { clearingSecret.value = '' }
+}
+
+async function loadRuntimeData({ silent = true } = {}) {
+  runtimeLoading.value = true
+  runtimeError.value = ''
+  const [runtimeResult, diagnosticsResult, migrationResult] = await Promise.allSettled([
+    apiGetJson('/api/app/runtime', '读取应用运行环境失败'),
+    apiGetJson('/api/app/diagnostics', '读取运行环境诊断失败'),
+    apiGetJson('/api/app/migration-status', '读取旧数据迁移状态失败'),
+  ])
+  if (runtimeResult.status === 'fulfilled') {
+    appRuntime.value = normalizeRuntime(runtimeResult.value, appRuntime.value)
+    migration.value = normalizeMigration(appRuntime.value, migration.value)
+  } else if (!silent) {
+    runtimeError.value = runtimeResult.reason?.message || '读取应用运行环境失败'
+  }
+  if (diagnosticsResult.status === 'fulfilled') {
+    appDiagnostics.value = normalizeDiagnostics(diagnosticsResult.value, appDiagnostics.value)
+  } else if (!runtimeError.value && !silent) {
+    runtimeError.value = diagnosticsResult.reason?.message || '读取运行环境诊断失败'
+  }
+  if (migrationResult.status === 'fulfilled') {
+    migration.value = normalizeMigration(migrationResult.value, migration.value)
+    appRuntime.value = { ...appRuntime.value, migration: migration.value }
+  } else if (!runtimeError.value && !silent) {
+    runtimeError.value = migrationResult.reason?.message || '读取旧数据迁移状态失败'
+  }
+  runtimeLoading.value = false
+}
+
+async function migrateLegacy(action) {
+  if (action === 'migrate_clean' && !window.confirm('将先复制旧数据并验证旧项目，再删除确认属于本应用的旧目录。是否继续？')) return
+  await runAdvanced(`migration-${action}`, () => apiPostJson('/api/app/migrate-legacy', { action }, '处理旧数据失败'), {
+    onSuccess: payload => {
+      migration.value = normalizeMigration(payload, migration.value)
+      appRuntime.value = { ...appRuntime.value, migration: migration.value }
+      const cleanup = migration.value.cleanup || {}
+      const message = action === 'migrate_clean'
+        ? (cleanup.status === 'partial' ? '旧项目已迁移，但少量旧目录未能清理。' : `旧项目已迁移并清理 ${cleanup.deleted_paths?.length || 0} 个旧目录。`)
+        : action === 'migrate' ? '旧项目数据已迁移；原目录按你的选择保留。' : '已跳过旧数据迁移。'
+      toast(message, cleanup.status === 'partial' ? 'warn' : 'success')
+    },
+  })
+}
+
+function resetAdvancedErasePrompt() {
+  draft.advanced_erase_selection_prompt = ADVANCED_ERASE_DEFAULT_PROMPT
+  toast('已恢复默认 Prompt，请点击保存使其生效。', 'ok')
 }
 function beforeUnload(event) {
-  if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' }
+  if (dirty.value || saving.value || clearing.value) { event.preventDefault(); event.returnValue = '' }
 }
 onBeforeRouteLeave(async () => {
   try { await state.flush(); return true } catch (err) { toastError(err); return false }
@@ -49,14 +133,16 @@ onBeforeRouteLeave(async () => {
 onMounted(() => {
   loadSettings()
   loadFonts({ silent: true })
+  loadRuntimeData({ silent: true })
+  loadRemoteStatuses({ silent: true })
   window.addEventListener('beforeunload', beforeUnload)
 })
 onUnmounted(() => window.removeEventListener('beforeunload', beforeUnload))
 
 // ---- 高级运维 ----
 const advBusy = ref('')
-const remoteDiag = ref(null) // start 响应（含地址/到期时间等）
-const remoteExec = ref(null) // enable / rotate-token 响应（含 token）
+const remoteDiag = ref(null)
+const remoteExec = ref(null)
 const logsText = ref('')
 
 async function runAdvanced(key, request, { onSuccess } = {}) {
@@ -74,9 +160,9 @@ async function runAdvanced(key, request, { onSuccess } = {}) {
 }
 
 function startRemoteDiag() {
-  runAdvanced('diag-start', () => apiPostJson('/api/app/remote-diagnostics/start', {}, '开启远程诊断失败'), {
+  runAdvanced('diag-start', () => apiPostJson('/api/app/remote-diagnostics/start', { ttl_minutes: 60 }, '开启远程诊断失败'), {
     onSuccess: (payload) => {
-      remoteDiag.value = payload && typeof payload === 'object' ? payload : { status: 'started' }
+      remoteDiag.value = normalizeRemoteDiagnostics(payload, remoteDiag.value || {})
       toast('远程诊断已开启。', 'success')
     },
   })
@@ -84,8 +170,8 @@ function startRemoteDiag() {
 
 function stopRemoteDiag() {
   runAdvanced('diag-stop', () => apiPostJson('/api/app/remote-diagnostics/stop', {}, '关闭远程诊断失败'), {
-    onSuccess: () => {
-      remoteDiag.value = null
+    onSuccess: (payload) => {
+      remoteDiag.value = normalizeRemoteDiagnostics(payload, remoteDiag.value || {})
       toast('远程诊断已关闭。', 'success')
     },
   })
@@ -96,19 +182,39 @@ function remoteExecAction(action) {
   runAdvanced(`exec-${action}`, () => apiPostJson(`/api/app/remote-execution/${action}`, {}, `${labelMap[action]}失败`), {
     onSuccess: (payload) => {
       if (action === 'disable') {
-        remoteExec.value = null
+        remoteExec.value = normalizeRemoteExecution(payload, remoteExec.value || {})
       } else if (payload && typeof payload === 'object') {
-        remoteExec.value = payload
+        remoteExec.value = normalizeRemoteExecution(payload, remoteExec.value || {})
       }
       toast(`${labelMap[action]}成功。`, 'success')
     },
   })
 }
 
+async function loadRemoteStatuses({ silent = true } = {}) {
+  const [diagResult, execResult] = await Promise.allSettled([
+    apiGetJson('/api/app/remote-diagnostics', '读取局域网诊断状态失败'),
+    apiGetJson('/api/app/remote-execution', '读取远程任务节点状态失败'),
+  ])
+  if (diagResult.status === 'fulfilled') {
+    remoteDiag.value = normalizeRemoteDiagnostics(diagResult.value, remoteDiag.value || {})
+  } else if (!silent) {
+    toastError(diagResult.reason)
+  }
+  if (execResult.status === 'fulfilled') {
+    remoteExec.value = normalizeRemoteExecution(execResult.value, remoteExec.value || {})
+  } else if (!silent) {
+    toastError(execResult.reason)
+  }
+}
+
 function openDirectory(kind) {
   const labelMap = { 'open-logs': '日志目录', 'open-data-directory': '数据目录', 'open-user-fonts': '字库文件夹' }
   runAdvanced(kind, () => apiPostJson(`/api/app/${kind}`, {}, `打开${labelMap[kind]}失败`), {
-    onSuccess: () => toast(`已请求打开${labelMap[kind]}。`, 'success'),
+    onSuccess: (payload) => {
+      if (!payload?.ok) throw new Error(payload?.error || `系统文件管理器未能打开${labelMap[kind]}。`)
+      toast(`已打开${labelMap[kind]}。`, 'success')
+    },
   })
 }
 
@@ -143,13 +249,58 @@ async function exportDiagnostics() {
   }
 }
 
-/** 展示响应里的关键信息（地址 / 令牌 / 状态）。 */
+async function copyText(value, successMessage, emptyMessage) {
+  const textValue = String(value || '').trim()
+  if (!textValue) {
+    toast(emptyMessage, 'warn')
+    return
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(textValue)
+    } else {
+      const input = document.createElement('textarea')
+      input.value = textValue
+      input.setAttribute('readonly', '')
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.appendChild(input)
+      input.select()
+      if (!document.execCommand('copy')) throw new Error('剪贴板不可用')
+      input.remove()
+    }
+    toast(successMessage, 'success')
+  } catch (err) {
+    toastError(err)
+  }
+}
+
+function copyRemoteDiag() {
+  copyText(
+    remoteDiagnosticsConnectionText(remoteDiag.value),
+    '局域网诊断连接信息已复制，可直接发送给 Codex。',
+    '当前没有可复制的连接信息，请开启或刷新诊断访问。',
+  )
+}
+
+function copyRemoteExec() {
+  copyText(
+    remoteExecutionConnectionText(remoteExec.value),
+    '远程任务节点连接信息已复制，可直接发送给 Codex。',
+    '任务节点尚未运行，请先启用后再复制连接信息。',
+  )
+}
+
+/** Keep status panels readable while retaining the full payload for copying. */
 function summarizePayload(payload) {
   if (!payload || typeof payload !== 'object') return []
-  const interesting = ['status', 'url', 'address', 'token', 'expires_at', 'expires_in', 'enabled', 'message']
-  return Object.entries(payload)
-    .filter(([k]) => interesting.includes(k))
-    .map(([k, v]) => ({ key: k, value: String(v) }))
+  const interesting = ['active', 'enabled', 'persistent', 'read_only', 'port', 'urls', 'expires_at', 'remaining_seconds', 'token', 'tasks', 'worker_root']
+  return interesting
+    .filter(key => Object.hasOwn(payload, key))
+    .map(key => ({
+      key,
+      value: Array.isArray(payload[key]) ? payload[key].join(', ') : String(payload[key] ?? ''),
+    }))
 }
 
 // ---- 导航 ----
@@ -192,7 +343,7 @@ function goBack() {
       <div class="topbar-actions">
         <button
           class="btn btn-primary btn-sm"
-          :disabled="!dirty || saving || !!loadError"
+          :disabled="!dirty || saving || clearing || !!loadError"
           data-tip="仅保存改动字段"
           @click="saveSettings"
         >
@@ -237,18 +388,71 @@ function goBack() {
           </div>
 
           <template v-else>
+            <!-- 运行环境与旧数据 -->
+            <section class="settings-group" id="settings-runtime">
+              <div class="group-head">
+                <h3>应用运行环境</h3>
+                <span>{{ appRuntime.desktop_mode ? '桌面版本地运行时' : '浏览器模式' }}</span>
+              </div>
+              <div class="group-body">
+                <div v-if="runtimeLoading" class="inline-note">正在读取运行环境…</div>
+                <p v-if="runtimeError" class="inline-note is-error">{{ runtimeError }}</p>
+                <template v-else>
+                  <div class="kv"><span>设置状态</span><strong>{{ saving ? '正在保存设置…' : state.error.value ? '连接待修复' : '设置已载入' }}</strong></div>
+                  <div v-if="appRuntime.settings_path" class="kv"><span>设置文件</span><strong :title="appRuntime.settings_path" class="mono">{{ appRuntime.settings_path }}</strong></div>
+                  <div v-if="appRuntime.data_dir" class="kv"><span>统一存储根目录</span><strong :title="appRuntime.data_dir" class="mono">{{ appRuntime.data_dir }}</strong></div>
+                  <div v-if="appRuntime.cache_dir" class="kv"><span>缓存目录</span><strong :title="appRuntime.cache_dir" class="mono">{{ appRuntime.cache_dir }}</strong></div>
+                  <div v-if="appRuntime.temp_dir" class="kv"><span>临时目录</span><strong :title="appRuntime.temp_dir" class="mono">{{ appRuntime.temp_dir }}</strong></div>
+                  <div class="kv"><span>GPU / CUDA</span><strong :title="gpuLabel(appDiagnostics)">{{ gpuLabel(appDiagnostics) }}</strong></div>
+                  <p v-if="appDiagnostics.gpu?.action" class="inline-note is-error">{{ appDiagnostics.gpu.action }}</p>
+                  <div v-if="appDiagnostics.disk" class="kv"><span>可用磁盘空间</span><strong>{{ formatBytes(appDiagnostics.disk.free_bytes) }}</strong></div>
+                  <div v-if="appRuntime.logs_dir" class="kv"><span>日志目录</span><strong :title="appRuntime.logs_dir" class="mono">{{ appRuntime.logs_dir }}</strong></div>
+                  <div v-if="appRuntime.font_root" class="kv"><span>字体目录</span><strong :title="appRuntime.font_root" class="mono">{{ appRuntime.font_root }}</strong></div>
+                  <div v-if="appDiagnostics.checks?.length" class="runtime-check-list">
+                    <div v-for="check in appDiagnostics.checks" :key="check.id" class="kv">
+                      <span>{{ check.label }}</span>
+                      <strong :class="'runtime-' + diagnosticTone(check.status)" :title="check.message">{{ check.message || check.status }}</strong>
+                    </div>
+                  </div>
+                  <div class="inline-actions">
+                    <button class="btn btn-secondary" :disabled="runtimeLoading || !!advBusy" @click="loadRuntimeData({ silent: false })">
+                      <span v-if="runtimeLoading" class="spin" />
+                      <template v-else>重新检查</template>
+                    </button>
+                    <button class="btn btn-secondary" :disabled="!!advBusy" @click="openDirectory('open-data-directory')">打开统一数据目录</button>
+                    <button class="btn btn-secondary" :disabled="!!advBusy" @click="openDirectory('open-logs')">打开日志目录</button>
+                    <button class="btn btn-secondary" :disabled="!!advBusy" @click="exportDiagnostics">导出诊断包</button>
+                  </div>
+                  <div v-if="hasLegacyData(migration)" class="migration-box">
+                    <div class="kv"><span>旧版数据</span><strong>{{ migration.status === 'skipped' ? '已跳过，可重新处理' : '检测到可迁移数据' }}</strong></div>
+                    <p class="inline-note">迁移会先复制并验证旧项目；只有明确选择“迁移并清理”才会删除本应用确认拥有的旧目录。</p>
+                    <div class="inline-actions">
+                      <button class="btn btn-secondary" :disabled="!!advBusy" @click="migrateLegacy('migrate')">迁移并保留原目录</button>
+                      <button class="btn btn-danger" :disabled="!!advBusy" @click="migrateLegacy('migrate_clean')">迁移并清理旧目录</button>
+                      <button class="btn btn-ghost" :disabled="!!advBusy" @click="migrateLegacy('skip')">跳过本次迁移</button>
+                    </div>
+                    <p v-if="migration.cleanup?.failed_paths?.length" class="inline-note is-error">仍有目录未能清理：{{ migration.cleanup.failed_paths.join('、') }}</p>
+                  </div>
+                </template>
+              </div>
+            </section>
             <section v-for="group in formGroups" :id="`settings-${group.id}`" :key="group.id" class="settings-group">
               <div class="group-head"><h3>{{ group.label }}</h3></div>
               <div class="group-body">
-                <SettingsFields :draft="draft" :keys="group.keys" :configured-secrets="settings.configured_secrets" :fonts="fonts" />
+                <SettingsFields :draft="draft" :keys="group.keys" :configured-secrets="settings.configured_secrets" :fonts="fonts" :clear-busy="clearingSecret" @clear-secret="clearSecret" />
                 <template v-if="group.id === 'translation'">
                   <div class="inline-actions">
-                    <button class="btn btn-secondary" :disabled="validating || saving" @click="validateService">{{ validating ? '验证中…' : '验证当前配置' }}</button>
-                    <button class="btn btn-ghost" :disabled="!dirty || saving" @click="resetDraft">放弃改动</button>
+                    <button class="btn btn-secondary" :disabled="validating || saving || clearing" @click="validateService">{{ validating ? '验证中…' : '验证当前配置' }}</button>
+                    <button class="btn btn-ghost" :disabled="!dirty || saving || clearing" @click="resetDraft">放弃改动</button>
                   </div>
                   <p class="inline-note">验证会使用当前填写的配置向所选服务发送测试文本。密钥保存在本机，留空保留已有密钥。</p>
                 </template>
-                <p v-if="group.id === 'cleanup'" class="inline-note">在线清理与在线擦除会把所需图片发送给你选择的服务商；本地 LaMa 不需要在线擦除密钥。在线擦除目前使用 Ark / Seedream。</p>
+                <template v-if="group.id === 'cleanup'">
+                  <div class="inline-actions">
+                    <button class="btn btn-ghost" type="button" :disabled="saving || clearing" @click="resetAdvancedErasePrompt">恢复默认 Prompt</button>
+                  </div>
+                  <p class="inline-note">在线清理与在线擦除会把所需图片发送给你选择的服务商；本地 LaMa 不需要在线擦除密钥。在线擦除目前使用 Ark / Seedream。</p>
+                </template>
               </div>
             </section>
 
@@ -260,7 +464,7 @@ function goBack() {
               </div>
               <div class="group-body">
                 <div class="inline-actions">
-                  <button class="btn btn-secondary" :disabled="fontsLoading" @click="loadFonts()">
+                  <button class="btn btn-secondary" :disabled="fontsLoading" @click="loadFonts({ forceRefresh: true })">
                     <span v-if="fontsLoading" class="spin" />
                     <template v-else>刷新字库</template>
                   </button>
@@ -270,7 +474,7 @@ function goBack() {
                 <p v-else class="inline-note">共 {{ fonts.length }} 款字体</p>
                 <div v-if="fonts.length" class="font-list">
                   <div v-for="font in fonts" :key="font.id" class="mark-item">
-                    <span class="tag" :class="{ 'is-accent': font.source === 'user' }">{{ fontSourceLabel(font.source) }}</span>
+                    <span class="tag" :class="{ 'is-accent': ['custom', 'project', 'user'].includes(font.source) }">{{ fontSourceLabel(font.source) }}</span>
                     <span>{{ font.label || font.id }}</span>
                     <span class="num">{{ font.source }}</span>
                   </div>
@@ -298,7 +502,7 @@ function goBack() {
                     </div>
                     <div v-else class="kv"><span>服务状态</span><strong>已关闭</strong></div>
                     <div class="inline-actions">
-                      <button v-if="!remoteDiag" class="btn btn-secondary" :disabled="!!advBusy" @click="startRemoteDiag">
+                      <button v-if="!remoteDiag?.active" class="btn btn-secondary" :disabled="!!advBusy" @click="startRemoteDiag">
                         <span v-if="advBusy === 'diag-start'" class="spin" />
                         <template v-else>开启</template>
                       </button>
@@ -306,6 +510,7 @@ function goBack() {
                         <span v-if="advBusy === 'diag-stop'" class="spin" />
                         <template v-else>关闭</template>
                       </button>
+                      <button v-if="remoteDiag?.active" class="btn btn-ghost" :disabled="!!advBusy" @click="copyRemoteDiag">复制连接信息</button>
                     </div>
                   </div>
                 </details>
@@ -323,8 +528,9 @@ function goBack() {
                     <div v-else class="kv"><span>服务状态</span><strong>已关闭</strong></div>
                     <div class="inline-actions">
                       <button class="btn btn-secondary" :disabled="!!advBusy" @click="remoteExecAction('enable')">启用</button>
-                      <button class="btn btn-secondary" :disabled="!!advBusy || !remoteExec" @click="remoteExecAction('rotate-token')">轮换令牌</button>
-                      <button class="btn btn-danger" :disabled="!!advBusy || !remoteExec" @click="remoteExecAction('disable')">禁用</button>
+                      <button class="btn btn-ghost" :disabled="!!advBusy || !remoteExec?.enabled" @click="copyRemoteExec">复制连接信息</button>
+                      <button class="btn btn-secondary" :disabled="!!advBusy || !remoteExec?.enabled" @click="remoteExecAction('rotate-token')">轮换令牌</button>
+                      <button class="btn btn-danger" :disabled="!!advBusy || !remoteExec?.enabled" @click="remoteExecAction('disable')">禁用</button>
                     </div>
                   </div>
                 </details>

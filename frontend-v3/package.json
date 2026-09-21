@@ -11,7 +11,8 @@
     "dev:mock": "node scripts/dev-mock.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "test:unit": "node --test scripts/test-*.mjs"
+    "test:unit": "node --test scripts/test-*.mjs",
+    "test:workflow": "node scripts/workflow-e2e.mjs"
   },
   "dependencies": {
     "lucide-vue-next": "^0.577.0",

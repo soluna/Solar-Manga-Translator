@@ -191,6 +191,15 @@ function getImageRegionCount(image) {
 
 export const REVIEW_LOCATION_VERSION = 1
 
+export const REVIEW_REGION_FILTERS = Object.freeze([
+  'all', 'attention', 'manual', 'keep-original', 'untranslated', 'font-override', 'disabled',
+])
+
+export function normalizeReviewRegionFilter(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return REVIEW_REGION_FILTERS.includes(normalized) ? normalized : 'all'
+}
+
 /** Keep only serializable, bounded UI state in the per-project work location. */
 export function normalizeReviewLocation(value = {}) {
   const source = value && typeof value === 'object' ? value : {}
@@ -210,7 +219,7 @@ export function normalizeReviewLocation(value = {}) {
     regionId: String(source.regionId || '').trim(),
     previousPageId: String(source.previousPageId || '').trim(),
     previousRegionId: String(source.previousRegionId || '').trim(),
-    filter: ['all', 'attention', 'manual', 'disabled'].includes(source.filter) ? source.filter : 'all',
+    filter: normalizeReviewRegionFilter(source.filter),
     searchQuery: String(source.searchQuery || '').slice(0, 160),
     panelCollapsed: Boolean(source.panelCollapsed),
     panelWidth: Number.isFinite(panelWidth) ? Math.min(520, Math.max(280, Math.round(panelWidth))) : 348,

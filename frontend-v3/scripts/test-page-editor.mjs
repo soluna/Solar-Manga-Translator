@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { usePageEditor } from '../src/composables/usePageEditor.js'
 import { buildStablePageImageUrl } from '../src/state/review-document.js'
+import { resolveReviewDirection, reviewStyleSnapshot } from '../src/state/review-style.js'
 
 const fixture = JSON.parse(readFileSync(new URL('../test-fixtures/page-document.json', import.meta.url)))
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -74,6 +75,97 @@ test('leaving waits for an in-flight save and persists newer typing with the nex
   assert.equal(requests[1].commands[0].text, '保存期间继续输入')
   assert.equal(editor.draftFor('region-a').translation, '保存期间继续输入')
   assert.equal(editor.dirty.value, false)
+})
+
+test('an in-flight direction save keeps the current direction draft available to the editor', async () => {
+  const started = deferred(), finish = deferred()
+  const server = copy(fixture.document)
+  const editor = usePageEditor({ api: {
+    load: async () => ({ document: copy(server) }),
+    command: async (_project, _page, { commands }) => {
+      started.resolve(commands)
+      await finish.promise
+      const direction = commands.find(command => command.type === 'update_text_direction')?.direction
+      server.regions[0].direction = direction
+      server.metadata.revision++
+      return { document: copy(server) }
+    },
+  } })
+  await editor.load('project-a', '0001.png')
+  editor.draftFor('region-a').direction = 'vertical'
+  const saving = editor.saveDraft('region-a')
+  const commands = await started.promise
+  assert.deepEqual(commands, [{ type: 'update_text_direction', region_id: 'region-a', direction: 'vertical' }])
+  assert.equal(editor.draftFor('region-a').direction, 'vertical')
+  finish.resolve()
+  await saving
+  assert.equal(editor.draftFor('region-a').direction, 'vertical')
+})
+
+test('an explicit direction intent saves even at the detected baseline and remains undoable after reload', async () => {
+  const commandStarted = deferred(), finishCommand = deferred()
+  const server = copy(fixture.document)
+  server.regions[0].direction = 'horizontal'
+  const commands = []
+  const layoutOverrides = {}
+  const config = () => ({
+    target_lang: 'CHS',
+    overrides: { translation_region_layout_overrides: copy(layoutOverrides) },
+  })
+  const editor = usePageEditor({ api: {
+    load: async () => ({ document: copy(server) }),
+    command: async (_project, _page, body) => {
+      commands.push(copy(body.commands))
+      if (commands.length === 1) {
+        commandStarted.resolve()
+        await finishCommand.promise
+      }
+      for (const command of body.commands) {
+        if (command.type !== 'update_text_direction') continue
+        if (command.direction === 'auto') delete layoutOverrides[command.region_id]
+        else layoutOverrides[command.region_id] = { direction: command.direction }
+        server.regions.find(region => region.region_id === command.region_id).direction = 'horizontal'
+      }
+      server.metadata.revision++
+      return { document: copy(server) }
+    },
+  } })
+  const resolvedDirection = () => resolveReviewDirection(
+    editor.document.value.regions[0], config(), editor.draftFor('region-a'),
+  )
+
+  await editor.load('project-a', '0001.png')
+  assert.equal(editor.draftFor('region-a').direction, 'horizontal')
+  assert.equal(resolvedDirection(), 'vertical')
+
+  const saving = editor.saveDirectionIntent('region-a', 'horizontal', 'auto')
+  await commandStarted.promise
+  assert.deepEqual(commands[0], [
+    { type: 'update_text_direction', region_id: 'region-a', direction: 'horizontal' },
+  ])
+  assert.equal(resolvedDirection(), 'horizontal')
+  assert.equal(reviewStyleSnapshot(editor.document.value.regions[0], {
+    draft: editor.draftFor('region-a'), config: config(),
+  }).direction, 'horizontal')
+  finishCommand.resolve()
+  await saving
+  assert.equal(editor.draftFor('region-a').directionIntent, null)
+
+  await editor.load('project-a', '0001.png')
+  assert.equal(resolvedDirection(), 'horizontal')
+
+  await editor.undo()
+  assert.deepEqual(commands[1], [
+    { type: 'update_text_direction', region_id: 'region-a', direction: 'auto' },
+  ])
+  assert.equal(layoutOverrides['region-a'], undefined)
+  assert.equal(resolvedDirection(), 'vertical')
+
+  await editor.redo()
+  assert.deepEqual(commands[2], [
+    { type: 'update_text_direction', region_id: 'region-a', direction: 'horizontal' },
+  ])
+  assert.equal(resolvedDirection(), 'horizontal')
 })
 
 test('a failed navigation flush preserves editable drafts and allows an explicit retry', async () => {
@@ -153,6 +245,32 @@ test('translation and typography edits undo and redo together using saved server
   assert.equal(editor.draftFor('region-a').translation, '调整后的文字')
   assert.equal(editor.draftFor('region-a').fontSize, 36)
   assert.equal(editor.dirty.value, false)
+})
+
+test('font size override can be cleared with a null command and restores the detected size', async () => {
+  const server = copy(fixture.document)
+  const editor = usePageEditor({ api: {
+    load: async () => ({ document: copy(server) }),
+    command: async (_project, _page, { commands }) => {
+      for (const command of commands) {
+        if (command.type !== 'update_font_size') continue
+        const region = server.regions.find(item => item.region_id === command.region_id)
+        region.style.font_size_override = command.font_size
+        region.style.font_size = command.font_size == null ? region.style.detected_font_size : command.font_size
+      }
+      server.metadata.revision++
+      return { document: copy(server) }
+    },
+  } })
+  await editor.load('project-a', '0001.png')
+  assert.equal(editor.draftFor('region-a').fontSizeOverride, 28)
+  editor.draftFor('region-a').fontSize = 28
+  editor.draftFor('region-a').fontSizeOverride = null
+  await editor.saveDraft('region-a', ['fontSizeOverride'])
+  assert.equal(server.regions[0].style.font_size_override, null)
+  assert.equal(editor.draftFor('region-a').fontSizeOverride, null)
+  assert.equal(editor.draftFor('region-a').fontSize, 28)
+  assert.equal(editor.canUndo.value, true)
 })
 
 test('a malformed document cannot silently turn regions into one undefined selection', async () => {

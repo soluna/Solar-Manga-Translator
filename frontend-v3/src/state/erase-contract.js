@@ -1,4 +1,55 @@
 const clamp = value => Math.max(0, Math.min(1, value))
+const BRUSH_MODES = new Set(['paint', 'erase', 'restore'])
+
+function roundBrushValue(value) {
+  return Math.round(value * 10) / 10
+}
+
+/** Normalize the UI's hex value before it is used for preview or wire data. */
+export function normalizeBrushColor(value, fallback = '#ffffff') {
+  const normalize = candidate => {
+    let normalized = String(candidate || '').trim()
+    if (!normalized) return ''
+    if (!normalized.startsWith('#')) normalized = `#${normalized}`
+    if (/^#[0-9a-f]{3}$/i.test(normalized)) {
+      normalized = `#${normalized.slice(1).split('').map(char => char + char).join('')}`
+    }
+    return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized.toLowerCase() : ''
+  }
+  return normalize(value) || normalize(fallback) || (fallback === '' ? '' : '#ffffff')
+}
+
+export function normalizeBrushSize(value, fallback = 20, max = 2048) {
+  const upper = Math.max(1, Number(max) || 2048)
+  const fallbackValue = Number(fallback)
+  const safeFallback = Number.isFinite(fallbackValue) ? fallbackValue : 20
+  const numeric = Number(value)
+  return roundBrushValue(Math.max(1, Math.min(upper, Number.isFinite(numeric) ? numeric : safeFallback)))
+}
+
+export function normalizeBrushFeather(value, size = 20, fallback = 0) {
+  const normalizedSize = normalizeBrushSize(size)
+  const fallbackValue = Number(fallback)
+  const safeFallback = Number.isFinite(fallbackValue) ? fallbackValue : 0
+  const numeric = Number(value)
+  return roundBrushValue(Math.max(0, Math.min(normalizedSize / 2, Number.isFinite(numeric) ? numeric : safeFallback)))
+}
+
+function colorTriplet(value, fallback) {
+  if (Array.isArray(value) && value.length >= 3) {
+    return value.slice(0, 3).map(channel => {
+      const numeric = Number(channel)
+      return Math.max(0, Math.min(255, Number.isFinite(numeric) ? Math.round(numeric) : 0))
+    })
+  }
+  const hex = normalizeBrushColor(value, fallback)
+  return [1, 3, 5].map(index => Number.parseInt(hex.slice(index, index + 2), 16))
+}
+
+function brushPoint(point) {
+  if (Array.isArray(point)) return [point[0], point[1]]
+  return [point?.x, point?.y]
+}
 function sizeOf(dimensions) {
   if (!(dimensions?.w > 0) || !(dimensions?.h > 0)) throw new Error('请等待页面尺寸加载完成。')
   return dimensions
@@ -35,21 +86,43 @@ export function eraseRequest({ provider, scope, marks = [], dimensions, maskMode
 export function previewAttempt(response) {
   const attempt = response?.advanced_erase
   if (!attempt?.attempt_id || !attempt.preview?.candidate_url) throw new Error('后端没有返回有效的擦除预览。')
-  return { attempt_id: attempt.attempt_id, preview: attempt.preview }
+  return { ...attempt, attempt_id: attempt.attempt_id, preview: attempt.preview }
 }
 export function brushOperations(marks, mode, color, feather = 0, dimensions = null) {
-  if (!marks.length || marks.some(mark => !mark.points?.length)) throw new Error('手工修补只接受画笔标记，请先移除矩形标记。')
-  if (!['paint', 'restore'].includes(mode)) throw new Error('修补画笔模式无效。')
-  if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error('请选择有效的画笔颜色。')
+  if (!Array.isArray(marks) || !marks.length || marks.some(mark => !Array.isArray(mark?.points) || !mark.points.length)) {
+    throw new Error('手工修补只接受画笔标记，请先移除矩形标记。')
+  }
+  if (!BRUSH_MODES.has(mode)) throw new Error('修补画笔模式无效。')
+  if (!/^#[0-9a-f]{6}$/i.test(normalizeBrushColor(color, ''))) throw new Error('请选择有效的画笔颜色。')
   const normalized = dimensions?.w > 0 && dimensions?.h > 0
   const minSide = normalized ? Math.min(dimensions.w, dimensions.h) : 1
-  return marks.map(mark => ({ mode, coordinate_space: normalized ? 'normalized' : 'pixel',
-    ...(normalized ? { size_space: 'normalized' } : {}),
-    points: mark.points.map(([x, y]) => ({
-    x: normalized ? Math.max(0, Math.min(1, x / dimensions.w)) : x,
-    y: normalized ? Math.max(0, Math.min(1, y / dimensions.h)) : y,
-  })),
-    size: normalized ? (mark.radius * 2) / minSide : mark.radius * 2,
-    feather: normalized ? feather / minSide : feather,
-    color: [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16)) }))
+  const fallbackColor = normalizeBrushColor(color)
+  return marks.map(mark => {
+    // A mark is a snapshot of the controls at pointer-down time. The current
+    // toolbar values are only fallbacks for legacy marks created before the
+    // per-stroke fields existed.
+    const operationMode = BRUSH_MODES.has(mark.mode) ? mark.mode : mode
+    const operationColor = normalizeBrushColor(mark.color, fallbackColor)
+    const radius = Number(mark.radius)
+    const rawSize = mark.size ?? (Number.isFinite(radius) ? radius * 2 : 20)
+    const operationSize = normalizeBrushSize(rawSize)
+    const operationFeather = normalizeBrushFeather(mark.feather ?? feather, operationSize)
+    const points = mark.points.map(point => {
+      const [rawX, rawY] = brushPoint(point)
+      if (rawX == null || rawY == null || !Number.isFinite(Number(rawX)) || !Number.isFinite(Number(rawY))) {
+        throw new Error('画笔轨迹包含无效位置。')
+      }
+      if (normalized) return normalizedPoint([Number(rawX), Number(rawY)], dimensions)
+      return { x: Number(rawX), y: Number(rawY) }
+    })
+    return {
+      mode: operationMode,
+      coordinate_space: normalized ? 'normalized' : 'pixel',
+      ...(normalized ? { size_space: 'normalized' } : {}),
+      points,
+      size: normalized ? operationSize / minSide : operationSize,
+      feather: normalized ? operationFeather / minSide : operationFeather,
+      color: colorTriplet(operationColor, fallbackColor),
+    }
+  })
 }

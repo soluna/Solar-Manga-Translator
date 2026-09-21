@@ -717,20 +717,38 @@ class ApiSecurityTests(unittest.TestCase):
             self.assertEqual(upload.status_code, 200)
             project_id = upload.json()["session_id"]
             url = f"/api/projects/{project_id}/glossary"
-            saved = self.client.put(url, json={"entries": [
-                {"source": "アキ", "translation": "阿纪", "category": "人名"},
-            ]})
-            self.assertEqual(saved.status_code, 200)
-            expected = self.client.get(url).json()["glossary"]["entries"]
-            self.assertEqual(len(expected), 1)
-            for method, target in (("put", url), ("post", url + "/apply")):
-                for invalid in ({}, {"entries": None}, {"entries": {}}, {"entries": ""}, {"entries": False}):
-                    with self.subTest(method=method, payload=invalid):
-                        response = getattr(self.client, method)(target, json=invalid)
-                        self.assertEqual(response.status_code, 400)
-                        self.assertEqual(self.client.get(url).json()["glossary"]["entries"], expected)
-            # An explicit empty list remains the deliberate clear operation.
-            cleared = self.client.put(url, json={"entries": []})
+            with mock.patch.object(
+                main.translator_engine,
+                "_now_iso",
+                return_value="2026-09-15T12:00:00+00:00",
+            ) as clock:
+                saved = self.client.put(url, json={"entries": [
+                    {"source": "アキ", "translation": "阿纪", "category": "人名"},
+                ]})
+                self.assertEqual(saved.status_code, 200)
+                expected = self.client.get(url).json()["glossary"]["entries"]
+                self.assertEqual(len(expected), 1)
+
+                # Reads must keep the saved entry timestamp even after the
+                # clock advances into the next second.
+                clock.return_value = "2026-09-15T12:00:01+00:00"
+                for method, target in (("put", url), ("post", url + "/apply")):
+                    for invalid in ({}, {"entries": None}, {"entries": {}}, {"entries": ""}, {"entries": False}):
+                        with self.subTest(method=method, payload=invalid):
+                            response = getattr(self.client, method)(target, json=invalid)
+                            self.assertEqual(response.status_code, 400)
+                            self.assertEqual(self.client.get(url).json()["glossary"]["entries"], expected)
+
+                edited = self.client.put(url, json={"entries": [
+                    {"source": "アキ", "translation": "阿希", "category": "人名"},
+                ]})
+                self.assertEqual(edited.status_code, 200)
+                edited_entries = edited.json()["glossary"]["entries"]
+                self.assertEqual(edited_entries[0]["updated_at"], clock.return_value)
+                self.assertNotEqual(edited_entries[0]["updated_at"], expected[0]["updated_at"])
+
+                # An explicit empty list remains the deliberate clear operation.
+                cleared = self.client.put(url, json={"entries": []})
             self.assertEqual(cleared.status_code, 200)
             self.assertEqual(self.client.get(url).json()["glossary"]["entries"], [])
 

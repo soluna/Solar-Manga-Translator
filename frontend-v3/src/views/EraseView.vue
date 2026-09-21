@@ -7,7 +7,16 @@ import { toasts, dismiss, toast, toastError } from '../composables/useToast.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
 import { loadProcessingConfig } from '../api/processing-config.js'
 import { useTaskEvents } from '../composables/useTaskEvents.js'
-import { normalizedPoint, selectionBox, eraseRequest, previewAttempt as readPreviewAttempt, brushOperations } from '../state/erase-contract.js'
+import {
+  normalizedPoint,
+  selectionBox,
+  eraseRequest,
+  previewAttempt as readPreviewAttempt,
+  brushOperations,
+  normalizeBrushColor,
+  normalizeBrushFeather,
+  normalizeBrushSize,
+} from '../state/erase-contract.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -30,8 +39,16 @@ const pageIndex = computed(() => {
 // ---- 画布（自由画布：缩放 + 平移，对齐审校页与旧版擦除弹窗）----
 const canvasImg = ref(null)
 const eraseCanvas = ref(null)
+const brushCanvas = ref(null)
 const imgNatural = ref({ w: 0, h: 0 })
 const imgError = ref(false)
+const brushCanvasLoading = ref(false)
+const brushCanvasError = ref('')
+const brushCursor = ref({ visible: false, x: 0, y: 0, diameter: 20 })
+let brushBaseImage = null
+let brushSourceImage = null
+let brushActiveStroke = null
+let brushLoadEpoch = 0
 
 const baseImageUrl = computed(() => {
   const primary = withImagePreviewSize(toApiUrl(`/api/pages/${sessionId.value}/${pageId.value}/base-image`), 1024)
@@ -65,6 +82,11 @@ function fitErase() {
   view.zoom = clampZoom(Math.min((rect.width - 2) / imgNatural.value.w, (rect.height - 2) / imgNatural.value.h))
   view.panX = (rect.width - imgNatural.value.w * view.zoom) / 2
   view.panY = (rect.height - imgNatural.value.h * view.zoom) / 2
+}
+
+function fitEraseManual() {
+  userTookOver = false
+  fitErase()
 }
 
 function zoomEraseAt(nextZoom, x, y) {
@@ -154,11 +176,47 @@ const provider = ref('local')
 const paintMode = ref('paint'), paintColor = ref('#ffffff'), feather = ref(0)
 const scope = ref('selection') // full | selection
 const tool = ref('click') // click | box | brush
+const brushToolOptions = [
+  { value: 'paint', label: '涂色覆盖', symbol: '●' },
+  { value: 'erase', label: '橡皮擦', symbol: '◌' },
+  { value: 'restore', label: '恢复原图', symbol: '↺' },
+]
+const brushPaintSize = ref(20)
+const brushEraseSize = ref(20)
+const brushRestoreSize = ref(20)
 const brushSize = ref(48)
+const paintColorPicking = ref(false)
 const maskMode = ref('stroke')
+const marks = ref([]) // 选区 mask 标记：{kind:'auto'|'box'|'brush', bbox?, points?, radius?, label}
+const brushMarks = ref([]) // 手工修补操作；每笔保留当时的工具参数
+const activeMarks = computed(() => provider.value === 'brush' ? brushMarks.value : marks.value)
+const hasPendingMarks = computed(() => marks.value.length > 0 || brushMarks.value.length > 0)
+const drawing = ref(null) // 进行中的 box/brush
+let actionSerial = 0
 const maxBrushSize = computed(() => Math.max(4, Math.min(200, Math.floor(Math.min(imgNatural.value.w || 800, imgNatural.value.h || 1200) / 4))))
+const maxBrushEditSize = computed(() => Math.max(1, Math.min(2048, Math.max(imgNatural.value.w || 1, imgNatural.value.h || 1))))
+const brushModeSize = computed({
+  get: () => ({ paint: brushPaintSize, erase: brushEraseSize, restore: brushRestoreSize }[paintMode.value] || brushPaintSize).value,
+  set: value => {
+    const target = { paint: brushPaintSize, erase: brushEraseSize, restore: brushRestoreSize }[paintMode.value] || brushPaintSize
+    target.value = value
+  },
+})
 watch(maxBrushSize, maximum => { brushSize.value = Math.min(brushSize.value, maximum) })
-watch(provider, value => { if (value === 'brush') { scope.value = 'selection'; tool.value = 'brush' } })
+watch([provider, sourceSize], () => {
+  if (provider.value === 'brush') nextTick(() => { void ensureBrushCanvas() })
+}, { flush: 'post' })
+watch(provider, value => {
+  if (value === 'brush') {
+    scope.value = 'selection'
+    tool.value = 'brush'
+    drawing.value = null
+  } else {
+    paintColorPicking.value = false
+    clearBrushCanvasRuntime()
+    drawing.value = null
+  }
+})
 
 const TOOL_HINTS = {
   click: '直接点击文字；系统优先命中已有文本框，需要时调用本地文字检测。',
@@ -166,10 +224,366 @@ const TOOL_HINTS = {
   brush: '在文字上涂抹；画笔与点击、框选结果合并成一张 mask。',
 }
 
-// ---- 标记 ----
-const marks = ref([]) // {kind:'auto'|'box'|'brush', bbox?, points?, radius?, label}
-const drawing = ref(null) // 进行中的 box/brush
-let actionSerial = 0
+function colorTripletToHex([r, g, b]) {
+  return `#${[r, g, b].map(value => Math.max(0, Math.min(255, Number(value) || 0)).toString(16).padStart(2, '0')).join('')}`
+}
+
+function pickPaintColor(pt) {
+  const canvas = brushCanvas.value
+  if (!canvas?.width || !canvas?.height || !imgNatural.value.w || !imgNatural.value.h) return false
+  try {
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round(pt[0] / imgNatural.value.w * canvas.width)))
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round(pt[1] / imgNatural.value.h * canvas.height)))
+    paintColor.value = colorTripletToHex(context.getImageData(x, y, 1, 1).data)
+    paintColorPicking.value = false
+    toast(`已取色 ${paintColor.value}`, 'ok')
+    return true
+  } catch (error) {
+    paintColorPicking.value = false
+    toast(error instanceof Error ? `无法从图片取色：${error.message}` : '无法从图片取色。', 'warn')
+    return false
+  }
+}
+
+function clampBrushNumber(value, min, max, fallback = min) {
+  const numeric = Number(value)
+  return Math.max(min, Math.min(max, Number.isFinite(numeric) ? numeric : fallback))
+}
+
+function normalizeBrushControls() {
+  const selectionSize = Math.round(clampBrushNumber(brushSize.value, 4, maxBrushSize.value, 48) * 10) / 10
+  brushSize.value = selectionSize
+  for (const size of [brushPaintSize, brushEraseSize, brushRestoreSize]) {
+    size.value = normalizeBrushSize(size.value, 20, maxBrushEditSize.value)
+  }
+  feather.value = normalizeBrushFeather(feather.value, brushPaintSize.value)
+  paintColor.value = normalizeBrushColor(paintColor.value)
+  redrawBrushCanvas()
+}
+
+function loadBrushImage(url, label) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    // The backend allows public image GETs and returns CORS headers for the
+    // local dev origins. Set this before src so the canvas remains readable
+    // when the frontend and backend use different local ports.
+    image.crossOrigin = 'anonymous'
+    image.decoding = 'async'
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error(`${label}加载失败，请刷新页面后重试。`))
+    image.src = withCacheBust(toApiUrl(url), `${pageEpoch}-${Date.now()}`)
+  })
+}
+
+async function ensureBrushCanvas() {
+  if (provider.value !== 'brush' || !sourceSize.value || !brushCanvas.value) return
+  const currentEpoch = pageEpoch
+  if (brushBaseImage && brushSourceImage && brushCanvas.value.width) {
+    redrawBrushCanvas()
+    return
+  }
+  const loadEpoch = ++brushLoadEpoch
+  brushCanvasLoading.value = true
+  brushCanvasError.value = ''
+  try {
+    const [baseImage, sourceImage] = await Promise.all([
+      loadBrushImage(baseImageUrl.value, '空页图片'),
+      loadBrushImage(fallbackImageUrl.value, '原图'),
+    ])
+    if (currentEpoch !== pageEpoch || loadEpoch !== brushLoadEpoch || provider.value !== 'brush') return
+    brushBaseImage = baseImage
+    brushSourceImage = sourceImage
+    const canvas = brushCanvas.value
+    canvas.width = Math.max(1, baseImage.naturalWidth)
+    canvas.height = Math.max(1, baseImage.naturalHeight)
+    redrawBrushCanvas()
+  } catch (error) {
+    if (currentEpoch === pageEpoch && loadEpoch === brushLoadEpoch) {
+      brushCanvasError.value = error instanceof Error ? error.message : '画笔编辑器初始化失败。'
+    }
+  } finally {
+    if (currentEpoch === pageEpoch && loadEpoch === brushLoadEpoch) brushCanvasLoading.value = false
+  }
+}
+
+async function refreshBrushBaseImage() {
+  if (provider.value !== 'brush' || !sourceSize.value || !brushCanvas.value) return false
+  const currentEpoch = pageEpoch
+  const loadEpoch = ++brushLoadEpoch
+  brushCanvasLoading.value = true
+  brushCanvasError.value = ''
+  try {
+    const baseImage = await loadBrushImage(baseImageUrl.value, '更新后的空页图片')
+    const sourceImage = brushSourceImage || await loadBrushImage(fallbackImageUrl.value, '原图')
+    if (currentEpoch !== pageEpoch || loadEpoch !== brushLoadEpoch || provider.value !== 'brush') return false
+    brushBaseImage = baseImage
+    brushSourceImage = sourceImage
+    brushCanvas.value.width = Math.max(1, baseImage.naturalWidth)
+    brushCanvas.value.height = Math.max(1, baseImage.naturalHeight)
+    redrawBrushCanvas()
+    return true
+  } catch (error) {
+    if (currentEpoch === pageEpoch && loadEpoch === brushLoadEpoch) {
+      brushCanvasError.value = error instanceof Error ? error.message : '更新画笔底图失败。'
+    }
+    return false
+  } finally {
+    if (currentEpoch === pageEpoch && loadEpoch === brushLoadEpoch) brushCanvasLoading.value = false
+  }
+}
+
+function clearBrushCanvasRuntime() {
+  brushLoadEpoch += 1
+  brushBaseImage = null
+  brushSourceImage = null
+  brushActiveStroke = null
+  brushCanvasLoading.value = false
+  brushCanvasError.value = ''
+  brushCursor.value = { visible: false, x: 0, y: 0, diameter: brushModeSize.value }
+  if (brushCanvas.value) {
+    brushCanvas.value.width = 0
+    brushCanvas.value.height = 0
+  }
+}
+
+function brushCanvasScale() {
+  const canvas = brushCanvas.value
+  const width = Math.max(1, imgNatural.value.w || 1)
+  const height = Math.max(1, imgNatural.value.h || 1)
+  return {
+    x: (canvas?.width || width) / width,
+    y: (canvas?.height || height) / height,
+  }
+}
+
+function brushCanvasPoint(event) {
+  const canvas = brushCanvas.value
+  if (!canvas || !imgNatural.value.w || !imgNatural.value.h) return null
+  const rect = canvas.getBoundingClientRect()
+  if (!rect.width || !rect.height) return null
+  const relativeX = clampBrushNumber((event.clientX - rect.left) / rect.width, 0, 1, 0)
+  const relativeY = clampBrushNumber((event.clientY - rect.top) / rect.height, 0, 1, 0)
+  const stageZoom = Math.max(view.zoom, 0.0001)
+  const stageWidth = rect.width / stageZoom
+  const stageHeight = rect.height / stageZoom
+  const x = relativeX * imgNatural.value.w
+  const y = relativeY * imgNatural.value.h
+  return {
+    point: [Math.round(x), Math.round(y)],
+    canvasX: relativeX * canvas.width,
+    canvasY: relativeY * canvas.height,
+    // The cursor lives inside the transformed stage. Keep its position and
+    // diameter in stage CSS pixels so it is transformed exactly once.
+    localX: (event.clientX - rect.left) / stageZoom,
+    localY: (event.clientY - rect.top) / stageZoom,
+    cssScale: stageWidth / Math.max(1, imgNatural.value.w),
+    stageWidth,
+    stageHeight,
+  }
+}
+
+function brushOperationFeather(operation) {
+  const size = Math.max(1, Number(operation?.size || (Number(operation?.radius || 0) * 2) || brushSize.value))
+  const radius = size / 2
+  const explicit = Number(operation?.feather)
+  if (Number.isFinite(explicit)) return clampBrushNumber(explicit, 0, radius, 0)
+  const hardness = clampBrushNumber(operation?.hardness, 0, 100, 100)
+  return radius * (1 - hardness / 100)
+}
+
+function drawBrushCanvasBase() {
+  const canvas = brushCanvas.value
+  if (!canvas || !brushBaseImage) return
+  const context = canvas.getContext('2d')
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(brushBaseImage, 0, 0, canvas.width, canvas.height)
+}
+
+function drawBrushCanvasStamp(operation, point) {
+  const canvas = brushCanvas.value
+  if (!canvas || !brushBaseImage || !brushSourceImage || !point) return
+  const context = canvas.getContext('2d')
+  const scale = brushCanvasScale()
+  const x = point[0] * scale.x
+  const y = point[1] * scale.y
+  const size = Math.max(1, Number(operation.size || Number(operation.radius || 0) * 2 || brushModeSize.value))
+  const radius = Math.max(0.5, size * ((scale.x + scale.y) / 2) / 2)
+  const mode = operation.mode || 'paint'
+
+  if (mode === 'paint') {
+    const featherPixels = Math.min(radius, brushOperationFeather(operation) * ((scale.x + scale.y) / 2))
+    context.save()
+    context.beginPath()
+    context.arc(x, y, radius, 0, Math.PI * 2)
+    if (featherPixels > 0) {
+      const [red, green, blue] = typeof operation.color === 'string'
+        ? [1, 3, 5].map(index => parseInt(operation.color.slice(index, index + 2), 16))
+        : [255, 255, 255]
+      const gradient = context.createRadialGradient(
+        x, y, Math.max(0, radius - featherPixels), x, y, radius,
+      )
+      gradient.addColorStop(0, `rgba(${red || 0}, ${green || 0}, ${blue || 0}, 1)`)
+      gradient.addColorStop(1, `rgba(${red || 0}, ${green || 0}, ${blue || 0}, 0)`)
+      context.fillStyle = gradient
+    } else {
+      context.fillStyle = normalizeBrushColor(operation.color)
+    }
+    context.fill()
+    context.restore()
+    return
+  }
+
+  const sourceImage = mode === 'restore' ? brushSourceImage : brushBaseImage
+  context.save()
+  context.beginPath()
+  context.arc(x, y, radius, 0, Math.PI * 2)
+  context.clip()
+  context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
+  context.restore()
+}
+
+function drawBrushCanvasSegment(operation, previousPoint, nextPoint) {
+  const canvas = brushCanvas.value
+  if (!canvas || !previousPoint || !nextPoint) return
+  const scale = brushCanvasScale()
+  const startX = previousPoint[0] * scale.x
+  const startY = previousPoint[1] * scale.y
+  const endX = nextPoint[0] * scale.x
+  const endY = nextPoint[1] * scale.y
+  const distance = Math.hypot(endX - startX, endY - startY)
+  const size = Math.max(1, Number(operation.size || Number(operation.radius || 0) * 2 || brushModeSize.value))
+  const radius = Math.max(0.5, size * ((scale.x + scale.y) / 2) / 2)
+  const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius * 0.35)))
+  for (let index = 1; index <= steps; index += 1) {
+    const ratio = index / steps
+    drawBrushCanvasStamp(operation, [
+      previousPoint[0] + (nextPoint[0] - previousPoint[0]) * ratio,
+      previousPoint[1] + (nextPoint[1] - previousPoint[1]) * ratio,
+    ])
+  }
+}
+
+function replayBrushCanvas() {
+  if (!brushBaseImage || !brushCanvas.value) return
+  drawBrushCanvasBase()
+  for (const mark of brushMarks.value) {
+    const points = mark.points
+    drawBrushCanvasStamp(mark, points[0])
+    for (let index = 1; index < points.length; index += 1) {
+      drawBrushCanvasSegment(mark, points[index - 1], points[index])
+    }
+  }
+}
+
+function redrawBrushCanvas() {
+  replayBrushCanvas()
+}
+
+function updateBrushCursor(event) {
+  const point = brushCanvasPoint(event)
+  if (!point) return
+  brushCursor.value = {
+    visible: true,
+    x: point.localX,
+    y: point.localY,
+    diameter: Math.max(3, brushModeSize.value * point.cssScale),
+  }
+}
+
+function brushCursorStyle() {
+  return {
+    width: `${brushCursor.value.diameter}px`,
+    height: `${brushCursor.value.diameter}px`,
+    left: `${brushCursor.value.x}px`,
+    top: `${brushCursor.value.y}px`,
+    borderColor: paintMode.value === 'paint' ? normalizeBrushColor(paintColor.value) : undefined,
+  }
+}
+
+function brushStrokeLabel(operation, index = brushMarks.value.length + 1) {
+  const mode = brushToolOptions.find(item => item.value === operation?.mode)?.label || '画笔'
+  const size = Math.round(Number(operation?.size || Number(operation?.radius || 0) * 2 || 0))
+  const f = Math.round(Number(operation?.feather || 0) * 10) / 10
+  return `${mode} ${index} · ${size}px · 羽化 ${f}px · 硬度 ${Math.round(clampBrushNumber(operation?.hardness, 0, 100, 100))}%`
+}
+
+function beginBrushStroke(event) {
+  if (spacePan.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    startErasePan(event)
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  if (!canRun.value || brushCanvasLoading.value || brushCanvasError.value) return
+  const point = brushCanvasPoint(event)
+  if (!point) return
+  updateBrushCursor(event)
+  if (paintColorPicking.value && paintMode.value === 'paint') {
+    pickPaintColor(point.point)
+    return
+  }
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+  const size = normalizeBrushSize(
+    clampBrushNumber(brushModeSize.value, 1, maxBrushEditSize.value, 20),
+    20,
+    maxBrushEditSize.value,
+  )
+  const operation = {
+    kind: 'brush',
+    mode: paintMode.value,
+    color: normalizeBrushColor(paintColor.value),
+    size,
+    radius: size / 2,
+    feather: paintMode.value === 'paint' ? normalizeBrushFeather(feather.value, size) : 0,
+    points: [point.point],
+  }
+  brushActiveStroke = { pointerId: event.pointerId, operation }
+  drawBrushCanvasStamp(operation, point.point)
+}
+
+function updateBrushStroke(event) {
+  if (spacePan.value) return
+  updateBrushCursor(event)
+  const active = brushActiveStroke
+  if (!active || active.pointerId !== event.pointerId) return
+  const point = brushCanvasPoint(event)
+  if (!point) return
+  const previous = active.operation.points[active.operation.points.length - 1]
+  if (Math.hypot(point.point[0] - previous[0], point.point[1] - previous[1]) < 1) return
+  active.operation.points.push(point.point)
+  drawBrushCanvasSegment(active.operation, previous, point.point)
+}
+
+function finishBrushStroke(event) {
+  const active = brushActiveStroke
+  if (!active || active.pointerId !== event.pointerId) return
+  event.currentTarget?.releasePointerCapture?.(event.pointerId)
+  const operation = active.operation
+  brushMarks.value.push({ ...operation, label: brushStrokeLabel(operation) })
+  brushActiveStroke = null
+  replayBrushCanvas()
+}
+
+function cancelBrushStroke(event) {
+  if (brushActiveStroke?.pointerId === event.pointerId) {
+    brushActiveStroke = null
+    replayBrushCanvas()
+  }
+}
+
+function hideBrushCursor() {
+  if (!brushActiveStroke) brushCursor.value = { ...brushCursor.value, visible: false }
+}
+
+function selectBrushTool(value) {
+  if (!brushToolOptions.some(option => option.value === value) || running.value) return
+  paintMode.value = value
+  paintColorPicking.value = false
+  normalizeBrushControls()
+}
 
 function beginAction() {
   if (!canRun.value) return 0
@@ -188,12 +602,20 @@ function addMark(mark) {
 
 function removeMark(index) {
   if (running.value) return
-  marks.value.splice(index, 1)
+  activeMarks.value.splice(index, 1)
+  if (provider.value === 'brush') redrawBrushCanvas()
 }
 
 function clearMarks() {
   if (running.value) return
-  marks.value = []
+  activeMarks.value.splice(0)
+  if (provider.value === 'brush') redrawBrushCanvas()
+}
+
+function undoLastMark() {
+  if (running.value || !activeMarks.value.length) return
+  activeMarks.value.pop()
+  if (provider.value === 'brush') redrawBrushCanvas()
 }
 
 async function onCanvasPointerDown(event) {
@@ -206,6 +628,11 @@ async function onCanvasPointerDown(event) {
   if (scope.value === 'full') return
   const pt = toNaturalPoint(event)
   if (!pt) return
+  if (paintColorPicking.value && provider.value === 'brush' && paintMode.value === 'paint') {
+    event.preventDefault()
+    pickPaintColor(pt)
+    return
+  }
   if (tool.value === 'click') {
     await handleClickSelect(pt)
     return
@@ -302,9 +729,12 @@ function brushPolyline(mark) {
 // ---- 执行 ----
 const running = ref(false)
 const previewAttempt = ref(null)
-const canRun = computed(() => !running.value && !loading.value && Boolean(sourceSize.value) && !taskBusy.value)
+const previewShowMask = ref(false)
+const canRun = computed(() => !running.value && !loading.value && Boolean(sourceSize.value) && !taskBusy.value
+  && (provider.value !== 'brush' || (!brushCanvasLoading.value && !brushCanvasError.value && Boolean(brushCanvas.value?.width))))
 
 async function runErase() {
+  if (previewAttempt.value) return
   const token = beginAction()
   if (!token) return
   const epoch = pageEpoch
@@ -318,10 +748,12 @@ async function runErase() {
     if (epoch !== pageEpoch) return
     if (body.action === 'local-advanced-preview') {
       previewAttempt.value = readPreviewAttempt(response)
+      previewShowMask.value = false
       toast('整页预览已生成，请对比后应用。', 'ok')
     } else {
       adoptResponse(response)
       previewAttempt.value = null
+      previewShowMask.value = false
       marks.value = []
       displayUrl.value = withCacheBust(baseImageUrl.value)
       const fallback = response.advanced_erase?.mask_mode === 'selection_fallback'
@@ -335,21 +767,40 @@ async function runErase() {
 async function runBrush(token = beginAction(), epoch = pageEpoch) {
   if (!token) return
   try {
-    const operations = brushOperations(marks.value, paintMode.value, paintColor.value, feather.value, imgNatural.value)
+    const operations = brushOperations(brushMarks.value, paintMode.value, paintColor.value, feather.value, imgNatural.value)
     const response = await apiPostJson(`${endpoint.value}/brush-edit`, { operations }, '画笔修补失败')
     if (epoch !== pageEpoch) return
     adoptResponse(response)
     previewAttempt.value = null
-    marks.value = []
+    previewShowMask.value = false
+    brushMarks.value = []
     displayUrl.value = withCacheBust(baseImageUrl.value)
-    toast('画笔修补已保存，需重新嵌字后导出。', 'ok')
+    const refreshed = await refreshBrushBaseImage()
+    toast(refreshed ? '画笔修补已保存，需重新嵌字后导出。' : '画笔修补已保存，但空页预览刷新失败；请返回审校后重新进入修图。', refreshed ? 'ok' : 'warn')
   } catch (error) {
     if (epoch === pageEpoch) toastError(error)
   } finally { finishAction(token) }
 }
 
 function previewUrl(kind) {
-  return toApiUrl(previewAttempt.value?.preview?.[`${kind}_url`] || '')
+  const raw = previewAttempt.value?.preview?.[`${kind}_url`]
+  return raw ? withCacheBust(toApiUrl(raw), previewAttempt.value?.attempt_id) : ''
+}
+
+function discardPreview() {
+  if (running.value) return
+  previewAttempt.value = null
+  previewShowMask.value = false
+}
+
+function continueWithLocalSelectionErase() {
+  if (running.value) return
+  provider.value = 'local'
+  scope.value = 'selection'
+  tool.value = 'brush'
+  marks.value = []
+  discardPreview()
+  toast('已切换到本地选区修补，可用点击、框选或画笔补充范围。', 'ok')
 }
 
 async function applyPreview() {
@@ -364,6 +815,7 @@ async function applyPreview() {
     if (epoch !== pageEpoch) return
     adoptResponse(response)
     previewAttempt.value = null
+    previewShowMask.value = false
     marks.value = []
     displayUrl.value = withCacheBust(baseImageUrl.value)
     toast('已应用新空页，需重新嵌字后导出。', 'ok')
@@ -373,6 +825,7 @@ async function applyPreview() {
 }
 
 async function restoreBlank() {
+  if (previewAttempt.value) return
   const token = beginAction()
   if (!token) return
   const epoch = pageEpoch
@@ -381,8 +834,12 @@ async function restoreBlank() {
     if (epoch !== pageEpoch) return
     adoptResponse(response)
     previewAttempt.value = null
+    previewShowMask.value = false
+    marks.value = []
+    brushMarks.value = []
     displayUrl.value = withCacheBust(baseImageUrl.value)
-    toast('已恢复首次修图前的空页。', 'ok')
+    const refreshed = provider.value !== 'brush' || await refreshBrushBaseImage()
+    toast(refreshed ? '已恢复首次修图前的空页。' : '空页已恢复，但画笔预览刷新失败；请返回审校后重新进入修图。', refreshed ? 'ok' : 'warn')
   } catch (error) {
     if (epoch === pageEpoch) toastError(error)
   } finally { finishAction(token) }
@@ -393,21 +850,24 @@ function backToReview() {
 }
 function leaveSafely() {
   if (running.value) { toast('请等待当前修图操作完成。', 'warn'); return false }
-  return (!marks.value.length && !previewAttempt.value) || window.confirm('还有未应用的标记或预览，离开将放弃这些内容。确定离开？')
+  return (!hasPendingMarks.value && !previewAttempt.value) || window.confirm('还有未应用的标记或预览，离开将放弃这些内容。确定离开？')
 }
 onBeforeRouteLeave(leaveSafely)
 onBeforeRouteUpdate(leaveSafely)
 function beforeUnload(event) {
-  if (running.value || marks.value.length || previewAttempt.value) { event.preventDefault(); event.returnValue = '' }
+  if (running.value || hasPendingMarks.value || previewAttempt.value) { event.preventDefault(); event.returnValue = '' }
 }
 watch([sessionId, pageId], async ([sid, pid]) => {
   const epoch = ++pageEpoch
   actionSerial += 1
+  clearBrushCanvasRuntime()
   running.value = false
   loading.value = true
   sourceSize.value = null
   previewAttempt.value = null
+  previewShowMask.value = false
   marks.value = []
+  brushMarks.value = []
   drawing.value = null
   panState.value = null
   userTookOver = false
@@ -420,7 +880,10 @@ watch([sessionId, pageId], async ([sid, pid]) => {
     imgNatural.value = sourceSize.value
     imgError.value = false
     displayUrl.value = baseImageUrl.value
-    nextTick(fitErase)
+    nextTick(() => {
+      fitErase()
+      if (provider.value === 'brush') void ensureBrushCanvas()
+    })
   } catch (error) { if (epoch === pageEpoch) toastError(error) }
   finally { if (epoch === pageEpoch) loading.value = false }
 }, { immediate: true })
@@ -441,8 +904,13 @@ function onEraseKeydown(event) {
   const meta = event.metaKey || event.ctrlKey
   if (meta && !event.shiftKey && event.key.toLowerCase() === 'z') {
     event.preventDefault()
-    if (drawing.value) drawing.value = null
-    else if (marks.value.length) marks.value.pop()
+    if (brushActiveStroke) {
+      const active = brushActiveStroke
+      brushActiveStroke = null
+      brushCanvas.value?.releasePointerCapture?.(active.pointerId)
+      replayBrushCanvas()
+    } else if (drawing.value) drawing.value = null
+    else undoLastMark()
     return
   }
   if (!meta && event.key === '0') {
@@ -463,6 +931,12 @@ function onEraseKeydown(event) {
   }
   if (event.key === 'Escape') {
     event.preventDefault()
+    if (brushActiveStroke) {
+      const active = brushActiveStroke
+      brushActiveStroke = null
+      brushCanvas.value?.releasePointerCapture?.(active.pointerId)
+      replayBrushCanvas()
+    }
     drawing.value = null
   }
 }
@@ -491,12 +965,13 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', onErasePanMove)
   window.removeEventListener('keydown', onEraseKeydown)
   window.removeEventListener('keyup', onEraseKeyup)
+  clearBrushCanvasRuntime()
   eraseResizeObs?.disconnect()
 })
 </script>
 
 <template>
-  <div class="app erase-app" style="overflow:auto;">
+  <div class="app erase-app" :class="{ 'has-preview': Boolean(previewAttempt) }" style="overflow:auto;">
     <header class="topbar">
       <a class="topbar-brand" href="#/">
         <span class="brand-mark">S</span>
@@ -533,13 +1008,37 @@ onUnmounted(() => {
             ref="eraseCanvas"
             class="erase-canvas"
             :class="{ 'is-space-pan': spacePan, 'is-panning': panState }"
-            title="滚轮平移 · Shift 滚轮横向 · Ctrl/⌘+滚轮缩放 · 按住 Space 拖平移 · 0 适合 · ⌘Z 撤销标记"
+            title="滚轮平移 · Shift 滚轮横向 · Ctrl/⌘+滚轮缩放 · 按住 Space 拖平移 · 0 适合 · ⌘Z 撤销上一笔"
             @wheel.prevent="onEraseWheel"
             @pointerdown="onCanvasPointerDown"
           >
             <div class="erase-stage" :style="stageStyle">
-              <img ref="canvasImg" :src="displayUrl" alt="页面底图" draggable="false" @load="onImgLoad" @error="onImgError" />
+              <canvas
+                v-if="provider === 'brush'"
+                ref="brushCanvas"
+                class="brush-canvas"
+                :class="{ 'is-picking-color': paintColorPicking }"
+                data-testid="erase-brush-canvas"
+                aria-label="空页画笔编辑画布"
+                @pointerdown="beginBrushStroke"
+                @pointermove="updateBrushStroke"
+                @pointerup="finishBrushStroke"
+                @pointercancel="cancelBrushStroke"
+                @pointerenter="updateBrushCursor"
+                @pointerleave="hideBrushCursor"
+              />
+              <img v-else ref="canvasImg" :src="displayUrl" alt="页面底图" draggable="false" @load="onImgLoad" @error="onImgError" />
+              <div v-if="provider === 'brush' && brushCanvasLoading" class="brush-canvas-status">正在加载空页与原图…</div>
+              <div v-else-if="provider === 'brush' && brushCanvasError" class="brush-canvas-status is-error">{{ brushCanvasError }}</div>
+              <span
+                v-if="provider === 'brush' && brushCursor.visible && !paintColorPicking"
+                class="brush-cursor"
+                :class="`is-${paintMode}`"
+                :style="brushCursorStyle()"
+                aria-hidden="true"
+              ></span>
               <template v-if="scope === 'selection'">
+                <template v-if="provider !== 'brush'">
                 <div v-for="(mark, i) in marks.filter(m => m.bbox)" :key="`m${i}`" class="erase-mark" :style="markStyle(mark)">
                   <span>{{ mark.kind === 'auto' ? '自动' : '框选' }}</span>
                 </div>
@@ -563,6 +1062,7 @@ onUnmounted(() => {
                     stroke-linecap="round"
                   />
                 </svg>
+                </template>
               </template>
               <div v-if="scope === 'full'" class="full-scope-hint">
                 <span class="badge is-accent no-dot" style="height:auto;padding:8px 14px;font-size:var(--fs-sub);">整页处理 · 生成新的无字底图</span>
@@ -585,11 +1085,85 @@ onUnmounted(() => {
           </select></label>
           <p v-if="provider === 'online'" class="erase-hint">所需图片会发送至你配置的在线修图服务，费用由服务商收取。</p>
           <template v-if="provider === 'brush'">
-            <label class="field"><span>画笔操作</span><select v-model="paintMode" :disabled="running"><option value="paint">涂色覆盖</option><option value="restore">恢复原图</option></select></label>
-            <label v-if="paintMode === 'paint'" class="field"><span>颜色</span><input v-model="paintColor" type="color" :disabled="running" /></label>
-            <label v-if="paintMode === 'paint'" class="field"><span>羽化（像素）</span><input v-model.number="feather" type="number" min="0" :max="brushSize / 2" :disabled="running" /></label>
+            <span class="kicker">画笔工具</span>
+            <div class="brush-tool-list" role="group" aria-label="画笔操作">
+              <button
+                v-for="option in brushToolOptions"
+                :key="option.value"
+                class="tool-item"
+                type="button"
+                :disabled="running || brushCanvasLoading || !!brushCanvasError"
+                :class="{ active: paintMode === option.value }"
+                :aria-pressed="paintMode === option.value"
+                :data-testid="`erase-brush-tool-${option.value}`"
+                @click="selectBrushTool(option.value)"
+              >
+                <span class="brush-tool-symbol" aria-hidden="true">{{ option.symbol }}</span>
+                <span><strong>{{ option.label }}</strong><small>{{ option.value === 'paint' ? '在空页上涂色' : option.value === 'erase' ? '恢复当前空页' : '取回原图内容' }}</small></span>
+              </button>
+            </div>
+            <div class="field">
+              <span>{{ paintMode === 'paint' ? '涂色大小' : paintMode === 'erase' ? '橡皮擦大小' : '恢复画笔大小' }}</span>
+              <div class="brush-value-row">
+                <input
+                  v-model.number="brushModeSize"
+                  type="range"
+                  min="1"
+                  :max="maxBrushEditSize"
+                  step="1"
+                  aria-label="当前画笔大小"
+                  :disabled="running || brushCanvasLoading || !!brushCanvasError"
+                  @change="normalizeBrushControls"
+                />
+                <input
+                  v-model.number="brushModeSize"
+                  type="number"
+                  min="1"
+                  :max="maxBrushEditSize"
+                  step="1"
+                  aria-label="当前画笔大小数值"
+                  :disabled="running || brushCanvasLoading || !!brushCanvasError"
+                  @change="normalizeBrushControls"
+                />
+                <small>px</small>
+              </div>
+            </div>
+            <label v-if="paintMode === 'paint'" class="field">
+              <span>颜色</span>
+              <div class="brush-color-row">
+                <input v-model="paintColor" type="color" aria-label="画笔颜色" :disabled="running || brushCanvasLoading || !!brushCanvasError" />
+                <input
+                  v-model="paintColor"
+                  class="brush-color-hex"
+                  type="text"
+                  maxlength="7"
+                  aria-label="画笔颜色 Hex"
+                  :disabled="running || brushCanvasLoading || !!brushCanvasError"
+                  @change="paintColor = normalizeBrushColor($event.target.value)"
+                />
+                <button
+                  class="icon-btn"
+                  type="button"
+                  :class="{ active: paintColorPicking }"
+                  aria-label="从图片吸取颜色"
+                  title="从图片吸取颜色"
+                  :disabled="running || brushCanvasLoading || !!brushCanvasError"
+                  data-testid="erase-pick-color"
+                  @click="paintColorPicking = !paintColorPicking"
+                >⊙</button>
+              </div>
+            </label>
+            <label v-if="paintMode === 'paint'" class="field">
+              <span>羽化</span>
+              <div class="brush-value-row">
+                <input v-model.number="feather" type="range" min="0" :max="Math.max(0, brushModeSize / 2)" step="1" aria-label="画笔羽化" :disabled="running || brushCanvasLoading || !!brushCanvasError" @change="normalizeBrushControls" />
+                <input v-model.number="feather" type="number" min="0" :max="Math.max(0, brushModeSize / 2)" step="1" aria-label="画笔羽化数值" :disabled="running || brushCanvasLoading || !!brushCanvasError" @change="normalizeBrushControls" />
+                <small>px</small>
+              </div>
+            </label>
+            <p class="erase-hint">在空页上直接修补；每一笔会记录当时的工具、颜色、大小和羽化设置。</p>
           </template>
-          <template v-if="scope === 'selection'">
+          <template v-else-if="scope === 'selection'">
             <span class="kicker">选择工具</span>
             <div class="tool-list">
               <button v-if="provider !== 'brush'" class="tool-item" :disabled="running" :class="{ active: tool === 'click' }" @click="tool = 'click'">
@@ -633,25 +1207,25 @@ onUnmounted(() => {
 
           </template>
           <template v-if="scope === 'selection'">
-            <span class="kicker">范围标记 · {{ marks.length }}</span>
+            <span class="kicker">范围标记 · {{ activeMarks.length }}</span>
             <div class="mark-list">
-              <div v-for="(mark, i) in marks" :key="i" class="mark-item">
+              <div v-for="(mark, i) in activeMarks" :key="i" class="mark-item">
                 <span class="tag" :class="{ 'is-accent': mark.kind === 'auto' }">{{ mark.kind === 'auto' ? '自动' : mark.kind === 'box' ? '框选' : '画笔' }}</span>
-                <span>{{ mark.label }}</span>
+                <span>{{ provider === 'brush' ? brushStrokeLabel(mark, i + 1) : mark.label }}</span>
                 <button class="icon-btn" type="button" :disabled="running" aria-label="删除标记" @click="removeMark(i)">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
               </div>
-              <p v-if="!marks.length" class="inline-note">还没有标记。用左侧工具在画布上标记。</p>
+              <p v-if="!activeMarks.length" class="inline-note">还没有标记。用左侧工具在画布上标记。</p>
             </div>
           </template>
         </div>
 
         <div class="erase-side-foot">
-          <button class="btn btn-ghost" style="width:100%;" :disabled="!canRun" @click="restoreBlank">恢复首次修图前空页</button>
+          <button class="btn btn-ghost" style="width:100%;" :disabled="!canRun || !!previewAttempt" @click="restoreBlank">恢复首次修图前空页</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <button class="btn btn-ghost" type="button" :disabled="running || !marks.length" @click="marks.pop()">撤销</button>
-            <button class="btn btn-ghost" type="button" :disabled="running || !marks.length" @click="clearMarks">清空</button>
+            <button class="btn btn-ghost" type="button" :disabled="running || !activeMarks.length" @click="undoLastMark">撤销</button>
+            <button class="btn btn-ghost" type="button" :disabled="running || !activeMarks.length" @click="clearMarks">清空</button>
           </div>
           <button class="btn btn-primary btn-lg" style="width:100%;" :disabled="!canRun" @click="runErase">
             {{ running ? '处理中…' : provider === 'brush' ? '应用修补画笔' : provider === 'local' && scope === 'full' ? '生成整页预览' : '执行擦除' }}
@@ -660,28 +1234,35 @@ onUnmounted(() => {
       </aside>
     </div>
 
-    <section v-if="previewAttempt" class="pages-view" style="flex:none;border-top:1px solid var(--border);">
+    <section v-if="previewAttempt" class="pages-view erase-preview" data-testid="erase-preview" style="flex:none;border-top:1px solid var(--border);">
       <div class="pages-inner">
-        <div>
+        <div class="erase-preview-head">
+          <div>
           <span class="kicker">LaMa 预览</span>
           <h2 class="section-title">本地擦除对比</h2>
+          </div>
+          <label class="check-row"><input v-model="previewShowMask" type="checkbox" /><span>显示擦除范围</span></label>
         </div>
         <div class="compare3">
           <figure>
             <figcaption><strong>原图</strong></figcaption>
-            <div class="cmp-img"><img :src="fallbackImageUrl" alt="原图" /></div>
+            <div class="cmp-img"><img :src="previewUrl('source') || fallbackImageUrl" alt="原图" /></div>
           </figure>
           <figure>
             <figcaption><strong>擦除结果 · LaMa</strong></figcaption>
-            <div class="cmp-img"><img :src="previewUrl('candidate')" alt="擦除结果" /></div>
+            <div class="cmp-img">
+              <img :src="previewUrl('candidate')" alt="擦除结果" />
+              <img v-if="previewShowMask && previewUrl('overlay')" class="preview-mask-overlay" :src="previewUrl('overlay')" alt="" />
+            </div>
           </figure>
           <figure>
             <figcaption><strong>Mask</strong></figcaption>
-            <div class="cmp-img"><img :src="previewUrl('mask')" alt="mask" /></div>
+            <div class="cmp-img"><img v-if="previewUrl('mask')" :src="previewUrl('mask')" alt="mask" /></div>
           </figure>
         </div>
         <div class="inline-actions" style="justify-content:flex-end;">
-          <button class="btn btn-ghost" type="button" :disabled="running" @click="previewAttempt = null">放弃结果</button>
+          <button class="btn btn-ghost" type="button" :disabled="running" @click="continueWithLocalSelectionErase">继续用本地选区修补</button>
+          <button class="btn btn-ghost" type="button" :disabled="running" @click="discardPreview">放弃结果</button>
           <button class="btn btn-primary" type="button" :disabled="!canRun" @click="applyPreview">应用新空页</button>
         </div>
       </div>
@@ -694,11 +1275,31 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.erase-app.has-preview .erase-view {
+  /* Keep the original workspace at its normal viewport height and let the
+     outer app scroll to the candidate preview below it. */
+  flex: 0 0 calc(100% - 46px);
+}
 .erase-canvas { position: absolute; inset: 0; overflow: hidden; user-select: none; touch-action: none; }
 .erase-canvas.is-space-pan { cursor: grab; }
 .erase-canvas.is-panning { cursor: grabbing; }
 .erase-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .erase-stage > img { display: block; width: 100%; height: 100%; pointer-events: none; box-shadow: var(--stage-shadow); }
+.erase-stage > .brush-canvas { display: block; width: 100%; height: 100%; cursor: none; box-shadow: var(--stage-shadow); }
+.brush-canvas.is-picking-color { cursor: crosshair; }
+.brush-canvas-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: var(--text-2); background: color-mix(in srgb, var(--bg-inset) 72%, transparent); pointer-events: none; text-align: center; }
+.brush-canvas-status.is-error { color: var(--danger); }
+.brush-cursor { position: absolute; z-index: 4; border: 1px solid var(--accent); border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; box-sizing: border-box; }
+.brush-cursor.is-erase { border-style: dashed; border-color: var(--warn); }
+.brush-cursor.is-restore { border-color: var(--accent); }
+.brush-tool-list { display: flex; flex-direction: column; gap: 6px; }
+.brush-tool-symbol { width: 18px; flex: none; text-align: center; color: var(--text-2); font-size: 16px; }
+.brush-value-row, .brush-color-row { display: flex; align-items: center; gap: 8px; }
+.brush-value-row input[type='range'] { flex: 1; min-width: 0; height: auto; padding: 0; border: none; background: transparent; accent-color: var(--accent); }
+.brush-value-row input[type='number'] { width: 74px; }
+.brush-value-row small { flex: none; color: var(--text-3); }
+.brush-color-row input[type='color'] { width: 42px; min-width: 42px; height: 32px; padding: 3px; }
+.brush-color-hex { min-width: 0; flex: 1; }
 .brush-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .erase-mark.is-drawing { border-style: dashed; }
 .full-scope-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }

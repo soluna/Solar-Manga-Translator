@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { eraseSelection, normalizedPoint, selectionBox, eraseRequest, previewAttempt, brushOperations } from '../src/state/erase-contract.js'
+import {
+  eraseSelection,
+  normalizedPoint,
+  selectionBox,
+  eraseRequest,
+  previewAttempt,
+  brushOperations,
+  normalizeBrushColor,
+  normalizeBrushFeather,
+  normalizeBrushSize,
+} from '../src/state/erase-contract.js'
 
 test('erase marks use the backend normalized coordinates, diameter and mask modes', () => {
   const size = { w: 2400, h: 3600 }
@@ -33,4 +43,48 @@ test('brush operations can use normalized coordinates and min-side size ratios',
   assert.deepEqual(operation.points, [{ x: 0.25, y: 0.25 }, { x: 0.5, y: 0.5 }])
   assert.equal(operation.size, 0.02)
   assert.equal(operation.feather, 6 / 2400)
+})
+
+test('brush controls normalize colors, sizes, and feather to valid values', () => {
+  assert.equal(normalizeBrushColor(' F0A '), '#ff00aa')
+  assert.equal(normalizeBrushColor('bad'), '#bbaadd')
+  assert.equal(normalizeBrushColor('not-a-color', '#123456'), '#123456')
+  assert.equal(normalizeBrushColor('not-a-color', ''), '')
+  assert.equal(normalizeBrushSize(5000, 20, 32), 32)
+  assert.equal(normalizeBrushSize(Number.NaN, 12, 32), 12)
+  assert.equal(normalizeBrushFeather(80, 20), 10)
+  assert.equal(normalizeBrushFeather(Number.NaN, 20, 4.5), 4.5)
+})
+
+test('brush edit operations keep each stroke mode and controls instead of applying toolbar fallbacks', () => {
+  const operations = brushOperations([
+    { mode: 'paint', color: '#a1b2c3', size: 37, feather: 8.5, points: [[120, 360]] },
+    { mode: 'erase', color: '#0f0', size: 84.5, feather: 40, points: [{ x: 600, y: 900 }] },
+    { mode: 'restore', color: '#654321', size: 19.5, feather: 7.5, points: [[1080, 1620]] },
+  ], 'paint', '#010203', 1.25, { w: 1200, h: 1800 })
+
+  assert.deepEqual(operations.map(({ mode, color }) => ({ mode, color })), [
+    { mode: 'paint', color: [161, 178, 195] },
+    { mode: 'erase', color: [0, 255, 0] },
+    { mode: 'restore', color: [101, 67, 33] },
+  ])
+  assert.deepEqual(operations.map(operation => operation.size), [37 / 1200, 84.5 / 1200, 19.5 / 1200])
+  assert.deepEqual(operations.map(operation => operation.feather), [8.5 / 1200, 40 / 1200, 7.5 / 1200])
+  assert.deepEqual(operations.map(operation => operation.points[0]), [
+    { x: 0.1, y: 0.2 },
+    { x: 0.5, y: 0.5 },
+    { x: 0.9, y: 0.9 },
+  ])
+  assert.ok(operations.every(operation => operation.coordinate_space === 'normalized' && operation.size_space === 'normalized'))
+})
+
+test('legacy brush marks inherit toolbar defaults and malformed trajectories are rejected', () => {
+  const [operation] = brushOperations([{ points: [[60, 90]], radius: 7 }], 'restore', '#345678', 4, { w: 600, h: 900 })
+  assert.equal(operation.mode, 'restore')
+  assert.deepEqual(operation.color, [52, 86, 120])
+  assert.equal(operation.size, 14 / 600)
+  assert.equal(operation.feather, 4 / 600)
+  assert.throws(() => brushOperations([{ points: [[null, 2]] }], 'paint', '#fff'), /位置/)
+  assert.throws(() => brushOperations([{ points: [[1, 2]] }], 'invalid', '#ffffff'), /模式/)
+  assert.throws(() => brushOperations([{ points: [[1, 2]] }], 'paint', 'invalid'), /颜色/)
 })

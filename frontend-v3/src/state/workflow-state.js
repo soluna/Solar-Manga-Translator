@@ -140,6 +140,13 @@ export function getWorkflowStageLabel(stage) {
   return workflowStageLabelMap[normalized] || normalized || '未开始'
 }
 
+export function getProjectTranslateAction({ workflowStage, hasPartialTranslatedResults = false } = {}) {
+  const stage = String(workflowStage || '').trim().toLowerCase()
+  return stage === 'detected' || hasPartialTranslatedResults
+    ? 'resume-translate'
+    : 'translate'
+}
+
 export function getPrimaryProjectCommand({
   workflowStage,
   hasPartialTranslatedResults,
@@ -184,9 +191,7 @@ export function getProjectStageCommands({
   const normalizedActiveAction = normalizeTaskAction(activeAction)
   const projectReady = Boolean(hasProject)
   const busy = Boolean(translating)
-  const translateAction = stage === 'detected' || hasPartialTranslatedResults
-    ? 'resume-translate'
-    : 'translate'
+  const translateAction = getProjectTranslateAction({ workflowStage: stage, hasPartialTranslatedResults })
 
   const detectEnabled = projectReady && !busy && Boolean(canRunInitialDetection)
   const translateEnabled = projectReady && !busy && (

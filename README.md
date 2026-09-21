@@ -61,6 +61,16 @@ npm run dev        # http://127.0.0.1:5273/ （端口可用 VITE_DEV_PORT 覆盖
 
 后端照常启动（8000 端口）后，新入口通过同一套 `/api` 工作。无后端时可用 `npm run dev:mock` 浏览合成演示项目；演示模式不执行保存、导入、模型处理或导出。该命令兼容 Windows 与 macOS/Linux。
 
+新版回归检查：`npm --prefix frontend-v3 run test:unit` 和
+`npm --prefix frontend-v3 run build`。完整页面流程使用
+`npm --prefix frontend-v3 run test:workflow`；需安装后端依赖、两个前端的 npm
+依赖，以及 `frontend/` 的 Playwright Chromium。脚本自行启动临时后端与新版开发服务，
+使用合成项目和仓库外的新临时数据目录，不使用现有 `.runtime` 数据。
+它覆盖项目恢复、审校保存重载、取消整本翻译确认、导出、画笔修补与整页擦除预览；
+检测及修补推理使用确定性替身，不验证模型质量或实际翻译服务。
+可用 `PYTHON` 指定 Python 可执行文件；失败排查时设置
+`WORKFLOW_E2E_KEEP_DATA=1` 保留该次临时数据。
+
 ### Windows
 
 ```bat

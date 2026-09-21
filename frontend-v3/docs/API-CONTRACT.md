@@ -184,8 +184,10 @@ same project and retain task feedback while routes change.
 If the start command crossed the socket but the backend task ID has not arrived,
 the cancel control must not claim that the server task was cancelled. Stop any
 unsent client-side batch pages, keep the subscription alive, and wait for the
-`start` event to supply the task ID; then issue exactly one
-`POST /api/tasks/{task}/cancel`. If no acknowledgement arrives, recovery may
+`start` event to supply the task ID. Explain that the user can request backend
+cancellation once the task is confirmed; that click issues one
+`POST /api/tasks/{task}/cancel`. As in the legacy UI, backend cancellation
+requires a known task ID. If no acknowledgement arrives, recovery may
 query the project task snapshot, but it must never send a second start command.
 
 InkStage's pending-page rerender is an explicit client queue of page-scoped

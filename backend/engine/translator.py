@@ -3953,6 +3953,11 @@ class TranslatorEngine:
         candidates: list[GlossaryCandidate] | None,
         session_id: str = "",
     ) -> str:
+        provider_session_id = (
+            session_id
+            if self.translation_provider.configure(config).provider_name == "opencode-go"
+            else ""
+        )
         prompt = self._build_glossary_extraction_prompt(
             project_context,
             target_lang,
@@ -3960,9 +3965,9 @@ class TranslatorEngine:
             candidates=candidates,
         )
         try:
-            if session_id:
+            if provider_session_id:
                 return await self._request_project_glossary_extraction(
-                    config, prompt, session_id=session_id
+                    config, prompt, session_id=provider_session_id
                 )
             return await self._request_project_glossary_extraction(config, prompt)
         except Exception as exc:
@@ -3986,9 +3991,9 @@ class TranslatorEngine:
                     candidates=None,
                     context_char_limit=self.PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT,
                 )
-            if session_id:
+            if provider_session_id:
                 return await self._request_project_glossary_extraction(
-                    config, fallback_prompt, session_id=session_id
+                    config, fallback_prompt, session_id=provider_session_id
                 )
             return await self._request_project_glossary_extraction(config, fallback_prompt)
 

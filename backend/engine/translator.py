@@ -393,12 +393,14 @@ class TranslatorEngine:
         base_url: str,
         model: str,
         api_key: str,
+        session_id: str = "",
     ) -> str:
         return self._upstream_translation_provider().request_chat_completions_validation_sync(
             provider_label=provider_label,
             base_url=base_url,
             model=model,
             api_key=api_key,
+            session_id=session_id,
         )
 
     def _request_chat_completions_text_sync(
@@ -412,6 +414,7 @@ class TranslatorEngine:
         user_prompt: str,
         max_tokens: int = 1600,
         timeout_seconds: int = 30,
+        session_id: str = "",
     ) -> str:
         return self._upstream_translation_provider().request_chat_completions_text_sync(
             provider_label=provider_label,
@@ -422,6 +425,7 @@ class TranslatorEngine:
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
+            session_id=session_id,
         )
 
     def _request_gemini_text_sync(
@@ -464,6 +468,7 @@ class TranslatorEngine:
         api_key: str,
         payload: dict[str, Any],
         timeout_seconds: int = 30,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return self._upstream_translation_provider().post_json_direct(
             provider_label=provider_label,
@@ -471,6 +476,7 @@ class TranslatorEngine:
             api_key=api_key,
             payload=payload,
             timeout_seconds=timeout_seconds,
+            headers=headers,
         )
 
     def _upstream_translation_provider(self) -> UpstreamTranslationProvider:
@@ -3919,6 +3925,8 @@ class TranslatorEngine:
         self,
         config: dict[str, Any],
         prompt: str,
+        *,
+        session_id: str = "",
     ) -> str:
         result = await self.translation_provider.extract_glossary(
             GlossaryRequest(
@@ -3927,6 +3935,7 @@ class TranslatorEngine:
                 user_prompt=prompt,
                 max_tokens=3200,
                 timeout_seconds=self.PROJECT_GLOSSARY_REQUEST_TIMEOUT_SECONDS,
+                session_id=session_id,
             )
         )
         return result.text
@@ -3942,6 +3951,7 @@ class TranslatorEngine:
         *,
         retry: bool,
         candidates: list[GlossaryCandidate] | None,
+        session_id: str = "",
     ) -> str:
         prompt = self._build_glossary_extraction_prompt(
             project_context,
@@ -3950,6 +3960,10 @@ class TranslatorEngine:
             candidates=candidates,
         )
         try:
+            if session_id:
+                return await self._request_project_glossary_extraction(
+                    config, prompt, session_id=session_id
+                )
             return await self._request_project_glossary_extraction(config, prompt)
         except Exception as exc:
             if (
@@ -3971,6 +3985,10 @@ class TranslatorEngine:
                     retry=retry,
                     candidates=None,
                     context_char_limit=self.PROJECT_GLOSSARY_FALLBACK_CONTEXT_CHAR_LIMIT,
+                )
+            if session_id:
+                return await self._request_project_glossary_extraction(
+                    config, fallback_prompt, session_id=session_id
                 )
             return await self._request_project_glossary_extraction(config, fallback_prompt)
 
@@ -4216,6 +4234,7 @@ class TranslatorEngine:
                 target_lang,
                 retry=False,
                 candidates=candidates or None,
+                session_id=project_id,
             )
         except Exception as exc:
             print(f"[WARN] Project glossary extraction failed for {project_id}: {exc}")
@@ -4257,6 +4276,7 @@ class TranslatorEngine:
                     target_lang,
                     retry=True,
                     candidates=missing_candidates or None,
+                    session_id=project_id,
                 )
                 retry_entries = self._parse_glossary_extraction_response(retry_response_text)
                 candidate_review_returned_entries = bool(missing_candidates and retry_entries)
@@ -8735,12 +8755,12 @@ class TranslatorEngine:
         api_key = provider_config.api_key
         openai_base_url = (
             provider_config.base_url
-            if selected_translator == "openai-compatible"
+            if selected_translator in {"openai-compatible", "opencode-go"}
             else str(raw_config.get("openai_base_url") or "").strip()
         )
         openai_model = (
             provider_config.model
-            if selected_translator == "openai-compatible"
+            if selected_translator in {"openai-compatible", "opencode-go"}
             else str(raw_config.get("openai_model") or "").strip()
         )
         render_alignment = self._normalize_render_alignment(raw_config.get("render_alignment"))
@@ -9429,7 +9449,8 @@ class TranslatorEngine:
         env["MT_DISABLE_INTERNAL_LOG_FILE"] = "1"
         env.update(
             self.translation_provider.runtime_environment(
-                self.translation_provider.configure(config)
+                self.translation_provider.configure(config),
+                session_id=session_id or "",
             )
         )
         glossary_context = str(config.get("project_glossary_context") or "").strip()
@@ -12241,6 +12262,7 @@ class TranslatorEngine:
                 config=self.translation_provider.configure(config),
                 texts=tuple(cleaned_texts),
                 device=self._select_inference_device(bool(config.get("use_gpu"))),
+                session_id=session_id,
             )
         )
         return list(translated.texts)

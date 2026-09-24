@@ -1437,7 +1437,8 @@ const topbarTaskProgressPercent = computed(() => {
 const translatorLabelMap = {
   gemini: 'Gemini',
   'doubao-ark': 'Doubao',
-  'openai-compatible': 'OpenAI Compatible'
+  'openai-compatible': 'OpenAI Compatible',
+  'opencode-go': 'OpenCode Go'
 }
 const targetLangLabelMap = {
   CHS: '简中',
@@ -1459,17 +1460,19 @@ const compactConfigSummary = computed(() => {
   let translatorModel = ''
   if (config.value.translator === 'doubao-ark') {
     translatorModel = ` / ${getResolvedTranslatorModel(config.value)}`
-  } else if (config.value.translator === 'openai-compatible') {
+  } else if (['openai-compatible', 'opencode-go'].includes(config.value.translator)) {
     translatorModel = config.value.openai_model ? ` / ${config.value.openai_model}` : ''
   }
   return `${translator}${translatorModel} / ${targetLang} / ${styleMode} / ${cleanup} / ${workflow} / 默认${reviewMode}`
 })
-const showTranslatorApiKeyField = computed(() => ['gemini', 'doubao-ark', 'openai-compatible'].includes(config.value.translator))
+const showTranslatorApiKeyField = computed(() => ['gemini', 'doubao-ark', 'openai-compatible', 'opencode-go'].includes(config.value.translator))
 const translatorApiKeyLabel = computed(() => (
   config.value.translator === 'doubao-ark'
     ? 'Doubao Ark API Key'
     : config.value.translator === 'openai-compatible'
     ? 'OpenAI Compatible API Key'
+    : config.value.translator === 'opencode-go'
+    ? 'OpenCode Go API Key'
     : 'Gemini API Key'
 ))
 const translatorApiKeyPlaceholder = computed(() => (
@@ -1479,6 +1482,8 @@ const translatorApiKeyPlaceholder = computed(() => (
     ? '输入火山方舟 Ark API Key'
     : config.value.translator === 'openai-compatible'
     ? '输入 OpenAI Compatible API Key'
+    : config.value.translator === 'opencode-go'
+    ? '输入 OpenCode Go API Key'
     : '输入 Gemini API Key'
 ))
 const showImageCleanupApiKeyField = computed(() => config.value.image_cleanup_mode !== 'off')
@@ -1938,7 +1943,7 @@ const activeTranslatorServiceLabel = computed(() => {
   if (config.value.translator === 'doubao-ark') {
     return `${translator} / ${getResolvedTranslatorModel(config.value)}`
   }
-  if (config.value.translator === 'openai-compatible') {
+  if (['openai-compatible', 'opencode-go'].includes(config.value.translator)) {
     return config.value.openai_model ? `${translator} / ${config.value.openai_model}` : translator
   }
   return translator
@@ -2505,7 +2510,7 @@ async function loadPersistedAppSettings() {
       ...(nextSettings.configured_secrets || {})
     }
     appSettingsLoaded.value = true
-    const translatorNeedsKey = ['gemini', 'doubao-ark', 'openai-compatible'].includes(String(nextSettings?.translator || config.value.translator || ''))
+    const translatorNeedsKey = ['gemini', 'doubao-ark', 'openai-compatible', 'opencode-go'].includes(String(nextSettings?.translator || config.value.translator || ''))
     const hasPrimaryKey = Boolean(
       configuredSecrets.value.api_key
       || String(config.value.api_key || '').trim()
@@ -12968,6 +12973,7 @@ watch(
                 <option value="gemini">Gemini</option>
                 <option value="doubao-ark">Doubao</option>
                 <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="opencode-go">OpenCode Go</option>
               </select>
             </label>
 
@@ -13005,11 +13011,11 @@ watch(
               />
             </label>
 
-            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
-              <span>模型名称</span>
+            <label v-if="['openai-compatible', 'opencode-go'].includes(config.translator)" class="v2-field">
+              <span>{{ config.translator === 'opencode-go' ? 'OpenCode Go 模型 ID' : '模型名称' }}</span>
               <input
                 v-model="config.openai_model"
-                placeholder="gpt-4o / deepseek-chat / ..."
+                :placeholder="config.translator === 'opencode-go' ? '例如 deepseek-v4-flash（Chat Completions）' : 'gpt-4o / deepseek-chat / ...'"
                 type="text"
                 autocomplete="off"
               />
@@ -13646,6 +13652,7 @@ watch(
                 <option value="gemini">Gemini</option>
                 <option value="doubao-ark">Doubao</option>
                 <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="opencode-go">OpenCode Go</option>
               </select>
             </label>
 
@@ -13683,11 +13690,11 @@ watch(
               />
             </label>
 
-            <label v-if="config.translator === 'openai-compatible'" class="v2-field">
-              <span>模型名称</span>
+            <label v-if="['openai-compatible', 'opencode-go'].includes(config.translator)" class="v2-field">
+              <span>{{ config.translator === 'opencode-go' ? 'OpenCode Go 模型 ID' : '模型名称' }}</span>
               <input
                 v-model="config.openai_model"
-                placeholder="gpt-4o / deepseek-chat / ..."
+                :placeholder="config.translator === 'opencode-go' ? '例如 deepseek-v4-flash（Chat Completions）' : 'gpt-4o / deepseek-chat / ...'"
                 type="text"
                 autocomplete="off"
               />

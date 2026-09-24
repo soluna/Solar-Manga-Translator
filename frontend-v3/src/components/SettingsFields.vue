@@ -6,6 +6,17 @@ const props = defineProps({ draft: { type: Object, required: true }, keys: { typ
   clearBusy: { type: String, default: '' } })
 const emit = defineEmits(['clear-secret'])
 const visible = computed(() => visibleSettingKeys(props.keys, props.draft))
+function label(key) {
+  return key === 'openai_model' && props.draft.translator === 'opencode-go'
+    ? 'OpenCode Go 模型 ID'
+    : SETTINGS_FIELDS[key].label
+}
+function placeholder(key) {
+  if (key !== 'openai_model') return ''
+  return props.draft.translator === 'opencode-go'
+    ? '例如 deepseek-v4-flash（Chat Completions 模型）'
+    : 'gpt-4o / deepseek-chat / …'
+}
 function options(key) {
   const field = SETTINGS_FIELDS[key]
   let values = field.type === 'font' ? props.fonts.map(font => ({ value: font.id, label: font.label || font.id })) : field.options
@@ -20,10 +31,10 @@ function options(key) {
   <div class="form-grid">
     <label v-for="key in visible" :key="key" :class="SETTINGS_FIELDS[key].type === 'boolean' ? 'check-row' : ['field', { span2: SETTINGS_FIELDS[key].wide || ['secret', 'textarea'].includes(SETTINGS_FIELDS[key].type) }]">
       <template v-if="SETTINGS_FIELDS[key].type === 'boolean'">
-        <input v-model="draft[key]" type="checkbox" /><span>{{ SETTINGS_FIELDS[key].label }}</span>
+        <input v-model="draft[key]" type="checkbox" /><span>{{ label(key) }}</span>
       </template>
       <template v-else>
-        <span>{{ SETTINGS_FIELDS[key].label }}</span>
+        <span>{{ label(key) }}</span>
         <select v-if="options(key)" v-model="draft[key]">
           <option v-for="option in options(key)" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
@@ -38,7 +49,7 @@ function options(key) {
         <input v-else-if="SETTINGS_FIELDS[key].type === 'number'" v-model.number="draft[key]" type="number"
           :min="SETTINGS_FIELDS[key].min" :max="SETTINGS_FIELDS[key].max" :step="SETTINGS_FIELDS[key].step || 1" />
         <textarea v-else-if="SETTINGS_FIELDS[key].type === 'textarea'" v-model="draft[key]" rows="3" />
-        <input v-else v-model="draft[key]" type="text" />
+        <input v-else v-model="draft[key]" type="text" :placeholder="placeholder(key)" />
       </template>
     </label>
   </div>

@@ -979,8 +979,17 @@ async function main() {
     }
 
     await page.getByRole('banner').getByRole('button', { name: '打开设置' }).click()
-    await page.getByTestId('v2-settings-panel').waitFor({ state: 'visible', timeout: 20000 })
-    const persistedBaseUrl = await page.getByTestId('v2-settings-panel').getByLabel('API Base URL').inputValue()
+    const settingsPanel = page.getByTestId('v2-settings-panel')
+    await settingsPanel.waitFor({ state: 'visible', timeout: 20000 })
+    const translatorSelect = settingsPanel.getByLabel('翻译引擎')
+    await translatorSelect.selectOption('opencode-go')
+    await settingsPanel.getByLabel('OpenCode Go 模型 ID').waitFor({ state: 'visible' })
+    await settingsPanel.getByLabel('OpenCode Go API Key').waitFor({ state: 'visible' })
+    if (await settingsPanel.getByLabel('API Base URL').count()) {
+      throw new Error('OpenCode Go 不应要求手动填写 API Base URL')
+    }
+    await translatorSelect.selectOption('openai-compatible')
+    const persistedBaseUrl = await settingsPanel.getByLabel('API Base URL').inputValue()
     const persistedModel = await page.getByTestId('v2-settings-panel')
       .getByPlaceholder('gpt-4o / deepseek-chat / ...')
       .inputValue()

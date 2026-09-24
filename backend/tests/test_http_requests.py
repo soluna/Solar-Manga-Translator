@@ -30,6 +30,18 @@ class HttpRequestTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer secret")
         self.assertIn("Solar-Manga-Translator", headers["User-agent"])
 
+    def test_json_post_request_merges_provider_specific_headers(self) -> None:
+        request = build_json_post_request(
+            "https://api.example.com/v1/chat/completions",
+            api_key="secret",
+            payload={"model": "example-model"},
+            headers={"x-opencode-session": "project-42"},
+        )
+
+        headers = {name.casefold(): value for name, value in request.header_items()}
+        self.assertEqual(headers["x-opencode-session"], "project-42")
+        self.assertIn("Solar-Manga-Translator", headers["user-agent"])
+
 
 if __name__ == "__main__":
     unittest.main()

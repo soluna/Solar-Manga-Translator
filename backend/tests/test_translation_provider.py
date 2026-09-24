@@ -129,6 +129,58 @@ class TranslationProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(production, TranslationProvider)
         self.assertIsInstance(fake, TranslationProvider)
 
+    def test_opencode_go_uses_fixed_base_url_model_and_project_session(self) -> None:
+        provider = UpstreamTranslationProvider(_InferenceTransport())  # type: ignore[arg-type]
+        config = provider.configure({
+            "translator": "opencode-go",
+            "selected_translator": "opencode-go",
+            "openai_base_url": "https://ignored.example/v1",
+            "openai_model": "deepseek-v4-flash",
+            "api_key": "super-secret-token",
+        })
+
+        self.assertEqual(config.provider_name, "opencode-go")
+        self.assertEqual(config.translator_name, "custom_openai")
+        self.assertEqual(config.base_url, "https://opencode.ai/zen/go/v1")
+        self.assertEqual(config.model, "deepseek-v4-flash")
+        environment = provider.runtime_environment(config, session_id="project-42")
+        self.assertEqual(environment["CUSTOM_OPENAI_OPENCODE_GO"], "1")
+        self.assertEqual(environment["CUSTOM_OPENAI_SESSION_ID"], "project-42")
+        self.assertEqual(environment["CUSTOM_OPENAI_API_BASE"], "https://opencode.ai/zen/go/v1")
+        self.assertEqual(environment["CUSTOM_OPENAI_MODEL"], "deepseek-v4-flash")
+        self.assertEqual(environment["CUSTOM_OPENAI_API_KEY"], "super-secret-token")
+        self.assertEqual(environment["CUSTOM_OPENAI_USE_RESPONSES"], "0")
+
+    def test_opencode_go_validation_sends_session_and_app_user_agent(self) -> None:
+        requests = []
+        provider = UpstreamTranslationProvider(
+            _InferenceTransport(),  # type: ignore[arg-type]
+            url_opener=lambda request, **_kwargs: (requests.append(request) or _Response({
+                "choices": [{"message": {"content": "テスト"}}],
+            })),
+        )
+        config = provider.configure({
+            "translator": "opencode-go",
+            "openai_model": "kimi-k2.6",
+            "api_key": "super-secret-token",
+        })
+
+        preview = provider.request_chat_completions_validation_sync(
+            provider_label="OpenCode Go",
+            base_url=config.base_url,
+            model=config.model,
+            api_key=config.api_key,
+            session_id="project-42",
+        )
+
+        self.assertEqual(preview, "テスト")
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        headers = {name.casefold(): value for name, value in request.header_items()}
+        self.assertEqual(request.full_url, "https://opencode.ai/zen/go/v1/chat/completions")
+        self.assertEqual(headers["x-opencode-session"], "project-42")
+        self.assertIn("Solar-Manga-Translator", headers["user-agent"])
+
     async def test_direct_openai_configuration_rejects_a_missing_model(self) -> None:
         provider = UpstreamTranslationProvider(_InferenceTransport())  # type: ignore[arg-type]
         config = provider.configure({
@@ -440,6 +492,33 @@ class TranslationProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TranslatorProviderIntegrationTests(unittest.TestCase):
+    def test_opencode_go_settings_normalize_for_the_frontend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = TranslatorEngine(
+                root,
+                app_paths=_test_paths(root),
+                translation_provider=DeterministicTranslationProvider(),
+            )
+            config = engine.normalize_user_config({
+                "translator": "opencode-go",
+                "selected_translator": "opencode-go",
+                "openai_base_url": "https://ignored.example/v1",
+                "openai_model": "kimi-k2.6",
+                "api_key": "synthetic-key",
+                "use_gpu": False,
+            })
+            redacted = engine._redact_settings(config)
+
+            self.assertEqual(config["translator"], "custom_openai")
+            self.assertEqual(config["selected_translator"], "opencode-go")
+            self.assertEqual(config["openai_base_url"], "https://opencode.ai/zen/go/v1")
+            self.assertEqual(config["openai_model"], "kimi-k2.6")
+            self.assertEqual(redacted["translator"], "opencode-go")
+            self.assertEqual(redacted["openai_model"], "kimi-k2.6")
+            self.assertEqual(redacted["api_key"], "")
+            self.assertTrue(redacted["configured_secrets"]["api_key"])
+
     def test_translator_delegates_validation_translation_and_glossary_to_injected_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

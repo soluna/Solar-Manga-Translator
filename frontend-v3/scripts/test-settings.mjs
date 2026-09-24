@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { useSettings } from '../src/composables/useSettings.js'
+import { PROVIDERS, visibleSettingKeys } from '../src/state/settings-fields.js'
 import { loadProcessingConfig } from '../src/api/processing-config.js'
 
 const saved = () => ({ translator: 'gemini', target_lang: 'CHS', api_key: '', openai_base_url: '',
@@ -16,6 +17,12 @@ const deferred = () => {
     reject,
   }
 }
+
+test('OpenCode Go exposes a model field and hides the compatible base URL', () => {
+  const keys = visibleSettingKeys(['translator', 'api_key', 'openai_base_url', 'openai_model'], { translator: 'opencode-go', api_key: '', openai_base_url: '', openai_model: '' })
+  assert.deepEqual(keys, ['translator', 'api_key', 'openai_model'])
+  assert.ok(PROVIDERS.some(provider => provider.value === 'opencode-go'))
+})
 
 test('settings validate the current draft with canonical fields and preserve redacted secrets', async () => {
   let validation, patch

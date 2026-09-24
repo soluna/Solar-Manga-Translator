@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
-from http_requests import build_json_post_request
+from http_requests import APP_USER_AGENT, build_json_post_request
 from inference_backend import InferenceBackend
 
 
 DOUBAO_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 DOUBAO_DEFAULT_MODEL = "doubao-seed-translation-250915"
 DOUBAO_GLOSSARY_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
 GEMINI_DEFAULT_MODEL = "gemini-3.1-pro-preview"
@@ -38,6 +40,7 @@ class TranslationRequest:
     config: ProviderConfig = field(repr=False)
     texts: tuple[str, ...] = field(repr=False)
     device: str = "cpu"
+    session_id: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,7 @@ class GlossaryRequest:
     user_prompt: str = field(repr=False)
     max_tokens: int = 3200
     timeout_seconds: int = 120
+    session_id: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +79,7 @@ def normalize_provider_config(raw_config: Mapping[str, Any]) -> ProviderConfig:
         selected = str(raw_config.get("selected_translator") or "").strip()
         provider_name = (
             selected
-            if selected in {"doubao-ark", "openai-compatible"}
+            if selected in {"doubao-ark", "openai-compatible", "opencode-go"}
             else "doubao-ark"
         )
     elif (
@@ -89,13 +93,13 @@ def normalize_provider_config(raw_config: Mapping[str, Any]) -> ProviderConfig:
         raw_config.get("target_lang") or "CHS"
     ).strip().upper() or "CHS"
     translator_name = provider_name
-    if provider_name in {"doubao-ark", "openai-compatible"}:
+    if provider_name in {"doubao-ark", "openai-compatible", "opencode-go"}:
         translator_name = "custom_openai"
     elif provider_name == "sugoi" and target_lang in {"CHS", "CHT"}:
         translator_name = "gemini"
     raw_model = (
         raw_config.get("openai_model")
-        if provider_name == "openai-compatible"
+        if provider_name in {"openai-compatible", "opencode-go"}
         else raw_config.get("translator_model_custom")
         or raw_config.get("translator_model")
     )
@@ -107,6 +111,8 @@ def normalize_provider_config(raw_config: Mapping[str, Any]) -> ProviderConfig:
     base_url = str(raw_config.get("openai_base_url") or "").strip()
     if provider_name == "doubao-ark":
         base_url = DOUBAO_ARK_BASE_URL
+    elif provider_name == "opencode-go":
+        base_url = OPENCODE_GO_BASE_URL
     return ProviderConfig(
         provider_name=provider_name,
         translator_name=translator_name,
@@ -186,7 +192,9 @@ def canonical_provider_error(exc: TranslationProviderError) -> TranslationProvid
 class TranslationProvider(Protocol):
     def configure(self, raw_config: Mapping[str, Any]) -> ProviderConfig: ...
 
-    def runtime_environment(self, config: ProviderConfig) -> Mapping[str, str]: ...
+    def runtime_environment(
+        self, config: ProviderConfig, *, session_id: str = ""
+    ) -> Mapping[str, str]: ...
 
     def is_context_length_error(self, exc: BaseException) -> bool: ...
 
@@ -216,11 +224,19 @@ class UpstreamTranslationProvider:
     def configure(self, raw_config: Mapping[str, Any]) -> ProviderConfig:
         return normalize_provider_config(raw_config)
 
-    def runtime_environment(self, config: ProviderConfig) -> Mapping[str, str]:
-        env: dict[str, str] = {"GEMINI_MODEL": GEMINI_DEFAULT_MODEL}
+    def runtime_environment(
+        self, config: ProviderConfig, *, session_id: str = ""
+    ) -> Mapping[str, str]:
+        env: dict[str, str] = {
+            "GEMINI_MODEL": GEMINI_DEFAULT_MODEL,
+            "CUSTOM_OPENAI_OPENCODE_GO": "1" if config.provider_name == "opencode-go" else "0",
+        }
+        if config.provider_name == "opencode-go":
+            env["CUSTOM_OPENAI_SESSION_ID"] = self._normalize_session_id(session_id)
+            env["CUSTOM_OPENAI_USER_AGENT"] = APP_USER_AGENT
         if config.provider_name == "gemini" and config.api_key:
             env["GEMINI_API_KEY"] = config.api_key
-        elif config.provider_name in {"doubao-ark", "openai-compatible"}:
+        elif config.provider_name in {"doubao-ark", "openai-compatible", "opencode-go"}:
             if config.base_url:
                 env["CUSTOM_OPENAI_API_BASE"] = config.base_url
             if config.model:
@@ -236,6 +252,20 @@ class UpstreamTranslationProvider:
                 env["CUSTOM_OPENAI_API_KEY"] = config.api_key
         return env
 
+    @staticmethod
+    def _normalize_session_id(session_id: str | None) -> str:
+        normalized = str(session_id or "").strip()
+        if not normalized or len(normalized) > 256 or "\r" in normalized or "\n" in normalized:
+            return uuid.uuid4().hex
+        return normalized
+
+    @staticmethod
+    def _opencode_go_headers(session_id: str) -> dict[str, str]:
+        return {
+            "User-Agent": APP_USER_AGENT,
+            "x-opencode-session": UpstreamTranslationProvider._normalize_session_id(session_id),
+        }
+
     def is_context_length_error(self, exc: BaseException) -> bool:
         return isinstance(exc, TranslationProviderContextLengthError) or (
             self._body_indicates_context_limit(str(exc or ""))
@@ -246,16 +276,21 @@ class UpstreamTranslationProvider:
         self._require_api_key(config)
         failure: TranslationProviderError | None = None
         try:
-            if config.provider_name == "openai-compatible":
+            if config.provider_name in {"openai-compatible", "opencode-go"}:
                 self._require_chat_configuration(config)
+                validation_args: dict[str, Any] = {
+                    "provider_label": "OpenCode Go" if config.provider_name == "opencode-go" else "OpenAI Compatible",
+                    "base_url": config.base_url,
+                    "model": config.model,
+                    "api_key": config.api_key,
+                }
+                if config.provider_name == "opencode-go":
+                    validation_args["session_id"] = uuid.uuid4().hex
                 preview = await asyncio.to_thread(
                     self._call_compat,
                     "_request_chat_completions_validation_sync",
                     self.request_chat_completions_validation_sync,
-                    provider_label="OpenAI Compatible",
-                    base_url=config.base_url,
-                    model=config.model,
-                    api_key=config.api_key,
+                    **validation_args,
                 )
             elif config.provider_name == "doubao-ark":
                 if config.model.startswith("doubao-seed-translation"):
@@ -300,7 +335,7 @@ class UpstreamTranslationProvider:
         texts = tuple(str(item or "").strip() for item in request.texts)
         if request.config.translator_name == "none":
             return TranslationResult(texts=tuple("" for _ in texts))
-        if request.config.provider_name in {"gemini", "doubao-ark", "openai-compatible"}:
+        if request.config.provider_name in {"gemini", "doubao-ark", "openai-compatible", "opencode-go"}:
             self._require_api_key(request.config)
         failure: TranslationProviderError | None = None
         try:
@@ -309,7 +344,10 @@ class UpstreamTranslationProvider:
                 translator_name=request.config.translator_name,
                 target_lang=request.config.target_lang,
                 device=request.device,
-                environment=self.runtime_environment(request.config),
+                environment=self.runtime_environment(
+                    request.config,
+                    session_id=request.session_id,
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -332,34 +370,39 @@ class UpstreamTranslationProvider:
 
     async def extract_glossary(self, request: GlossaryRequest) -> GlossaryResult:
         config = request.config
-        if config.provider_name not in {"gemini", "doubao-ark", "openai-compatible"}:
+        if config.provider_name not in {"gemini", "doubao-ark", "openai-compatible", "opencode-go"}:
             return GlossaryResult(text="")
         self._require_api_key(config)
         failure: TranslationProviderError | None = None
         try:
-            if config.provider_name in {"doubao-ark", "openai-compatible"}:
+            if config.provider_name in {"doubao-ark", "openai-compatible", "opencode-go"}:
                 self._require_chat_configuration(config)
                 model = config.model
                 if config.provider_name == "doubao-ark" and model.startswith(
                     "doubao-seed-translation"
                 ):
                     model = DOUBAO_GLOSSARY_FALLBACK_MODEL
+                request_args: dict[str, Any] = {
+                    "provider_label": {
+                        "doubao-ark": "Doubao Ark",
+                        "openai-compatible": "OpenAI Compatible",
+                        "opencode-go": "OpenCode Go",
+                    }[config.provider_name],
+                    "base_url": config.base_url,
+                    "model": model,
+                    "api_key": config.api_key,
+                    "system_prompt": request.system_prompt,
+                    "user_prompt": request.user_prompt,
+                    "max_tokens": request.max_tokens,
+                    "timeout_seconds": request.timeout_seconds,
+                }
+                if config.provider_name == "opencode-go":
+                    request_args["session_id"] = self._normalize_session_id(request.session_id)
                 text = await asyncio.to_thread(
                     self._call_compat,
                     "_request_chat_completions_text_sync",
                     self.request_chat_completions_text_sync,
-                    provider_label=(
-                        "Doubao Ark"
-                        if config.provider_name == "doubao-ark"
-                        else "OpenAI Compatible"
-                    ),
-                    base_url=config.base_url,
-                    model=model,
-                    api_key=config.api_key,
-                    system_prompt=request.system_prompt,
-                    user_prompt=request.user_prompt,
-                    max_tokens=request.max_tokens,
-                    timeout_seconds=request.timeout_seconds,
+                    **request_args,
                 )
             else:
                 text = await asyncio.to_thread(
@@ -384,7 +427,13 @@ class UpstreamTranslationProvider:
         return GlossaryResult(text=text.strip())
 
     def request_chat_completions_validation_sync(
-        self, *, provider_label: str, base_url: str, model: str, api_key: str
+        self,
+        *,
+        provider_label: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+        session_id: str = "",
     ) -> str:
         provider_label = self._safe_provider_label(provider_label)
         return self.request_chat_completions_text_sync(
@@ -396,6 +445,7 @@ class UpstreamTranslationProvider:
             user_prompt="Translate this Japanese text to Chinese: テスト",
             max_tokens=64,
             timeout_seconds=30,
+            session_id=session_id,
         )
 
     def request_chat_completions_text_sync(
@@ -409,10 +459,11 @@ class UpstreamTranslationProvider:
         user_prompt: str,
         max_tokens: int = 1600,
         timeout_seconds: int = 30,
+        session_id: str = "",
     ) -> str:
         provider_label = self._safe_provider_label(provider_label)
         config = ProviderConfig(
-            provider_name="openai-compatible",
+            provider_name="opencode-go" if provider_label == "OpenCode Go" else "openai-compatible",
             translator_name="custom_openai",
             target_lang="CHS",
             model=model,
@@ -431,13 +482,16 @@ class UpstreamTranslationProvider:
             "temperature": 0,
             "stream": False,
         }
-        response = self._post_json(
-            provider_label=provider_label,
-            url=self._chat_completions_url(base_url),
-            api_key=api_key,
-            payload=payload,
-            timeout_seconds=timeout_seconds,
-        )
+        post_args: dict[str, Any] = {
+            "provider_label": provider_label,
+            "url": self._chat_completions_url(base_url),
+            "api_key": api_key,
+            "payload": payload,
+            "timeout_seconds": timeout_seconds,
+        }
+        if config.provider_name == "opencode-go":
+            post_args["headers"] = self._opencode_go_headers(session_id)
+        response = self._post_json(**post_args)
         return self._extract_chat_completions_text(response)
 
     def request_responses_validation_sync(
@@ -525,12 +579,18 @@ class UpstreamTranslationProvider:
         api_key: str,
         payload: dict[str, Any],
         timeout_seconds: int = 30,
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         provider_label = self._safe_provider_label(provider_label)
         preparation_failure: TranslationProviderError | None = None
         try:
             timeout = max(5, int(timeout_seconds or 30))
-            request = build_json_post_request(url, api_key=api_key, payload=payload)
+            request = build_json_post_request(
+                url,
+                api_key=api_key,
+                payload=payload,
+                headers=headers,
+            )
         except Exception:
             preparation_failure = TranslationProviderConfigurationError(
                 f"{provider_label} 请求配置无效。"
@@ -595,9 +655,9 @@ class UpstreamTranslationProvider:
 
     @staticmethod
     def _require_supported_remote(config: ProviderConfig) -> None:
-        if config.provider_name not in {"gemini", "doubao-ark", "openai-compatible"}:
+        if config.provider_name not in {"gemini", "doubao-ark", "openai-compatible", "opencode-go"}:
             raise TranslationProviderConfigurationError(
-                "当前只支持校验 Gemini / Doubao / OpenAI Compatible，暂不支持当前引擎。"
+                "当前只支持校验 Gemini / Doubao / OpenAI Compatible / OpenCode Go，暂不支持当前引擎。"
             )
 
     @staticmethod
@@ -612,9 +672,10 @@ class UpstreamTranslationProvider:
     def _require_chat_configuration(
         config: ProviderConfig, *, provider_label: str | None = None
     ) -> None:
-        label = provider_label or (
-            "Doubao Ark" if config.provider_name == "doubao-ark" else "OpenAI Compatible"
-        )
+        label = provider_label or {
+            "doubao-ark": "Doubao Ark",
+            "opencode-go": "OpenCode Go",
+        }.get(config.provider_name, "OpenAI Compatible")
         parsed = urlsplit(config.base_url)
         if not config.base_url or parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise TranslationProviderConfigurationError(f"缺少或无效的 {label} API Base URL。")
@@ -760,6 +821,7 @@ class UpstreamTranslationProvider:
             "gemini": "Gemini",
             "doubao-ark": "Doubao Ark",
             "openai-compatible": "OpenAI Compatible",
+            "opencode-go": "OpenCode Go",
         }.get(provider_name, "翻译服务")
         if self._body_indicates_context_limit(message):
             return TranslationProviderContextLengthError(
@@ -786,7 +848,7 @@ class UpstreamTranslationProvider:
     @staticmethod
     def _safe_provider_label(raw_label: Any) -> str:
         label = str(raw_label or "").strip()
-        if label in {"Gemini", "Doubao Ark", "OpenAI Compatible"}:
+        if label in {"Gemini", "Doubao Ark", "OpenAI Compatible", "OpenCode Go"}:
             return label
         return "翻译服务"
 
@@ -811,7 +873,9 @@ class DeterministicTranslationProvider:
     def configure(self, raw_config: Mapping[str, Any]) -> ProviderConfig:
         return normalize_provider_config(raw_config)
 
-    def runtime_environment(self, config: ProviderConfig) -> Mapping[str, str]:
+    def runtime_environment(
+        self, config: ProviderConfig, *, session_id: str = ""
+    ) -> Mapping[str, str]:
         return {}
 
     def is_context_length_error(self, exc: BaseException) -> bool:

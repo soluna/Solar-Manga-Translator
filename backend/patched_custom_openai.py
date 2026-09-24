@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import uuid
 from typing import List
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -27,16 +28,19 @@ from .keys import CUSTOM_OPENAI_API_KEY, CUSTOM_OPENAI_API_BASE, CUSTOM_OPENAI_M
 APP_USER_AGENT = "Solar-Manga-Translator/0.1"
 
 
-def build_json_post_request(url: str, *, api_key: str, payload: dict):
+def build_json_post_request(url: str, *, api_key: str, payload: dict, headers=None):
+    request_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": APP_USER_AGENT,
+    }
+    if headers:
+        request_headers.update({str(name): str(value) for name, value in headers.items()})
     return urllib_request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": APP_USER_AGENT,
-        },
+        headers=request_headers,
         method="POST",
     )
 
@@ -79,6 +83,8 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         self.token_count = 0
         self.token_count_last = 0
         self.use_responses_api = False
+        self.opencode_go = self._env_flag("CUSTOM_OPENAI_OPENCODE_GO")
+        self.opencode_session_id = self._current_session_id()
         self._refresh_runtime_clients()
 
     def _env_flag(self, key: str) -> bool:
@@ -87,6 +93,18 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             "true",
             "yes",
             "on",
+        }
+
+    def _current_session_id(self) -> str:
+        session_id = str(os.getenv("CUSTOM_OPENAI_SESSION_ID", "") or "").strip()
+        if not session_id or len(session_id) > 256 or "\r" in session_id or "\n" in session_id:
+            return uuid.uuid4().hex
+        return session_id
+
+    def _opencode_go_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": APP_USER_AGENT,
+            "x-opencode-session": self.opencode_session_id,
         }
 
     def _current_model_conf(self) -> str:
@@ -104,8 +122,10 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     def _refresh_runtime_clients(self):
         self.api_key = self._current_api_key() or "ollama"
         api_base = self._current_api_base() or CUSTOM_OPENAI_API_BASE
+        self.opencode_go = self._env_flag("CUSTOM_OPENAI_OPENCODE_GO")
         if openai is not None:
-            self.client = openai.AsyncOpenAI(api_key=self.api_key)
+            client_options = {"default_headers": self._opencode_go_headers()} if self.opencode_go else {}
+            self.client = openai.AsyncOpenAI(api_key=self.api_key, **client_options)
             self.client.base_url = api_base
 
         configured_model = self._current_model_name().lower()
@@ -597,6 +617,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             self._responses_endpoint_url(),
             api_key=self.api_key,
             payload=payload,
+            headers=self._opencode_go_headers() if self.opencode_go else None,
         )
         try:
             with urllib_request.urlopen(request, timeout=self._TIMEOUT) as response:

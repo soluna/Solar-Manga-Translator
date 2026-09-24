@@ -23,7 +23,7 @@
 | --- | --- |
 | 导入 | 单张图片、图片文件夹、`.zip`、`.cbz` |
 | 识别 | 自动检测文本区域并执行 OCR |
-| 翻译 | Gemini、豆包 Ark、OpenAI Compatible 等可配置服务 |
+| 翻译 | Gemini、豆包 Ark、OpenAI Compatible、OpenCode Go 等可配置服务 |
 | 图像处理 | 擦除原文、背景修补、自动嵌入译文 |
 | 人工审校 | 修改原文与译文、文本框、字体、字号、颜色、描边、排版方向和位置 |
 | 项目管理 | 自动保存项目、创建快照、恢复历史项目、继续未完成工作 |
@@ -207,6 +207,10 @@ GitHub 或 Hugging Face 不可达时会尝试备用源，当前模型准备情�
 
 新版会把设置写到设置面板显示的本地配置文件。“测试连接”和“保存并开始”都会先确认写入完成。
 若仍失败，请导出诊断包并检查其中的 `diagnostics.json`；密钥会被脱敏。
+
+### 配置 OpenCode Go
+
+选择“OpenCode Go”后只需填写 API Key 和模型 ID。应用会固定使用 OpenCode Go 官方 OpenAI-compatible Chat Completions 地址，并为请求附上应用 User-Agent 和 `x-opencode-session`。目前支持 Go 文档中使用 Chat Completions 的模型；Responses 和 Anthropic Messages 模型需要各自的 API 适配，不能直接用此兼容模式。
 
 ### 手动添加框后 OCR 失败
 

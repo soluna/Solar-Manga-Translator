@@ -1,5 +1,5 @@
 const choices = entries => entries.map(([value, label]) => ({ value, label }))
-export const PROVIDERS = choices([['gemini', 'Gemini'], ['doubao-ark', '豆包 Ark'], ['openai-compatible', 'OpenAI Compatible']])
+export const PROVIDERS = choices([['gemini', 'Gemini'], ['doubao-ark', '豆包 Ark'], ['openai-compatible', 'OpenAI Compatible'], ['opencode-go', 'OpenCode Go']])
 export const LANGUAGES = choices([['CHS', '简体中文'], ['CHT', '繁体中文'], ['ENG', '英语'], ['JPN', '日语'], ['KOR', '韩语']])
 export const STYLE_NAMES = { gothic: '黑体 / 对话', mincho: '宋体 / 旁白', rounded: '圆体', cartoon: '漫画体', handwritten: '手写体', sfx: '拟声字' }
 export const ADVANCED_ERASE_DEFAULT_PROMPT = [
@@ -21,7 +21,7 @@ export const SETTINGS_FIELDS = {
   api_key: { label: '翻译服务 API Key', type: 'secret' },
   translator_model: { label: '豆包模型 / 接入点', provider: 'doubao-ark' },
   openai_base_url: { label: 'API Base URL', provider: 'openai-compatible', wide: true },
-  openai_model: { label: '模型名称', provider: 'openai-compatible' },
+  openai_model: { label: '模型名称', provider: ['openai-compatible', 'opencode-go'] },
   use_gpu: { label: '使用 GPU', type: 'boolean' },
   pause_after_detection: { label: '识别完成后暂停，先检查原文', type: 'boolean' },
   mask_cleanup_strength: { label: '擦字边缘清理强度', options: choices([['standard', '标准'], ['clean', '加强清理'], ['aggressive', '强力清理']]) },
@@ -60,5 +60,9 @@ export function editableSettings(settings) {
 }
 
 export function visibleSettingKeys(keys, draft) {
-  return keys.filter(key => Object.hasOwn(draft, key) && (!SETTINGS_FIELDS[key].provider || SETTINGS_FIELDS[key].provider === draft.translator))
+  return keys.filter(key => {
+    const provider = SETTINGS_FIELDS[key].provider
+    const providerMatches = !provider || (Array.isArray(provider) ? provider.includes(draft.translator) : provider === draft.translator)
+    return Object.hasOwn(draft, key) && providerMatches
+  })
 }

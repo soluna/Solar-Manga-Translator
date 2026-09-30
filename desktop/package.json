@@ -18,7 +18,7 @@
     "dist:win:dir": "node ./scripts/package-win.mjs --dir"
   },
   "devDependencies": {
-    "electron": "^42.5.1",
+    "electron": "^42.10.0",
     "electron-builder": "^26.15.3"
   },
   "build": {
